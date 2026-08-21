@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider  = "postgresql"
   // Pooled connection (Supabase pgbouncer, port 6543) — used by the running app.
   url       = env("DATABASE_URL")
   // Direct connection (port 5432) — pgbouncer cannot run DDL, so migrations need this.
@@ -17,50 +17,161 @@ datasource db {
 // ENUMS
 // ═══════════════════════════════════════════
 
-enum UserStatus { ACTIVE INACTIVE SUSPENDED }
-enum BrandType { LD_COTTON_MILLS VHAGAR CUSTOM }
-enum ItemType { RAW_MATERIAL SEMI_FINISHED FINISHED_GOOD CONSUMABLE PACKING_MATERIAL TRIM }
-enum CustomerType { DOMESTIC EXPORT JOB_WORK VHAGAR_DEALER }
-enum SupplierCategory { FABRIC THREAD BUTTON LINING LABEL PACKAGING TRIM TRANSPORT SERVICE OTHER }
-enum SalesOrderStatus { DRAFT CONFIRMED IN_PRODUCTION PARTIALLY_DISPATCHED COMPLETED CANCELLED }
-enum PurchaseOrderStatus { DRAFT SENT PARTIALLY_RECEIVED COMPLETED CANCELLED }
-enum MOStatus { DRAFT RELEASED CUTTING STITCHING FINISHING QC PACKING COMPLETED CLOSED }
-enum TransactionType { PURCHASE SALE TRANSFER ADJUSTMENT RETURN OPENING }
-enum VoucherType { PAYMENT RECEIPT JOURNAL CONTRA }
-enum PaymentMode { CASH CHEQUE NEFT RTGS UPI PDC }
-enum EmploymentType { PERMANENT DAILY_WAGE CONTRACT }
-enum AttendanceStatus { PRESENT ABSENT HALF_DAY LEAVE HOLIDAY }
-enum NotificationChannel { IN_APP EMAIL WHATSAPP SMS }
-enum ApprovalStatus { PENDING APPROVED REJECTED }
-enum QCResult { PASS FAIL CONDITIONAL_PASS }
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum BrandType {
+  LD_COTTON_MILLS
+  VHAGAR
+  CUSTOM
+}
+
+enum ItemType {
+  RAW_MATERIAL
+  SEMI_FINISHED
+  FINISHED_GOOD
+  CONSUMABLE
+  PACKING_MATERIAL
+  TRIM
+}
+
+enum CustomerType {
+  DOMESTIC
+  EXPORT
+  JOB_WORK
+  VHAGAR_DEALER
+}
+
+enum SupplierCategory {
+  FABRIC
+  THREAD
+  BUTTON
+  LINING
+  LABEL
+  PACKAGING
+  TRIM
+  TRANSPORT
+  SERVICE
+  OTHER
+}
+
+enum SalesOrderStatus {
+  DRAFT
+  CONFIRMED
+  IN_PRODUCTION
+  PARTIALLY_DISPATCHED
+  COMPLETED
+  CANCELLED
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  SENT
+  PARTIALLY_RECEIVED
+  COMPLETED
+  CANCELLED
+}
+
+enum MOStatus {
+  DRAFT
+  RELEASED
+  CUTTING
+  STITCHING
+  FINISHING
+  QC
+  PACKING
+  COMPLETED
+  CLOSED
+}
+
+enum TransactionType {
+  PURCHASE
+  SALE
+  TRANSFER
+  ADJUSTMENT
+  RETURN
+  OPENING
+}
+
+enum VoucherType {
+  PAYMENT
+  RECEIPT
+  JOURNAL
+  CONTRA
+}
+
+enum PaymentMode {
+  CASH
+  CHEQUE
+  NEFT
+  RTGS
+  UPI
+  PDC
+}
+
+enum EmploymentType {
+  PERMANENT
+  DAILY_WAGE
+  CONTRACT
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  LEAVE
+  HOLIDAY
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  WHATSAPP
+  SMS
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum QCResult {
+  PASS
+  FAIL
+  CONDITIONAL_PASS
+}
 
 // ═══════════════════════════════════════════
 // AUTH & RBAC
 // ═══════════════════════════════════════════
 
 model User {
-  id            String     @id @default(cuid())
-  employeeCode  String?    @unique
-  name          String
-  email         String     @unique
-  phone         String?
-  passwordHash  String
-  avatarUrl     String?
-  status        UserStatus @default(ACTIVE)
-  roleId        String
-  role          Role       @relation(fields: [roleId], references: [id])
-  lastLoginAt   DateTime?
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id           String     @id @default(cuid())
+  employeeCode String?    @unique
+  name         String
+  email        String     @unique
+  phone        String?
+  passwordHash String
+  avatarUrl    String?
+  status       UserStatus @default(ACTIVE)
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id])
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
 
-  auditLogs        AuditLog[]
-  notifications    Notification[]
-  aiConversations  AIConversation[]
-  createdSOs       SalesOrder[]        @relation("SOCreatedBy")
-  approvedSOs      SalesOrder[]        @relation("SOApprovedBy")
-  createdPOs       PurchaseOrder[]     @relation("POCreatedBy")
-  approvedPOs      PurchaseOrder[]     @relation("POApprovedBy")
-  createdMOs       ManufacturingOrder[] @relation("MOCreatedBy")
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+  aiConversations AIConversation[]
+  createdSOs      SalesOrder[]         @relation("SOCreatedBy")
+  approvedSOs     SalesOrder[]         @relation("SOApprovedBy")
+  createdPOs      PurchaseOrder[]      @relation("POCreatedBy")
+  approvedPOs     PurchaseOrder[]      @relation("POApprovedBy")
+  createdMOs      ManufacturingOrder[] @relation("MOCreatedBy")
 
   @@index([email])
   @@index([roleId])
@@ -77,6 +188,7 @@ model Role {
 
   users       User[]
   permissions RolePermission[]
+
   @@map("roles")
 }
 
@@ -85,7 +197,8 @@ model Permission {
   module String
   action String
 
-  roles  RolePermission[]
+  roles RolePermission[]
+
   @@unique([module, action])
   @@map("permissions")
 }
@@ -147,6 +260,7 @@ model Company {
   warehouses   Warehouse[]
   departments  Department[]
   numberSeries NumberSeries[]
+
   @@map("company")
 }
 
@@ -164,6 +278,7 @@ model Brand {
 
   salesOrders         SalesOrder[]
   manufacturingOrders ManufacturingOrder[]
+
   @@map("brands")
 }
 
@@ -191,7 +306,8 @@ model ItemCategory {
   children ItemCategory[] @relation("CategoryHierarchy")
   isActive Boolean        @default(true)
 
-  items    Item[]
+  items Item[]
+
   @@map("item_categories")
 }
 
@@ -201,7 +317,8 @@ model UOM {
   symbol   String  @unique
   isActive Boolean @default(true)
 
-  items    Item[]
+  items Item[]
+
   @@map("uom")
 }
 
@@ -225,12 +342,13 @@ model Item {
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
-  bomComponents BOMLine[]                @relation("ComponentItem")
+  bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
   poLines       PurchaseOrderLine[]
   soLines       SalesOrderLine[]
   mrLines       MaterialRequisitionLine[]
   grnLines      GRNLine[]
+
   @@index([code])
   @@index([type])
   @@map("items")
@@ -258,39 +376,42 @@ model Style {
 
   boms    BOM[]
   moLines MOLine[]
+
   @@index([code])
   @@map("styles")
 }
 
 model BOM {
-  id           String   @id @default(cuid())
-  styleId      String
-  style        Style    @relation(fields: [styleId], references: [id])
-  version      String   @default("1.0")
-  isActive     Boolean  @default(true)
-  totalCost    Decimal? @db.Decimal(10, 2)
-  notes        String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id        String   @id @default(cuid())
+  styleId   String
+  style     Style    @relation(fields: [styleId], references: [id])
+  version   String   @default("1.0")
+  isActive  Boolean  @default(true)
+  totalCost Decimal? @db.Decimal(10, 2)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  lines        BOMLine[]
+  lines BOMLine[]
+
   @@unique([styleId, version])
   @@map("bom")
 }
 
 model BOMLine {
-  id              String  @id @default(cuid())
+  id              String   @id @default(cuid())
   bomId           String
-  bom             BOM     @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  bom             BOM      @relation(fields: [bomId], references: [id], onDelete: Cascade)
   componentItemId String
-  componentItem   Item    @relation("ComponentItem", fields: [componentItemId], references: [id])
-  qtyPerUnit      Decimal @db.Decimal(10, 4)
-  wastagePercent  Decimal @default(0) @db.Decimal(5, 2)
-  effectiveQty    Decimal @db.Decimal(10, 4)
+  componentItem   Item     @relation("ComponentItem", fields: [componentItemId], references: [id])
+  qtyPerUnit      Decimal  @db.Decimal(10, 4)
+  wastagePercent  Decimal  @default(0) @db.Decimal(5, 2)
+  effectiveQty    Decimal  @db.Decimal(10, 4)
   unitCost        Decimal? @db.Decimal(10, 4)
   totalCost       Decimal? @db.Decimal(10, 4)
   notes           String?
-  sortOrder       Int     @default(0)
+  sortOrder       Int      @default(0)
+
   @@map("bom_lines")
 }
 
@@ -320,9 +441,10 @@ model Customer {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
-  salesOrders  SalesOrder[]
-  invoices     SalesInvoice[]
-  payments     PaymentReceipt[]
+  salesOrders SalesOrder[]
+  invoices    SalesInvoice[]
+  payments    PaymentReceipt[]
+
   @@index([code])
   @@map("customers")
 }
@@ -356,6 +478,7 @@ model Supplier {
   purchaseOrders PurchaseOrder[]
   invoices       PurchaseInvoice[]
   payments       SupplierPayment[]
+
   @@index([code])
   @@map("suppliers")
 }
@@ -372,6 +495,7 @@ model Warehouse {
   stockLedger StockLedger[]
   mrLines     MaterialRequisitionLine[]
   grnLines    GRNLine[]
+
   @@map("warehouses")
 }
 
@@ -386,6 +510,7 @@ model Department {
   operations Operation[]
   employees  Employee[]
   machines   Machine[]
+
   @@map("departments")
 }
 
@@ -397,6 +522,7 @@ model Operation {
   code         String     @unique
   smv          Decimal?   @db.Decimal(5, 3)
   isActive     Boolean    @default(true)
+
   @@map("operations")
 }
 
@@ -418,8 +544,9 @@ model Machine {
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
 
-  breakdowns    MachineBreakdown[]
-  maintenances  MaintenanceSchedule[]
+  breakdowns   MachineBreakdown[]
+  maintenances MaintenanceSchedule[]
+
   @@map("machines")
 }
 
@@ -428,43 +555,44 @@ model Machine {
 // ═══════════════════════════════════════════
 
 model SalesOrder {
-  id             String           @id @default(cuid())
-  soNumber       String           @unique
-  brandId        String
-  brand          Brand            @relation(fields: [brandId], references: [id])
-  customerId     String
-  customer       Customer         @relation(fields: [customerId], references: [id])
-  customerPORef  String?
-  customerPODate DateTime?
-  orderDate      DateTime         @default(now())
-  deliveryDate   DateTime?
+  id              String           @id @default(cuid())
+  soNumber        String           @unique
+  brandId         String
+  brand           Brand            @relation(fields: [brandId], references: [id])
+  customerId      String
+  customer        Customer         @relation(fields: [customerId], references: [id])
+  customerPORef   String?
+  customerPODate  DateTime?
+  orderDate       DateTime         @default(now())
+  deliveryDate    DateTime?
   deliveryAddress String?
-  salesperson    String?
-  status         SalesOrderStatus @default(DRAFT)
-  subtotal       Decimal          @db.Decimal(12, 2) @default(0)
-  discountAmount Decimal          @db.Decimal(12, 2) @default(0)
-  taxableAmount  Decimal          @db.Decimal(12, 2) @default(0)
-  cgst           Decimal          @db.Decimal(12, 2) @default(0)
-  sgst           Decimal          @db.Decimal(12, 2) @default(0)
-  igst           Decimal          @db.Decimal(12, 2) @default(0)
-  totalAmount    Decimal          @db.Decimal(12, 2) @default(0)
-  currency       String           @default("INR")
-  isJobWork      Boolean          @default(false)
-  notes          String?
-  attachmentUrl  String?
-  version        Int              @default(1)
-  createdById    String
-  createdBy      User             @relation("SOCreatedBy", fields: [createdById], references: [id])
-  approvedById   String?
-  approvedBy     User?            @relation("SOApprovedBy", fields: [approvedById], references: [id])
-  approvedAt     DateTime?
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  salesperson     String?
+  status          SalesOrderStatus @default(DRAFT)
+  subtotal        Decimal          @default(0) @db.Decimal(12, 2)
+  discountAmount  Decimal          @default(0) @db.Decimal(12, 2)
+  taxableAmount   Decimal          @default(0) @db.Decimal(12, 2)
+  cgst            Decimal          @default(0) @db.Decimal(12, 2)
+  sgst            Decimal          @default(0) @db.Decimal(12, 2)
+  igst            Decimal          @default(0) @db.Decimal(12, 2)
+  totalAmount     Decimal          @default(0) @db.Decimal(12, 2)
+  currency        String           @default("INR")
+  isJobWork       Boolean          @default(false)
+  notes           String?
+  attachmentUrl   String?
+  version         Int              @default(1)
+  createdById     String
+  createdBy       User             @relation("SOCreatedBy", fields: [createdById], references: [id])
+  approvedById    String?
+  approvedBy      User?            @relation("SOApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
   lines               SalesOrderLine[]
   deliveryChallans    DeliveryChallan[]
   invoices            SalesInvoice[]
   manufacturingOrders ManufacturingOrder[]
+
   @@index([soNumber])
   @@index([customerId])
   @@index([status])
@@ -481,13 +609,14 @@ model SalesOrderLine {
   color        String?
   sizeBreakup  Json?
   totalQty     Decimal    @db.Decimal(10, 2)
-  unitPrice    Decimal    @db.Decimal(10, 2) @default(0)
-  discount     Decimal    @db.Decimal(5, 2)  @default(0)
-  gstRate      Decimal    @db.Decimal(5, 2)  @default(0)
-  amount       Decimal    @db.Decimal(12, 2) @default(0)
-  deliveredQty Decimal    @db.Decimal(10, 2) @default(0)
-  pendingQty   Decimal    @db.Decimal(10, 2) @default(0)
+  unitPrice    Decimal    @default(0) @db.Decimal(10, 2)
+  discount     Decimal    @default(0) @db.Decimal(5, 2)
+  gstRate      Decimal    @default(0) @db.Decimal(5, 2)
+  amount       Decimal    @default(0) @db.Decimal(12, 2)
+  deliveredQty Decimal    @default(0) @db.Decimal(10, 2)
+  pendingQty   Decimal    @default(0) @db.Decimal(10, 2)
   sortOrder    Int        @default(0)
+
   @@map("sales_order_lines")
 }
 
@@ -501,11 +630,11 @@ model SalesInvoice {
   invoiceDate   DateTime    @default(now())
   dueDate       DateTime?
   subtotal      Decimal     @db.Decimal(12, 2)
-  cgst          Decimal     @db.Decimal(12, 2) @default(0)
-  sgst          Decimal     @db.Decimal(12, 2) @default(0)
-  igst          Decimal     @db.Decimal(12, 2) @default(0)
+  cgst          Decimal     @default(0) @db.Decimal(12, 2)
+  sgst          Decimal     @default(0) @db.Decimal(12, 2)
+  igst          Decimal     @default(0) @db.Decimal(12, 2)
   totalAmount   Decimal     @db.Decimal(12, 2)
-  paidAmount    Decimal     @db.Decimal(12, 2) @default(0)
+  paidAmount    Decimal     @default(0) @db.Decimal(12, 2)
   balanceAmount Decimal     @db.Decimal(12, 2)
   status        String      @default("UNPAID")
   irnNumber     String?
@@ -517,6 +646,7 @@ model SalesInvoice {
   updatedAt     DateTime    @updatedAt
 
   payments PaymentReceipt[]
+
   @@index([invoiceNumber])
   @@index([customerId])
   @@map("sales_invoices")
@@ -539,6 +669,7 @@ model DeliveryChallan {
   updatedAt      DateTime   @updatedAt
 
   lines DeliveryChallanLine[]
+
   @@map("delivery_challans")
 }
 
@@ -550,24 +681,26 @@ model DeliveryChallanLine {
   qty         Decimal         @db.Decimal(10, 2)
   uom         String
   sizeBreakup Json?
+
   @@map("delivery_challan_lines")
 }
 
 model PaymentReceipt {
-  id             String       @id @default(cuid())
-  receiptNumber  String       @unique
-  customerId     String
-  customer       Customer     @relation(fields: [customerId], references: [id])
-  invoiceId      String?
-  invoice        SalesInvoice? @relation(fields: [invoiceId], references: [id])
-  receiptDate    DateTime     @default(now())
-  amount         Decimal      @db.Decimal(12, 2)
-  mode           PaymentMode
-  referenceNo    String?
-  chequeDate     DateTime?
-  isChequeCleared Boolean     @default(false)
-  notes          String?
-  createdAt      DateTime     @default(now())
+  id              String        @id @default(cuid())
+  receiptNumber   String        @unique
+  customerId      String
+  customer        Customer      @relation(fields: [customerId], references: [id])
+  invoiceId       String?
+  invoice         SalesInvoice? @relation(fields: [invoiceId], references: [id])
+  receiptDate     DateTime      @default(now())
+  amount          Decimal       @db.Decimal(12, 2)
+  mode            PaymentMode
+  referenceNo     String?
+  chequeDate      DateTime?
+  isChequeCleared Boolean       @default(false)
+  notes           String?
+  createdAt       DateTime      @default(now())
+
   @@map("payment_receipts")
 }
 
@@ -576,30 +709,31 @@ model PaymentReceipt {
 // ═══════════════════════════════════════════
 
 model PurchaseOrder {
-  id              String              @id @default(cuid())
-  poNumber        String              @unique
-  supplierId      String
-  supplier        Supplier            @relation(fields: [supplierId], references: [id])
-  poDate          DateTime            @default(now())
-  deliveryDate    DateTime?
-  status          PurchaseOrderStatus @default(DRAFT)
-  poType          String              @default("STANDARD")
-  subtotal        Decimal             @db.Decimal(12, 2) @default(0)
-  taxAmount       Decimal             @db.Decimal(12, 2) @default(0)
-  totalAmount     Decimal             @db.Decimal(12, 2) @default(0)
-  notes           String?
-  terms           String?
-  createdById     String
-  createdBy       User                @relation("POCreatedBy", fields: [createdById], references: [id])
-  approvedById    String?
-  approvedBy      User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
-  approvedAt      DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  id           String              @id @default(cuid())
+  poNumber     String              @unique
+  supplierId   String
+  supplier     Supplier            @relation(fields: [supplierId], references: [id])
+  poDate       DateTime            @default(now())
+  deliveryDate DateTime?
+  status       PurchaseOrderStatus @default(DRAFT)
+  poType       String              @default("STANDARD")
+  subtotal     Decimal             @default(0) @db.Decimal(12, 2)
+  taxAmount    Decimal             @default(0) @db.Decimal(12, 2)
+  totalAmount  Decimal             @default(0) @db.Decimal(12, 2)
+  notes        String?
+  terms        String?
+  createdById  String
+  createdBy    User                @relation("POCreatedBy", fields: [createdById], references: [id])
+  approvedById String?
+  approvedBy   User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
 
   lines    PurchaseOrderLine[]
   grns     GRN[]
   invoices PurchaseInvoice[]
+
   @@index([poNumber])
   @@index([supplierId])
   @@index([status])
@@ -613,14 +747,15 @@ model PurchaseOrderLine {
   itemId      String
   item        Item          @relation(fields: [itemId], references: [id])
   qty         Decimal       @db.Decimal(10, 3)
-  unitRate    Decimal       @db.Decimal(10, 2) @default(0)
-  gstRate     Decimal       @db.Decimal(5, 2)  @default(0)
-  amount      Decimal       @db.Decimal(12, 2) @default(0)
-  receivedQty Decimal       @db.Decimal(10, 3) @default(0)
-  pendingQty  Decimal       @db.Decimal(10, 3) @default(0)
+  unitRate    Decimal       @default(0) @db.Decimal(10, 2)
+  gstRate     Decimal       @default(0) @db.Decimal(5, 2)
+  amount      Decimal       @default(0) @db.Decimal(12, 2)
+  receivedQty Decimal       @default(0) @db.Decimal(10, 3)
+  pendingQty  Decimal       @default(0) @db.Decimal(10, 3)
   sortOrder   Int           @default(0)
 
   grnLines GRNLine[]
+
   @@map("purchase_order_lines")
 }
 
@@ -638,27 +773,29 @@ model GRN {
 
   lines     GRNLine[]
   qcRecords InwardQC[]
+
   @@map("grn")
 }
 
 model GRNLine {
-  id          String             @id @default(cuid())
-  grnId       String
-  grn         GRN                @relation(fields: [grnId], references: [id], onDelete: Cascade)
-  poLineId    String?
-  poLine      PurchaseOrderLine? @relation(fields: [poLineId], references: [id])
-  itemId      String
-  item        Item               @relation(fields: [itemId], references: [id])
-  warehouseId String
-  warehouse   Warehouse          @relation(fields: [warehouseId], references: [id])
-  orderedQty  Decimal            @db.Decimal(10, 3)
-  receivedQty Decimal            @db.Decimal(10, 3)
-  rejectedQty Decimal            @db.Decimal(10, 3) @default(0)
-  acceptedQty Decimal            @db.Decimal(10, 3)
-  batchNumber String?
+  id           String             @id @default(cuid())
+  grnId        String
+  grn          GRN                @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  poLineId     String?
+  poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id])
+  itemId       String
+  item         Item               @relation(fields: [itemId], references: [id])
+  warehouseId  String
+  warehouse    Warehouse          @relation(fields: [warehouseId], references: [id])
+  orderedQty   Decimal            @db.Decimal(10, 3)
+  receivedQty  Decimal            @db.Decimal(10, 3)
+  rejectedQty  Decimal            @default(0) @db.Decimal(10, 3)
+  acceptedQty  Decimal            @db.Decimal(10, 3)
+  batchNumber  String?
   batchDetails Json?
-  unitRate    Decimal            @db.Decimal(10, 2) @default(0)
-  amount      Decimal            @db.Decimal(12, 2) @default(0)
+  unitRate     Decimal            @default(0) @db.Decimal(10, 2)
+  amount       Decimal            @default(0) @db.Decimal(12, 2)
+
   @@map("grn_lines")
 }
 
@@ -672,33 +809,35 @@ model InwardQC {
   checklistData  Json?
   remarks        String?
   createdAt      DateTime @default(now())
+
   @@map("inward_qc")
 }
 
 model PurchaseInvoice {
-  id                  String        @id @default(cuid())
-  billNumber          String        @unique
+  id                  String         @id @default(cuid())
+  billNumber          String         @unique
   supplierInvoiceNo   String?
   supplierInvoiceDate DateTime?
   supplierId          String
-  supplier            Supplier      @relation(fields: [supplierId], references: [id])
+  supplier            Supplier       @relation(fields: [supplierId], references: [id])
   poId                String?
   po                  PurchaseOrder? @relation(fields: [poId], references: [id])
-  billDate            DateTime      @default(now())
+  billDate            DateTime       @default(now())
   dueDate             DateTime?
-  subtotal            Decimal       @db.Decimal(12, 2)
-  cgst                Decimal       @db.Decimal(12, 2) @default(0)
-  sgst                Decimal       @db.Decimal(12, 2) @default(0)
-  igst                Decimal       @db.Decimal(12, 2) @default(0)
-  totalAmount         Decimal       @db.Decimal(12, 2)
-  paidAmount          Decimal       @db.Decimal(12, 2) @default(0)
-  balanceAmount       Decimal       @db.Decimal(12, 2)
-  status              String        @default("UNPAID")
+  subtotal            Decimal        @db.Decimal(12, 2)
+  cgst                Decimal        @default(0) @db.Decimal(12, 2)
+  sgst                Decimal        @default(0) @db.Decimal(12, 2)
+  igst                Decimal        @default(0) @db.Decimal(12, 2)
+  totalAmount         Decimal        @db.Decimal(12, 2)
+  paidAmount          Decimal        @default(0) @db.Decimal(12, 2)
+  balanceAmount       Decimal        @db.Decimal(12, 2)
+  status              String         @default("UNPAID")
   notes               String?
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 
   payments SupplierPayment[]
+
   @@map("purchase_invoices")
 }
 
@@ -716,6 +855,7 @@ model SupplierPayment {
   chequeDate    DateTime?
   notes         String?
   createdAt     DateTime         @default(now())
+
   @@map("supplier_payments")
 }
 
@@ -733,8 +873,8 @@ model StockLedger {
   referenceType   String?
   referenceId     String?
   batchNumber     String?
-  inQty           Decimal         @db.Decimal(10, 3) @default(0)
-  outQty          Decimal         @db.Decimal(10, 3) @default(0)
+  inQty           Decimal         @default(0) @db.Decimal(10, 3)
+  outQty          Decimal         @default(0) @db.Decimal(10, 3)
   closingStock    Decimal         @db.Decimal(10, 3)
   unitRate        Decimal?        @db.Decimal(10, 2)
   transactionDate DateTime        @default(now())
@@ -747,21 +887,22 @@ model StockLedger {
 }
 
 model MaterialRequisition {
-  id           String         @id @default(cuid())
-  mrNumber     String         @unique
+  id           String              @id @default(cuid())
+  mrNumber     String              @unique
   moId         String?
   mo           ManufacturingOrder? @relation(fields: [moId], references: [id])
   department   String
-  requestDate  DateTime       @default(now())
+  requestDate  DateTime            @default(now())
   requiredDate DateTime?
-  status       ApprovalStatus @default(PENDING)
+  status       ApprovalStatus      @default(PENDING)
   approvedBy   String?
   approvedAt   DateTime?
   notes        String?
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
 
   lines MaterialRequisitionLine[]
+
   @@map("material_requisitions")
 }
 
@@ -772,10 +913,11 @@ model MaterialRequisitionLine {
   itemId       String
   item         Item                @relation(fields: [itemId], references: [id])
   requestedQty Decimal             @db.Decimal(10, 3)
-  issuedQty    Decimal             @db.Decimal(10, 3) @default(0)
+  issuedQty    Decimal             @default(0) @db.Decimal(10, 3)
   warehouseId  String
   warehouse    Warehouse           @relation(fields: [warehouseId], references: [id])
   purpose      String?
+
   @@map("material_requisition_lines")
 }
 
@@ -784,27 +926,27 @@ model MaterialRequisitionLine {
 // ═══════════════════════════════════════════
 
 model ManufacturingOrder {
-  id               String   @id @default(cuid())
-  moNumber         String   @unique
+  id               String      @id @default(cuid())
+  moNumber         String      @unique
   soId             String?
   so               SalesOrder? @relation(fields: [soId], references: [id])
   brandId          String
-  brand            Brand    @relation(fields: [brandId], references: [id])
+  brand            Brand       @relation(fields: [brandId], references: [id])
   plannedStartDate DateTime?
   plannedEndDate   DateTime?
   actualStartDate  DateTime?
   actualEndDate    DateTime?
-  status           MOStatus @default(DRAFT)
-  totalPlannedQty  Int      @default(0)
-  totalCutQty      Int      @default(0)
-  totalStitchedQty Int      @default(0)
-  totalFinishedQty Int      @default(0)
-  totalPackedQty   Int      @default(0)
+  status           MOStatus    @default(DRAFT)
+  totalPlannedQty  Int         @default(0)
+  totalCutQty      Int         @default(0)
+  totalStitchedQty Int         @default(0)
+  totalFinishedQty Int         @default(0)
+  totalPackedQty   Int         @default(0)
   notes            String?
   createdById      String
-  createdBy        User     @relation("MOCreatedBy", fields: [createdById], references: [id])
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdBy        User        @relation("MOCreatedBy", fields: [createdById], references: [id])
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
   lines                MOLine[]
   materialRequisitions MaterialRequisition[]
@@ -812,6 +954,7 @@ model ManufacturingOrder {
   productionEntries    ProductionEntry[]
   qcRecords            ProductionQC[]
   packingOrders        PackingOrder[]
+
   @@index([moNumber])
   @@index([status])
   @@map("manufacturing_orders")
@@ -826,6 +969,7 @@ model MOLine {
   color       String
   sizeBreakup Json
   totalQty    Int
+
   @@map("mo_lines")
 }
 
@@ -849,6 +993,7 @@ model CuttingOrder {
   notes            String?
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
+
   @@map("cutting_orders")
 }
 
@@ -876,22 +1021,23 @@ model ProductionEntry {
 }
 
 model ProductionQC {
-  id          String             @id @default(cuid())
-  moId        String
-  mo          ManufacturingOrder @relation(fields: [moId], references: [id])
-  qcType      String
-  qcDate      DateTime           @default(now())
+  id           String             @id @default(cuid())
+  moId         String
+  mo           ManufacturingOrder @relation(fields: [moId], references: [id])
+  qcType       String
+  qcDate       DateTime           @default(now())
   inspectedQty Int
-  passQty     Int
-  failQty     Int
-  reworkQty   Int                @default(0)
-  dhu         Decimal?           @db.Decimal(5, 2)
-  aqlLevel    String?
-  defects     Json?
-  result      QCResult
-  inspector   String?
-  notes       String?
-  createdAt   DateTime           @default(now())
+  passQty      Int
+  failQty      Int
+  reworkQty    Int                @default(0)
+  dhu          Decimal?           @db.Decimal(5, 2)
+  aqlLevel     String?
+  defects      Json?
+  result       QCResult
+  inspector    String?
+  notes        String?
+  createdAt    DateTime           @default(now())
+
   @@map("production_qc")
 }
 
@@ -910,6 +1056,7 @@ model PackingOrder {
   updatedAt     DateTime           @updatedAt
 
   cartons Carton[]
+
   @@map("packing_orders")
 }
 
@@ -923,6 +1070,7 @@ model Carton {
   dimensions     String?
   contents       Json
   totalPieces    Int
+
   @@map("cartons")
 }
 
@@ -940,10 +1088,11 @@ model Account {
   children       Account[] @relation("AccountHierarchy")
   costCenter     String?
   isActive       Boolean   @default(true)
-  openingBalance Decimal   @db.Decimal(14, 2) @default(0)
+  openingBalance Decimal   @default(0) @db.Decimal(14, 2)
   createdAt      DateTime  @default(now())
 
   voucherLines VoucherLine[]
+
   @@map("accounts")
 }
 
@@ -961,6 +1110,7 @@ model Voucher {
   updatedAt   DateTime    @updatedAt
 
   lines VoucherLine[]
+
   @@index([voucherNo])
   @@index([date])
   @@map("vouchers")
@@ -972,10 +1122,11 @@ model VoucherLine {
   voucher   Voucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
   accountId String
   account   Account @relation(fields: [accountId], references: [id])
-  debit     Decimal @db.Decimal(14, 2) @default(0)
-  credit    Decimal @db.Decimal(14, 2) @default(0)
+  debit     Decimal @default(0) @db.Decimal(14, 2)
+  credit    Decimal @default(0) @db.Decimal(14, 2)
   narration String?
   sortOrder Int     @default(0)
+
   @@map("voucher_lines")
 }
 
@@ -987,10 +1138,11 @@ model BankAccount {
   ifscCode       String
   branch         String?
   accountType    String   @default("CURRENT")
-  openingBalance Decimal  @db.Decimal(14, 2) @default(0)
-  currentBalance Decimal  @db.Decimal(14, 2) @default(0)
+  openingBalance Decimal  @default(0) @db.Decimal(14, 2)
+  currentBalance Decimal  @default(0) @db.Decimal(14, 2)
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
+
   @@map("bank_accounts")
 }
 
@@ -999,15 +1151,15 @@ model BankAccount {
 // ═══════════════════════════════════════════
 
 model Employee {
-  id                String         @id @default(cuid())
-  employeeCode      String         @unique
+  id                String           @id @default(cuid())
+  employeeCode      String           @unique
   name              String
-  email             String?        @unique
+  email             String?          @unique
   phone             String?
   departmentId      String
-  department        Department     @relation(fields: [departmentId], references: [id])
+  department        Department       @relation(fields: [departmentId], references: [id])
   designation       String?
-  employmentType    EmploymentType @default(PERMANENT)
+  employmentType    EmploymentType   @default(PERMANENT)
   joinDate          DateTime
   exitDate          DateTime?
   bankName          String?
@@ -1020,12 +1172,13 @@ model Employee {
   salaryStructureId String?
   salaryStructure   SalaryStructure? @relation(fields: [salaryStructureId], references: [id])
   photoUrl          String?
-  isActive          Boolean        @default(true)
-  createdAt         DateTime       @default(now())
-  updatedAt         DateTime       @updatedAt
+  isActive          Boolean          @default(true)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
 
   attendance     Attendance[]
   payrollRecords PayrollRecord[]
+
   @@index([employeeCode])
   @@map("employees")
 }
@@ -1034,16 +1187,17 @@ model SalaryStructure {
   id               String   @id @default(cuid())
   name             String   @unique
   basic            Decimal  @db.Decimal(10, 2)
-  hra              Decimal  @db.Decimal(10, 2) @default(0)
-  da               Decimal  @db.Decimal(10, 2) @default(0)
-  conveyance       Decimal  @db.Decimal(10, 2) @default(0)
-  specialAllowance Decimal  @db.Decimal(10, 2) @default(0)
+  hra              Decimal  @default(0) @db.Decimal(10, 2)
+  da               Decimal  @default(0) @db.Decimal(10, 2)
+  conveyance       Decimal  @default(0) @db.Decimal(10, 2)
+  specialAllowance Decimal  @default(0) @db.Decimal(10, 2)
   pfApplicable     Boolean  @default(true)
   esicApplicable   Boolean  @default(true)
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
 
   employees Employee[]
+
   @@map("salary_structures")
 }
 
@@ -1067,34 +1221,34 @@ model Attendance {
 }
 
 model PayrollRecord {
-  id               String   @id @default(cuid())
+  id               String    @id @default(cuid())
   employeeId       String
-  employee         Employee @relation(fields: [employeeId], references: [id])
+  employee         Employee  @relation(fields: [employeeId], references: [id])
   month            Int
   year             Int
   workingDays      Int
-  presentDays      Decimal  @db.Decimal(5, 2)
-  lwpDays          Decimal  @db.Decimal(5, 2) @default(0)
-  basic            Decimal  @db.Decimal(10, 2)
-  hra              Decimal  @db.Decimal(10, 2) @default(0)
-  da               Decimal  @db.Decimal(10, 2) @default(0)
-  conveyance       Decimal  @db.Decimal(10, 2) @default(0)
-  specialAllowance Decimal  @db.Decimal(10, 2) @default(0)
-  otherEarnings    Decimal  @db.Decimal(10, 2) @default(0)
-  grossSalary      Decimal  @db.Decimal(10, 2)
-  pfDeduction      Decimal  @db.Decimal(10, 2) @default(0)
-  esicDeduction    Decimal  @db.Decimal(10, 2) @default(0)
-  tdsDeduction     Decimal  @db.Decimal(10, 2) @default(0)
-  advanceDeduction Decimal  @db.Decimal(10, 2) @default(0)
-  otherDeductions  Decimal  @db.Decimal(10, 2) @default(0)
-  totalDeductions  Decimal  @db.Decimal(10, 2)
-  netSalary        Decimal  @db.Decimal(10, 2)
-  isPaid           Boolean  @default(false)
+  presentDays      Decimal   @db.Decimal(5, 2)
+  lwpDays          Decimal   @default(0) @db.Decimal(5, 2)
+  basic            Decimal   @db.Decimal(10, 2)
+  hra              Decimal   @default(0) @db.Decimal(10, 2)
+  da               Decimal   @default(0) @db.Decimal(10, 2)
+  conveyance       Decimal   @default(0) @db.Decimal(10, 2)
+  specialAllowance Decimal   @default(0) @db.Decimal(10, 2)
+  otherEarnings    Decimal   @default(0) @db.Decimal(10, 2)
+  grossSalary      Decimal   @db.Decimal(10, 2)
+  pfDeduction      Decimal   @default(0) @db.Decimal(10, 2)
+  esicDeduction    Decimal   @default(0) @db.Decimal(10, 2)
+  tdsDeduction     Decimal   @default(0) @db.Decimal(10, 2)
+  advanceDeduction Decimal   @default(0) @db.Decimal(10, 2)
+  otherDeductions  Decimal   @default(0) @db.Decimal(10, 2)
+  totalDeductions  Decimal   @db.Decimal(10, 2)
+  netSalary        Decimal   @db.Decimal(10, 2)
+  isPaid           Boolean   @default(false)
   paidDate         DateTime?
   paymentMode      String?
   payslipUrl       String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   @@unique([employeeId, month, year])
   @@map("payroll_records")
@@ -1105,36 +1259,38 @@ model PayrollRecord {
 // ═══════════════════════════════════════════
 
 model MachineBreakdown {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   machineId      String
-  machine        Machine  @relation(fields: [machineId], references: [id])
-  reportedAt     DateTime @default(now())
+  machine        Machine   @relation(fields: [machineId], references: [id])
+  reportedAt     DateTime  @default(now())
   reportedBy     String?
   problemDesc    String
-  severity       String   @default("MEDIUM")
+  severity       String    @default("MEDIUM")
   assignedTo     String?
   resolvedAt     DateTime?
   resolutionDesc String?
-  downtimeHours  Decimal? @db.Decimal(6, 2)
-  status         String   @default("OPEN")
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  downtimeHours  Decimal?  @db.Decimal(6, 2)
+  status         String    @default("OPEN")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
   @@map("machine_breakdowns")
 }
 
 model MaintenanceSchedule {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   machineId       String
-  machine         Machine  @relation(fields: [machineId], references: [id])
+  machine         Machine   @relation(fields: [machineId], references: [id])
   maintenanceType String
   title           String
   checklistItems  Json?
   scheduledDate   DateTime
   completedDate   DateTime?
   completedBy     String?
-  status          String   @default("PENDING")
+  status          String    @default("PENDING")
   notes           String?
-  createdAt       DateTime @default(now())
+  createdAt       DateTime  @default(now())
+
   @@map("maintenance_schedules")
 }
 
@@ -1152,6 +1308,7 @@ model AIConversation {
   updatedAt DateTime @updatedAt
 
   messages AIMessage[]
+
   @@map("ai_conversations")
 }
 
@@ -1165,6 +1322,7 @@ model AIMessage {
   toolResults    Json?
   tokenCount     Int?
   createdAt      DateTime       @default(now())
+
   @@map("ai_messages")
 }
 

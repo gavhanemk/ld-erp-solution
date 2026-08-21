@@ -3,8 +3,15 @@
   "compilerOptions": {
     "module": "commonjs",
     "moduleResolution": "node",
+    // The API is an application, not a library. Emitting declarations would
+    // force TypeScript to name every inferred Express type, which it cannot do
+    // through pnpm's non-hoisted node_modules layout.
+    "declaration": false,
+    "declarationMap": false,
     "outDir": "./dist",
-    "rootDir": "./src",
+    // No rootDir: the workspace packages under packages/ are compiled from
+    // source alongside this app, so the common root is the repo, not ./src.
+    // That is why the built entry point is dist/apps/api/src/index.js.
     "baseUrl": ".",
     "types": ["node"],
     "paths": {

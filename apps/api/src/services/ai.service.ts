@@ -1,4 +1,9 @@
-import { GoogleGenerativeAI, FunctionDeclaration, Tool } from '@google/generative-ai'
+import {
+  GoogleGenerativeAI,
+  FunctionDeclarationSchemaType as SchemaType,
+  type FunctionDeclaration,
+  type Tool,
+} from '@google/generative-ai'
 import { prisma } from '@ld-erp/database'
 import { logger } from '../utils/logger'
 
@@ -9,19 +14,19 @@ const erpTools: FunctionDeclaration[] = [
     name: 'get_dashboard_summary',
     description: "Get today's key business metrics: production, orders, financials",
     parameters: {
-      type: 'object' as const,
-      properties: { date: { type: 'string', description: 'Date YYYY-MM-DD, defaults to today' } },
+      type: SchemaType.OBJECT,
+      properties: { date: { type: SchemaType.STRING, description: 'Date YYYY-MM-DD, defaults to today' } },
     },
   },
   {
     name: 'get_sales_orders',
     description: 'Get sales orders with optional filters',
     parameters: {
-      type: 'object' as const,
+      type: SchemaType.OBJECT,
       properties: {
-        status: { type: 'string', description: 'DRAFT, CONFIRMED, IN_PRODUCTION, PARTIALLY_DISPATCHED, COMPLETED' },
-        dueThisWeek: { type: 'boolean', description: 'Orders due this week' },
-        limit: { type: 'number', description: 'Max records, default 10' },
+        status: { type: SchemaType.STRING, description: 'DRAFT, CONFIRMED, IN_PRODUCTION, PARTIALLY_DISPATCHED, COMPLETED' },
+        dueThisWeek: { type: SchemaType.BOOLEAN, description: 'Orders due this week' },
+        limit: { type: SchemaType.NUMBER, description: 'Max records, default 10' },
       },
     },
   },
@@ -29,10 +34,10 @@ const erpTools: FunctionDeclaration[] = [
     name: 'get_production_status',
     description: 'Get current production status and line efficiency',
     parameters: {
-      type: 'object' as const,
+      type: SchemaType.OBJECT,
       properties: {
-        date: { type: 'string', description: 'Date YYYY-MM-DD' },
-        department: { type: 'string', description: 'CUTTING, STITCHING, FINISHING, PACKING' },
+        date: { type: SchemaType.STRING, description: 'Date YYYY-MM-DD' },
+        department: { type: SchemaType.STRING, description: 'CUTTING, STITCHING, FINISHING, PACKING' },
       },
     },
   },
@@ -40,10 +45,10 @@ const erpTools: FunctionDeclaration[] = [
     name: 'get_outstanding_payments',
     description: 'Get outstanding receivables or payables',
     parameters: {
-      type: 'object' as const,
+      type: SchemaType.OBJECT,
       properties: {
-        type: { type: 'string', description: '"receivable" for customers, "payable" for suppliers' },
-        overdueDays: { type: 'number', description: 'Filter overdue by N days or more' },
+        type: { type: SchemaType.STRING, description: '"receivable" for customers, "payable" for suppliers' },
+        overdueDays: { type: SchemaType.NUMBER, description: 'Filter overdue by N days or more' },
       },
       required: ['type'],
     },
@@ -51,16 +56,16 @@ const erpTools: FunctionDeclaration[] = [
   {
     name: 'get_pending_approvals',
     description: 'Get all documents pending approval (PO, MR, SO)',
-    parameters: { type: 'object' as const, properties: {} },
+    parameters: { type: SchemaType.OBJECT, properties: {} },
   },
   {
     name: 'get_stock_status',
     description: 'Check stock levels and low stock alerts',
     parameters: {
-      type: 'object' as const,
+      type: SchemaType.OBJECT,
       properties: {
-        showLowStock: { type: 'boolean', description: 'Only show items below reorder level' },
-        itemCode: { type: 'string', description: 'Specific item code' },
+        showLowStock: { type: SchemaType.BOOLEAN, description: 'Only show items below reorder level' },
+        itemCode: { type: SchemaType.STRING, description: 'Specific item code' },
       },
     },
   },

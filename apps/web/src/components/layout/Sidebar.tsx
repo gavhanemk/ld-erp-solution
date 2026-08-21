@@ -158,7 +158,7 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
                   <button
                     onClick={() => !collapsed && toggleMenu(item.label)}
                     className={cn(
-                      'nav-item w-full',
+                      'nav-item group w-full',
                       groupActive && 'text-teal-400'
                     )}
                   >
@@ -207,7 +207,7 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
               <Link
                 key={item.label}
                 href={item.href!}
-                className={cn('nav-item', isActive(item.href!) && 'active')}
+                className={cn('nav-item group', isActive(item.href!) && 'active')}
               >
                 <Icon
                   size={18}
