@@ -1,0 +1,28 @@
+{
+  "name": "ld-erp-solution",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LD ERP Solution — AI-Powered ERP for Garment Manufacturing",
+  "author": "LD Cotton Mills",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@9.0.0",
+  "engines": { "node": ">=20.0.0", "pnpm": ">=9.0.0" },
+  "scripts": {
+    "dev": "pnpm --parallel --filter './apps/*' dev",
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "pnpm --filter api dev",
+    "build:web": "pnpm --filter web build",
+    "build:api": "pnpm --filter api build",
+    "db:generate": "pnpm --filter @ld-erp/database generate",
+    "db:migrate": "pnpm --filter @ld-erp/database migrate",
+    "db:studio": "pnpm --filter @ld-erp/database studio",
+    "db:seed": "pnpm --filter @ld-erp/database seed",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "prettier": "^3.3.0",
+    "prettier-plugin-tailwindcss": "^0.6.0",
+    "typescript": "^5.5.0"
+  }
+}
