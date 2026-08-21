@@ -1,12 +1,11 @@
 import { Router } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
-import { PrismaClient } from '@prisma/client'
+import { prisma } from '@ld-erp/database'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 
 const router = Router()
-const prisma = new PrismaClient()
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -86,15 +85,28 @@ router.post('/refresh', async (req, res) => {
 
     const user = await prisma.user.findUnique({
       where: { id: decoded.id },
-      include: { role: true },
+      include: { role: { include: { permissions: { include: { permission: true } } } } },
     })
 
     if (!user || user.status !== 'ACTIVE') throw new AppError('User not found or inactive', 401)
 
+    // The permission matrix must be rebuilt here. Omitting it would hand back a
+    // token with no grants, locking the user out 15 minutes after they log in.
+    const permissions = user.role.permissions.map(
+      (rp) => `${rp.permission.module}:${rp.permission.action}`
+    )
+
     const newAccessToken = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, roleId: user.roleId, role: user.role.name },
+      {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        roleId: user.roleId,
+        role: user.role.name,
+        permissions,
+      },
       process.env.JWT_SECRET!,
-      { expiresIn: '15m' } as jwt.SignOptions
+      { expiresIn: process.env.JWT_EXPIRES_IN || '15m' } as jwt.SignOptions
     )
 
     res.json({ success: true, accessToken: newAccessToken })

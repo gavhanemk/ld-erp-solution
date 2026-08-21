@@ -1,9 +1,8 @@
 import { Router } from 'express'
-import { PrismaClient } from '@prisma/client'
+import { prisma } from '@ld-erp/database'
 import { AuthRequest } from '../middleware/auth'
 
 const router = Router()
-const prisma = new PrismaClient()
 
 // GET /api/dashboard/summary
 router.get('/summary', async (req: AuthRequest, res) => {

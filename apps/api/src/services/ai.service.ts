@@ -1,8 +1,7 @@
 import { GoogleGenerativeAI, FunctionDeclaration, Tool } from '@google/generative-ai'
-import { PrismaClient } from '@prisma/client'
+import { prisma } from '@ld-erp/database'
 import { logger } from '../utils/logger'
 
-const prisma = new PrismaClient()
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
 
 const erpTools: FunctionDeclaration[] = [

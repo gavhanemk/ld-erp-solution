@@ -8,14 +8,19 @@ export interface AuthRequest extends Request {
     name: string
     roleId: string
     role: string
+    /** Flattened "module:action" grants, e.g. "masters:create". */
+    permissions?: string[]
   }
 }
+
+/** Bypasses the permission matrix — the Admin role is always fully authorised. */
+const SUPER_ROLE = 'Admin'
 
 export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization
 
   if (!authHeader?.startsWith('Bearer ')) {
-    return res.status(401).json({ message: 'No token provided' })
+    return res.status(401).json({ success: false, message: 'No token provided' })
   }
 
   const token = authHeader.split(' ')[1]
@@ -26,18 +31,51 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
     next()
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
-      return res.status(401).json({ message: 'Token expired', code: 'TOKEN_EXPIRED' })
+      return res
+        .status(401)
+        .json({ success: false, message: 'Token expired', code: 'TOKEN_EXPIRED' })
     }
-    return res.status(401).json({ message: 'Invalid token' })
+    return res.status(401).json({ success: false, message: 'Invalid token' })
   }
 }
 
 export const requireRole = (...roles: string[]) => {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (!req.user) return res.status(401).json({ message: 'Unauthorized' })
+    if (!req.user) return res.status(401).json({ success: false, message: 'Unauthorized' })
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ message: 'Insufficient permissions' })
+      return res.status(403).json({ success: false, message: 'Insufficient permissions' })
     }
     next()
+  }
+}
+
+/**
+ * Guards a route by (module, action) against the permission list baked into the
+ * caller's access token.
+ *
+ * The token is the source of truth, so a permission change only takes effect
+ * once the user's access token is refreshed — 15 minutes at most.
+ */
+export const requirePermission = (module: string, action: string) => {
+  const needed = `${module}:${action}`
+
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Unauthorized' })
+    }
+
+    if (req.user.role === SUPER_ROLE) return next()
+
+    const granted = req.user.permissions ?? []
+    if (granted.includes(needed) || granted.includes(`${module}:*`)) {
+      return next()
+    }
+
+    return res.status(403).json({
+      success: false,
+      message: `You do not have permission to ${action} ${module}`,
+      code: 'FORBIDDEN',
+      required: needed,
+    })
   }
 }

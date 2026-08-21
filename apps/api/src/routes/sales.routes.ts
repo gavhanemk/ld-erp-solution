@@ -1,11 +1,10 @@
 import { Router } from 'express'
-import { PrismaClient } from '@prisma/client'
+import { prisma } from '@ld-erp/database'
 import { AuthRequest } from '../middleware/auth'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 
 const router = Router()
-const prisma = new PrismaClient()
 
 // GET /api/sales/orders
 router.get('/orders', async (req: AuthRequest, res) => {

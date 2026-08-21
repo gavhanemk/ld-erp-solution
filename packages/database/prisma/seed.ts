@@ -185,6 +185,86 @@ async function main() {
     })
   }
 
+  // 10. Permission matrix (module x action), then wire it to the roles.
+  // Without these rows every non-Admin user is refused by requirePermission.
+  const MODULES = [
+    'dashboard', 'masters', 'sales', 'purchase', 'inventory',
+    'production', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin',
+  ]
+  const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export']
+
+  const permissionIds = new Map<string, string>()
+  for (const module of MODULES) {
+    for (const action of ACTIONS) {
+      const perm = await prisma.permission.upsert({
+        where: { module_action: { module, action } },
+        update: {},
+        create: { module, action },
+      })
+      permissionIds.set(`${module}:${action}`, perm.id)
+    }
+  }
+
+  /** Grant every action on the listed modules. */
+  const full = (...modules: string[]) =>
+    modules.flatMap((m) => ACTIONS.map((a) => `${m}:${a}`))
+  /** Grant only the listed actions on the listed modules. */
+  const only = (actions: string[], ...modules: string[]) =>
+    modules.flatMap((m) => actions.map((a) => `${m}:${a}`))
+
+  const roleGrants: Array<{ roleId: string; grants: string[] }> = [
+    // Admin holds the whole matrix. requirePermission also short-circuits on
+    // the Admin role, but the rows are seeded so the UI can render them.
+    { roleId: adminRole.id, grants: full(...MODULES) },
+
+    // MD/CEO reviews and signs off; they do not key in transactions.
+    {
+      roleId: mdRole.id,
+      grants: only(['view', 'approve', 'export'], ...MODULES),
+    },
+
+    {
+      roleId: accountsRole.id,
+      grants: [
+        ...full('accounts'),
+        ...only(['view', 'export'], 'dashboard', 'masters', 'sales', 'purchase', 'ai'),
+        ...only(['view'], 'inventory', 'production'),
+      ],
+    },
+
+    {
+      roleId: productionRole.id,
+      grants: [
+        ...full('production', 'maintenance'),
+        ...only(['view', 'export'], 'dashboard', 'masters', 'inventory', 'ai'),
+        ...only(['view'], 'sales'),
+      ],
+    },
+
+    {
+      roleId: storeRole.id,
+      grants: [
+        ...full('inventory', 'purchase'),
+        ...only(['view', 'export'], 'dashboard', 'masters', 'ai'),
+        ...only(['view'], 'production'),
+      ],
+    },
+  ]
+
+  for (const { roleId, grants } of roleGrants) {
+    for (const key of grants) {
+      const permissionId = permissionIds.get(key)
+      if (!permissionId) continue
+      await prisma.rolePermission.upsert({
+        where: { roleId_permissionId: { roleId, permissionId } },
+        update: {},
+        create: { roleId, permissionId },
+      })
+    }
+  }
+
+  console.log(`   Seeded ${permissionIds.size} permissions across ${roleGrants.length} roles`)
+
   console.log('✅ Database seeded successfully!')
   console.log('')
   console.log('📋 Default credentials:')

@@ -1,12 +1,11 @@
 import { Router } from 'express'
-import { PrismaClient } from '@prisma/client'
+import { prisma } from '@ld-erp/database'
 import { AuthRequest } from '../middleware/auth'
 import { chatWithERP, generateDailyMISReport } from '../services/ai.service'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 
 const router = Router()
-const prisma = new PrismaClient()
 
 const chatSchema = z.object({
   messages: z.array(z.object({
