@@ -56,7 +56,7 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth salvaging later
 - Database not seeded
 - RBAC middleware checks role name only; the permission matrix isn't enforced per endpoint
 - No `packages/ui`, no `apps/mobile` (mobile is Phase 5)
-- `pnpm install` has never completed on this machine
+- `pnpm install` still incomplete: packages are linked but the binary/postinstall step dies for lack of memory
 
 ---
 
@@ -95,3 +95,38 @@ Seeded logins (after step 4):
 - The seed used `bcryptjs` without depending on it — fixed
 - Every route file called `new PrismaClient()`, which opens a separate connection pool per file — a shared client now exists in `@ld-erp/database`, but **the route files still need to be switched over to it**
 - `packages/shared` was never listed as a dependency of the web or api app — fixed
+
+---
+
+## Update — master data and frontend wiring complete
+
+Added since the recovery commit:
+
+- **Master data API is real.** `lib/crud.ts` builds list / get / create / update /
+  deactivate for each master, with pagination, debounced search, whitelisted
+  sorting and audit logging. 11 masters are wired to it; company and BOM have
+  hand-written routes because they are not plain tables.
+- **BOM costing works.** Wastage inflates the consumed quantity, unit cost falls
+  back to the item's standard rate, and lines plus the header total are replaced
+  in one transaction.
+- **Validation.** Zod schemas enforce real GSTIN, PAN, IFSC, HSN and PIN formats.
+- **Permissions enforced.** `requirePermission(module, action)` guards every
+  master endpoint against the matrix carried in the access token.
+- **Frontend talks to the API.** `lib/api.ts` attaches the token, refreshes once
+  on a 401, and shares a single refresh promise so parallel requests cannot race
+  each other through token rotation.
+- **Screens.** Customers, suppliers, items, styles and warehouses now load real
+  data. They were linked in the sidebar but dead ends before.
+
+### Bugs fixed along the way
+- `POST /auth/refresh` issued tokens without the permissions claim — every
+  non-Admin user would have lost all access 15 minutes after logging in
+- Five files each constructed their own `PrismaClient`
+- The seed created no `Permission` rows at all, so the matrix was empty
+
+### Still to do
+- Forms to create and edit masters (the lists are read-only so far)
+- BOM screen
+- Purchase, inventory, production, accounts and HR routes are still stubs
+- Dashboard, sales and production pages still render mock data
+- Port the 4 extra AI tools from the abandoned `ld-erp` attempt
