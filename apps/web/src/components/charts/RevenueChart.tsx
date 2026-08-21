@@ -1,18 +1,18 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend, Area, AreaChart
 } from 'recharts'
+import { api } from '@/lib/api'
 
-const data = [
-  { month: 'Mar', revenue: 1050000, expenses: 680000 },
-  { month: 'Apr', revenue: 1280000, expenses: 790000 },
-  { month: 'May', revenue: 1150000, expenses: 710000 },
-  { month: 'Jun', revenue: 1480000, expenses: 850000 },
-  { month: 'Jul', revenue: 1620000, expenses: 920000 },
-  { month: 'Aug', revenue: 1840000, expenses: 1050000 },
-]
+interface TrendPoint {
+  month: string
+  label: string
+  revenue: number
+  expenses: number
+}
 
 const fmt = (v: number) =>
   v >= 100000 ? `₹${(v / 100000).toFixed(1)}L` : `₹${(v / 1000).toFixed(0)}K`
@@ -34,20 +34,62 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 }
 
 export function RevenueChart() {
+  const [months, setMonths] = useState(6)
+  const [data, setData] = useState<TrendPoint[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setData(null)
+    setError(null)
+
+    api
+      .get<{ success: boolean; data: TrendPoint[] }>(`/dashboard/revenue-trend?months=${months}`)
+      .then((res) => {
+        if (!cancelled) setData(res.data)
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not load the revenue trend.')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [months])
+
+  // Zero everywhere means nothing has been invoiced yet. An area chart of a
+  // flat zero line reads as a reporting failure, so say so plainly instead.
+  const hasValues = data?.some((d) => d.revenue > 0 || d.expenses > 0) ?? false
+
   return (
     <div className="glass-card p-6">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h3 className="text-sm font-semibold text-foreground">Revenue vs Expenses</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">Last 6 months trend</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Invoiced sales against supplier bills</p>
         </div>
-        <select className="text-xs bg-secondary border border-border rounded-lg px-2 py-1.5 text-foreground">
-          <option>Last 6 months</option>
-          <option>Last 12 months</option>
-          <option>This year</option>
+        <select
+          className="text-xs bg-secondary border border-border rounded-lg px-2 py-1.5 text-foreground"
+          value={months}
+          onChange={(e) => setMonths(Number(e.target.value))}
+        >
+          <option value={6}>Last 6 months</option>
+          <option value={12}>Last 12 months</option>
+          <option value={24}>Last 24 months</option>
         </select>
       </div>
 
+      {error && <p className="text-xs text-red-400 py-16 text-center">{error}</p>}
+
+      {!error && !data && <div className="skeleton h-[220px] w-full rounded-lg" />}
+
+      {!error && data && !hasValues && (
+        <p className="text-xs text-muted-foreground py-20 text-center">
+          No invoices raised in this period yet.
+        </p>
+      )}
+
+      {!error && data && hasValues && (
       <ResponsiveContainer width="100%" height={220}>
         <AreaChart data={data} margin={{ top: 5, right: 5, bottom: 0, left: 0 }}>
           <defs>
@@ -63,7 +105,7 @@ export function RevenueChart() {
 
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
           <XAxis
-            dataKey="month"
+            dataKey="label"
             tick={{ fill: '#64748b', fontSize: 11 }}
             axisLine={false}
             tickLine={false}
@@ -102,6 +144,7 @@ export function RevenueChart() {
           />
         </AreaChart>
       </ResponsiveContainer>
+      )}
     </div>
   )
 }

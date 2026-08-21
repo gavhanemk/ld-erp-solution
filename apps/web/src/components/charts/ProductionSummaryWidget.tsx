@@ -1,21 +1,51 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, Cell } from 'recharts'
 import { Factory, TrendingUp, AlertCircle } from 'lucide-react'
+import { api } from '@/lib/api'
 
-const lineData = [
-  { line: 'Line 1', target: 500, achieved: 480, efficiency: 96, rejection: 12 },
-  { line: 'Line 2', target: 500, achieved: 420, efficiency: 84, rejection: 25 },
-  { line: 'Line 3', target: 450, achieved: 460, efficiency: 102, rejection: 8 },
-  { line: 'Line 4', target: 400, achieved: 380, efficiency: 95, rejection: 15 },
-  { line: 'Line 5', target: 200, achieved: 100, efficiency: 50, rejection: 5 },
-]
+interface ProductionLine {
+  line: string
+  target: number
+  achieved: number
+  rejection: number
+  rework: number
+  efficiency: number
+}
 
 export function ProductionSummaryWidget() {
-  const totalTarget = lineData.reduce((s, l) => s + l.target, 0)
-  const totalAchieved = lineData.reduce((s, l) => s + l.achieved, 0)
-  const overallEfficiency = Math.round((totalAchieved / totalTarget) * 100)
-  const totalRejection = lineData.reduce((s, l) => s + l.rejection, 0)
+  const [lineData, setLineData] = useState<ProductionLine[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const load = () =>
+      api
+        .get<{ success: boolean; data: ProductionLine[] }>('/dashboard/production-today')
+        .then((res) => {
+          if (!cancelled) setLineData(res.data)
+        })
+        .catch(() => {
+          if (!cancelled) setError('Could not load production figures.')
+        })
+
+    void load()
+    // Entries are keyed in through the shift, so refresh periodically.
+    const timer = setInterval(() => void load(), 60_000)
+
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [])
+
+  const lines = lineData ?? []
+  const totalTarget = lines.reduce((s, l) => s + l.target, 0)
+  const totalAchieved = lines.reduce((s, l) => s + l.achieved, 0)
+  const overallEfficiency = totalTarget > 0 ? Math.round((totalAchieved / totalTarget) * 100) : 0
+  const totalRejection = lines.reduce((s, l) => s + l.rejection, 0)
 
   return (
     <div className="glass-card p-6">
@@ -32,7 +62,9 @@ export function ProductionSummaryWidget() {
         <div className="flex items-center gap-4">
           <div className="text-right">
             <p className="text-xl font-bold text-foreground">{totalAchieved.toLocaleString()}</p>
-            <p className="text-xs text-muted-foreground">of {totalTarget.toLocaleString()} target</p>
+            <p className="text-xs text-muted-foreground">
+              {totalTarget > 0 ? `of ${totalTarget.toLocaleString()} target` : 'No target set'}
+            </p>
           </div>
           <div className={`flex items-center gap-1 text-sm font-bold px-2.5 py-1 rounded-lg ${
             overallEfficiency >= 90 ? 'bg-emerald-500/10 text-emerald-400' :
@@ -45,10 +77,21 @@ export function ProductionSummaryWidget() {
         </div>
       </div>
 
+      {error && <p className="text-xs text-red-400 py-12 text-center">{error}</p>}
+
+      {!error && !lineData && <div className="skeleton h-[140px] w-full rounded-lg" />}
+
+      {!error && lineData && lines.length === 0 && (
+        <p className="text-xs text-muted-foreground py-12 text-center">
+          No production has been entered for today yet.
+        </p>
+      )}
+
+      {!error && lines.length > 0 && (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Bar Chart */}
         <ResponsiveContainer width="100%" height={140}>
-          <BarChart data={lineData} barGap={4} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+          <BarChart data={lines} barGap={4} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
             <XAxis dataKey="line" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false} />
             <YAxis hide />
             <Tooltip
@@ -65,7 +108,7 @@ export function ProductionSummaryWidget() {
               }}
             />
             <Bar dataKey="achieved" radius={[4, 4, 0, 0]} maxBarSize={32}>
-              {lineData.map((entry, i) => (
+              {lines.map((entry, i) => (
                 <Cell
                   key={i}
                   fill={
@@ -82,14 +125,14 @@ export function ProductionSummaryWidget() {
 
         {/* Line Details Table */}
         <div className="space-y-2">
-          {lineData.map((line) => (
+          {lines.map((line) => (
             <div key={line.line} className="flex items-center gap-3">
               <span className="text-xs font-medium text-muted-foreground w-14">{line.line}</span>
               <div className="flex-1 h-2 bg-secondary rounded-full overflow-hidden">
                 <div
                   className="h-full rounded-full transition-all duration-500"
                   style={{
-                    width: `${Math.min((line.achieved / line.target) * 100, 100)}%`,
+                    width: `${line.target > 0 ? Math.min((line.achieved / line.target) * 100, 100) : 0}%`,
                     background: line.efficiency >= 90 ? '#14b8a6' : line.efficiency >= 75 ? '#f59e0b' : '#f87171',
                   }}
                 />
@@ -109,6 +152,7 @@ export function ProductionSummaryWidget() {
           )}
         </div>
       </div>
+      )}
     </div>
   )
 }

@@ -98,4 +98,243 @@ router.get('/alerts', async (_, res) => {
   })
 })
 
+// GET /api/dashboard/revenue-trend?months=6
+// Invoiced value per calendar month, oldest first.
+router.get('/revenue-trend', async (req, res) => {
+  const months = Math.min(24, Math.max(1, Number(req.query.months) || 6))
+
+  const now = new Date()
+  const start = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1)
+
+  const [sales, purchases] = await Promise.all([
+    prisma.salesInvoice.findMany({
+      where: { invoiceDate: { gte: start } },
+      select: { invoiceDate: true, totalAmount: true },
+    }),
+    prisma.purchaseInvoice.findMany({
+      where: { billDate: { gte: start } },
+      select: { billDate: true, totalAmount: true },
+    }),
+  ])
+
+  // Every month in the window must appear, including the ones with no
+  // invoices, or the chart silently compresses gaps and misleads.
+  const buckets = new Map<string, { revenue: number; expenses: number }>()
+  for (let i = 0; i < months; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth() + i, 1)
+    buckets.set(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`, {
+      revenue: 0,
+      expenses: 0,
+    })
+  }
+
+  const keyOf = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+
+  for (const inv of sales) {
+    const bucket = buckets.get(keyOf(inv.invoiceDate))
+    if (bucket) bucket.revenue += Number(inv.totalAmount)
+  }
+  for (const bill of purchases) {
+    const bucket = buckets.get(keyOf(bill.billDate))
+    if (bucket) bucket.expenses += Number(bill.totalAmount)
+  }
+
+  res.json({
+    success: true,
+    data: [...buckets.entries()].map(([month, totals]) => ({
+      month,
+      label: new Date(`${month}-01`).toLocaleDateString('en-IN', {
+        month: 'short',
+        year: '2-digit',
+      }),
+      ...totals,
+    })),
+  })
+})
+
+// GET /api/dashboard/order-status
+router.get('/order-status', async (_req, res) => {
+  const grouped = await prisma.salesOrder.groupBy({
+    by: ['status'],
+    _count: { _all: true },
+    _sum: { totalAmount: true },
+  })
+
+  res.json({
+    success: true,
+    data: grouped.map((g) => ({
+      status: g.status,
+      count: g._count._all,
+      value: Number(g._sum.totalAmount ?? 0),
+    })),
+  })
+})
+
+// GET /api/dashboard/recent-orders?limit=5
+router.get('/recent-orders', async (req, res) => {
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 5))
+
+  const orders = await prisma.salesOrder.findMany({
+    take: limit,
+    orderBy: { createdAt: 'desc' },
+    include: {
+      customer: { select: { name: true } },
+      brand: { select: { name: true, type: true } },
+    },
+  })
+
+  res.json({
+    success: true,
+    data: orders.map((o) => ({
+      id: o.id,
+      soNumber: o.soNumber,
+      customer: o.customer.name,
+      brand: o.brand.name,
+      brandType: o.brand.type,
+      status: o.status,
+      totalAmount: Number(o.totalAmount),
+      isJobWork: o.isJobWork,
+      deliveryDate: o.deliveryDate,
+    })),
+  })
+})
+
+// GET /api/dashboard/low-stock?limit=10
+// Items whose closing stock has fallen to or below their reorder level.
+router.get('/low-stock', async (req, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10))
+
+  const items = await prisma.item.findMany({
+    where: { isActive: true, reorderLevel: { gt: 0 } },
+    select: { id: true, code: true, name: true, reorderLevel: true, uom: { select: { symbol: true } } },
+  })
+  if (items.length === 0) return res.json({ success: true, data: [] })
+
+  // Stock on hand is the ledger's net movement per item, across warehouses.
+  const movements = await prisma.stockLedger.groupBy({
+    by: ['itemId'],
+    where: { itemId: { in: items.map((i) => i.id) } },
+    _sum: { inQty: true, outQty: true },
+  })
+
+  const onHand = new Map(
+    movements.map((m) => [m.itemId, Number(m._sum.inQty ?? 0) - Number(m._sum.outQty ?? 0)]),
+  )
+
+  const low = items
+    .map((i) => ({
+      id: i.id,
+      code: i.code,
+      name: i.name,
+      uom: i.uom?.symbol ?? '',
+      reorderLevel: Number(i.reorderLevel),
+      // An item that has never moved is at zero, which is genuinely below its
+      // reorder level and should be flagged.
+      currentStock: onHand.get(i.id) ?? 0,
+    }))
+    .filter((i) => i.currentStock <= i.reorderLevel)
+    .sort((a, b) => a.currentStock - a.reorderLevel - (b.currentStock - b.reorderLevel))
+    .slice(0, limit)
+
+  res.json({ success: true, data: low })
+})
+
+// GET /api/dashboard/production-today
+// Today's output per production line, for the line-wise performance widget.
+router.get('/production-today', async (_req, res) => {
+  const now = new Date()
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+
+  const grouped = await prisma.productionEntry.groupBy({
+    by: ['lineNumber'],
+    where: { entryDate: { gte: startOfDay, lte: endOfDay } },
+    _sum: { target: true, achieved: true, rejection: true, rework: true },
+  })
+
+  const lines = grouped
+    .map((g) => {
+      const target = g._sum.target ?? 0
+      const achieved = g._sum.achieved ?? 0
+      return {
+        line: g.lineNumber ?? 'Unassigned',
+        target,
+        achieved,
+        rejection: g._sum.rejection ?? 0,
+        rework: g._sum.rework ?? 0,
+        // Guard the divide: a line can be logged with output but no target.
+        efficiency: target > 0 ? Math.round((achieved / target) * 100) : 0,
+      }
+    })
+    .sort((a, b) => a.line.localeCompare(b.line, undefined, { numeric: true }))
+
+  res.json({ success: true, data: lines })
+})
+
+// GET /api/dashboard/pending-approvals?limit=10
+// Documents waiting on a sign-off, newest first.
+router.get('/pending-approvals', async (req, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10))
+
+  const [purchaseOrders, salesOrders, requisitions] = await Promise.all([
+    prisma.purchaseOrder.findMany({
+      where: { status: 'DRAFT', approvedAt: null },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: { supplier: { select: { name: true } } },
+    }),
+    prisma.salesOrder.findMany({
+      where: { status: 'DRAFT', approvedAt: null },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: { customer: { select: { name: true } } },
+    }),
+    prisma.materialRequisition.findMany({
+      where: { status: 'PENDING' },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+    }),
+  ])
+
+  // Anything sitting unapproved for more than two working days is called out,
+  // so the oldest items do not quietly sink down the list.
+  const URGENT_AFTER_DAYS = 2
+  const isUrgent = (d: Date) =>
+    (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24) > URGENT_AFTER_DAYS
+
+  const approvals = [
+    ...purchaseOrders.map((po) => ({
+      id: po.id,
+      type: 'PO' as const,
+      number: po.poNumber,
+      description: po.supplier.name,
+      amount: Number(po.totalAmount),
+      date: po.createdAt,
+      urgent: isUrgent(po.createdAt),
+    })),
+    ...salesOrders.map((so) => ({
+      id: so.id,
+      type: 'SO' as const,
+      number: so.soNumber,
+      description: so.customer.name,
+      amount: Number(so.totalAmount),
+      date: so.createdAt,
+      urgent: isUrgent(so.createdAt),
+    })),
+    ...requisitions.map((mr) => ({
+      id: mr.id,
+      type: 'MR' as const,
+      number: mr.mrNumber,
+      description: mr.department,
+      amount: null,
+      date: mr.createdAt,
+      urgent: isUrgent(mr.createdAt),
+    })),
+  ]
+    .sort((a, b) => b.date.getTime() - a.date.getTime())
+    .slice(0, limit)
+
+  res.json({ success: true, data: approvals })
+})
+
 export default router

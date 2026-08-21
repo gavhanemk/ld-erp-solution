@@ -1,50 +1,19 @@
 'use client'
 
-import { CheckCircle2, Clock, Eye } from 'lucide-react'
-import Link from 'next/link'
+import { useCallback, useEffect, useState } from 'react'
+import { CheckCircle2, Clock, XCircle, Loader2, Inbox } from 'lucide-react'
+import { api, ApiError } from '@/lib/api'
+import { formatCurrency, formatDate } from '@/lib/utils'
 
-const approvals = [
-  {
-    id: 'A1',
-    type: 'PO',
-    number: 'PO-2425-0012',
-    description: 'Sunrise Fabrics — White Cotton Fabric',
-    amount: '₹1,20,000',
-    requestedBy: 'Ravi Kumar',
-    date: '21 Aug 2025',
-    urgent: true,
-  },
-  {
-    id: 'A2',
-    type: 'SO',
-    number: 'SO-2425-0045',
-    description: 'Rajan Traders — 500 pcs Men\'s Shirt',
-    amount: '₹2,25,000',
-    requestedBy: 'Sales Team',
-    date: '21 Aug 2025',
-    urgent: false,
-  },
-  {
-    id: 'A3',
-    type: 'MR',
-    number: 'MR-2425-0023',
-    description: 'Line 2 — White Thread 50 rolls',
-    amount: '—',
-    requestedBy: 'Stitching Dept',
-    date: '20 Aug 2025',
-    urgent: false,
-  },
-  {
-    id: 'A4',
-    type: 'PO',
-    number: 'PO-2425-0013',
-    description: 'Mehta Buttons — Buttons & Accessories',
-    amount: '₹28,500',
-    requestedBy: 'Store Manager',
-    date: '20 Aug 2025',
-    urgent: false,
-  },
-]
+interface Approval {
+  id: string
+  type: 'PO' | 'SO' | 'MR'
+  number: string
+  description: string
+  amount: number | null
+  date: string
+  urgent: boolean
+}
 
 const typeColors: Record<string, string> = {
   PO: 'badge-info',
@@ -52,7 +21,61 @@ const typeColors: Record<string, string> = {
   MR: 'badge-warning',
 }
 
+const typeLabel: Record<string, string> = {
+  PO: 'Purchase Order',
+  SO: 'Sales Order',
+  MR: 'Material Requisition',
+}
+
 export function PendingApprovalsTable() {
+  const [approvals, setApprovals] = useState<Approval[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ success: boolean; data: Approval[] }>(
+        '/dashboard/pending-approvals?limit=10',
+      )
+      setApprovals(res.data)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load pending approvals.')
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const decide = async (a: Approval, decision: 'approve' | 'reject') => {
+    let reason = ''
+    if (decision === 'reject') {
+      const input = window.prompt(`Why are you rejecting ${a.number}?`)
+      if (input === null) return
+      reason = input.trim()
+      if (!reason) {
+        setError('A reason is required when rejecting.')
+        return
+      }
+    } else if (!window.confirm(`Approve ${a.number} (${typeLabel[a.type]})?`)) {
+      return
+    }
+
+    setBusyId(a.id)
+    setError(null)
+    try {
+      await api.post(`/approvals/${a.type}/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
+      // Refetch rather than splicing locally: approving a document can change
+      // what else is outstanding.
+      await load()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : `Could not ${decision} ${a.number}.`)
+    } finally {
+      setBusyId(null)
+    }
+  }
+
   return (
     <div className="glass-card p-6">
       <div className="flex items-center justify-between mb-5">
@@ -61,66 +84,91 @@ export function PendingApprovalsTable() {
             <Clock size={15} className="text-amber-400" />
             Pending Approvals
           </h3>
-          <p className="text-xs text-muted-foreground mt-0.5">{approvals.length} items waiting</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {approvals === null && !error
+              ? 'Loading...'
+              : `${approvals?.length ?? 0} item${approvals?.length === 1 ? '' : 's'} waiting`}
+          </p>
         </div>
-        <Link href="/approvals" className="text-xs text-teal-400 hover:text-teal-300 transition-colors">
-          View all
-        </Link>
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>Document</th>
-              <th>Description</th>
-              <th>Amount</th>
-              <th>Requested By</th>
-              <th>Date</th>
-              <th className="text-right">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {approvals.map((a) => (
-              <tr key={a.id}>
-                <td>
-                  <span className={typeColors[a.type] || 'badge-neutral'}>
-                    {a.type}
-                  </span>
-                </td>
-                <td>
-                  <span className="font-mono text-xs text-teal-400">{a.number}</span>
-                  {a.urgent && (
-                    <span className="ml-2 text-[10px] text-red-400 font-semibold">URGENT</span>
-                  )}
-                </td>
-                <td className="max-w-[200px] truncate text-muted-foreground">{a.description}</td>
-                <td className="font-semibold text-foreground">{a.amount}</td>
-                <td className="text-muted-foreground">{a.requestedBy}</td>
-                <td className="text-muted-foreground text-xs">{a.date}</td>
-                <td>
-                  <div className="flex items-center gap-2 justify-end">
-                    <button
-                      id={`approve-${a.id}`}
-                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors"
-                    >
-                      <CheckCircle2 size={12} />
-                      Approve
-                    </button>
-                    <button
-                      id={`view-${a.id}`}
-                      className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-                    >
-                      <Eye size={14} />
-                    </button>
-                  </div>
-                </td>
+      {error && (
+        <p className="text-xs text-red-400 mb-3 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/5">
+          {error}
+        </p>
+      )}
+
+      {!approvals && !error && <div className="skeleton h-32 w-full rounded-lg" />}
+
+      {approvals && approvals.length === 0 && (
+        <div className="py-10 text-center">
+          <Inbox size={22} className="text-muted-foreground mx-auto mb-2" />
+          <p className="text-xs text-muted-foreground">Nothing is waiting on approval.</p>
+        </div>
+      )}
+
+      {approvals && approvals.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Document</th>
+                <th>Description</th>
+                <th className="text-right">Amount</th>
+                <th>Raised</th>
+                <th className="text-right">Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {approvals.map((a) => (
+                <tr key={`${a.type}-${a.id}`}>
+                  <td>
+                    <span className={typeColors[a.type] ?? 'badge-neutral'} title={typeLabel[a.type]}>
+                      {a.type}
+                    </span>
+                  </td>
+                  <td>
+                    <span className="font-mono text-xs text-teal-400">{a.number}</span>
+                    {a.urgent && (
+                      <span className="ml-2 text-[10px] text-red-400 font-semibold">URGENT</span>
+                    )}
+                  </td>
+                  <td className="max-w-[200px] truncate text-muted-foreground">{a.description}</td>
+                  <td className="text-right font-semibold text-foreground">
+                    {a.amount != null && a.amount > 0 ? formatCurrency(a.amount) : '—'}
+                  </td>
+                  <td className="text-muted-foreground text-xs">{formatDate(a.date)}</td>
+                  <td>
+                    <div className="flex items-center gap-2 justify-end">
+                      <button
+                        disabled={busyId === a.id}
+                        onClick={() => void decide(a, 'approve')}
+                        className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                      >
+                        {busyId === a.id ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : (
+                          <CheckCircle2 size={12} />
+                        )}
+                        Approve
+                      </button>
+                      <button
+                        disabled={busyId === a.id}
+                        onClick={() => void decide(a, 'reject')}
+                        title="Reject"
+                        className="p-1.5 rounded-lg text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                      >
+                        <XCircle size={14} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

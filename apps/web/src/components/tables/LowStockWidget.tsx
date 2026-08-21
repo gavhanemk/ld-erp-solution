@@ -1,14 +1,39 @@
 'use client'
 
-import { AlertTriangle } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { AlertTriangle, PackageCheck } from 'lucide-react'
+import { api } from '@/lib/api'
 
-const items = [
-  { id: 'I1', name: 'White Poplin Fabric', code: 'FAB-001', stock: '42 mtr', reorder: '100 mtr', status: 'critical' },
-  { id: 'I2', name: 'White Thread (50s)', code: 'THR-012', stock: '8 rolls', reorder: '20 rolls', status: 'low' },
-  { id: 'I3', name: 'Button 14mm White', code: 'BTN-034', stock: '1200 pcs', reorder: '2000 pcs', status: 'low' },
-]
+interface LowStockItem {
+  id: string
+  code: string
+  name: string
+  uom: string
+  reorderLevel: number
+  currentStock: number
+}
 
 export function LowStockWidget() {
+  const [items, setItems] = useState<LowStockItem[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    api
+      .get<{ success: boolean; data: LowStockItem[] }>('/dashboard/low-stock?limit=6')
+      .then((res) => {
+        if (!cancelled) setItems(res.data)
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not load stock alerts.')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   return (
     <div className="glass-card p-4">
       <div className="flex items-center justify-between mb-4">
@@ -18,24 +43,61 @@ export function LowStockWidget() {
           </div>
           <h3 className="text-xs font-semibold text-foreground">Low Stock Alerts</h3>
         </div>
-        <span className="badge-danger">{items.length} items</span>
+        {items && items.length > 0 && <span className="badge-danger">{items.length} items</span>}
       </div>
 
-      <div className="space-y-3">
-        {items.map((item) => (
-          <div key={item.id} className="flex items-center gap-3">
-            <div className={`w-2 h-2 rounded-full shrink-0 ${item.status === 'critical' ? 'bg-red-500 animate-pulse' : 'bg-amber-500'}`} />
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-foreground truncate">{item.name}</p>
-              <p className="text-[10px] text-muted-foreground">{item.code} · Stock: <span className={item.status === 'critical' ? 'text-red-400 font-semibold' : 'text-amber-400 font-semibold'}>{item.stock}</span></p>
-            </div>
-          </div>
-        ))}
-      </div>
+      {error && <p className="text-xs text-red-400 py-6 text-center">{error}</p>}
 
-      <button className="mt-4 w-full text-xs text-teal-400 hover:text-teal-300 transition-colors py-1.5 border border-teal-500/20 rounded-lg hover:bg-teal-500/5">
-        Create Purchase Requisition
-      </button>
+      {!error && !items && (
+        <div className="space-y-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="skeleton h-8 w-full rounded" />
+          ))}
+        </div>
+      )}
+
+      {!error && items && items.length === 0 && (
+        <div className="py-6 text-center">
+          <PackageCheck size={20} className="text-emerald-400 mx-auto mb-2" />
+          <p className="text-xs text-muted-foreground">
+            Nothing below its reorder level.
+          </p>
+        </div>
+      )}
+
+      {!error && items && items.length > 0 && (
+        <div className="space-y-3">
+          {items.map((item) => {
+            // Out of stock entirely is a harder stop than merely dipping under
+            // the reorder level, so the two are shown differently.
+            const critical = item.currentStock <= 0
+
+            return (
+              <div key={item.id} className="flex items-center gap-3">
+                <div
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    critical ? 'bg-red-500 animate-pulse' : 'bg-amber-500'
+                  }`}
+                />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-foreground truncate">{item.name}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {item.code} · Stock:{' '}
+                    <span
+                      className={
+                        critical ? 'text-red-400 font-semibold' : 'text-amber-400 font-semibold'
+                      }
+                    >
+                      {item.currentStock.toLocaleString('en-IN')} {item.uom}
+                    </span>{' '}
+                    of {item.reorderLevel.toLocaleString('en-IN')}
+                  </p>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

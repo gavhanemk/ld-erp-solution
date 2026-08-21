@@ -1,203 +1,175 @@
 'use client'
 
-import { TrendingUp, TrendingDown, ShoppingCart, Factory, IndianRupee, AlertTriangle, CheckCircle2, Clock } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { useCallback, useEffect, useState } from 'react'
+import {
+  ShoppingCart,
+  Factory,
+  IndianRupee,
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  Wallet,
+} from 'lucide-react'
+import { cn, formatCurrency } from '@/lib/utils'
+import { api, ApiError } from '@/lib/api'
 
-interface KPI {
+interface DashboardSummary {
+  activeOrders: number
+  todayProduction: { achieved: number; target: number; efficiency: number; rejection: number }
+  pendingApprovals: number
+  revenueMTD: number | string
+  outstandingReceivable: number | string
+  outstandingPayable: number | string
+  generatedAt: string
+}
+
+type Color = 'teal' | 'amber' | 'emerald' | 'red' | 'blue' | 'purple'
+
+const colorMap: Record<Color, { bg: string; border: string; icon: string }> = {
+  teal: { bg: 'bg-teal-500/10', border: 'border-teal-500/20', icon: 'text-teal-400' },
+  amber: { bg: 'bg-amber-500/10', border: 'border-amber-500/20', icon: 'text-amber-400' },
+  emerald: { bg: 'bg-emerald-500/10', border: 'border-emerald-500/20', icon: 'text-emerald-400' },
+  red: { bg: 'bg-red-500/10', border: 'border-red-500/20', icon: 'text-red-400' },
+  blue: { bg: 'bg-blue-500/10', border: 'border-blue-500/20', icon: 'text-blue-400' },
+  purple: { bg: 'bg-purple-500/10', border: 'border-purple-500/20', icon: 'text-purple-400' },
+}
+
+interface Card {
   id: string
   label: string
   value: string
   subValue?: string
-  trend?: number
-  trendLabel?: string
   icon: React.ElementType
-  color: 'teal' | 'amber' | 'emerald' | 'red' | 'blue' | 'purple'
-  sparkline?: number[]
+  color: Color
 }
 
-const kpis: KPI[] = [
-  {
-    id: 'active-orders',
-    label: 'Active Orders',
-    value: '24',
-    subValue: '+3 this week',
-    trend: 14,
-    trendLabel: 'vs last month',
-    icon: ShoppingCart,
-    color: 'teal',
-    sparkline: [12, 15, 14, 18, 20, 22, 24],
-  },
-  {
-    id: 'todays-production',
-    label: "Today's Production",
-    value: '1,840',
-    subValue: 'pieces',
-    trend: 8,
-    trendLabel: 'vs yesterday',
-    icon: Factory,
-    color: 'blue',
-    sparkline: [1400, 1600, 1520, 1750, 1840, 1900, 1840],
-  },
-  {
-    id: 'revenue-mtd',
-    label: 'Revenue (MTD)',
-    value: '₹18.4L',
-    subValue: 'Month to date',
-    trend: 12,
-    trendLabel: 'vs last month',
-    icon: IndianRupee,
-    color: 'emerald',
-    sparkline: [10, 12, 14, 13, 16, 17, 18.4],
-  },
-  {
-    id: 'outstanding',
-    label: 'Outstanding',
-    value: '₹6.2L',
-    subValue: 'Receivables',
-    trend: -5,
-    trendLabel: 'vs last month',
-    icon: Clock,
-    color: 'amber',
-    sparkline: [8, 7.5, 7, 6.8, 6.5, 6.3, 6.2],
-  },
-  {
-    id: 'pending-approvals',
-    label: 'Pending Approvals',
-    value: '7',
-    subValue: '3 PO, 4 MR',
-    icon: CheckCircle2,
-    color: 'purple',
-    sparkline: [5, 8, 6, 9, 7, 8, 7],
-  },
-  {
-    id: 'low-stock',
-    label: 'Low Stock Alerts',
-    value: '3',
-    subValue: 'Items below reorder',
-    icon: AlertTriangle,
-    color: 'red',
-    sparkline: [2, 1, 3, 2, 4, 3, 3],
-  },
-]
+function toCards(d: DashboardSummary): Card[] {
+  const { achieved, target, efficiency, rejection } = d.todayProduction
 
-const colorMap = {
-  teal: {
-    bg: 'bg-teal-500/10',
-    border: 'border-teal-500/20',
-    icon: 'text-teal-400',
-    text: 'text-teal-400',
-    sparkline: '#14b8a6',
-  },
-  amber: {
-    bg: 'bg-amber-500/10',
-    border: 'border-amber-500/20',
-    icon: 'text-amber-400',
-    text: 'text-amber-400',
-    sparkline: '#f59e0b',
-  },
-  emerald: {
-    bg: 'bg-emerald-500/10',
-    border: 'border-emerald-500/20',
-    icon: 'text-emerald-400',
-    text: 'text-emerald-400',
-    sparkline: '#10b981',
-  },
-  red: {
-    bg: 'bg-red-500/10',
-    border: 'border-red-500/20',
-    icon: 'text-red-400',
-    text: 'text-red-400',
-    sparkline: '#f87171',
-  },
-  blue: {
-    bg: 'bg-blue-500/10',
-    border: 'border-blue-500/20',
-    icon: 'text-blue-400',
-    text: 'text-blue-400',
-    sparkline: '#60a5fa',
-  },
-  purple: {
-    bg: 'bg-purple-500/10',
-    border: 'border-purple-500/20',
-    icon: 'text-purple-400',
-    text: 'text-purple-400',
-    sparkline: '#a78bfa',
-  },
-}
-
-function MiniSparkline({ data, color }: { data: number[]; color: string }) {
-  const min = Math.min(...data)
-  const max = Math.max(...data)
-  const range = max - min || 1
-  const w = 80
-  const h = 28
-  const pts = data
-    .map((v, i) => {
-      const x = (i / (data.length - 1)) * w
-      const y = h - ((v - min) / range) * h
-      return `${x},${y}`
-    })
-    .join(' ')
-
-  return (
-    <svg width={w} height={h} className="overflow-visible opacity-60">
-      <polyline fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={pts} />
-      {/* Last point dot */}
-      {data.length > 0 && (
-        <circle
-          cx={(((data.length - 1) / (data.length - 1)) * w)}
-          cy={h - ((data[data.length - 1] - min) / range) * h}
-          r="2.5"
-          fill={color}
-        />
-      )}
-    </svg>
-  )
+  return [
+    {
+      id: 'active-orders',
+      label: 'Active Orders',
+      value: String(d.activeOrders),
+      subValue: 'Confirmed, in production or part dispatched',
+      icon: ShoppingCart,
+      color: 'teal',
+    },
+    {
+      id: 'todays-production',
+      label: "Today's Production",
+      value: achieved.toLocaleString('en-IN'),
+      // Efficiency is meaningless until a target has been entered for the day.
+      subValue: target > 0 ? `of ${target.toLocaleString('en-IN')} target · ${efficiency}%` : 'No target set',
+      icon: Factory,
+      color: 'blue',
+    },
+    {
+      id: 'rejections',
+      label: 'Rejections Today',
+      value: rejection.toLocaleString('en-IN'),
+      subValue: achieved > 0 ? `${((rejection / achieved) * 100).toFixed(1)}% of output` : 'No output yet',
+      icon: AlertCircle,
+      color: 'red',
+    },
+    {
+      id: 'revenue-mtd',
+      label: 'Revenue (MTD)',
+      value: formatCurrency(Number(d.revenueMTD)),
+      subValue: 'Invoiced this month',
+      icon: IndianRupee,
+      color: 'emerald',
+    },
+    {
+      id: 'receivable',
+      label: 'Receivable',
+      value: formatCurrency(Number(d.outstandingReceivable)),
+      subValue: 'Owed by customers',
+      icon: Clock,
+      color: 'amber',
+    },
+    {
+      id: 'payable',
+      label: 'Payable',
+      value: formatCurrency(Number(d.outstandingPayable)),
+      subValue: 'Owed to suppliers',
+      icon: Wallet,
+      color: 'purple',
+    },
+  ]
 }
 
 export function KPICards() {
+  const [cards, setCards] = useState<Card[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ success: boolean; data: DashboardSummary }>('/dashboard/summary')
+      setCards(toCards(res.data))
+      setError(null)
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?',
+      )
+      setCards(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+    // The factory floor keys in production through the day, so the figures go
+    // stale quickly on a screen someone leaves open.
+    const timer = setInterval(() => void load(), 60_000)
+    return () => clearInterval(timer)
+  }, [load])
+
+  if (error) {
+    return (
+      <div className="glass-card p-4 flex items-start gap-3 border-red-500/40">
+        <AlertCircle size={18} className="text-red-400 mt-0.5 shrink-0" />
+        <div>
+          <p className="text-sm font-semibold text-red-400">Could not load dashboard figures</p>
+          <p className="text-xs text-muted-foreground mt-1">{error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!cards) {
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="kpi-card">
+            <div className="skeleton h-8 w-8 rounded-lg mb-3" />
+            <div className="skeleton h-7 w-20 mb-2" />
+            <div className="skeleton h-3 w-24" />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
-      {kpis.map((kpi) => {
+      {cards.map((kpi) => {
         const Icon = kpi.icon
         const colors = colorMap[kpi.color]
 
         return (
-          <div
-            key={kpi.id}
-            id={`kpi-${kpi.id}`}
-            className="kpi-card group"
-          >
-            {/* Header */}
+          <div key={kpi.id} id={`kpi-${kpi.id}`} className="kpi-card group">
             <div className="flex items-center justify-between mb-3">
               <div className={cn('p-2 rounded-lg', colors.bg, 'border', colors.border)}>
                 <Icon size={16} className={colors.icon} />
               </div>
-              {kpi.trend !== undefined && (
-                <div className={cn('flex items-center gap-0.5 text-[10px] font-semibold', kpi.trend >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                  {kpi.trend >= 0 ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-                  {Math.abs(kpi.trend)}%
-                </div>
-              )}
             </div>
 
-            {/* Value */}
             <div className="mb-1">
               <p className="text-2xl font-bold text-foreground leading-none">{kpi.value}</p>
-              {kpi.subValue && (
-                <p className="text-xs text-muted-foreground mt-1">{kpi.subValue}</p>
-              )}
+              {kpi.subValue && <p className="text-xs text-muted-foreground mt-1">{kpi.subValue}</p>}
             </div>
 
-            {/* Label */}
-            <p className="text-xs font-medium text-muted-foreground mb-3">{kpi.label}</p>
-
-            {/* Sparkline */}
-            {kpi.sparkline && (
-              <div className="mt-auto">
-                <MiniSparkline data={kpi.sparkline} color={colors.sparkline} />
-              </div>
-            )}
+            <p className="text-xs font-medium text-muted-foreground">{kpi.label}</p>
           </div>
         )
       })}

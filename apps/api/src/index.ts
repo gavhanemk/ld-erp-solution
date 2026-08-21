@@ -20,6 +20,7 @@ import inventoryRoutes from './routes/inventory.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
 import hrRoutes from './routes/hr.routes'
+import approvalRoutes from './routes/approvals.routes'
 import aiRoutes from './routes/ai.routes'
 import notificationRoutes from './routes/notification.routes'
 import webhookRoutes from './routes/webhook.routes'
@@ -84,6 +85,7 @@ app.use('/api/inventory', authMiddleware, inventoryRoutes)
 app.use('/api/production', authMiddleware, productionRoutes)
 app.use('/api/accounts', authMiddleware, accountsRoutes)
 app.use('/api/hr', authMiddleware, hrRoutes)
+app.use('/api/approvals', authMiddleware, approvalRoutes)
 app.use('/api/ai', authMiddleware, aiRoutes)
 app.use('/api/notifications', authMiddleware, notificationRoutes)
 
