@@ -1,6 +1,7 @@
 'use client'
 
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import type { FormField } from '@/components/masters/MasterFormDialog'
 
 interface Style {
   id: string
@@ -95,12 +96,53 @@ const columns: Column<Style>[] = [
   { key: 'isActive', header: 'Status', render: (s) => <ActiveBadge isActive={s.isActive} /> },
 ]
 
+const formFields: FormField[] = [
+  { name: 'code', label: 'Style Code', required: true, placeholder: 'SS-SLIM-101', section: 'Identity' },
+  { name: 'name', label: 'Style Name', required: true, placeholder: 'Slim Fit Formal Shirt', section: 'Identity' },
+  {
+    name: 'brandType',
+    label: 'Brand',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
+  },
+  { name: 'category', label: 'Garment Type', section: 'Identity', placeholder: 'Shirt' },
+  { name: 'season', label: 'Season', section: 'Identity', placeholder: 'SS26' },
+  { name: 'collarType', label: 'Collar Type', section: 'Construction', placeholder: 'Cutaway' },
+  { name: 'sleeveType', label: 'Sleeve Type', section: 'Construction', placeholder: 'Full sleeve' },
+  { name: 'fit', label: 'Fit', section: 'Construction', placeholder: 'Slim' },
+  { name: 'fabricType', label: 'Fabric', section: 'Construction', placeholder: 'Cotton Poplin' },
+  { name: 'gsm', label: 'GSM', type: 'number', section: 'Construction', placeholder: '120' },
+  {
+    name: 'sizeSet',
+    label: 'Size Set',
+    type: 'tags',
+    section: 'Size & Colour',
+    span: 2,
+    placeholder: 'S, M, L, XL, XXL',
+    help: 'Separate sizes with commas, in the order they should appear',
+  },
+  {
+    name: 'colors',
+    label: 'Colours',
+    type: 'tags',
+    section: 'Size & Colour',
+    span: 2,
+    placeholder: 'White, Sky Blue, Navy',
+    help: 'Separate colours with commas',
+  },
+  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Size & Colour' },
+]
+
 export default function StylesPage() {
   return (
     <MasterTable<Style>
       title="Styles & SKUs"
+      entityName="Style"
       resource="styles"
       columns={columns}
+      formFields={formFields}
       defaultSort="code"
       searchPlaceholder="Search style code, name, season, fabric..."
       emptyMessage="No styles yet. Add a style, then build its bill of materials."

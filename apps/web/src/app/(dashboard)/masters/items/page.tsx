@@ -2,6 +2,7 @@
 
 import { AlertTriangle } from 'lucide-react'
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import type { FormField } from '@/components/masters/MasterFormDialog'
 import { formatCurrency } from '@/lib/utils'
 
 interface Item {
@@ -86,12 +87,70 @@ const columns: Column<Item>[] = [
   { key: 'isActive', header: 'Status', render: (i) => <ActiveBadge isActive={i.isActive} /> },
 ]
 
+const formFields: FormField[] = [
+  { name: 'code', label: 'Item Code', required: true, placeholder: 'FAB-COT-001', section: 'Identity' },
+  { name: 'name', label: 'Item Name', required: true, placeholder: 'Cotton Poplin 40s', section: 'Identity' },
+  {
+    name: 'type',
+    label: 'Item Type',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    options: Object.entries(TYPE_LABEL).map(([value, v]) => ({ value, label: v.label })),
+  },
+  {
+    name: 'categoryId',
+    label: 'Category',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    optionsFrom: { resource: 'item-categories' },
+  },
+  {
+    name: 'uomId',
+    label: 'Unit of Measure',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    optionsFrom: { resource: 'uoms' },
+  },
+  {
+    name: 'hsnCode',
+    label: 'HSN Code',
+    section: 'Identity',
+    placeholder: '52081200',
+    help: '4 to 8 digits, used on GST invoices',
+  },
+  { name: 'description', label: 'Description', type: 'textarea', section: 'Identity' },
+  {
+    name: 'standardRate',
+    label: 'Standard Rate',
+    type: 'number',
+    section: 'Costing',
+    placeholder: '145.50',
+    help: 'Used to cost a BOM before real purchase rates exist',
+  },
+  {
+    name: 'reorderLevel',
+    label: 'Reorder Level',
+    type: 'number',
+    section: 'Stock Control',
+    placeholder: '500',
+    help: 'Raises a reorder alert when stock falls below this',
+  },
+  { name: 'minStock', label: 'Minimum Stock', type: 'number', section: 'Stock Control' },
+  { name: 'maxStock', label: 'Maximum Stock', type: 'number', section: 'Stock Control' },
+  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new documents', section: 'Stock Control' },
+]
+
 export default function ItemsPage() {
   return (
     <MasterTable<Item>
       title="Items"
+      entityName="Item"
       resource="items"
       columns={columns}
+      formFields={formFields}
       defaultSort="name"
       searchPlaceholder="Search name, code, HSN, description..."
       emptyMessage="No items yet. Add fabric, thread, buttons and other materials here."

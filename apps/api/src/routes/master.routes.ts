@@ -35,6 +35,23 @@ import {
 const router = Router()
 const MODULE = 'masters'
 
+/**
+ * Warehouses, departments and brands all hang off the company. There is exactly
+ * one company row per install, so the UI should never ask which — the id is
+ * filled in here instead.
+ */
+async function currentCompanyId(): Promise<Record<string, unknown>> {
+  const company = await prisma.company.findFirst({ select: { id: true } })
+  if (!company) {
+    throw new AppError(
+      'Company profile is not set up yet. Seed the database first.',
+      409,
+      'NO_COMPANY',
+    )
+  }
+  return { companyId: company.id }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Straightforward masters — the factory covers list/get/create/update/delete
 // ─────────────────────────────────────────────────────────────
@@ -104,6 +121,7 @@ router.use(
     entityType: 'Warehouse',
     createSchema: createWarehouseSchema,
     updateSchema: updateWarehouseSchema,
+    injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -118,6 +136,7 @@ router.use(
     entityType: 'Department',
     createSchema: createDepartmentSchema,
     updateSchema: updateDepartmentSchema,
+    injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -192,6 +211,7 @@ router.use(
     entityType: 'Brand',
     createSchema: createBrandSchema,
     updateSchema: updateBrandSchema,
+    injectOnCreate: currentCompanyId,
     searchFields: ['name', 'description'],
     sortableFields: ['name', 'createdAt'],
     defaultSort: { field: 'name', order: 'asc' },

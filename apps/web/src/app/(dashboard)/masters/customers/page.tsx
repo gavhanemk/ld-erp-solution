@@ -1,6 +1,7 @@
 'use client'
 
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import type { FormField } from '@/components/masters/MasterFormDialog'
 import { formatCurrency } from '@/lib/utils'
 
 interface Customer {
@@ -102,12 +103,69 @@ const columns: Column<Customer>[] = [
   },
 ]
 
+const formFields: FormField[] = [
+  { name: 'code', label: 'Customer Code', required: true, placeholder: 'CUST-001', section: 'Identity' },
+  { name: 'name', label: 'Customer Name', required: true, placeholder: 'Rajan Traders', section: 'Identity' },
+  {
+    name: 'type',
+    label: 'Type',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    options: [
+      { value: 'DOMESTIC', label: 'Domestic' },
+      { value: 'EXPORT', label: 'Export' },
+      { value: 'JOB_WORK', label: 'Job Work' },
+      { value: 'VHAGAR_DEALER', label: 'VHAGAR Dealer' },
+    ],
+  },
+  {
+    name: 'gstin',
+    label: 'GSTIN',
+    section: 'Identity',
+    placeholder: '24AAACL1234M1Z5',
+    help: '15 characters, leave blank if unregistered',
+  },
+  { name: 'pan', label: 'PAN', section: 'Identity', placeholder: 'AAACL1234M' },
+  { name: 'phone', label: 'Phone', section: 'Contact', placeholder: '+91 98765 43210' },
+  { name: 'email', label: 'Email', section: 'Contact', placeholder: 'accounts@example.com' },
+  { name: 'billingAddress', label: 'Billing Address', type: 'textarea', section: 'Address' },
+  { name: 'billingCity', label: 'City', section: 'Address', placeholder: 'Surat' },
+  { name: 'billingState', label: 'State', section: 'Address', placeholder: 'Gujarat' },
+  { name: 'billingPincode', label: 'PIN Code', section: 'Address', placeholder: '395010' },
+  { name: 'shippingAddress', label: 'Shipping Address', type: 'textarea', section: 'Address' },
+  {
+    name: 'creditLimit',
+    label: 'Credit Limit',
+    type: 'number',
+    section: 'Payment Terms',
+    placeholder: '500000',
+    help: 'In rupees',
+  },
+  {
+    name: 'creditDays',
+    label: 'Credit Days',
+    type: 'number',
+    section: 'Payment Terms',
+    placeholder: '30',
+  },
+  { name: 'paymentTerms', label: 'Payment Terms', section: 'Payment Terms', placeholder: '30 days from invoice' },
+  { name: 'bankName', label: 'Bank Name', section: 'Bank Details' },
+  { name: 'bankAccount', label: 'Account Number', section: 'Bank Details' },
+  { name: 'bankIFSC', label: 'IFSC Code', section: 'Bank Details', placeholder: 'HDFC0001234' },
+  { name: 'notes', label: 'Notes', type: 'textarea', section: 'Other' },
+  { name: 'isBlacklisted', label: 'Blacklisted', type: 'checkbox', placeholder: 'Block new orders', section: 'Other' },
+  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Other' },
+]
+
 export default function CustomersPage() {
   return (
     <MasterTable<Customer>
       title="Customers"
+      entityName="Customer"
       resource="customers"
       columns={columns}
+      formFields={formFields}
       defaultSort="name"
       searchPlaceholder="Search name, code, GSTIN, phone, email..."
       emptyMessage="No customers yet. Add your first customer to get started."

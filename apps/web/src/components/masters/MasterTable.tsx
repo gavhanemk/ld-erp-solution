@@ -1,8 +1,18 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Plus, Search, RefreshCw, AlertCircle } from 'lucide-react'
+import {
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  Search,
+  RefreshCw,
+  AlertCircle,
+  Pencil,
+  Ban,
+} from 'lucide-react'
 import { ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
+import { MasterFormDialog, type FormField } from './MasterFormDialog'
 
 export interface Column<T> {
   key: string
@@ -27,6 +37,13 @@ interface MasterTableProps<T> {
   /** Extra query parameters merged into every list request. */
   filters?: ListParams
   emptyMessage?: string
+  /**
+   * Form definition. Supplying it turns on the New button and the per-row
+   * edit and deactivate actions; omitting it leaves the table read-only.
+   */
+  formFields?: FormField[]
+  /** Singular noun used in the dialog heading, e.g. "Customer". */
+  entityName?: string
 }
 
 const PAGE_SIZE = 25
@@ -40,6 +57,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   actions,
   filters,
   emptyMessage = 'Nothing here yet.',
+  formFields,
+  entityName,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -53,7 +72,13 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   const [sort, setSort] = useState(defaultSort)
   const [order, setOrder] = useState<'asc' | 'desc'>('asc')
 
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editing, setEditing] = useState<T | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+
   const client = useMemo(() => masterResource<T>(resource), [resource])
+  const editable = Boolean(formFields?.length)
+  const singular = entityName ?? title.replace(/s$/, '')
 
   // Typing shouldn't fire a request per keystroke.
   useEffect(() => {
@@ -110,6 +135,32 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     void load()
   }, [load])
 
+  /**
+   * Masters are referenced by transactions forever, so the API deactivates
+   * rather than deletes. The wording here has to match that or it reads as
+   * destructive.
+   */
+  const deactivate = async (row: T) => {
+    const label = (row as Record<string, unknown>).name ?? (row as Record<string, unknown>).code
+    if (
+      !window.confirm(
+        `Deactivate ${label}?\n\nIt stays in the system and on past documents, but stops appearing in new ones. You can reactivate it later by editing it.`,
+      )
+    ) {
+      return
+    }
+
+    setActionError(null)
+    try {
+      await client.deactivate(row.id)
+      await load()
+    } catch (err) {
+      setActionError(
+        err instanceof ApiError ? err.message : 'Could not deactivate. Is the API running?',
+      )
+    }
+  }
+
   const toggleSort = (key: string) => {
     if (sort === key) {
       setOrder((o) => (o === 'asc' ? 'desc' : 'asc'))
@@ -136,6 +187,18 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
             Refresh
           </button>
           {actions}
+          {editable && (
+            <button
+              onClick={() => {
+                setEditing(null)
+                setDialogOpen(true)
+              }}
+              className="btn-primary"
+            >
+              <Plus size={16} />
+              New {singular}
+            </button>
+          )}
         </div>
       </div>
 
@@ -160,12 +223,14 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
         </label>
       </div>
 
-      {error && (
+      {(error || actionError) && (
         <div className="glass-card p-4 flex items-start gap-3 border-red-500/40">
           <AlertCircle size={18} className="text-red-400 mt-0.5 shrink-0" />
           <div>
-            <p className="text-sm font-semibold text-red-400">Could not load {title}</p>
-            <p className="text-xs text-muted-foreground mt-1">{error}</p>
+            <p className="text-sm font-semibold text-red-400">
+              {error ? `Could not load ${title}` : 'Action failed'}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">{error ?? actionError}</p>
           </div>
         </div>
       )}
@@ -190,6 +255,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                     {sort === col.key && (order === 'asc' ? ' ↑' : ' ↓')}
                   </th>
                 ))}
+                {editable && <th className="text-right">Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -206,7 +272,10 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
 
               {!loading && rows.length === 0 && !error && (
                 <tr>
-                  <td colSpan={columns.length} className="text-center py-10 text-muted-foreground">
+                  <td
+                    colSpan={columns.length + (editable ? 1 : 0)}
+                    className="text-center py-10 text-muted-foreground"
+                  >
                     {debouncedSearch ? `No matches for "${debouncedSearch}".` : emptyMessage}
                   </td>
                 </tr>
@@ -233,6 +302,29 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                         : ((row as Record<string, unknown>)[col.key] as React.ReactNode) ?? '—'}
                     </td>
                   ))}
+                  {editable && (
+                    <td className="text-right whitespace-nowrap">
+                      <button
+                        className="btn-ghost p-1.5"
+                        title={`Edit ${singular.toLowerCase()}`}
+                        onClick={() => {
+                          setEditing(row)
+                          setDialogOpen(true)
+                        }}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      {row.isActive !== false && (
+                        <button
+                          className="btn-ghost p-1.5 text-red-400"
+                          title={`Deactivate ${singular.toLowerCase()}`}
+                          onClick={() => void deactivate(row)}
+                        >
+                          <Ban size={14} />
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -265,6 +357,18 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           </div>
         )}
       </div>
+
+      {editable && formFields && (
+        <MasterFormDialog<T>
+          open={dialogOpen}
+          onClose={() => setDialogOpen(false)}
+          onSaved={() => void load()}
+          resource={resource}
+          fields={formFields}
+          record={editing}
+          title={singular}
+        />
+      )}
     </div>
   )
 }

@@ -27,6 +27,12 @@ export interface CrudOptions {
    * column must opt out.
    */
   softDelete?: boolean
+  /**
+   * Fields merged into the body before validation when the client did not
+   * supply them. Used for owner keys the user should never have to type, such
+   * as companyId on a single-entity install.
+   */
+  injectOnCreate?: () => Promise<Record<string, unknown>>
 }
 
 const MAX_PAGE_SIZE = 200
@@ -54,6 +60,7 @@ export function crudRouter(options: CrudOptions): Router {
     defaultSort = { field: 'createdAt', order: 'desc' },
     include,
     softDelete = true,
+    injectOnCreate,
   } = options
 
   const router = Router({ mergeParams: true })
@@ -114,7 +121,18 @@ export function crudRouter(options: CrudOptions): Router {
   })
 
   router.post('/', requirePermission(module, 'create'), async (req: AuthRequest, res) => {
-    const data = createSchema.parse(req.body)
+    let body = req.body
+
+    if (injectOnCreate) {
+      const defaults = await injectOnCreate()
+      // Only fill what the caller left out, so an explicit value still wins.
+      const missing = Object.fromEntries(
+        Object.entries(defaults).filter(([key]) => body?.[key] === undefined),
+      )
+      body = { ...body, ...missing }
+    }
+
+    const data = createSchema.parse(body)
     const created = await delegate().create({ data, include })
 
     await writeAuditLog(req, {
