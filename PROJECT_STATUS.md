@@ -161,6 +161,12 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 - `setup.ps1` runs install, generate, migrate and seed in one command, and
   refuses to start without enough memory or with the password placeholder still
   in place.
+- **Never run `next build` while `pnpm dev:web` is running.** Both write to
+  `apps/web/.next`, and they overwrite each other's files. The symptom is the
+  site rendering as unstyled raw HTML: the browser asks for stylesheet chunks
+  that no longer exist. The fix is to stop the dev server, delete
+  `apps/web/.next`, start it again, and hard-refresh the browser with
+  Ctrl+Shift+R. Stop the dev server before building, or the other way round.
 - The PC hit its memory commit limit during this work and `pnpm install` failed
   until a restart. If installs start dying with `ERR_PNPM_ERR_MEMORY_ALLOCATION_FAILED`,
   that is the cause.
