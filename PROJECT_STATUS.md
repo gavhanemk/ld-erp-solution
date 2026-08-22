@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: 22 Aug 2026_
+_Last updated: Sat 22 Aug 2026 — paused for the weekend, resuming Mon 24 Aug_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -29,6 +29,31 @@ before finishing.
 Copy the host from the Supabase dashboard rather than guessing — Supabase
 assigns either `aws-0-*` or `aws-1-*` per project, and the wrong one will not
 connect.
+
+---
+
+## Where we left off (Sat 22 Aug)
+
+The ERP is running and Mahesh has seen it working. Reactions so far: the UI and
+typography landed well; the light theme was too bright and has been softened.
+He expects a round of modifications, but has not listed them yet — the plan is
+for him to use it first and collect changes, then do them in a batch.
+
+**Pick up here on Monday:**
+
+1. Ask what he noted down while using it. That list should drive the next round,
+   not a guess at what to build.
+2. If nothing is blocking, the natural next build is **entering a real sales
+   order end to end** — the list screen reads live data but there is no form to
+   create one, so nothing can flow through the system yet. That unlocks the
+   dashboard figures, approvals and manufacturing orders actually doing
+   something.
+3. The seeded admin account is still called "Admin User". He may want it renamed
+   to his own name, and a user created for each real person.
+
+**Not yet discussed with him:** GEMINI_API_KEY is not set, so the AI assistant
+cannot answer anything yet. The plan treats AI as a must-have, so this needs a
+decision on whose API key to use and who pays for it.
 
 ---
 
