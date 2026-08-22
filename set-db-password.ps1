@@ -50,8 +50,8 @@ $direct = "postgresql://postgres.$PROJECT_REF`:$encoded@$POOLER_HOST`:5432/postg
 # ── packages/database/.env — used by the Prisma command line ──
 $dbEnv = @"
 # Supabase project: LD COTTON APPS ($PROJECT_REF), region ap-southeast-1
-# ERP tables live in the dedicated `$SCHEMA` schema, alongside vhagar_fabric
-# and vhagar_kandy. Written by set-db-password.ps1 — never commit this file.
+# ERP tables live in the dedicated $SCHEMA schema, alongside vhagar_fabric
+# and vhagar_kandy. Written by set-db-password.ps1 - never commit this file.
 
 # Pooled connection (port 6543) - what the running app uses.
 DATABASE_URL="$pooled"
@@ -96,21 +96,30 @@ Write-Host '  Checking the connection...' -ForegroundColor Cyan
 $check = @'
 const { PrismaClient } = require('@prisma/client')
 const prisma = new PrismaClient()
-prisma.$queryRaw`select current_user, current_schema()`
+prisma.$connect()
   .then(async () => {
     const users = await prisma.user.count()
     const roles = await prisma.role.count()
     console.log(`OK|${users}|${roles}`)
   })
-  .catch((e) => console.log('FAIL|' + e.message.split('\n').find(Boolean)))
+  .catch((e) => {
+    const first = String(e.message).split('\n').filter(Boolean)[0] || 'Unknown error'
+    // Tell a wrong password apart from a network or host problem, because the
+    // fix is completely different.
+    const wrongPassword = /authentication failed/i.test(e.message)
+    console.log('FAIL|' + (wrongPassword ? 'BADPASS' : 'OTHER') + '|' + first.trim())
+  })
   .finally(() => prisma.$disconnect())
 '@
 
-$checkFile = Join-Path $env:TEMP 'ld-erp-db-check.js'
+# The check must live inside packages\database: Node resolves @prisma/client
+# relative to the script file, not the working directory, so a file in TEMP
+# cannot find it.
+$checkFile = 'packages\database\.db-check.js'
 Set-Content -Path $checkFile -Value $check -Encoding utf8
 
 Push-Location 'packages\database'
-$result = node $checkFile 2>&1 | Select-String -Pattern '^(OK|FAIL)\|' | Select-Object -First 1
+$result = node '.db-check.js' 2>&1 | Select-String -Pattern '^(OK|FAIL)\|' | Select-Object -First 1
 Pop-Location
 Remove-Item $checkFile -ErrorAction SilentlyContinue
 
@@ -127,12 +136,29 @@ if ($result -and $result.ToString().StartsWith('OK|')) {
     Write-Host '  Then open http://localhost:3000 and sign in as:'
     Write-Host '    admin@ldcottonmills.com / Admin@123'
     Write-Host ''
+} elseif ($result -and $result.ToString().StartsWith('FAIL|BADPASS')) {
+    Write-Host '  That password was not accepted by the database.' -ForegroundColor Red
+    Write-Host ''
+    Write-Host '  The connection reached Supabase fine, so the address is right -' -ForegroundColor Yellow
+    Write-Host '  only the password is wrong or out of date. To get a fresh one:' -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host '    1. supabase.com/dashboard  ->  LD COTTON APPS'
+    Write-Host '    2. Project Settings (gear icon)  ->  Database'
+    Write-Host '    3. Reset database password  ->  Generate a new password'
+    Write-Host '    4. Copy it, then run this script again'
+    Write-Host ''
+    exit 1
 } else {
     Write-Host '  Could not connect.' -ForegroundColor Red
-    if ($result) { Write-Host "  $($result.ToString().Substring(5))" -ForegroundColor Red }
+    if ($result) {
+        $detail = ($result.ToString() -split '\|', 3)[2]
+        Write-Host "  $detail" -ForegroundColor Red
+    } else {
+        Write-Host '  The check produced no result. Has pnpm install been run?' -ForegroundColor Red
+    }
     Write-Host ''
-    Write-Host '  Most likely the password was wrong. Run this script again,' -ForegroundColor Yellow
-    Write-Host '  or reset the password in the Supabase dashboard and use the new one.' -ForegroundColor Yellow
+    Write-Host '  This is not a password problem - the database could not be reached' -ForegroundColor Yellow
+    Write-Host '  at all. Check your internet connection and try again.' -ForegroundColor Yellow
     Write-Host ''
     exit 1
 }
