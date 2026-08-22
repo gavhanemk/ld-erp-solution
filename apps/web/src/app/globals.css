@@ -52,25 +52,58 @@
     --glass-bg: rgba(255, 255, 255, 0.04);
     --glass-border: rgba(255, 255, 255, 0.08);
     --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+
+    /* Row and button hover. White tint on dark; the light theme flips it. */
+    --hover-overlay: rgba(255, 255, 255, 0.04);
+    --hover-overlay-strong: rgba(255, 255, 255, 0.07);
   }
 
+  /* Light mode is for a bright factory office, not a dark room. It is kept
+     deliberately soft: a warm grey page rather than white, so the screen is not
+     glaring over a long shift, with cards lifted slightly above it. */
   .light {
-    --background: 0 0% 98%;
-    --foreground: 222 47% 11%;
-    --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --primary: 173 80% 36%;
+    --background: 220 16% 93%;       /* soft warm grey, not white */
+    --foreground: 222 40% 18%;       /* near-black would glare against it */
+
+    --card: 0 0% 100%;               /* cards sit above the page, so white reads as raised */
+    --card-foreground: 222 40% 18%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 40% 18%;
+
+    --primary: 173 75% 33%;          /* darkened so teal passes contrast on white */
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent: 38 92% 50%;
-    --accent-foreground: 222 47% 7%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --sidebar-bg: 222 47% 6%;
-    --sidebar-border: 217 33% 18%;
+
+    --secondary: 220 16% 96%;
+    --secondary-foreground: 222 40% 18%;
+
+    --muted: 220 14% 90%;
+    --muted-foreground: 215 16% 42%; /* readable secondary text, not faint grey */
+
+    --accent: 38 88% 45%;            /* amber is hard to read on white at full brightness */
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 47%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 14% 85%;           /* visible enough to separate cards from the page */
+    --input: 220 14% 88%;
+    --ring: 173 75% 33%;
+
+    /* The sidebar stays dark in both themes: it anchors the layout and keeps
+       the brand colour readable. */
+    --sidebar-bg: 222 47% 10%;
+    --sidebar-border: 217 33% 20%;
+
+    /* Without these the glass effect stays white-on-white and every card
+       disappears into the page. */
+    --glass-bg: rgba(255, 255, 255, 0.85);
+    --glass-border: rgba(15, 23, 42, 0.09);
+    --glass-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.05);
+
+    /* A white tint over a white card is invisible, so tint with ink instead. */
+    --hover-overlay: rgba(15, 23, 42, 0.035);
+    --hover-overlay-strong: rgba(15, 23, 42, 0.06);
   }
 
   * {
@@ -94,8 +127,9 @@
   ::-webkit-scrollbar-thumb { @apply bg-navy-600 rounded-full; }
   ::-webkit-scrollbar-thumb:hover { @apply bg-navy-500; }
 
-  /* Selection */
+  /* Selection. The dark-mode teal is far too pale to read on a white card. */
   ::selection { @apply bg-teal-500/20 text-teal-300; }
+  .light ::selection { @apply bg-teal-500/25 text-teal-900; }
 }
 
 /* ═══════════════════════════════════════════
@@ -122,6 +156,8 @@
   /* Stat Trend Up */
   .trend-up { @apply text-emerald-400 text-xs font-medium; }
   .trend-down { @apply text-red-400 text-xs font-medium; }
+  .light .trend-up { @apply text-emerald-700; }
+  .light .trend-down { @apply text-red-700; }
 
   /* Navigation Item */
   .nav-item {
@@ -175,7 +211,11 @@
   }
 
   .data-table tbody tr {
-    @apply border-b border-border/50 hover:bg-white/[0.02] transition-colors;
+    @apply border-b border-border/50 transition-colors;
+  }
+
+  .data-table tbody tr:hover {
+    background: var(--hover-overlay);
   }
 
   .data-table tbody td {
@@ -194,6 +234,15 @@
   .badge-neutral { @apply badge bg-slate-500/15 text-slate-400 border border-slate-500/20; }
   .badge-purple  { @apply badge bg-purple-500/15 text-purple-400 border border-purple-500/20; }
 
+  /* Badge text is a 400 weight tuned for dark cards; on white it washes out,
+     so light mode drops each hue two steps and firms up the tint. */
+  .light .badge-success { @apply bg-emerald-500/10 text-emerald-700 border-emerald-600/25; }
+  .light .badge-warning { @apply bg-amber-500/15 text-amber-700 border-amber-600/30; }
+  .light .badge-danger  { @apply bg-red-500/10 text-red-700 border-red-600/25; }
+  .light .badge-info    { @apply bg-teal-500/10 text-teal-700 border-teal-600/25; }
+  .light .badge-neutral { @apply bg-slate-500/10 text-slate-600 border-slate-500/25; }
+  .light .badge-purple  { @apply bg-purple-500/10 text-purple-700 border-purple-600/25; }
+
   /* Buttons */
   .btn-primary {
     @apply inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold
@@ -211,8 +260,12 @@
 
   .btn-ghost {
     @apply inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium
-           text-muted-foreground hover:text-foreground hover:bg-white/5
+           text-muted-foreground hover:text-foreground
            transition-all duration-200;
+  }
+
+  .btn-ghost:hover {
+    background: var(--hover-overlay-strong);
   }
 
   .btn-danger {
