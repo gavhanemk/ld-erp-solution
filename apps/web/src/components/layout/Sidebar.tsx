@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import {
   LayoutDashboard, ShoppingCart, Package, Warehouse, Factory,
   BookOpen, Users, Wrench, Bot, Settings, ChevronLeft, ChevronRight,
@@ -10,6 +10,15 @@ import {
   Tag, Layers
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { api, currentUser, tokens } from '@/lib/api'
+
+/** "Mahesh Ghavane" -> "MG"; a single name gives its first two letters. */
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+}
 
 interface NavItem {
   label: string
@@ -108,7 +117,25 @@ interface SidebarProps {
 
 export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
   const pathname = usePathname()
+  const router = useRouter()
   const [openMenus, setOpenMenus] = useState<string[]>(['Masters'])
+  const [user, setUser] = useState<{ name?: string; role?: string } | null>(null)
+
+  // localStorage is browser-only, so the signed-in user arrives after mount.
+  useEffect(() => {
+    setUser(currentUser())
+  }, [])
+
+  const signOut = async () => {
+    try {
+      await api.post('/auth/logout', {})
+    } catch {
+      // Signing out must work even when the server cannot be reached: the
+      // tokens live in this browser and clearing them is what actually matters.
+    }
+    tokens.clear()
+    router.push('/login')
+  }
 
   const toggleMenu = (label: string) => {
     setOpenMenus((prev) =>
@@ -260,15 +287,26 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
       {/* Bottom: User + Collapse */}
       <div className="border-t border-[hsl(var(--sidebar-border))] p-3 space-y-1 shrink-0">
         {!collapsed && (
-          <div className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-white/5 cursor-pointer transition-colors">
+          <div className="flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-white/5 transition-colors">
             <div className="w-8 h-8 rounded-full bg-teal-500/20 border border-teal-500/20 flex items-center justify-center shrink-0">
-              <span className="text-xs font-bold text-teal-400">MG</span>
+              <span className="text-xs font-bold text-teal-400">
+                {user?.name ? initialsOf(user.name) : '—'}
+              </span>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-foreground truncate">Mahesh Ghavane</p>
-              <p className="text-[10px] text-muted-foreground truncate">Admin</p>
+              <p className="text-xs font-semibold text-foreground truncate">
+                {user?.name ?? 'Signed in'}
+              </p>
+              <p className="text-[10px] text-muted-foreground truncate">{user?.role ?? ''}</p>
             </div>
-            <LogOut size={14} className="text-muted-foreground hover:text-red-400 transition-colors" />
+            <button
+              onClick={() => void signOut()}
+              title="Sign out"
+              aria-label="Sign out"
+              className="p-1 rounded text-muted-foreground hover:text-red-400 transition-colors"
+            >
+              <LogOut size={14} />
+            </button>
           </div>
         )}
 

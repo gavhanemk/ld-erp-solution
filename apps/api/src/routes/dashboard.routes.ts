@@ -45,8 +45,10 @@ router.get('/summary', async (req: AuthRequest, res) => {
   ])
 
   const achieved = todayProductionAgg._sum.achieved || 0
-  const target = todayProductionAgg._sum.target || 1
-  const efficiency = Math.round((achieved / target) * 100)
+  // Report the real target. Substituting 1 to dodge the divide made the
+  // dashboard claim "of 1 target" on a day nobody had set one.
+  const target = todayProductionAgg._sum.target || 0
+  const efficiency = target > 0 ? Math.round((achieved / target) * 100) : 0
 
   res.json({
     success: true,
