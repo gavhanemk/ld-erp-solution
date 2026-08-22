@@ -1,38 +1,34 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: 21 Aug 2026_
+_Last updated: 22 Aug 2026_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
 
-## One thing is left before you can log in
+## The ERP runs
 
-**The database password.** `packages/database/.env` and `apps/api/.env` still
-contain `[YOUR-PASSWORD]`. Everything else is done — the tables exist on
-Supabase and are seeded.
+Verified end to end on 22 Aug 2026 against the live database: login issues a
+token carrying all 78 permissions, master reads return the seeded data, a create
+is written and audited, and an invalid GSTIN is rejected.
 
-1. Supabase Dashboard → **LD COTTON APPS** → **Connect** → **ORMs** → **Prisma**
-2. Copy the `DATABASE_URL` and `DIRECT_URL` it shows into both `.env` files,
-   keeping `?schema=ld_erp` on the end of each
-3. Replace `[YOUR-PASSWORD]` with the database password (use "Reset database
-   password" on that page if you don't know it)
-
-Copy the host from the dashboard rather than trusting the one already in the
-file — Supabase assigns either `aws-0-*` or `aws-1-*` per project, and the wrong
-one will not connect.
-
-Then:
-
-```
-pnpm dev:api    # http://localhost:5000
-pnpm dev:web    # http://localhost:3000
-```
+**To start it:** double-click **START ERP.bat**. It launches the API and the web
+app in their own windows, waits until both actually answer, then opens the
+browser. Closing those two windows stops the ERP.
 
 Sign in with:
 - `admin@ldcottonmills.com` / `Admin@123`
 - `md@ldcottonmills.com` / `MD@12345`
+
+**If the database password ever needs changing** (a Supabase reset, or moving to
+another project), run `set-db-password.ps1`. It asks for the password without
+echoing it, URL-encodes it, writes both `.env` files, and proves the connection
+before finishing.
+
+Copy the host from the Supabase dashboard rather than guessing — Supabase
+assigns either `aws-0-*` or `aws-1-*` per project, and the wrong one will not
+connect.
 
 ---
 
@@ -146,6 +142,15 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   the file is `prisma/seed.ts`, and it imported `bcryptjs` without depending on it
 - `packages/shared` was never a dependency of either app
 - The dashboard's Approve button had no handler at all
+- The notification bell held three fabricated alerts, including a payment of
+  2.4 lakh supposedly received from a customer, with the unread dot permanently
+  lit. Someone could have acted on any of it.
+- The greeting, both avatars and the sidebar name were hardcoded to one person,
+  so every user would have seen the same name and role
+- The sign-out icon was decorative, and the theme toggle swapped its own icon
+  without changing the theme
+- The dashboard reported "of 1 target" on a day nobody had set one, because the
+  API substituted 1 to avoid dividing by zero
 
 ---
 
