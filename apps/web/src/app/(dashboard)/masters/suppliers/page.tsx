@@ -107,7 +107,7 @@ const columns: Column<Supplier>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Supplier Code', required: true, placeholder: 'SUP-001', section: 'Identity' },
+  { name: 'code', label: 'Supplier Code', required: true, placeholder: 'SUP-001', section: 'Identity', uppercase: true },
   { name: 'name', label: 'Supplier Name', required: true, placeholder: 'Shree Fabrics', section: 'Identity' },
   {
     name: 'category',
@@ -117,8 +117,25 @@ const formFields: FormField[] = [
     section: 'Identity',
     options: Object.entries(CATEGORY_LABEL).map(([value, label]) => ({ value, label })),
   },
-  { name: 'gstin', label: 'GSTIN', section: 'Identity', placeholder: '24AAACL1234M1Z5' },
-  { name: 'pan', label: 'PAN', section: 'Identity', placeholder: 'AAACL1234M' },
+  {
+    name: 'gstin',
+    label: 'GSTIN',
+    section: 'Identity',
+    placeholder: '27AAACL1234M1Z5',
+    uppercase: true,
+    help: 'Leave blank if the supplier is not registered — the order will then carry no GST',
+    // The first two digits are the state, and the state is what decides whether
+    // they bill CGST+SGST or IGST.
+    derives: { field: 'stateCode', from: (v) => (/^d{2}/.test(v) ? v.slice(0, 2) : null) },
+  },
+  {
+    name: 'stateCode',
+    label: 'GST State Code',
+    section: 'Identity',
+    placeholder: '27',
+    help: 'Filled in from the GSTIN. Decides the tax split on every purchase.',
+  },
+  { name: 'pan', label: 'PAN', section: 'Identity', placeholder: 'AAACL1234M', uppercase: true },
   { name: 'phone', label: 'Phone', section: 'Contact', placeholder: '+91 98765 43210' },
   { name: 'email', label: 'Email', section: 'Contact', placeholder: 'sales@example.com' },
   { name: 'address', label: 'Address', type: 'textarea', section: 'Address' },
@@ -137,7 +154,7 @@ const formFields: FormField[] = [
   { name: 'paymentTerms', label: 'Payment Terms', section: 'Terms' },
   { name: 'bankName', label: 'Bank Name', section: 'Bank Details' },
   { name: 'bankAccount', label: 'Account Number', section: 'Bank Details' },
-  { name: 'bankIFSC', label: 'IFSC Code', section: 'Bank Details', placeholder: 'HDFC0001234' },
+  { name: 'bankIFSC', label: 'IFSC Code', section: 'Bank Details', placeholder: 'HDFC0001234', uppercase: true },
   { name: 'rating', label: 'Rating', type: 'number', section: 'Other', placeholder: '4', help: '1 to 5' },
   { name: 'notes', label: 'Notes', type: 'textarea', section: 'Other' },
   { name: 'isPreferred', label: 'Preferred', type: 'checkbox', placeholder: 'Prioritise in vendor lists', section: 'Other' },

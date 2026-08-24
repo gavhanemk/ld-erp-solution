@@ -4,46 +4,104 @@ import { z } from 'zod'
 // Shared field helpers
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Tax identifiers are always written in capitals, and people copy them out of
+ * emails and certificates with stray spaces in them. Refusing a GSTIN because
+ * it was typed in lower case, with nothing but "Invalid GSTIN" to explain it,
+ * is a fault in the software rather than in what was typed — so they are
+ * tidied up before they are checked.
+ */
+const tidyIdentifier = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(
+    (v) => (typeof v === 'string' ? v.replace(/[\s-]/g, '').toUpperCase() : v),
+    schema.optional().nullable(),
+  )
+
 /** 15-character GSTIN: 2 state digits, 10-char PAN, entity digit, 'Z', checksum. */
-const gstin = z
-  .string()
-  .regex(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, 'Invalid GSTIN')
-  .optional()
-  .nullable()
+const gstin = tidyIdentifier(
+  z
+    .string()
+    .length(15, 'A GSTIN is exactly 15 characters — count what you have typed')
+    .regex(
+      /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/,
+      'That is not a valid GSTIN. It runs: 2 digits for the state, then a 10-character PAN, then a digit, then Z, then one more character.',
+    ),
+)
 
-const pan = z
-  .string()
-  .regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, 'Invalid PAN')
-  .optional()
-  .nullable()
+const pan = tidyIdentifier(
+  z
+    .string()
+    .length(10, 'A PAN is exactly 10 characters')
+    .regex(/^[A-Z]{5}[0-9]{4}[A-Z]$/, 'A PAN runs: 5 letters, 4 digits, then 1 letter'),
+)
 
-const ifsc = z
-  .string()
-  .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, 'Invalid IFSC code')
-  .optional()
-  .nullable()
+const ifsc = tidyIdentifier(
+  z
+    .string()
+    .length(11, 'An IFSC code is exactly 11 characters')
+    .regex(
+      /^[A-Z]{4}0[A-Z0-9]{6}$/,
+      'An IFSC code runs: 4 letters for the bank, then a zero, then 6 more characters',
+    ),
+)
 
 /** Indian mobile or landline, with optional +91 / 0 prefix and separators. */
 const phone = z
   .string()
-  .regex(/^(\+91[\s-]?)?[0-9][0-9\s-]{7,14}$/, 'Invalid phone number')
+  .regex(
+    /^(\+91[\s-]?)?[0-9][0-9\s-]{7,14}$/,
+    'That does not look like a phone number. Ten digits, or +91 in front.',
+  )
   .optional()
   .nullable()
 
-const email = z.string().email('Invalid email address').optional().nullable()
+/**
+ * Zod's own wording for a bad choice is "Invalid enum value. Expected 'FABRIC' |
+ * 'THREAD' | ...", which is the software talking to itself. This says what the
+ * person actually needs to do.
+ */
+const pickOne = (what: string) => ({
+  errorMap: () => ({ message: `Choose ${what} from the list` }),
+})
+
+const email = z
+  .string()
+  .email('That does not look like an email address')
+  .optional()
+  .nullable()
 const pincode = z
   .string()
-  .regex(/^[1-9][0-9]{5}$/, 'Invalid PIN code')
+  .regex(/^[1-9][0-9]{5}$/, 'An Indian PIN code is 6 digits and does not start with 0')
   .optional()
   .nullable()
 
-/** Master codes are used in documents and URLs, so keep them tight. */
-const code = z
+/**
+ * Master codes are used in documents and URLs, so they are kept tight — but a
+ * trailing space from a paste should not be treated as a mistake by the person
+ * typing.
+ */
+const code = z.preprocess(
+  (v) => (typeof v === 'string' ? v.trim().toUpperCase() : v),
+  z
+    .string()
+    .min(1, 'Code is required')
+    .max(30)
+    .regex(
+      /^[A-Za-z0-9._/-]+$/,
+      'A code can hold letters, numbers, dot, dash and slash — no spaces',
+    ),
+)
+
+/**
+ * Two-digit GST state code. This, not the state name, decides whether a sale is
+ * taxed CGST+SGST or IGST, so it cannot be free text. Derived from the GSTIN
+ * when one is given.
+ */
+const stateCode = z
   .string()
-  .min(1, 'Code is required')
-  .max(30)
-  .regex(/^[A-Za-z0-9._/-]+$/, 'Code may only contain letters, numbers, dot, dash, slash')
-  .transform((v) => v.toUpperCase())
+  .regex(/^[0-3][0-9]$/, 'A state code is the two digits your GSTIN starts with')
+  .optional()
+  .nullable()
 
 const name = z.string().min(1, 'Name is required').max(200)
 const optionalText = z.string().max(500).optional().nullable()
@@ -62,8 +120,8 @@ const ItemTypeEnum = z.enum([
   'CONSUMABLE',
   'PACKING_MATERIAL',
   'TRIM',
-])
-const CustomerTypeEnum = z.enum(['DOMESTIC', 'EXPORT', 'JOB_WORK', 'VHAGAR_DEALER'])
+], pickOne('an item type'))
+const CustomerTypeEnum = z.enum(['DOMESTIC', 'EXPORT', 'JOB_WORK', 'VHAGAR_DEALER'], pickOne('a customer type'))
 const SupplierCategoryEnum = z.enum([
   'FABRIC',
   'THREAD',
@@ -75,8 +133,8 @@ const SupplierCategoryEnum = z.enum([
   'TRANSPORT',
   'SERVICE',
   'OTHER',
-])
-const BrandTypeEnum = z.enum(['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'])
+], pickOne('what this supplier provides'))
+const BrandTypeEnum = z.enum(['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'], pickOne('a brand'))
 
 /** Every master can be deactivated; only DELETE flips it implicitly. */
 const isActive = z.boolean().optional()
@@ -96,8 +154,17 @@ export const createCustomerSchema = z.object({
   billingAddress: optionalText,
   billingCity: z.string().max(100).optional().nullable(),
   billingState: z.string().max(100).optional().nullable(),
+  billingStateCode: stateCode,
   billingPincode: pincode,
   shippingAddress: optionalText,
+  shippingCity: z.string().max(100).optional().nullable(),
+  shippingState: z.string().max(100).optional().nullable(),
+  shippingStateCode: stateCode,
+  shippingPincode: pincode,
+  shippingGstin: gstin,
+  isGroupCompany: z.boolean().optional(),
+  brokerId: z.string().optional().nullable(),
+  brokeragePercent: z.number().min(0).max(100).optional().nullable(),
   creditLimit: nonNegativeDecimal,
   creditDays: z.number().int().min(0).max(365).optional(),
   paymentTerms: optionalText,
@@ -125,7 +192,11 @@ export const createSupplierSchema = z.object({
   address: optionalText,
   city: z.string().max(100).optional().nullable(),
   state: z.string().max(100).optional().nullable(),
+  stateCode,
   pincode,
+  isMsme: z.boolean().optional(),
+  msmeNumber: z.string().max(30).optional().nullable(),
+  isGroupCompany: z.boolean().optional(),
   creditDays: z.number().int().min(0).max(365).optional(),
   leadTimeDays: z.number().int().min(0).max(365).optional(),
   paymentTerms: optionalText,
@@ -149,11 +220,11 @@ export const createItemSchema = z
     name,
     description: optionalText,
     type: ItemTypeEnum,
-    categoryId: z.string().min(1, 'Category is required'),
-    uomId: z.string().min(1, 'Unit of measure is required'),
+    categoryId: z.string().min(1, 'Choose a category from the list'),
+    uomId: z.string().min(1, 'Choose a unit — pieces, metres, kilograms and so on'),
     hsnCode: z
       .string()
-      .regex(/^[0-9]{4,8}$/, 'HSN code must be 4 to 8 digits')
+      .regex(/^[0-9]{4,8}$/, 'An HSN code is 4 to 8 digits, nothing else')
       .optional()
       .nullable(),
     reorderLevel: nonNegativeDecimal,
@@ -298,13 +369,6 @@ export const createBrandSchema = z.object({
   isActive,
 })
 export const updateBrandSchema = createBrandSchema.partial()
-
-/** Two-digit GST state code, 01 (Jammu & Kashmir) through 38 (Ladakh). */
-const stateCode = z
-  .string()
-  .regex(/^[0-3][0-9]$/, 'State code is the two digits your GSTIN starts with')
-  .optional()
-  .nullable()
 
 export const updateCompanySchema = z.object({
   name: name.optional(),

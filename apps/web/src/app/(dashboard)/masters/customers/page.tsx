@@ -104,7 +104,7 @@ const columns: Column<Customer>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Customer Code', required: true, placeholder: 'CUST-001', section: 'Identity' },
+  { name: 'code', label: 'Customer Code', required: true, placeholder: 'CUST-001', section: 'Identity', uppercase: true },
   { name: 'name', label: 'Customer Name', required: true, placeholder: 'Rajan Traders', section: 'Identity' },
   {
     name: 'type',
@@ -123,10 +123,19 @@ const formFields: FormField[] = [
     name: 'gstin',
     label: 'GSTIN',
     section: 'Identity',
-    placeholder: '24AAACL1234M1Z5',
-    help: '15 characters, leave blank if unregistered',
+    placeholder: '27AAACL1234M1Z5',
+    uppercase: true,
+    help: '15 characters. Leave blank if unregistered.',
+    derives: { field: 'billingStateCode', from: (v) => (/^d{2}/.test(v) ? v.slice(0, 2) : null) },
   },
-  { name: 'pan', label: 'PAN', section: 'Identity', placeholder: 'AAACL1234M' },
+  {
+    name: 'billingStateCode',
+    label: 'GST State Code',
+    section: 'Identity',
+    placeholder: '27',
+    help: 'Filled in from the GSTIN. Decides CGST+SGST or IGST on every invoice.',
+  },
+  { name: 'pan', label: 'PAN', section: 'Identity', placeholder: 'AAACL1234M', uppercase: true },
   { name: 'phone', label: 'Phone', section: 'Contact', placeholder: '+91 98765 43210' },
   { name: 'email', label: 'Email', section: 'Contact', placeholder: 'accounts@example.com' },
   { name: 'billingAddress', label: 'Billing Address', type: 'textarea', section: 'Address' },
@@ -134,6 +143,13 @@ const formFields: FormField[] = [
   { name: 'billingState', label: 'State', section: 'Address', placeholder: 'Gujarat' },
   { name: 'billingPincode', label: 'PIN Code', section: 'Address', placeholder: '395010' },
   { name: 'shippingAddress', label: 'Shipping Address', type: 'textarea', section: 'Address' },
+  {
+    name: 'shippingStateCode',
+    label: 'Delivery State Code',
+    section: 'Address',
+    placeholder: '27',
+    help: 'Only if goods go to a different state from the billing address — that is where the tax follows',
+  },
   {
     name: 'creditLimit',
     label: 'Credit Limit',
@@ -152,7 +168,7 @@ const formFields: FormField[] = [
   { name: 'paymentTerms', label: 'Payment Terms', section: 'Payment Terms', placeholder: '30 days from invoice' },
   { name: 'bankName', label: 'Bank Name', section: 'Bank Details' },
   { name: 'bankAccount', label: 'Account Number', section: 'Bank Details' },
-  { name: 'bankIFSC', label: 'IFSC Code', section: 'Bank Details', placeholder: 'HDFC0001234' },
+  { name: 'bankIFSC', label: 'IFSC Code', section: 'Bank Details', placeholder: 'HDFC0001234', uppercase: true },
   { name: 'notes', label: 'Notes', type: 'textarea', section: 'Other' },
   { name: 'isBlacklisted', label: 'Blacklisted', type: 'checkbox', placeholder: 'Block new orders', section: 'Other' },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Other' },

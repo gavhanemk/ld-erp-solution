@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { X, Loader2, AlertCircle } from 'lucide-react'
 import { ApiError, masterResource, type Paginated } from '@/lib/api'
 
@@ -27,6 +27,13 @@ export interface FormField {
   }
   /** Short hint rendered under the input. */
   help?: string
+  /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
+  uppercase?: boolean
+  /**
+   * Fills another field from this one. Used so typing a GSTIN sets the state
+   * code, which is what actually decides the tax on every document.
+   */
+  derives?: { field: string; from: (value: string) => string | null }
   /** Fraction of the two-column grid this field occupies. */
   span?: 1 | 2
   /** Grouping heading this field sits under. */
@@ -61,6 +68,7 @@ export function MasterFormDialog<T extends { id: string }>({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   // Reset whenever the dialog opens, so a previous record's values and errors
   // never leak into the next one.
@@ -143,7 +151,22 @@ export function MasterFormDialog<T extends { id: string }>({
   if (!open) return null
 
   const set = (name: string, value: unknown) => {
-    setValues((v) => ({ ...v, [name]: value }))
+    const field = fields.find((f) => f.name === name)
+    const next = field?.uppercase && typeof value === 'string' ? value.toUpperCase() : value
+
+    setValues((v) => {
+      const updated = { ...v, [name]: next }
+
+      // One field can fill in another — a GSTIN gives the state code away, and
+      // nobody should have to know that to get their tax right.
+      if (field?.derives && typeof next === 'string') {
+        const derived = field.derives.from(next)
+        if (derived) updated[field.derives.field] = derived
+      }
+
+      return updated
+    })
+
     // Clearing as the user types keeps a stale server error from sitting under
     // a field they have already corrected.
     setFieldErrors((e) => (e[name] ? { ...e, [name]: '' } : e))
@@ -199,10 +222,27 @@ export function MasterFormDialog<T extends { id: string }>({
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.fieldErrors) setFieldErrors(err.fieldErrors)
-        setFormError(err.fieldErrors ? 'Please correct the highlighted fields.' : err.message)
+
+        // Naming the fields matters. "Please correct the highlighted fields"
+        // is useless when the offending one has scrolled out of sight.
+        const named = err.fieldErrors
+          ? Object.entries(err.fieldErrors)
+              .filter(([, m]) => m)
+              .map(([key]) => fields.find((f) => f.name === key)?.label ?? key)
+          : []
+
+        setFormError(
+          named.length
+            ? `Could not save. Check ${named.join(', ')} — the problem is marked in red below.`
+            : err.message,
+        )
       } else {
         setFormError('Could not save. Is the API running?')
       }
+
+      // The banner sits at the top of a long form; without this it is often
+      // off-screen and the save looks as though it simply did nothing.
+      dialogRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     } finally {
       setSaving(false)
     }
@@ -217,6 +257,7 @@ export function MasterFormDialog<T extends { id: string }>({
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
       <div
+        ref={dialogRef}
         className="glass-card w-full max-w-3xl my-auto"
         role="dialog"
         aria-modal="true"

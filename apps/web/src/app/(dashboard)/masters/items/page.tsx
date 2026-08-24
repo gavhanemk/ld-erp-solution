@@ -88,7 +88,7 @@ const columns: Column<Item>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Item Code', required: true, placeholder: 'FAB-COT-001', section: 'Identity' },
+  { name: 'code', label: 'Item Code', required: true, placeholder: 'FAB-COT-001', section: 'Identity', uppercase: true },
   { name: 'name', label: 'Item Name', required: true, placeholder: 'Cotton Poplin 40s', section: 'Identity' },
   {
     name: 'type',
