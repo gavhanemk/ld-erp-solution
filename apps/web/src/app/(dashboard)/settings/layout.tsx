@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Building2, Users, SlidersHorizontal, Activity } from 'lucide-react'
+import { Building2, Users, SlidersHorizontal, Activity, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -27,6 +27,12 @@ const tabs = [
     label: 'Preferences',
     icon: SlidersHorizontal,
     description: 'How the ERP behaves day to day',
+  },
+  {
+    href: '/settings/assistant',
+    label: 'Assistant',
+    icon: Sparkles,
+    description: 'Connect the AI assistant and decide what it may do',
   },
   {
     href: '/settings/system',

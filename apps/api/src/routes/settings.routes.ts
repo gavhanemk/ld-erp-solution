@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { z } from 'zod'
 import bcrypt from 'bcryptjs'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
@@ -21,6 +22,7 @@ import {
   withDefaults,
 } from '../schemas/settings.schemas'
 import { getPreferences, invalidatePreferences } from '../lib/preferences'
+import { AI_MODELS, getAiConfig, maskKey, saveAiConfig } from '../lib/aiConfig'
 
 const router = Router()
 
@@ -766,6 +768,126 @@ router.patch('/preferences', requirePermission(SETTINGS, 'edit'), async (req: Au
   })
 
   res.json({ success: true, data: after })
+})
+
+// ═══════════════════════════════════════════
+// ASSISTANT
+// ═══════════════════════════════════════════
+
+const aiSettingsSchema = z.object({
+  // An empty string clears the key; undefined leaves it alone.
+  apiKey: z.string().max(200).optional(),
+  model: z.string().max(60).optional(),
+  enabled: z.boolean().optional(),
+  dailySummary: z.boolean().optional(),
+})
+
+router.get('/ai', requirePermission(SETTINGS, 'view'), async (_req, res) => {
+  const config = await getAiConfig(true)
+
+  res.json({
+    success: true,
+    data: {
+      // The key itself is never sent back — only enough to show one is saved.
+      configured: Boolean(config.apiKey),
+      keyHint: maskKey(config.apiKey),
+      source: config.source,
+      model: config.model,
+      enabled: config.enabled,
+      dailySummary: config.dailySummary,
+      models: AI_MODELS,
+      /** Explains the guardrail on screen rather than offering it as a toggle. */
+      permissionScoped: true,
+    },
+  })
+})
+
+router.patch('/ai', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const data = aiSettingsSchema.parse(req.body)
+  const company = await companyId()
+
+  if (data.model && !AI_MODELS.some((m) => m.value === data.model)) {
+    throw new AppError('That model is not one we support', 400, 'INVALID_MODEL')
+  }
+
+  await saveAiConfig(company, {
+    ...(data.apiKey !== undefined ? { apiKey: data.apiKey.trim() || null } : {}),
+    ...(data.model !== undefined ? { model: data.model } : {}),
+    ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
+    ...(data.dailySummary !== undefined ? { dailySummary: data.dailySummary } : {}),
+  })
+
+  const after = await getAiConfig(true)
+
+  // The key must never reach the audit trail, so only the fact of a change is
+  // recorded alongside the settings that are safe to keep.
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'AssistantSettings',
+    entityId: company,
+    after: {
+      apiKeyChanged: data.apiKey !== undefined,
+      model: after.model,
+      enabled: after.enabled,
+      dailySummary: after.dailySummary,
+    },
+  })
+
+  res.json({
+    success: true,
+    data: {
+      configured: Boolean(after.apiKey),
+      keyHint: maskKey(after.apiKey),
+      source: after.source,
+      model: after.model,
+      enabled: after.enabled,
+      dailySummary: after.dailySummary,
+    },
+  })
+})
+
+/**
+ * Asks the model a trivial question and reports what came back.
+ *
+ * A key that merely exists proves nothing — it can be revoked, mistyped, or out
+ * of quota. This screen should say whether the assistant actually works.
+ */
+router.post('/ai/test', requirePermission(SETTINGS, 'edit'), async (req, res) => {
+  const { apiKey } = z.object({ apiKey: z.string().optional() }).parse(req.body ?? {})
+  const config = await getAiConfig(true)
+  const key = apiKey?.trim() || config.apiKey
+
+  if (!key) {
+    return res.json({ success: false, message: 'No API key to test. Paste one above first.' })
+  }
+
+  const started = Date.now()
+  try {
+    const { GoogleGenerativeAI } = await import('@google/generative-ai')
+    const model = new GoogleGenerativeAI(key).getGenerativeModel({ model: config.model })
+    const result = await model.generateContent('Reply with the single word: ready')
+    const text = result.response.text().trim().slice(0, 40)
+
+    res.json({
+      success: true,
+      message: `Answered in ${Date.now() - started} ms — "${text}"`,
+      model: config.model,
+    })
+  } catch (err) {
+    const raw = (err as Error).message ?? ''
+    // Google's errors are long and full of JSON; turn the common ones into
+    // something a mill owner can act on.
+    const message = /API_KEY_INVALID|API key not valid/i.test(raw)
+      ? 'That key was refused. Check you copied all of it from Google AI Studio.'
+      : /quota|RESOURCE_EXHAUSTED|429/i.test(raw)
+        ? 'The key works, but its free quota is used up for now. Try again later or add billing.'
+        : /not found|404/i.test(raw)
+          ? `The key works, but the model "${config.model}" is not available to it. Try another model.`
+          : `Could not reach Google: ${raw.slice(0, 160)}`
+
+    res.json({ success: false, message })
+  }
 })
 
 // ═══════════════════════════════════════════

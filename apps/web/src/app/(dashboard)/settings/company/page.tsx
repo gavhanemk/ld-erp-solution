@@ -86,7 +86,8 @@ function CompanyProfile() {
     // sending "" would fail the GSTIN and email formats.
     const payload: Record<string, unknown> = {}
     const editable = [
-      'name', 'legalName', 'gstin', 'pan', 'phone', 'email', 'website',
+      'name', 'legalName', 'gstin', 'stateCode', 'pan', 'tan', 'msmeNumber',
+      'phone', 'email', 'website',
       'address', 'city', 'state', 'pincode', 'currentFY',
     ]
     for (const key of editable) {
@@ -95,6 +96,7 @@ function CompanyProfile() {
     }
     payload.name = (values.name ?? '').trim()
     payload.fyStartMonth = Number(values.fyStartMonth) || 4
+    payload.booksStartDate = (values.booksStartDate ?? '').trim() || null
 
     try {
       const res = await settingsApi.company.update(payload as Partial<Company>)
@@ -162,9 +164,32 @@ function CompanyProfile() {
             <input
               id="gstin"
               className="form-input font-mono"
-              placeholder="24AAACL1234M1Z5"
+              placeholder="27AAFFL6946D1Z7"
               value={values.gstin ?? ''}
-              onChange={(e) => set('gstin', e.target.value.toUpperCase())}
+              onChange={(e) => {
+                const gstin = e.target.value.toUpperCase()
+                set('gstin', gstin)
+                // The first two digits are the state code. Filling it in here
+                // is what decides CGST+SGST versus IGST on every invoice, and
+                // nobody should have to know that to get their tax right.
+                if (/^\d{2}/.test(gstin)) set('stateCode', gstin.slice(0, 2))
+              }}
+            />
+          </Field>
+
+          <Field
+            label="GST State Code"
+            htmlFor="stateCode"
+            error={errors.stateCode}
+            help="Taken from your GSTIN. This decides whether a sale is taxed CGST+SGST or IGST."
+          >
+            <input
+              id="stateCode"
+              className="form-input font-mono"
+              placeholder="27"
+              maxLength={2}
+              value={values.stateCode ?? ''}
+              onChange={(e) => set('stateCode', e.target.value.replace(/\D/g, ''))}
             />
           </Field>
 
@@ -172,9 +197,39 @@ function CompanyProfile() {
             <input
               id="pan"
               className="form-input font-mono"
-              placeholder="AAACL1234M"
+              placeholder="AAFFL6946D"
               value={values.pan ?? ''}
               onChange={(e) => set('pan', e.target.value.toUpperCase())}
+            />
+          </Field>
+
+          <Field
+            label="TAN"
+            htmlFor="tan"
+            error={errors.tan}
+            help="Needed to deduct TDS and to issue Form 16A to your contractors"
+          >
+            <input
+              id="tan"
+              className="form-input font-mono"
+              placeholder="PNEL06861B"
+              value={values.tan ?? ''}
+              onChange={(e) => set('tan', e.target.value.toUpperCase())}
+            />
+          </Field>
+
+          <Field
+            label="MSME / Udyam Number"
+            htmlFor="msmeNumber"
+            error={errors.msmeNumber}
+            help="Optional. Registered suppliers must be paid within 45 days by law."
+          >
+            <input
+              id="msmeNumber"
+              className="form-input font-mono"
+              placeholder="UDYAM-MH-00-0000000"
+              value={values.msmeNumber ?? ''}
+              onChange={(e) => set('msmeNumber', e.target.value.toUpperCase())}
             />
           </Field>
 
@@ -286,6 +341,22 @@ function CompanyProfile() {
                   </option>
                 ))}
               </select>
+            </Field>
+
+            <Field
+              label="Books start from"
+              htmlFor="booksStartDate"
+              error={errors.booksStartDate}
+              help="Nothing can be dated before this. Set it to the day you start using the ERP."
+              span={2}
+            >
+              <input
+                id="booksStartDate"
+                type="date"
+                className="form-input"
+                value={(values.booksStartDate ?? '').slice(0, 10)}
+                onChange={(e) => set('booksStartDate', e.target.value)}
+              />
             </Field>
           </div>
         </div>

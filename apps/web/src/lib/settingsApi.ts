@@ -96,6 +96,17 @@ export interface ActivityEntry {
   changed: string[]
 }
 
+export interface AiSettings {
+  configured: boolean
+  keyHint: string | null
+  source: 'settings' | 'environment' | 'none'
+  model: string
+  enabled: boolean
+  dailySummary: boolean
+  models: { value: string; label: string }[]
+  permissionScoped: boolean
+}
+
 export interface SystemStatus {
   company: string | null
   financialYear: string | null
@@ -176,6 +187,16 @@ export const settingsApi = {
   },
 
   system: () => api.get<Single<SystemStatus>>('/settings/system'),
+
+  ai: {
+    get: () => api.get<Single<AiSettings>>('/settings/ai'),
+    update: (patch: Record<string, unknown>) => api.patch<Single<AiSettings>>('/settings/ai', patch),
+    /** Actually calls the model, rather than checking a string is present. */
+    test: (apiKey?: string) =>
+      api.post<{ success: boolean; message: string; model?: string }>('/settings/ai/test', {
+        ...(apiKey ? { apiKey } : {}),
+      }),
+  },
 
   changeOwnPassword: (currentPassword: string, newPassword: string) =>
     api.post<{ success: boolean; message: string }>('/settings/change-password', {

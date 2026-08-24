@@ -40,7 +40,16 @@ router.post('/chat', async (req: AuthRequest, res) => {
   })
 
   // Get AI response
-  const response = await chatWithERP(messages, user.id, user.name, user.role)
+  // The permissions carried in the caller's token decide which ERP tools the
+  // assistant may reach, so it can never answer something the person could not
+  // have looked up themselves.
+  const response = await chatWithERP(
+    messages,
+    user.id,
+    user.name,
+    user.role,
+    user.permissions ?? [],
+  )
 
   // Save AI response
   await prisma.aIMessage.create({

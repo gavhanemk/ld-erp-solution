@@ -6,8 +6,55 @@ import {
 } from '@google/generative-ai'
 import { prisma } from '@ld-erp/database'
 import { logger } from '../utils/logger'
+import { DEFAULT_MODEL, getAiConfig } from '../lib/aiConfig'
+import { AppError } from '../middleware/errorHandler'
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+/**
+ * The assistant is built per request rather than once at start-up, because the
+ * API key is set from Settings and can change without restarting the server.
+ */
+async function assistant(): Promise<{ genAI: GoogleGenerativeAI; model: string }> {
+  const config = await getAiConfig()
+
+  if (!config.apiKey) {
+    throw new AppError(
+      'The assistant has no API key yet. Add one in Settings → Assistant.',
+      409,
+      'AI_NOT_CONFIGURED',
+    )
+  }
+  if (!config.enabled) {
+    throw new AppError('The assistant is switched off in Settings.', 409, 'AI_DISABLED')
+  }
+
+  return { genAI: new GoogleGenerativeAI(config.apiKey), model: config.model || DEFAULT_MODEL }
+}
+
+/**
+ * Which permission each tool needs.
+ *
+ * The assistant runs as the person asking, so it must not become a way around
+ * the permission grid — a stitching supervisor asking "what do customers owe
+ * us?" should get the same answer as clicking Accounts would: no access.
+ */
+const TOOL_PERMISSIONS: Record<string, string> = {
+  get_dashboard_summary: 'dashboard:view',
+  get_sales_orders: 'sales:view',
+  get_production_status: 'production:view',
+  get_outstanding_payments: 'accounts:view',
+  get_pending_approvals: 'dashboard:view',
+  get_stock_status: 'inventory:view',
+}
+
+/** Admin holds everything, mirroring requirePermission in the auth middleware. */
+function toolsFor(role: string, permissions: string[]): FunctionDeclaration[] {
+  if (role === 'Admin') return erpTools
+  const granted = new Set(permissions)
+  return erpTools.filter((t) => {
+    const needed = TOOL_PERMISSIONS[t.name]
+    return !needed || granted.has(needed)
+  })
+}
 
 const erpTools: FunctionDeclaration[] = [
   {
@@ -177,23 +224,41 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
 
 export interface AIMessage { role: 'user' | 'model'; content: string }
 
-export async function chatWithERP(messages: AIMessage[], userId: string, userName: string, userRole: string): Promise<string> {
-  const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp',
-    tools: [{ functionDeclarations: erpTools } as Tool],
-    systemInstruction: `You are the LD ERP Solution AI Assistant for LD Cotton Mills — a garment manufacturing company.
-You have real-time access to the ERP database and can answer queries and perform actions.
+export async function chatWithERP(
+  messages: AIMessage[],
+  userId: string,
+  userName: string,
+  userRole: string,
+  userPermissions: string[] = [],
+): Promise<string> {
+  const { genAI, model: modelName } = await assistant()
 
-User: ${userName} | Role: ${userRole}
+  const allowed = toolsFor(userRole, userPermissions)
+  const withheld = erpTools.length - allowed.length
+
+  const company = await prisma.company.findFirst({ select: { name: true, currentFY: true } })
+
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    tools: [{ functionDeclarations: allowed } as Tool],
+    systemInstruction: `You are the assistant inside LD ERP Solution, the ERP for ${company?.name ?? 'this company'} — a garment manufacturer making men's shirts.
+You can read the live ERP database through the tools provided.
+
+You are speaking to ${userName}, whose role is ${userRole}.
+${
+  withheld > 0
+    ? `Their role does not give them access to everything. ${withheld} tool(s) have been withheld. If they ask about something you have no tool for, say plainly that their role does not have access to it and suggest they ask an administrator. Never guess at a figure you cannot look up.`
+    : 'They have full access.'
+}
 
 Rules:
-- Respond in the same language as the user (Hindi/English/Hinglish)
-- Always show amounts in Indian format: ₹, lakhs (L), crores (Cr)
-- Reference specific document numbers when available
-- Be concise but complete
-- Confirm before any write/approval action
+- Answer in the language they used — English, Hindi or Hinglish.
+- Money in Indian format: ₹, lakh, crore.
+- Quote document numbers whenever you have them.
+- If a tool returns nothing, say so. Never invent a number, a customer or an order.
+- Be brief. This is read on a phone between the cutting table and the office.
 
-Company: LD Cotton Mills | Products: Men's shirts | Brands: LD Cotton Mills + VHAGAR`,
+Financial year: ${company?.currentFY ?? 'not set'}.`,
   })
 
   const chat = model.startChat({
@@ -205,11 +270,22 @@ Company: LD Cotton Mills | Products: Men's shirts | Brands: LD Cotton Mills + VH
 
   while (response.functionCalls()?.length) {
     const calls = response.functionCalls()!
+    const allowedNames = new Set(allowed.map((t) => t.name))
+
     const fnResponses = await Promise.all(
       calls.map(async (call) => ({
         functionResponse: {
           name: call.name,
-          response: { result: await executeTool(call.name, call.args as Record<string, unknown>).catch((e) => ({ error: e.message })) },
+          response: {
+            // A second gate. The model is only offered the tools this person may
+            // use, but it must not be the only thing standing between a role and
+            // data it cannot see.
+            result: allowedNames.has(call.name)
+              ? await executeTool(call.name, call.args as Record<string, unknown>).catch((e) => ({
+                  error: e.message,
+                }))
+              : { error: `${userName}'s role does not have access to this information.` },
+          },
         },
       }))
     )
@@ -221,7 +297,12 @@ Company: LD Cotton Mills | Products: Men's shirts | Brands: LD Cotton Mills + VH
 }
 
 export async function generateDailyMISReport(date: Date = new Date()): Promise<string> {
-  const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-exp', tools: [{ functionDeclarations: erpTools } as Tool] })
+  const { genAI, model: modelName } = await assistant()
+  // The daily summary is for the owner, so it is not narrowed by role.
+  const model = genAI.getGenerativeModel({
+    model: modelName,
+    tools: [{ functionDeclarations: erpTools } as Tool],
+  })
 
   const result = await model.generateContent(
     `Generate a daily MIS report for LD Cotton Mills for ${date.toDateString()}.
