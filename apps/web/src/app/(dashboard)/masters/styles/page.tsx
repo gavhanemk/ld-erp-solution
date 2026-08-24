@@ -15,7 +15,8 @@ interface Style {
   fit: string | null
   fabricType: string | null
   gsm: number | null
-  sizeSet: string[]
+  sizeGroupId: string | null
+  sizeGroup: { id: string; name: string } | null
   colors: string[]
   isActive: boolean
 }
@@ -71,11 +72,11 @@ const columns: Column<Style>[] = [
     },
   },
   {
-    key: 'sizeSet',
-    header: 'Sizes',
+    key: 'sizeGroup',
+    header: 'Size Run',
     render: (s) =>
-      s.sizeSet?.length ? (
-        <span className="font-mono text-xs">{s.sizeSet.join('/')}</span>
+      s.sizeGroup ? (
+        <span className="text-xs">{s.sizeGroup.name}</span>
       ) : (
         <span className="text-muted-foreground">—</span>
       ),
@@ -115,13 +116,13 @@ const formFields: FormField[] = [
   { name: 'fabricType', label: 'Fabric', section: 'Construction', placeholder: 'Cotton Poplin' },
   { name: 'gsm', label: 'GSM', type: 'number', section: 'Construction', placeholder: '120' },
   {
-    name: 'sizeSet',
-    label: 'Size Set',
-    type: 'tags',
+    name: 'sizeGroupId',
+    label: 'Size Run',
+    type: 'select',
     section: 'Size & Colour',
     span: 2,
-    placeholder: 'S, M, L, XL, XXL',
-    help: 'Separate sizes with commas, in the order they should appear',
+    optionsFrom: { resource: 'size-groups' },
+    help: 'The named size run this style is cut in, so quantities reconcile from order to invoice',
   },
   {
     name: 'colors',

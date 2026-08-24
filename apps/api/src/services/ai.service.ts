@@ -128,12 +128,16 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
     case 'get_pending_approvals': {
       const [pos, mrs] = await Promise.all([
         prisma.purchaseOrder.findMany({ where: { status: 'DRAFT', approvedAt: null }, include: { supplier: { select: { name: true } } }, take: 10 }),
-        prisma.materialRequisition.findMany({ where: { status: 'PENDING' }, take: 10 }),
+        prisma.materialRequisition.findMany({
+          where: { status: 'PENDING' },
+          take: 10,
+          include: { department: { select: { name: true } } },
+        }),
       ])
       return {
         total: pos.length + mrs.length,
         purchaseOrders: pos.map((p) => ({ number: p.poNumber, supplier: p.supplier.name, amount: `₹${(Number(p.totalAmount) / 1000).toFixed(1)}K` })),
-        materialRequisitions: mrs.map((m) => ({ number: m.mrNumber, dept: m.department })),
+        materialRequisitions: mrs.map((m) => ({ number: m.mrNumber, dept: m.department.name })),
       }
     }
 
@@ -151,7 +155,16 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
       const date = args.date ? new Date(args.date as string) : new Date()
       const sod = new Date(date.getFullYear(), date.getMonth(), date.getDate())
       const eod = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59)
-      const entries = await prisma.productionEntry.findMany({ where: { entryDate: { gte: sod, lte: eod }, ...(args.department ? { department: args.department as string } : {}) } })
+      // The department arrives as a name from the assistant's caller, so it is
+      // matched against the department record rather than a free-text column.
+      const entries = await prisma.productionEntry.findMany({
+        where: {
+          entryDate: { gte: sod, lte: eod },
+          ...(args.department
+            ? { department: { name: { equals: args.department as string, mode: 'insensitive' } } }
+            : {}),
+        },
+      })
       const totalAchieved = entries.reduce((s, e) => s + e.achieved, 0)
       const totalTarget = entries.reduce((s, e) => s + e.target, 0)
       return { date: sod.toDateString(), totalAchieved, totalTarget, efficiency: `${totalTarget ? Math.round((totalAchieved / totalTarget) * 100) : 0}%`, lines: entries.length }

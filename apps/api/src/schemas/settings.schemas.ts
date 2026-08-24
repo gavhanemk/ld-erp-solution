@@ -63,13 +63,18 @@ export const createNumberSeriesSchema = z.object({
     .max(10)
     .regex(/^[A-Za-z]+$/, 'Letters only')
     .transform((v) => v.toUpperCase()),
+  // Real invoice numbers carry punctuation — LD's live series is SI/2026-27.
+  // Restricting this to letters and numbers rejected their own numbering.
   prefix: z
     .string()
     .min(1, 'Prefix is required')
-    .max(10)
-    .regex(/^[A-Za-z0-9]+$/, 'Letters and numbers only'),
-  separator: z.string().max(2).default('-'),
-  financialYear: z.string().regex(/^\d{4}$/, 'Financial year looks like 2425'),
+    .max(20)
+    .regex(/^[A-Za-z0-9/\-.]+$/, 'Letters, numbers, and / - . only'),
+  separator: z.string().max(3).default('-'),
+  // Either the short token (2627) or the written form (2026-27).
+  financialYear: z
+    .string()
+    .regex(/^(\d{4}|\d{4}-\d{2})$/, 'Financial year looks like 2627 or 2026-27'),
   padding: z.number().int().min(1).max(8).default(4),
   isActive: z.boolean().default(true),
 })

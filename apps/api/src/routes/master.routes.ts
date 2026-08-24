@@ -7,18 +7,26 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import {
   createBomSchema,
   createBrandSchema,
+  createBrokerSchema,
+  createChargeTypeSchema,
   createCustomerSchema,
   createDepartmentSchema,
   createItemCategorySchema,
   createItemSchema,
   createMachineSchema,
   createOperationSchema,
+  createRoutingSchema,
+  createSizeGroupSchema,
+  createSizeSchema,
   createStyleSchema,
   createSupplierSchema,
   createUomSchema,
   createWarehouseSchema,
+  createWorkstationSchema,
   updateBomSchema,
   updateBrandSchema,
+  updateBrokerSchema,
+  updateChargeTypeSchema,
   updateCompanySchema,
   updateCustomerSchema,
   updateDepartmentSchema,
@@ -26,10 +34,14 @@ import {
   updateItemSchema,
   updateMachineSchema,
   updateOperationSchema,
+  updateRoutingSchema,
+  updateSizeGroupSchema,
+  updateSizeSchema,
   updateStyleSchema,
   updateSupplierSchema,
   updateUomSchema,
   updateWarehouseSchema,
+  updateWorkstationSchema,
 } from '../schemas/master.schemas'
 
 const router = Router()
@@ -110,6 +122,7 @@ router.use(
     searchFields: ['name', 'code', 'season', 'category', 'fabricType'],
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
+    include: { sizeGroup: { select: { id: true, name: true } } },
   }),
 )
 
@@ -217,6 +230,276 @@ router.use(
     defaultSort: { field: 'name', order: 'asc' },
   }),
 )
+
+// ─────────────────────────────────────────────────────────────
+// Shop floor and commercial masters
+// ─────────────────────────────────────────────────────────────
+
+router.use(
+  '/size-groups',
+  crudRouter({
+    model: 'sizeGroup',
+    module: MODULE,
+    entityType: 'SizeGroup',
+    createSchema: createSizeGroupSchema,
+    updateSchema: updateSizeGroupSchema,
+    searchFields: ['name'],
+    sortableFields: ['name'],
+    defaultSort: { field: 'name', order: 'asc' },
+    include: { sizes: { orderBy: { sequence: 'asc' } } },
+  }),
+)
+
+router.use(
+  '/sizes',
+  crudRouter({
+    model: 'size',
+    module: MODULE,
+    entityType: 'Size',
+    createSchema: createSizeSchema,
+    updateSchema: updateSizeSchema,
+    searchFields: ['code', 'label'],
+    sortableFields: ['sequence', 'code'],
+    defaultSort: { field: 'sequence', order: 'asc' },
+    // Sizes are never referenced by history in their own right; the order line
+    // that used one keeps its own quantity, so a hard delete is safe.
+    softDelete: false,
+    include: { sizeGroup: { select: { id: true, name: true } } },
+  }),
+)
+
+router.use(
+  '/workstations',
+  crudRouter({
+    model: 'workstation',
+    module: MODULE,
+    entityType: 'Workstation',
+    createSchema: createWorkstationSchema,
+    updateSchema: updateWorkstationSchema,
+    searchFields: ['name', 'code', 'contactPerson'],
+    sortableFields: ['name', 'code', 'createdAt'],
+    defaultSort: { field: 'code', order: 'asc' },
+    include: {
+      department: { select: { id: true, name: true } },
+      supplier: { select: { id: true, name: true } },
+    },
+  }),
+)
+
+router.use(
+  '/brokers',
+  crudRouter({
+    model: 'broker',
+    module: MODULE,
+    entityType: 'Broker',
+    createSchema: createBrokerSchema,
+    updateSchema: updateBrokerSchema,
+    searchFields: ['name', 'code', 'phone', 'email'],
+    sortableFields: ['name', 'code', 'brokeragePercent'],
+    defaultSort: { field: 'name', order: 'asc' },
+  }),
+)
+
+router.use(
+  '/charge-types',
+  crudRouter({
+    model: 'chargeType',
+    module: MODULE,
+    entityType: 'ChargeType',
+    createSchema: createChargeTypeSchema,
+    updateSchema: updateChargeTypeSchema,
+    searchFields: ['name'],
+    sortableFields: ['name', 'defaultGstRate'],
+    defaultSort: { field: 'name', order: 'asc' },
+  }),
+)
+
+// ─────────────────────────────────────────────────────────────
+// Routings — header plus ordered steps, so they need their own handlers
+// ─────────────────────────────────────────────────────────────
+
+const routingInclude = {
+  style: { select: { id: true, code: true, name: true } },
+  steps: {
+    orderBy: { sequence: 'asc' as const },
+    include: {
+      operation: { select: { id: true, name: true, code: true } },
+      department: { select: { id: true, name: true } },
+      workstation: { select: { id: true, name: true, type: true } },
+    },
+  },
+}
+
+router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+
+  const where: Record<string, unknown> = {}
+  if (req.query.active === 'true') where.isActive = true
+  else if (req.query.active === 'false') where.isActive = false
+  if (typeof req.query.styleId === 'string' && req.query.styleId) where.styleId = req.query.styleId
+  if (q) {
+    where.OR = [
+      { name: { contains: q, mode: 'insensitive' } },
+      { code: { contains: q, mode: 'insensitive' } },
+      { style: { name: { contains: q, mode: 'insensitive' } } },
+    ]
+  }
+
+  const [rows, total] = await Promise.all([
+    prisma.routing.findMany({
+      where,
+      include: routingInclude,
+      orderBy: { code: 'asc' },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.routing.count({ where }),
+  ])
+
+  res.json({
+    success: true,
+    data: rows,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  })
+})
+
+router.get('/routings/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const row = await prisma.routing.findUnique({ where: { id: req.params.id }, include: routingInclude })
+  if (!row) throw new AppError('Routing not found', 404, 'NOT_FOUND')
+  res.json({ success: true, data: row })
+})
+
+router.post('/routings', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createRoutingSchema.parse(req.body)
+  await assertRoutingRefsExist(data.steps, data.styleId)
+
+  const created = await prisma.routing.create({
+    data: {
+      code: data.code,
+      name: data.name,
+      styleId: data.styleId,
+      notes: data.notes ?? null,
+      isActive: data.isActive ?? true,
+      steps: { create: data.steps.map((s) => ({ ...s, workstationId: s.workstationId ?? null })) },
+    },
+    include: routingInclude,
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'Routing',
+    entityId: created.id,
+    after: created,
+  })
+
+  res.status(201).json({ success: true, data: created })
+})
+
+router.patch('/routings/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = updateRoutingSchema.parse(req.body)
+
+  const before = await prisma.routing.findUnique({ where: { id: req.params.id }, include: routingInclude })
+  if (!before) throw new AppError('Routing not found', 404, 'NOT_FOUND')
+
+  // A locked routing has orders running against it; changing the steps midway
+  // would silently rewrite how work already in progress is supposed to flow.
+  if (before.isLocked && data.steps) {
+    throw new AppError(
+      'This routing is locked because orders are running against it. Unlock it first.',
+      400,
+      'ROUTING_LOCKED',
+    )
+  }
+
+  if (data.steps) await assertRoutingRefsExist(data.steps, data.styleId ?? before.styleId)
+
+  const after = await prisma.$transaction(async (tx) => {
+    if (data.steps) {
+      await tx.routingStep.deleteMany({ where: { routingId: before.id } })
+      await tx.routingStep.createMany({
+        data: data.steps.map((s) => ({ ...s, workstationId: s.workstationId ?? null, routingId: before.id })),
+      })
+    }
+    return tx.routing.update({
+      where: { id: before.id },
+      data: {
+        ...(data.code ? { code: data.code } : {}),
+        ...(data.name ? { name: data.name } : {}),
+        ...(data.styleId ? { styleId: data.styleId } : {}),
+        ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
+        ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
+        ...(data.isLocked !== undefined ? { isLocked: data.isLocked } : {}),
+      },
+      include: routingInclude,
+    })
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'Routing',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, data: after })
+})
+
+router.delete('/routings/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const before = await prisma.routing.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('Routing not found', 404, 'NOT_FOUND')
+
+  const after = await prisma.routing.update({ where: { id: before.id }, data: { isActive: false } })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'DELETE',
+    entityType: 'Routing',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, message: `Routing "${before.name}" is no longer offered.` })
+})
+
+/**
+ * Prisma would reject a bad id with a foreign-key error that means nothing to
+ * the person filling in the form, so the references are checked up front.
+ */
+async function assertRoutingRefsExist(
+  steps: Array<{ operationId: string; departmentId: string; workstationId?: string | null }>,
+  styleId: string,
+): Promise<void> {
+  const style = await prisma.style.findUnique({ where: { id: styleId }, select: { id: true } })
+  if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+
+  const operationIds = [...new Set(steps.map((s) => s.operationId))]
+  const departmentIds = [...new Set(steps.map((s) => s.departmentId))]
+  const workstationIds = [...new Set(steps.map((s) => s.workstationId).filter(Boolean))] as string[]
+
+  const [operations, departments, workstations] = await Promise.all([
+    prisma.operation.findMany({ where: { id: { in: operationIds } }, select: { id: true } }),
+    prisma.department.findMany({ where: { id: { in: departmentIds } }, select: { id: true } }),
+    workstationIds.length
+      ? prisma.workstation.findMany({ where: { id: { in: workstationIds } }, select: { id: true } })
+      : Promise.resolve([]),
+  ])
+
+  if (operations.length !== operationIds.length) {
+    throw new AppError('One of the operations no longer exists', 400, 'INVALID_OPERATION')
+  }
+  if (departments.length !== departmentIds.length) {
+    throw new AppError('One of the departments no longer exists', 400, 'INVALID_DEPARTMENT')
+  }
+  if (workstations.length !== workstationIds.length) {
+    throw new AppError('One of the workstations no longer exists', 400, 'INVALID_WORKSTATION')
+  }
+}
 
 // ─────────────────────────────────────────────────────────────
 // Company — single record, so it gets read + update only

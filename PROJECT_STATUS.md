@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 24 Aug 2026 — Settings module built_
+_Last updated: Mon 24 Aug 2026 — Settings module, then a model correctness pass_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -32,7 +32,59 @@ connect.
 
 ---
 
-## Where we left off (Mon 24 Aug)
+## Where we left off (Mon 24 Aug, later)
+
+After the Settings module, Mahesh asked for the data model itself to be made
+logically correct — "everything should be connected, wired up". An audit of all
+58 models found the schema relationally sound but carrying free-text columns
+where relations belonged, and 23 models with no way to reach them at all.
+
+**Decisions he gave us:**
+- **LD Silk Mills is his own second company**, registered under a separate
+  GSTIN, supplying fabric to LD Cotton Mills. It is therefore an ordinary
+  supplier in these books, flagged `isGroupCompany` so intercompany turnover can
+  be excluded from group figures. It does **not** become a second company inside
+  one database — separate GSTIN means separate books and separate returns.
+- **Garment GST is 5%.** The seed now defaults to it. Still worth the CA's
+  written confirmation before any rate is treated as settled.
+- Users and roles in Absolute can be reconfigured later; not a priority now.
+
+**What the correctness pass changed** (see the commit for the full list):
+- 18 new tables, 11 new enums replacing free-text `status` columns
+- `ProductionEntry.department`, `MaterialRequisition.department` and
+  `DeliveryChallanLine.uom` became real foreign keys
+- Routing, Workstation, Size, Broker and ChargeType masters now exist
+- Invoices and bills gained line items, charges, discount and round-off; credit
+  and debit notes exist for the first time
+- GST state codes on company, customer, supplier and broker
+- Stock can be marked as belonging to a customer rather than to us
+
+**Two live defects were fixed and proven:**
+1. Every sales order was taxed as IGST — including local ones — because the code
+   compared a state *name* ("Maharashtra") against `COMPANY_STATE_CODE=GJ`. Now
+   both sides carry a two-digit GST state code and the split is correct.
+2. Sales order numbers came from `Math.random()`, ignoring the number series and
+   able to collide. They now come from the counter, atomically.
+
+**Pick up here next — the API and UI wiring:**
+
+1. `purchase`, `inventory`, `accounts` and `hr` route files are **13 endpoints
+   that all return `{success: true, data: []}`**. The screens therefore look
+   like they work and show "no data" rather than "not built". Replace them with
+   real handlers, or make them honest.
+2. No screens yet for the new masters: workstations, brokers, routings, size
+   groups, charge types.
+3. Three models still have no route and no screen at all: `BankAccount`,
+   `SalaryStructure`, `Voucher`.
+4. Invoice creation and document printing — nothing in the system can print.
+
+Run `node <scratch>/audit.js` (kept in the session scratchpad) to re-check which
+models are reachable; it accounts for the CRUD factory's dynamic delegate and
+for child tables written through a parent.
+
+---
+
+## The Settings module (earlier the same day)
 
 The Settings module is built and tested. It was designed against the real
 Absolute ERP — signed into and read page by page — rather than guessed at.
@@ -234,3 +286,9 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 - The PC hit its memory commit limit during this work and `pnpm install` failed
   until a restart. If installs start dying with `ERR_PNPM_ERR_MEMORY_ALLOCATION_FAILED`,
   that is the cause.
+- **Another project on this machine (`Desktop\thehof`) also wants port 3000.**
+  `START ERP.ps1` used to read any busy port as "the ERP is already running" and
+  open whatever was there — somebody else's website. It now checks *whose*
+  process holds the port, and moves the website to the next free one if ours
+  cannot have 3000. The API's CORS accepts any localhost port in development for
+  the same reason; in production it is still limited to `FRONTEND_URL`.

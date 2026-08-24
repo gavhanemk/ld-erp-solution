@@ -44,19 +44,52 @@ if ((Get-Content 'apps\api\.env' -Raw) -match '\[YOUR-PASSWORD\]') {
     exit 1
 }
 
-# ── Is it already running? ───────────────────────────────────
-function PortBusy($port) {
-    $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-    return [bool]$c
+# ── Is it already running, or is something else on our port? ─
+#
+# Other projects on this machine also use port 3000. Assuming a busy port meant
+# "the ERP is already running" opened somebody else's website instead of ours.
+# So the port is checked for *whose* it is, not merely whether it is taken.
+function PortOwner($port) {
+    $c = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+         Select-Object -First 1
+    if (-not $c) { return $null }
+    $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
+    return $p.CommandLine
 }
 
-if ((PortBusy $API_PORT) -or (PortBusy $WEB_PORT)) {
-    Say 'The ERP already seems to be running.' 'Yellow'
+function IsOurs($commandLine) {
+    if (-not $commandLine) { return $false }
+    return $commandLine -like "*$PSScriptRoot*"
+}
+
+$apiOwner = PortOwner $API_PORT
+$webOwner = PortOwner $WEB_PORT
+
+if ((IsOurs $apiOwner) -or (IsOurs $webOwner)) {
+    Say 'The ERP is already running.' 'Yellow'
     Say "Opening http://localhost:$WEB_PORT" 'Yellow'
     Start-Process "http://localhost:$WEB_PORT"
     Write-Host ''
     Read-Host '  Press Enter to close'
     exit 0
+}
+
+if ($apiOwner) {
+    Say "Port $API_PORT is being used by another program, and the ERP server needs it." 'Red'
+    Say 'Close that program and try again.' 'Yellow'
+    Write-Host ''
+    Read-Host '  Press Enter to close'
+    exit 1
+}
+
+# The website can move to another port; Next picks the next free one itself.
+if ($webOwner) {
+    Say "Port $WEB_PORT is being used by another program, so the website will" 'Yellow'
+    Say 'open on the next free port instead. The link below will be correct.' 'Yellow'
+    Write-Host ''
+    for ($p = $WEB_PORT + 1; $p -le $WEB_PORT + 20; $p++) {
+        if (-not (PortOwner $p)) { $WEB_PORT = $p; break }
+    }
 }
 
 # ── Start both halves in their own windows ───────────────────
@@ -69,7 +102,7 @@ Start-Process powershell -ArgumentList @(
 Say 'Starting the website...' 'Cyan'
 Start-Process powershell -ArgumentList @(
     '-NoExit', '-Command',
-    "Set-Location '$PSScriptRoot'; Write-Host 'LD ERP - WEBSITE. Closing this window stops the ERP.' -ForegroundColor Cyan; pnpm dev:web"
+    "Set-Location '$PSScriptRoot'; Write-Host 'LD ERP - WEBSITE. Closing this window stops the ERP.' -ForegroundColor Cyan; `$env:PORT='$WEB_PORT'; pnpm dev:web"
 )
 
 # ── Wait until they actually answer ──────────────────────────

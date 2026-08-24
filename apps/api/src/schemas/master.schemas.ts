@@ -186,7 +186,9 @@ export const createStyleSchema = z.object({
   fit: z.string().max(100).optional().nullable(),
   fabricType: z.string().max(100).optional().nullable(),
   gsm: z.number().int().min(1).max(2000).optional().nullable(),
-  sizeSet: z.array(z.string().min(1).max(20)).default([]),
+  // The size run is a named master now, not a typed-in list. Free text let
+  // "XL" and "xl" both exist and the quantities quietly stopped reconciling.
+  sizeGroupId: z.string().min(1).optional().nullable(),
   colors: z.array(z.string().min(1).max(50)).default([]),
   techPackUrl: z.string().url().optional().nullable(),
   imageUrl: z.string().url().optional().nullable(),
@@ -249,6 +251,10 @@ export const createOperationSchema = z.object({
   name,
   /** Standard Minute Value — minutes one unit of this operation takes. */
   smv: nonNegativeDecimal,
+  /** What an outside unit is paid per piece for this operation. */
+  jobWorkRate: nonNegativeDecimal,
+  /** Position in the default factory sequence, so pickers read in floor order. */
+  sortOrder: z.number().int().min(0).max(999).optional(),
   isActive,
 })
 export const updateOperationSchema = createOperationSchema.partial()
@@ -293,15 +299,30 @@ export const createBrandSchema = z.object({
 })
 export const updateBrandSchema = createBrandSchema.partial()
 
+/** Two-digit GST state code, 01 (Jammu & Kashmir) through 38 (Ladakh). */
+const stateCode = z
+  .string()
+  .regex(/^[0-3][0-9]$/, 'State code is the two digits your GSTIN starts with')
+  .optional()
+  .nullable()
+
 export const updateCompanySchema = z.object({
   name: name.optional(),
   legalName: z.string().max(200).optional().nullable(),
   address: optionalText,
   city: z.string().max(100).optional().nullable(),
   state: z.string().max(100).optional().nullable(),
+  stateCode,
   pincode,
   gstin,
   pan,
+  /** Needed on TDS challans and to issue Form 16A. */
+  tan: z
+    .string()
+    .regex(/^[A-Z]{4}[0-9]{5}[A-Z]$/, 'Invalid TAN')
+    .optional()
+    .nullable(),
+  msmeNumber: z.string().max(30).optional().nullable(),
   phone,
   email,
   website: z.string().url().optional().nullable(),
@@ -312,4 +333,119 @@ export const updateCompanySchema = z.object({
     .optional()
     .nullable(),
   fyStartMonth: z.number().int().min(1).max(12).optional(),
+  booksStartDate: z.coerce.date().optional().nullable(),
+})
+
+// ─────────────────────────────────────────────────────────────
+// Shop floor and commercial masters
+// ─────────────────────────────────────────────────────────────
+
+export const createSizeGroupSchema = z.object({
+  name,
+  gender: z.enum(['MALE', 'FEMALE', 'UNISEX']).optional().nullable(),
+  isActive,
+})
+export const updateSizeGroupSchema = createSizeGroupSchema.partial()
+
+export const createSizeSchema = z.object({
+  sizeGroupId: z.string().min(1, 'Pick a size run'),
+  code: z.string().min(1, 'Code is required').max(20),
+  label: z.string().min(1, 'Label is required').max(40),
+  sequence: z.number().int().min(0).max(999).default(0),
+})
+export const updateSizeSchema = createSizeSchema.partial()
+
+export const createWorkstationSchema = z
+  .object({
+    code,
+    name,
+    departmentId: z.string().min(1, 'Pick the process this belongs to'),
+    type: z.enum(['IN_HOUSE', 'JOB_WORK']).default('IN_HOUSE'),
+    supplierId: z.string().optional().nullable(),
+    capacityPerDay: z.number().int().min(0).max(1000000).optional().nullable(),
+    address: optionalText,
+    contactPerson: z.string().max(120).optional().nullable(),
+    phone,
+    isActive,
+  })
+  // An outside unit that is not linked to a supplier can never be paid, which
+  // is the whole reason for recording it.
+  .refine((v) => v.type !== 'JOB_WORK' || Boolean(v.supplierId), {
+    message: 'A job-work unit must be linked to the supplier you pay for it',
+    path: ['supplierId'],
+  })
+
+export const updateWorkstationSchema = z.object({
+  code: code.optional(),
+  name: name.optional(),
+  departmentId: z.string().min(1).optional(),
+  type: z.enum(['IN_HOUSE', 'JOB_WORK']).optional(),
+  supplierId: z.string().optional().nullable(),
+  capacityPerDay: z.number().int().min(0).max(1000000).optional().nullable(),
+  address: optionalText,
+  contactPerson: z.string().max(120).optional().nullable(),
+  phone,
+  isActive,
+})
+
+export const createBrokerSchema = z.object({
+  code,
+  name,
+  phone,
+  email,
+  gstin,
+  pan,
+  address: optionalText,
+  city: z.string().max(100).optional().nullable(),
+  state: z.string().max(100).optional().nullable(),
+  stateCode,
+  brokeragePercent: z.number().min(0).max(100).default(0),
+  tdsSection: z.string().max(10).optional().nullable(),
+  tdsRate: z.number().min(0).max(100).optional().nullable(),
+  notes: optionalText,
+  isActive,
+})
+export const updateBrokerSchema = createBrokerSchema.partial()
+
+export const createChargeTypeSchema = z.object({
+  name,
+  defaultGstRate: z.number().min(0).max(100).default(0),
+  applyOnSale: z.boolean().default(true),
+  applyOnPurchase: z.boolean().default(false),
+  isActive,
+})
+export const updateChargeTypeSchema = createChargeTypeSchema.partial()
+
+// ─────────────────────────────────────────────────────────────
+// Routing — a style's ordered path through the factory
+// ─────────────────────────────────────────────────────────────
+
+export const routingStepSchema = z.object({
+  sequence: z.number().int().min(1).max(200),
+  operationId: z.string().min(1, 'Pick an operation'),
+  departmentId: z.string().min(1, 'Pick a department'),
+  workstationId: z.string().optional().nullable(),
+  smv: z.number().min(0).max(999).optional().nullable(),
+  ratePerPiece: z.number().min(0).max(100000).optional().nullable(),
+  isQcStep: z.boolean().default(false),
+})
+
+export const createRoutingSchema = z.object({
+  code,
+  name,
+  styleId: z.string().min(1, 'Pick a style'),
+  notes: optionalText,
+  isActive,
+  steps: z
+    .array(routingStepSchema)
+    .min(1, 'A routing needs at least one step')
+    // Two steps at the same position have no defined order, and the database
+    // rejects it anyway — catching it here gives a readable message.
+    .refine((steps) => new Set(steps.map((s) => s.sequence)).size === steps.length, {
+      message: 'Two steps cannot share the same position',
+    }),
+})
+
+export const updateRoutingSchema = createRoutingSchema.partial().extend({
+  isLocked: z.boolean().optional(),
 })

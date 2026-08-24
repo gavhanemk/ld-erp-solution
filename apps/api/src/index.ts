@@ -49,8 +49,36 @@ io.on('connection', (socket) => {
 
 // Security
 app.use(helmet({ contentSecurityPolicy: false }))
+
+/**
+ * In production only the configured front end may call the API.
+ *
+ * In development the web app does not always get port 3000 — another project on
+ * the same machine may already hold it, and Next then starts on 3001 or higher.
+ * Pinning CORS to one port made the whole app look broken in that case, so any
+ * loopback origin is accepted while developing.
+ */
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean)
+
+const isDevelopment = process.env.NODE_ENV !== 'production'
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin(origin, callback) {
+    // Same-origin and server-to-server calls arrive without an Origin header.
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) return callback(null, true)
+    if (isDevelopment && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      return callback(null, true)
+    }
+
+    // Refusing by omitting the CORS headers is what the browser needs, and it
+    // keeps a rejected origin out of the logs as if the server had crashed.
+    logger.warn(`Blocked cross-origin request from ${origin}`)
+    return callback(null, false)
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],

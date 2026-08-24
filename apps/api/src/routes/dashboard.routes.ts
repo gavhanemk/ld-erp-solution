@@ -254,24 +254,40 @@ router.get('/low-stock', async (req, res) => {
 })
 
 // GET /api/dashboard/production-today
-// Today's output per production line, for the line-wise performance widget.
+// Today's output per workstation, for the line-wise performance widget.
 router.get('/production-today', async (_req, res) => {
   const now = new Date()
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
 
   const grouped = await prisma.productionEntry.groupBy({
-    by: ['lineNumber'],
+    by: ['workstationId'],
     where: { entryDate: { gte: startOfDay, lte: endOfDay } },
     _sum: { target: true, achieved: true, rejection: true, rework: true },
   })
+
+  // Most of these are outside job-work units rather than lines on our own
+  // floor, so the name and the unit behind it both matter on the widget.
+  const ids = grouped.map((g) => g.workstationId).filter((id): id is string => Boolean(id))
+  const stations = ids.length
+    ? await prisma.workstation.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, name: true, type: true, supplier: { select: { name: true } } },
+      })
+    : []
+  const byId = new Map(stations.map((w) => [w.id, w]))
 
   const lines = grouped
     .map((g) => {
       const target = g._sum.target ?? 0
       const achieved = g._sum.achieved ?? 0
+      const station = g.workstationId ? byId.get(g.workstationId) : undefined
+
       return {
-        line: g.lineNumber ?? 'Unassigned',
+        workstationId: g.workstationId,
+        line: station?.name ?? 'Unassigned',
+        isJobWork: station?.type === 'JOB_WORK',
+        jobWorkUnit: station?.supplier?.name ?? null,
         target,
         achieved,
         rejection: g._sum.rejection ?? 0,
@@ -307,6 +323,7 @@ router.get('/pending-approvals', async (req, res) => {
       where: { status: 'PENDING' },
       take: limit,
       orderBy: { createdAt: 'desc' },
+      include: { department: { select: { name: true } } },
     }),
   ])
 
@@ -339,7 +356,7 @@ router.get('/pending-approvals', async (req, res) => {
       id: mr.id,
       type: 'MR' as const,
       number: mr.mrNumber,
-      description: mr.department,
+      description: mr.department.name,
       amount: null,
       date: mr.createdAt,
       urgent: isUrgent(mr.createdAt),

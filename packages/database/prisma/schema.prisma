@@ -145,6 +145,84 @@ enum QCResult {
   CONDITIONAL_PASS
 }
 
+/// Sales and purchase invoices share one payment lifecycle.
+enum InvoiceStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  CANCELLED
+}
+
+enum ChallanStatus {
+  DRAFT
+  DISPATCHED
+  DELIVERED
+  RETURNED
+  CANCELLED
+}
+
+enum GRNStatus {
+  DRAFT
+  QC_PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+enum CuttingStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PackingStatus {
+  IN_PROGRESS
+  COMPLETED
+  DISPATCHED
+}
+
+enum MachineStatus {
+  OPERATIONAL
+  UNDER_MAINTENANCE
+  BREAKDOWN
+  RETIRED
+}
+
+enum BreakdownStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  CLOSED
+}
+
+enum MaintenanceStatus {
+  PENDING
+  DONE
+  OVERDUE
+  SKIPPED
+}
+
+/// A workstation is either our own floor or an outside job-work unit we pay.
+enum WorkstationType {
+  IN_HOUSE
+  JOB_WORK
+}
+
+/// Fabric sent in by a customer for job work is in our godown but is not ours.
+/// Counting it as stock would inflate the stock value and the balance sheet.
+enum StockOwnership {
+  OWNED
+  CUSTOMER_OWNED
+}
+
+enum NoteStatus {
+  DRAFT
+  ISSUED
+  ADJUSTED
+  CANCELLED
+}
+
 // ═══════════════════════════════════════════
 // AUTH & RBAC
 // ═══════════════════════════════════════════
@@ -246,13 +324,22 @@ model Company {
   state        String?
   pincode      String?
   gstin        String?  @unique
+  /// Two-digit GST state code, e.g. "27" for Maharashtra. Place of supply is
+  /// decided by comparing this against the customer's, so it cannot be free text.
+  stateCode    String?
   pan          String?
+  /// Needed on every TDS challan and to issue Form 16A to contractors.
+  tan          String?
+  /// Udyam registration. Drives the 45-day payment rule for MSME suppliers.
+  msmeNumber   String?
   phone        String?
   email        String?
   website      String?
   logoUrl      String?
   currentFY    String?
   fyStartMonth Int      @default(4)
+  /// Nothing may be dated before the books open.
+  booksStartDate DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -313,6 +400,8 @@ model TaxRate {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  items Item[]
+
   @@unique([companyId, name])
   @@map("tax_rates")
 }
@@ -351,7 +440,8 @@ model UOM {
   symbol   String  @unique
   isActive Boolean @default(true)
 
-  items Item[]
+  items        Item[]
+  challanLines DeliveryChallanLine[]
 
   @@map("uom")
 }
@@ -371,6 +461,11 @@ model Item {
   minStock     Decimal?     @db.Decimal(10, 3)
   maxStock     Decimal?     @db.Decimal(10, 3)
   standardRate Decimal?     @db.Decimal(10, 2)
+  /// The rate that appears by itself on a document line. Absolute leaves this
+  /// to memory on every line, which is how one ledger ends up with three rates
+  /// for the same cloth.
+  taxRateId    String?
+  taxRate      TaxRate?     @relation(fields: [taxRateId], references: [id])
   imageUrl     String?
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
@@ -382,6 +477,10 @@ model Item {
   soLines       SalesOrderLine[]
   mrLines       MaterialRequisitionLine[]
   grnLines      GRNLine[]
+  invoiceLines  SalesInvoiceLine[]
+  billLines     PurchaseInvoiceLine[]
+  creditLines   CreditNoteLine[]
+  debitLines    DebitNoteLine[]
 
   @@index([code])
   @@index([type])
@@ -400,7 +499,10 @@ model Style {
   fit         String?
   fabricType  String?
   gsm         Int?
-  sizeSet     String[]
+  /// The size run this style is made in. Replaces a free-text array that let
+  /// "XL" and "xl" exist side by side and silently stop reconciling.
+  sizeGroupId String?
+  sizeGroup   SizeGroup? @relation(fields: [sizeGroupId], references: [id])
   colors      String[]
   techPackUrl String?
   imageUrl    String?
@@ -408,8 +510,9 @@ model Style {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  boms    BOM[]
-  moLines MOLine[]
+  boms     BOM[]
+  moLines  MOLine[]
+  routings Routing[]
 
   @@index([code])
   @@map("styles")
@@ -461,23 +564,41 @@ model Customer {
   billingAddress  String?
   billingCity     String?
   billingState    String?
+  /// Two-digit GST state code. This, not the state name, decides CGST+SGST vs IGST.
+  billingStateCode String?
   billingPincode  String?
   shippingAddress String?
+  shippingCity    String?
+  shippingState   String?
+  shippingStateCode String?
+  shippingPincode String?
+  /// A buyer can take delivery in one state under a GSTIN registered in another.
+  shippingGstin   String?
   creditLimit     Decimal?     @db.Decimal(12, 2)
   creditDays      Int          @default(30)
   paymentTerms    String?
   bankName        String?
   bankAccount     String?
   bankIFSC        String?
+  /// The agent who brings this buyer, and what they are paid on the sale.
+  brokerId        String?
+  broker          Broker?      @relation(fields: [brokerId], references: [id])
+  brokeragePercent Decimal?    @db.Decimal(5, 2)
+  /// Another company under the same owners — LD Silk Mills, for instance.
+  /// Trades at arm's length with its own GSTIN, but is flagged so intercompany
+  /// turnover can be identified and excluded from group figures.
+  isGroupCompany  Boolean      @default(false)
   isActive        Boolean      @default(true)
   isBlacklisted   Boolean      @default(false)
   notes           String?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
-  salesOrders SalesOrder[]
-  invoices    SalesInvoice[]
-  payments    PaymentReceipt[]
+  salesOrders  SalesOrder[]
+  invoices     SalesInvoice[]
+  payments     PaymentReceipt[]
+  creditNotes  CreditNote[]
+  ownedStock   StockLedger[]  @relation("CustomerOwnedStock")
 
   @@index([code])
   @@map("customers")
@@ -495,6 +616,8 @@ model Supplier {
   address      String?
   city         String?
   state        String?
+  /// Two-digit GST state code — decides the tax split on a purchase.
+  stateCode    String?
   pincode      String?
   creditDays   Int              @default(30)
   leadTimeDays Int              @default(7)
@@ -504,6 +627,13 @@ model Supplier {
   bankIFSC     String?
   rating       Int?             @db.SmallInt
   isPreferred  Boolean          @default(false)
+  /// Registered under MSME/Udyam — payment falls due within 45 days by law.
+  isMsme       Boolean          @default(false)
+  msmeNumber   String?
+  /// Another company under the same owners, trading at arm's length under its
+  /// own GSTIN. LD Silk Mills supplies fabric to LD Cotton Mills this way, so
+  /// the purchase is real and carries GST, but group figures must exclude it.
+  isGroupCompany Boolean        @default(false)
   isActive     Boolean          @default(true)
   notes        String?
   createdAt    DateTime         @default(now())
@@ -512,6 +642,8 @@ model Supplier {
   purchaseOrders PurchaseOrder[]
   invoices       PurchaseInvoice[]
   payments       SupplierPayment[]
+  debitNotes     DebitNote[]
+  workstations   Workstation[]
 
   @@index([code])
   @@map("suppliers")
@@ -541,9 +673,13 @@ model Department {
   code      String  @unique
   isActive  Boolean @default(true)
 
-  operations Operation[]
-  employees  Employee[]
-  machines   Machine[]
+  operations        Operation[]
+  employees         Employee[]
+  machines          Machine[]
+  workstations      Workstation[]
+  requisitions      MaterialRequisition[]
+  productionEntries ProductionEntry[]
+  routingSteps      RoutingStep[]
 
   @@map("departments")
 }
@@ -554,8 +690,15 @@ model Operation {
   department   Department @relation(fields: [departmentId], references: [id])
   name         String
   code         String     @unique
+  /// Standard minute value — how long one piece of this operation should take.
   smv          Decimal?   @db.Decimal(5, 3)
+  /// What an outside unit is paid per piece for this operation.
+  jobWorkRate  Decimal?   @db.Decimal(10, 2)
+  sortOrder    Int        @default(0)
   isActive     Boolean    @default(true)
+
+  routingSteps     RoutingStep[]
+  productionEntries ProductionEntry[]
 
   @@map("operations")
 }
@@ -573,7 +716,7 @@ model Machine {
   warrantyExpiry DateTime?
   amcStart       DateTime?
   amcEnd         DateTime?
-  status         String     @default("OPERATIONAL")
+  status         MachineStatus @default(OPERATIONAL)
   isActive       Boolean    @default(true)
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
@@ -601,6 +744,15 @@ model SalesOrder {
   deliveryDate    DateTime?
   deliveryAddress String?
   salesperson     String?
+  /// The agent on this sale and what they earn. Brokerage is a real cost with
+  /// TDS deducted against it, so it cannot live only in someone's notebook.
+  brokerId        String?
+  broker          Broker?          @relation(fields: [brokerId], references: [id])
+  brokeragePercent Decimal?        @db.Decimal(5, 2)
+  brokerageAmount Decimal          @default(0) @db.Decimal(12, 2)
+  /// Two-digit GST state code of the delivery. Compared against the company's
+  /// to decide CGST+SGST or IGST — and it is compulsory on a tax invoice.
+  placeOfSupplyCode String?
   status          SalesOrderStatus @default(DRAFT)
   subtotal        Decimal          @default(0) @db.Decimal(12, 2)
   discountAmount  Decimal          @default(0) @db.Decimal(12, 2)
@@ -608,6 +760,7 @@ model SalesOrder {
   cgst            Decimal          @default(0) @db.Decimal(12, 2)
   sgst            Decimal          @default(0) @db.Decimal(12, 2)
   igst            Decimal          @default(0) @db.Decimal(12, 2)
+  roundOff        Decimal          @default(0) @db.Decimal(6, 2)
   totalAmount     Decimal          @default(0) @db.Decimal(12, 2)
   currency        String           @default("INR")
   isJobWork       Boolean          @default(false)
@@ -641,7 +794,6 @@ model SalesOrderLine {
   item         Item       @relation(fields: [itemId], references: [id])
   styleCode    String?
   color        String?
-  sizeBreakup  Json?
   totalQty     Decimal    @db.Decimal(10, 2)
   unitPrice    Decimal    @default(0) @db.Decimal(10, 2)
   discount     Decimal    @default(0) @db.Decimal(5, 2)
@@ -650,6 +802,10 @@ model SalesOrderLine {
   deliveredQty Decimal    @default(0) @db.Decimal(10, 2)
   pendingQty   Decimal    @default(0) @db.Decimal(10, 2)
   sortOrder    Int        @default(0)
+
+  /// The size run. Rows rather than a JSON blob, so "XL" and "xl" cannot both
+  /// exist and the quantities still reconcile at the invoice.
+  sizes SalesOrderLineSize[]
 
   @@map("sales_order_lines")
 }
@@ -663,14 +819,27 @@ model SalesInvoice {
   customer      Customer    @relation(fields: [customerId], references: [id])
   invoiceDate   DateTime    @default(now())
   dueDate       DateTime?
+  /// Two-digit GST state code of the delivery — compulsory on a tax invoice.
+  placeOfSupplyCode String?
+  brokerId      String?
+  broker        Broker?     @relation(fields: [brokerId], references: [id])
+  brokeragePercent Decimal? @db.Decimal(5, 2)
+  brokerageAmount Decimal   @default(0) @db.Decimal(12, 2)
   subtotal      Decimal     @db.Decimal(12, 2)
+  /// A discount given on the whole bill rather than line by line, which is how
+  /// LD actually prices. Without it the invoice total cannot be reproduced.
+  discountAmount Decimal    @default(0) @db.Decimal(12, 2)
+  taxableAmount Decimal     @default(0) @db.Decimal(12, 2)
   cgst          Decimal     @default(0) @db.Decimal(12, 2)
   sgst          Decimal     @default(0) @db.Decimal(12, 2)
   igst          Decimal     @default(0) @db.Decimal(12, 2)
+  /// Rounds the bill to the nearest rupee. Without it every total carries paise
+  /// and nothing ties out against the customer's ledger.
+  roundOff      Decimal     @default(0) @db.Decimal(6, 2)
   totalAmount   Decimal     @db.Decimal(12, 2)
   paidAmount    Decimal     @default(0) @db.Decimal(12, 2)
   balanceAmount Decimal     @db.Decimal(12, 2)
-  status        String      @default("UNPAID")
+  status        InvoiceStatus @default(UNPAID)
   irnNumber     String?
   qrCodeData    String?
   ackNumber     String?
@@ -679,7 +848,10 @@ model SalesInvoice {
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
-  payments PaymentReceipt[]
+  payments    PaymentReceipt[]
+  lines       SalesInvoiceLine[]
+  charges     SalesInvoiceCharge[]
+  creditNotes CreditNote[]
 
   @@index([invoiceNumber])
   @@index([customerId])
@@ -697,7 +869,7 @@ model DeliveryChallan {
   transporter    String?
   lrNumber       String?
   eWayBillNumber String?
-  status         String     @default("DRAFT")
+  status         ChallanStatus @default(DRAFT)
   notes          String?
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
@@ -713,7 +885,8 @@ model DeliveryChallanLine {
   dc          DeliveryChallan @relation(fields: [dcId], references: [id], onDelete: Cascade)
   description String
   qty         Decimal         @db.Decimal(10, 2)
-  uom         String
+  uomId       String
+  uom         UOM             @relation(fields: [uomId], references: [id])
   sizeBreakup Json?
 
   @@map("delivery_challan_lines")
@@ -800,7 +973,7 @@ model GRN {
   po        PurchaseOrder @relation(fields: [poId], references: [id])
   grnDate   DateTime      @default(now())
   vehicleNo String?
-  status    String        @default("DRAFT")
+  status    GRNStatus     @default(DRAFT)
   notes     String?
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
@@ -859,18 +1032,33 @@ model PurchaseInvoice {
   billDate            DateTime       @default(now())
   dueDate             DateTime?
   subtotal            Decimal        @db.Decimal(12, 2)
+  discountAmount      Decimal        @default(0) @db.Decimal(12, 2)
+  taxableAmount       Decimal        @default(0) @db.Decimal(12, 2)
   cgst                Decimal        @default(0) @db.Decimal(12, 2)
   sgst                Decimal        @default(0) @db.Decimal(12, 2)
   igst                Decimal        @default(0) @db.Decimal(12, 2)
+  /// Tax deducted at source on a contractor or brokerage bill. Recorded here so
+  /// the payment of the net amount still settles the bill in full instead of
+  /// leaving a permanent stub outstanding against the supplier.
+  tdsSection          String?
+  tdsRate             Decimal?       @db.Decimal(5, 2)
+  tdsAmount           Decimal        @default(0) @db.Decimal(12, 2)
+  /// GST payable by us rather than the supplier — common on transport and on
+  /// bills from unregistered parties.
+  isReverseCharge     Boolean        @default(false)
+  roundOff            Decimal        @default(0) @db.Decimal(6, 2)
   totalAmount         Decimal        @db.Decimal(12, 2)
   paidAmount          Decimal        @default(0) @db.Decimal(12, 2)
   balanceAmount       Decimal        @db.Decimal(12, 2)
-  status              String         @default("UNPAID")
+  status              InvoiceStatus  @default(UNPAID)
   notes               String?
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
 
-  payments SupplierPayment[]
+  payments   SupplierPayment[]
+  lines      PurchaseInvoiceLine[]
+  charges    PurchaseInvoiceCharge[]
+  debitNotes DebitNote[]
 
   @@map("purchase_invoices")
 }
@@ -907,6 +1095,12 @@ model StockLedger {
   referenceType   String?
   referenceId     String?
   batchNumber     String?
+  /// Fabric a customer sends in for job work sits in our godown but is not our
+  /// stock. Counting it as ours would inflate the stock value, the balance
+  /// sheet and the GST position.
+  ownership       StockOwnership  @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?       @relation("CustomerOwnedStock", fields: [ownerCustomerId], references: [id])
   inQty           Decimal         @default(0) @db.Decimal(10, 3)
   outQty          Decimal         @default(0) @db.Decimal(10, 3)
   closingStock    Decimal         @db.Decimal(10, 3)
@@ -917,6 +1111,7 @@ model StockLedger {
 
   @@index([itemId, warehouseId])
   @@index([transactionDate])
+  @@index([ownership, ownerCustomerId])
   @@map("stock_ledger")
 }
 
@@ -925,7 +1120,8 @@ model MaterialRequisition {
   mrNumber     String              @unique
   moId         String?
   mo           ManufacturingOrder? @relation(fields: [moId], references: [id])
-  department   String
+  departmentId String
+  department   Department          @relation(fields: [departmentId], references: [id])
   requestDate  DateTime            @default(now())
   requiredDate DateTime?
   status       ApprovalStatus      @default(PENDING)
@@ -1001,8 +1197,9 @@ model MOLine {
   styleId     String
   style       Style              @relation(fields: [styleId], references: [id])
   color       String
-  sizeBreakup Json
   totalQty    Int
+
+  sizes MOLineSize[]
 
   @@map("mo_lines")
 }
@@ -1023,7 +1220,7 @@ model CuttingOrder {
   plannedPieces    Int
   actualPieces     Int                @default(0)
   sizeBreakup      Json?
-  status           String             @default("PENDING")
+  status           CuttingStatus      @default(PENDING)
   notes            String?
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
@@ -1036,8 +1233,12 @@ model ProductionEntry {
   moId        String
   mo          ManufacturingOrder @relation(fields: [moId], references: [id])
   entryDate   DateTime           @default(now())
-  department  String
-  lineNumber  String?
+  departmentId String
+  department  Department         @relation(fields: [departmentId], references: [id])
+  /// Which line or outside unit produced this. Without it, what is owed to a
+  /// job-work unit such as Nargis Fashion can never be totalled.
+  workstationId String?
+  workstation Workstation?       @relation(fields: [workstationId], references: [id])
   shift       String?
   target      Int
   achieved    Int
@@ -1045,6 +1246,7 @@ model ProductionEntry {
   rework      Int                @default(0)
   efficiency  Decimal?           @db.Decimal(5, 2)
   operationId String?
+  operation   Operation?         @relation(fields: [operationId], references: [id])
   notes       String?
   enteredBy   String?
   createdAt   DateTime           @default(now())
@@ -1085,7 +1287,7 @@ model PackingOrder {
   totalCartons  Int                @default(0)
   totalPieces   Int                @default(0)
   assortment    Json?
-  status        String             @default("IN_PROGRESS")
+  status        PackingStatus      @default(IN_PROGRESS)
   createdAt     DateTime           @default(now())
   updatedAt     DateTime           @updatedAt
 
@@ -1279,7 +1481,7 @@ model PayrollRecord {
   netSalary        Decimal   @db.Decimal(10, 2)
   isPaid           Boolean   @default(false)
   paidDate         DateTime?
-  paymentMode      String?
+  paymentMode      PaymentMode?
   payslipUrl       String?
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
@@ -1304,7 +1506,7 @@ model MachineBreakdown {
   resolvedAt     DateTime?
   resolutionDesc String?
   downtimeHours  Decimal?  @db.Decimal(6, 2)
-  status         String    @default("OPEN")
+  status         BreakdownStatus @default(OPEN)
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -1321,7 +1523,7 @@ model MaintenanceSchedule {
   scheduledDate   DateTime
   completedDate   DateTime?
   completedBy     String?
-  status          String    @default("PENDING")
+  status          MaintenanceStatus @default(PENDING)
   notes           String?
   createdAt       DateTime  @default(now())
 
@@ -1376,4 +1578,362 @@ model Notification {
 
   @@index([userId, isRead])
   @@map("notifications")
+}
+
+// ═══════════════════════════════════════════
+// PARTIES — AGENTS
+// ═══════════════════════════════════════════
+
+/// A commission agent who brings buyers. LD runs eleven of them plus "SELF" for
+/// direct sales, pays brokerage on the invoice value, and deducts TDS under
+/// section 194H — so this is real money that needs a ledger, not a note.
+model Broker {
+  id               String   @id @default(cuid())
+  code             String   @unique
+  name             String
+  phone            String?
+  email            String?
+  gstin            String?
+  pan              String?
+  address          String?
+  city             String?
+  state            String?
+  stateCode        String?
+  /// Default commission, overridable per customer and per order.
+  brokeragePercent Decimal  @default(0) @db.Decimal(5, 2)
+  /// TDS section applied to this agent's commission, e.g. "194H".
+  tdsSection       String?
+  tdsRate          Decimal? @db.Decimal(5, 2)
+  notes            String?
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  customers    Customer[]
+  salesOrders  SalesOrder[]
+  invoices     SalesInvoice[]
+
+  @@index([code])
+  @@map("brokers")
+}
+
+// ═══════════════════════════════════════════
+// SHOP FLOOR — WORKSTATIONS, ROUTING, SIZES
+// ═══════════════════════════════════════════
+
+/// Where work physically happens. At LD most of these are not machines on our
+/// own floor — they are outside units such as Nargis Fashion and Ritesh
+/// Enterprises. Linking one to a supplier is what makes their job-work bill
+/// addable at the end of the month.
+model Workstation {
+  id             String          @id @default(cuid())
+  code           String          @unique
+  name           String
+  departmentId   String
+  department     Department      @relation(fields: [departmentId], references: [id])
+  type           WorkstationType @default(IN_HOUSE)
+  /// Set when type is JOB_WORK — the party we pay for this work.
+  supplierId     String?
+  supplier       Supplier?       @relation(fields: [supplierId], references: [id])
+  capacityPerDay Int?
+  address        String?
+  contactPerson  String?
+  phone          String?
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  productionEntries ProductionEntry[]
+  routingSteps      RoutingStep[]
+
+  @@index([code])
+  @@map("workstations")
+}
+
+/// The ordered path a style takes through the factory. No two styles take the
+/// same one: a plain shirt skips washing, an embroidered one adds two steps.
+model Routing {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  styleId   String
+  style     Style    @relation(fields: [styleId], references: [id])
+  /// Locked routings cannot be edited while orders are running against them.
+  isLocked  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  steps RoutingStep[]
+
+  @@index([styleId])
+  @@map("routings")
+}
+
+model RoutingStep {
+  id            String       @id @default(cuid())
+  routingId     String
+  routing       Routing      @relation(fields: [routingId], references: [id], onDelete: Cascade)
+  sequence      Int
+  operationId   String
+  operation     Operation    @relation(fields: [operationId], references: [id])
+  departmentId  String
+  department    Department   @relation(fields: [departmentId], references: [id])
+  /// Optional: the specific unit this step is normally sent to.
+  workstationId String?
+  workstation   Workstation? @relation(fields: [workstationId], references: [id])
+  smv           Decimal?     @db.Decimal(5, 3)
+  ratePerPiece  Decimal?     @db.Decimal(10, 2)
+  isQcStep      Boolean      @default(false)
+
+  @@unique([routingId, sequence])
+  @@map("routing_steps")
+}
+
+/// A named size run, e.g. "Men's Shirt S–XXL". Replaces free-text size arrays.
+model SizeGroup {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  gender    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  sizes  Size[]
+  styles Style[]
+
+  @@map("size_groups")
+}
+
+model Size {
+  id          String    @id @default(cuid())
+  sizeGroupId String
+  sizeGroup   SizeGroup @relation(fields: [sizeGroupId], references: [id], onDelete: Cascade)
+  code        String
+  label       String
+  sequence    Int       @default(0)
+
+  soLineSizes SalesOrderLineSize[]
+  moLineSizes MOLineSize[]
+
+  @@unique([sizeGroupId, code])
+  @@map("sizes")
+}
+
+model SalesOrderLineSize {
+  id     String         @id @default(cuid())
+  lineId String
+  line   SalesOrderLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size           @relation(fields: [sizeId], references: [id])
+  qty    Decimal        @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("sales_order_line_sizes")
+}
+
+model MOLineSize {
+  id       String  @id @default(cuid())
+  moLineId String
+  moLine   MOLine  @relation(fields: [moLineId], references: [id], onDelete: Cascade)
+  sizeId   String
+  size     Size    @relation(fields: [sizeId], references: [id])
+  qty      Int
+
+  @@unique([moLineId, sizeId])
+  @@map("mo_line_sizes")
+}
+
+// ═══════════════════════════════════════════
+// DOCUMENT LINES AND CHARGES
+// ═══════════════════════════════════════════
+
+model SalesInvoiceLine {
+  id          String       @id @default(cuid())
+  invoiceId   String
+  invoice     SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item         @relation(fields: [itemId], references: [id])
+  description String?
+  /// Copied onto the line at the time of billing, because an item's HSN can be
+  /// corrected later and an issued invoice must never change.
+  hsnCode     String?
+  qty         Decimal      @db.Decimal(10, 3)
+  unitPrice   Decimal      @db.Decimal(10, 2)
+  discount    Decimal      @default(0) @db.Decimal(5, 2)
+  taxableValue Decimal     @default(0) @db.Decimal(12, 2)
+  gstRate     Decimal      @default(0) @db.Decimal(5, 2)
+  cgst        Decimal      @default(0) @db.Decimal(12, 2)
+  sgst        Decimal      @default(0) @db.Decimal(12, 2)
+  igst        Decimal      @default(0) @db.Decimal(12, 2)
+  amount      Decimal      @default(0) @db.Decimal(12, 2)
+  sortOrder   Int          @default(0)
+
+  @@index([invoiceId])
+  @@map("sales_invoice_lines")
+}
+
+model PurchaseInvoiceLine {
+  id           String          @id @default(cuid())
+  billId       String
+  bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item            @relation(fields: [itemId], references: [id])
+  description  String?
+  hsnCode      String?
+  qty          Decimal         @db.Decimal(10, 3)
+  unitPrice    Decimal         @db.Decimal(10, 2)
+  discount     Decimal         @default(0) @db.Decimal(5, 2)
+  taxableValue Decimal         @default(0) @db.Decimal(12, 2)
+  gstRate      Decimal         @default(0) @db.Decimal(5, 2)
+  cgst         Decimal         @default(0) @db.Decimal(12, 2)
+  sgst         Decimal         @default(0) @db.Decimal(12, 2)
+  igst         Decimal         @default(0) @db.Decimal(12, 2)
+  amount       Decimal         @default(0) @db.Decimal(12, 2)
+  sortOrder    Int             @default(0)
+
+  @@index([billId])
+  @@map("purchase_invoice_lines")
+}
+
+/// The chargeable extras LD already bills: transport, freight, dyeing. Each
+/// carries its own GST rate, so it cannot be folded into the goods value.
+model ChargeType {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  defaultGstRate  Decimal  @default(0) @db.Decimal(5, 2)
+  applyOnSale     Boolean  @default(true)
+  applyOnPurchase Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  salesCharges    SalesInvoiceCharge[]
+  purchaseCharges PurchaseInvoiceCharge[]
+
+  @@map("charge_types")
+}
+
+model SalesInvoiceCharge {
+  id           String       @id @default(cuid())
+  invoiceId    String
+  invoice      SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  chargeTypeId String
+  chargeType   ChargeType   @relation(fields: [chargeTypeId], references: [id])
+  amount       Decimal      @db.Decimal(12, 2)
+  gstRate      Decimal      @default(0) @db.Decimal(5, 2)
+  cgst         Decimal      @default(0) @db.Decimal(12, 2)
+  sgst         Decimal      @default(0) @db.Decimal(12, 2)
+  igst         Decimal      @default(0) @db.Decimal(12, 2)
+
+  @@map("sales_invoice_charges")
+}
+
+model PurchaseInvoiceCharge {
+  id           String          @id @default(cuid())
+  billId       String
+  bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
+  chargeTypeId String
+  chargeType   ChargeType      @relation(fields: [chargeTypeId], references: [id])
+  amount       Decimal         @db.Decimal(12, 2)
+  gstRate      Decimal         @default(0) @db.Decimal(5, 2)
+  cgst         Decimal         @default(0) @db.Decimal(12, 2)
+  sgst         Decimal         @default(0) @db.Decimal(12, 2)
+  igst         Decimal         @default(0) @db.Decimal(12, 2)
+
+  @@map("purchase_invoice_charges")
+}
+
+// ═══════════════════════════════════════════
+// RETURNS
+// ═══════════════════════════════════════════
+
+/// Issued to a customer when goods come back or a bill is reduced. Without it a
+/// return leaves the original invoice standing and overstates GST payable.
+model CreditNote {
+  id          String        @id @default(cuid())
+  noteNumber  String        @unique
+  customerId  String
+  customer    Customer      @relation(fields: [customerId], references: [id])
+  invoiceId   String?
+  invoice     SalesInvoice? @relation(fields: [invoiceId], references: [id])
+  noteDate    DateTime      @default(now())
+  reason      String?
+  subtotal    Decimal       @default(0) @db.Decimal(12, 2)
+  cgst        Decimal       @default(0) @db.Decimal(12, 2)
+  sgst        Decimal       @default(0) @db.Decimal(12, 2)
+  igst        Decimal       @default(0) @db.Decimal(12, 2)
+  roundOff    Decimal       @default(0) @db.Decimal(6, 2)
+  totalAmount Decimal       @default(0) @db.Decimal(12, 2)
+  status      NoteStatus    @default(DRAFT)
+  notes       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  lines CreditNoteLine[]
+
+  @@index([customerId])
+  @@map("credit_notes")
+}
+
+model CreditNoteLine {
+  id           String     @id @default(cuid())
+  noteId       String
+  note         CreditNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item       @relation(fields: [itemId], references: [id])
+  description  String?
+  hsnCode      String?
+  qty          Decimal    @db.Decimal(10, 3)
+  unitPrice    Decimal    @db.Decimal(10, 2)
+  taxableValue Decimal    @default(0) @db.Decimal(12, 2)
+  gstRate      Decimal    @default(0) @db.Decimal(5, 2)
+  amount       Decimal    @default(0) @db.Decimal(12, 2)
+  sortOrder    Int        @default(0)
+
+  @@map("credit_note_lines")
+}
+
+/// Raised against a supplier — short supply, rejected goods, a rate correction.
+model DebitNote {
+  id          String           @id @default(cuid())
+  noteNumber  String           @unique
+  supplierId  String
+  supplier    Supplier         @relation(fields: [supplierId], references: [id])
+  billId      String?
+  bill        PurchaseInvoice? @relation(fields: [billId], references: [id])
+  noteDate    DateTime         @default(now())
+  reason      String?
+  subtotal    Decimal          @default(0) @db.Decimal(12, 2)
+  cgst        Decimal          @default(0) @db.Decimal(12, 2)
+  sgst        Decimal          @default(0) @db.Decimal(12, 2)
+  igst        Decimal          @default(0) @db.Decimal(12, 2)
+  roundOff    Decimal          @default(0) @db.Decimal(6, 2)
+  totalAmount Decimal          @default(0) @db.Decimal(12, 2)
+  status      NoteStatus       @default(DRAFT)
+  notes       String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  lines DebitNoteLine[]
+
+  @@index([supplierId])
+  @@map("debit_notes")
+}
+
+model DebitNoteLine {
+  id           String    @id @default(cuid())
+  noteId       String
+  note         DebitNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item      @relation(fields: [itemId], references: [id])
+  description  String?
+  hsnCode      String?
+  qty          Decimal   @db.Decimal(10, 3)
+  unitPrice    Decimal   @db.Decimal(10, 2)
+  taxableValue Decimal   @default(0) @db.Decimal(12, 2)
+  gstRate      Decimal   @default(0) @db.Decimal(5, 2)
+  amount       Decimal   @default(0) @db.Decimal(12, 2)
+  sortOrder    Int       @default(0)
+
+  @@map("debit_note_lines")
 }
