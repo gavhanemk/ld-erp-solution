@@ -613,6 +613,26 @@ router.patch('/number-series/:id', requirePermission(SETTINGS, 'edit'), async (r
   const before = await prisma.numberSeries.findUnique({ where: { id: req.params.id } })
   if (!before) throw new AppError('Number series not found', 404, 'NOT_FOUND')
 
+  // The update is partial, so the length rule has to be re-checked against the
+  // pieces that are not changing. A document number over sixteen characters is
+  // not valid under Rule 46(b), whichever field pushed it over.
+  const merged = {
+    prefix: data.prefix ?? before.prefix,
+    financialYear: before.financialYear,
+    padding: data.padding ?? before.padding,
+    separator: data.separator ?? before.separator,
+  }
+  const sample = [merged.prefix, merged.financialYear, '9'.repeat(merged.padding)].join(
+    merged.separator,
+  )
+  if (sample.length > 16) {
+    throw new AppError(
+      `That would produce "${sample}" — ${sample.length} characters. The law allows 16. Shorten the prefix.`,
+      400,
+      'DOC_NUMBER_TOO_LONG',
+    )
+  }
+
   // Changing the prefix once documents exist produces two different formats in
   // the same year, which is legal but confusing, so it is called out.
   const after = await prisma.numberSeries.update({ where: { id: before.id }, data })

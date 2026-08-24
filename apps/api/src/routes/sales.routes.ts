@@ -116,7 +116,7 @@ router.post('/orders', async (req: AuthRequest, res) => {
   const data = createSalesOrderSchema.parse(req.body)
 
   const order = await prisma.$transaction(async (tx) => {
-    const soNumber = await nextDocumentNumber(tx, 'SO')
+    const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
     const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId)
 
     // Line discounts first, then a discount on the whole bill. LD prices at

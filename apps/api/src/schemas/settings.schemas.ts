@@ -56,21 +56,25 @@ export const updateRoleSchema = createRoleSchema.partial()
 
 // ── Number series ────────────────────────────────────────────────────────────
 
-export const createNumberSeriesSchema = z.object({
+/**
+ * Rule 46(b) of the CGST Rules: a document number may be at most sixteen
+ * characters and may contain only letters, numerals, hyphen and slash. A full
+ * stop, an underscore or a space makes the invoice non-compliant, so none of
+ * them may be typed into a prefix or chosen as a separator.
+ */
+const numberSeriesFields = z.object({
   docType: z
     .string()
     .min(1, 'Document type is required')
     .max(10)
     .regex(/^[A-Za-z]+$/, 'Letters only')
     .transform((v) => v.toUpperCase()),
-  // Real invoice numbers carry punctuation — LD's live series is SI/2026-27.
-  // Restricting this to letters and numbers rejected their own numbering.
   prefix: z
     .string()
     .min(1, 'Prefix is required')
-    .max(20)
-    .regex(/^[A-Za-z0-9/\-.]+$/, 'Letters, numbers, and / - . only'),
-  separator: z.string().max(3).default('-'),
+    .max(12)
+    .regex(/^[A-Za-z0-9/-]+$/, 'Only letters, numbers, hyphen and slash are allowed'),
+  separator: z.enum(['-', '/', '']).default('-'),
   // Either the short token (2627) or the written form (2026-27).
   financialYear: z
     .string()
@@ -80,11 +84,41 @@ export const createNumberSeriesSchema = z.object({
 })
 
 /**
+ * The pieces are each valid on their own; what matters is the number they add
+ * up to. Checked here so the mistake surfaces while it is being typed rather
+ * than when the first invoice is raised.
+ */
+function assertFitsLegalLength(
+  s: { prefix?: string; financialYear?: string; padding?: number; separator?: string },
+  ctx: z.RefinementCtx,
+  fallback?: { prefix: string; financialYear: string; padding: number; separator: string },
+) {
+  const prefix = s.prefix ?? fallback?.prefix
+  const fy = s.financialYear ?? fallback?.financialYear
+  const padding = s.padding ?? fallback?.padding
+  const separator = s.separator ?? fallback?.separator ?? '-'
+  if (prefix == null || fy == null || padding == null) return
+
+  const sample = [prefix, fy, '9'.repeat(padding)].join(separator)
+  if (sample.length > 16) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['prefix'],
+      message: `That would produce "${sample}" — ${sample.length} characters. The law allows 16. Shorten the prefix.`,
+    })
+  }
+}
+
+export const createNumberSeriesSchema = numberSeriesFields.superRefine((s, ctx) =>
+  assertFitsLegalLength(s, ctx),
+)
+
+/**
  * The document type and financial year identify the series, and the counter is
  * only ever moved by the ERP itself — letting either be edited would produce
  * duplicate document numbers.
  */
-export const updateNumberSeriesSchema = createNumberSeriesSchema
+export const updateNumberSeriesSchema = numberSeriesFields
   .omit({ docType: true, financialYear: true })
   .partial()
 
