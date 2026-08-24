@@ -193,7 +193,7 @@ export default function PurchaseOrdersPage() {
                       <td className="text-right whitespace-nowrap">
                         <div className="flex justify-end gap-1">
                           <Link
-                            href={`/purchase/orders/${po.id}/print`}
+                            href={`/print/purchase-order/${po.id}`}
                             target="_blank"
                             className="btn-ghost p-1.5"
                             title="Print"
