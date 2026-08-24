@@ -21,13 +21,25 @@ function initialsOf(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
+interface NavChild {
+  label: string
+  href: string
+  /**
+   * Screens that do not exist yet are shown greyed and do not navigate.
+   * Letting them link produced a 404 on 28 of 38 menu items, which reads as a
+   * broken system rather than an unfinished one.
+   */
+  planned?: boolean
+}
+
 interface NavItem {
   label: string
   href?: string
   icon: React.ElementType
   badge?: string | number
   badgeColor?: string
-  children?: { label: string; href: string }[]
+  planned?: boolean
+  children?: NavChild[]
 }
 
 const navItems: NavItem[] = [
@@ -38,8 +50,12 @@ const navItems: NavItem[] = [
       { label: 'Items & Products', href: '/masters/items' },
       { label: 'Styles & SKU', href: '/masters/styles' },
       { label: 'Bill of Materials', href: '/masters/bom' },
+      { label: 'Size Runs', href: '/masters/size-runs' },
       { label: 'Customers', href: '/masters/customers' },
       { label: 'Suppliers', href: '/masters/suppliers' },
+      { label: 'Agents & Brokers', href: '/masters/brokers' },
+      { label: 'Workstations', href: '/masters/workstations' },
+      { label: 'Extra Charges', href: '/masters/charges' },
       { label: 'Warehouses', href: '/masters/warehouses' },
     ],
   },
@@ -47,66 +63,67 @@ const navItems: NavItem[] = [
     label: 'Sales', icon: ShoppingCart,
     children: [
       { label: 'Sales Orders', href: '/sales/orders' },
-      { label: 'Delivery Challan', href: '/sales/challan' },
-      { label: 'Invoices', href: '/sales/invoices' },
-      { label: 'Payments Received', href: '/sales/payments' },
+      { label: 'Delivery Challan', href: '/sales/challan', planned: true },
+      { label: 'Invoices', href: '/sales/invoices', planned: true },
+      { label: 'Payments Received', href: '/sales/payments', planned: true },
     ],
   },
   {
     label: 'Purchase', icon: Package,
     children: [
-      { label: 'Purchase Orders', href: '/purchase/orders' },
-      { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
-      { label: 'Purchase Bills', href: '/purchase/bills' },
-      { label: 'Supplier Payments', href: '/purchase/payments' },
+      { label: 'Purchase Orders', href: '/purchase/orders', planned: true },
+      { label: 'Goods Receipt (GRN)', href: '/purchase/grn', planned: true },
+      { label: 'Purchase Bills', href: '/purchase/bills', planned: true },
+      { label: 'Supplier Payments', href: '/purchase/payments', planned: true },
     ],
   },
   {
     label: 'Inventory', icon: Warehouse,
     children: [
-      { label: 'Stock Summary', href: '/inventory/stock' },
-      { label: 'Material Requisitions', href: '/inventory/requisitions' },
-      { label: 'Stock Ledger', href: '/inventory/ledger' },
+      { label: 'Stock Summary', href: '/inventory/stock', planned: true },
+      { label: 'Material Requisitions', href: '/inventory/requisitions', planned: true },
+      { label: 'Stock Ledger', href: '/inventory/ledger', planned: true },
     ],
   },
   {
     label: 'Production', icon: Factory,
     children: [
       { label: 'Manufacturing Orders', href: '/production/orders' },
-      { label: 'Cutting', href: '/production/cutting' },
-      { label: 'Stitching', href: '/production/stitching' },
-      { label: 'Quality Control', href: '/production/qc' },
-      { label: 'Packing', href: '/production/packing' },
+      { label: 'Routings', href: '/masters/routings' },
+      { label: 'Cutting', href: '/production/cutting', planned: true },
+      { label: 'Stitching', href: '/production/stitching', planned: true },
+      { label: 'Quality Control', href: '/production/qc', planned: true },
+      { label: 'Packing', href: '/production/packing', planned: true },
     ],
   },
   {
     label: 'Accounts', icon: BookOpen,
     children: [
-      { label: 'Dashboard', href: '/accounts/dashboard' },
-      { label: 'Vouchers', href: '/accounts/vouchers' },
-      { label: 'Outstanding', href: '/accounts/outstanding' },
-      { label: 'GST Reports', href: '/accounts/gst' },
-      { label: 'Bank & Cash', href: '/accounts/bank' },
+      { label: 'Dashboard', href: '/accounts/dashboard', planned: true },
+      { label: 'Vouchers', href: '/accounts/vouchers', planned: true },
+      { label: 'Outstanding', href: '/accounts/outstanding', planned: true },
+      { label: 'GST Reports', href: '/accounts/gst', planned: true },
+      { label: 'Bank & Cash', href: '/accounts/bank', planned: true },
     ],
   },
   {
     label: 'HR & Payroll', icon: Users,
     children: [
-      { label: 'Employees', href: '/hr/employees' },
-      { label: 'Attendance', href: '/hr/attendance' },
-      { label: 'Payroll', href: '/hr/payroll' },
+      { label: 'Employees', href: '/hr/employees', planned: true },
+      { label: 'Attendance', href: '/hr/attendance', planned: true },
+      { label: 'Payroll', href: '/hr/payroll', planned: true },
     ],
   },
   {
     label: 'VHAGAR Brand', icon: Tag,
     children: [
-      { label: 'Product Catalog', href: '/vhagar/catalog' },
-      { label: 'Production Orders', href: '/vhagar/production' },
-      { label: 'Sales', href: '/vhagar/sales' },
-      { label: 'Brand P&L', href: '/vhagar/pnl' },
+      { label: 'Product Catalog', href: '/vhagar/catalog', planned: true },
+      { label: 'Production Orders', href: '/vhagar/production', planned: true },
+      { label: 'Sales', href: '/vhagar/sales', planned: true },
+      { label: 'Brand P&L', href: '/vhagar/pnl', planned: true },
     ],
   },
-  { label: 'Maintenance', href: '/maintenance', icon: Wrench },
+  { label: 'Maintenance', href: '/maintenance', icon: Wrench, planned: true },
   { label: 'AI Assistant', href: '/ai', icon: Bot, badge: 'AI', badgeColor: 'teal' },
   { label: 'Settings', href: '/settings', icon: Settings },
 ]
@@ -223,22 +240,58 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
 
                   {!collapsed && isOpen && (
                     <div className="ml-4 mt-0.5 pl-4 border-l border-border/50 space-y-0.5 animate-fade-in">
-                      {item.children.map((child) => (
-                        <Link
-                          key={child.href}
-                          href={child.href}
-                          className={cn(
-                            'flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium transition-colors',
-                            isActive(child.href)
-                              ? 'text-teal-400 bg-teal-500/10'
-                              : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
-                          )}
-                        >
-                          <ChevronRightIcon size={12} className="shrink-0" />
-                          {child.label}
-                        </Link>
-                      ))}
+                      {item.children.map((child) =>
+                        child.planned ? (
+                          <div
+                            key={child.href}
+                            title="Not built yet"
+                            aria-disabled="true"
+                            className="flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium text-slate-600 cursor-default select-none"
+                          >
+                            <ChevronRightIcon size={12} className="shrink-0 opacity-40" />
+                            <span className="flex-1">{child.label}</span>
+                            <span className="text-[9px] uppercase tracking-wider text-slate-600 border border-slate-700 rounded px-1 py-px">
+                              soon
+                            </span>
+                          </div>
+                        ) : (
+                          <Link
+                            key={child.href}
+                            href={child.href}
+                            className={cn(
+                              'flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium transition-colors',
+                              isActive(child.href)
+                                ? 'text-teal-400 bg-teal-500/10'
+                                : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                            )}
+                          >
+                            <ChevronRightIcon size={12} className="shrink-0" />
+                            {child.label}
+                          </Link>
+                        ),
+                      )}
                     </div>
+                  )}
+                </div>
+              )
+            }
+
+            if (item.planned) {
+              return (
+                <div
+                  key={item.label}
+                  title="Not built yet"
+                  aria-disabled="true"
+                  className="nav-item text-slate-600 cursor-default select-none"
+                >
+                  <Icon size={18} className="shrink-0 opacity-40" />
+                  {!collapsed && (
+                    <>
+                      <span className="flex-1">{item.label}</span>
+                      <span className="text-[9px] uppercase tracking-wider border border-slate-700 rounded px-1 py-px">
+                        soon
+                      </span>
+                    </>
                   )}
                 </div>
               )
