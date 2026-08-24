@@ -32,7 +32,47 @@ connect.
 
 ---
 
-## Where we left off (Mon 24 Aug, later)
+## Where we left off (Mon 24 Aug, evening) — READ THIS FIRST
+
+Mahesh went home mid-test. The purchase order works end to end and prints; the
+last thing changed was the width of the columns on the printed sheet, and
+**nobody has looked at the result yet**.
+
+**First thing tomorrow:** open a purchase order, click the printer icon, and
+check the line table lines up with the supplier box above it and the totals
+below. If it does not, the column widths are weights in
+`apps/web/src/app/(print)/print/purchase-order/[id]/page.tsx` and the maths that
+turns them into percentages is in `DocumentTable` in
+`apps/web/src/components/print/PrintSheet.tsx`.
+
+Two print bugs were found and fixed today, both mine:
+- The sidebar and top bar were on the print page and would have printed. Print
+  pages now live in their own route group with no app shell.
+- `overflow-wrap: anywhere` let a column shrink to one character, so the
+  supplier address printed vertically, one letter per line. Never use
+  `anywhere` in a table; `break-word` does not count towards a column's minimum.
+
+**How he works:** short, plain sentences. No jargon, no file paths, no rule
+numbers unless he asks. Answer the question first, then the detail.
+
+**Live demo data he entered** — a supplier (LD Silk Mills), one item (LIO LINEN)
+and PO-2627-0001 for ₹1,54,350. The HSN and some codes are deliberately not
+real; he said not to worry about them, they are for testing.
+
+**Decisions he has given:**
+- No data comes across from Absolute ERP. Whatever is there stays there. Do not
+  offer to migrate it again.
+- Garment GST is 5%.
+- LD Silk Mills is his own second company with its own GSTIN — a supplier here,
+  never a second company inside one database.
+- Users and roles can be reconfigured later; not a priority.
+
+**Next after the print check:** Goods Receipt, so what arrives can be booked
+against the order. `/purchase/grn` is still marked "soon" in the sidebar.
+
+---
+
+## Earlier on Mon 24 Aug
 
 After the Settings module, Mahesh asked for the data model itself to be made
 logically correct — "everything should be connected, wired up". An audit of all

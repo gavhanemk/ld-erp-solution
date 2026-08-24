@@ -18,7 +18,14 @@ export const money = (v: string | number) =>
 export interface Column {
   key: string
   label: string
-  width?: string
+  /**
+   * Relative share of the row. Turned into a percentage against the other
+   * columns, so the widths always add up to the full width of the sheet
+   * whichever columns happen to be shown. Fixed pixel widths left the table
+   * about half the width of the page and out of line with everything above
+   * and below it.
+   */
+  weight?: number
   align?: 'left' | 'right' | 'center'
 }
 
@@ -47,11 +54,15 @@ export function DocumentTable({
 }) {
   const padding = Math.max(0, minRows - rows.length)
 
+  // Percentages against the total weight, so they always add up to the whole
+  // width no matter which optional columns are showing.
+  const totalWeight = columns.reduce((s, c) => s + (c.weight ?? 10), 0)
+
   return (
-    <table className="grid lines">
+    <table className="grid lines" style={{ width: '100%' }}>
       <colgroup>
         {columns.map((c) => (
-          <col key={c.key} style={c.width ? { width: c.width } : undefined} />
+          <col key={c.key} style={{ width: `${(((c.weight ?? 10) / totalWeight) * 100).toFixed(3)}%` }} />
         ))}
       </colgroup>
       <thead>
@@ -187,7 +198,7 @@ export function PrintSheet({
 
         <div className="doc-title">{title}</div>
 
-        <table className="grid">
+        <table className="grid" style={{ width: '100%' }}>
           <colgroup>
             <col style={{ width: '58%' }} />
             <col style={{ width: '42%' }} />
@@ -204,7 +215,7 @@ export function PrintSheet({
                 {party.phone && <div>Phone: {party.phone}</div>}
               </td>
               <td>
-                <table className="meta">
+                <table className="meta" style={{ width: '100%' }}>
                   <tbody>
                     {meta.map((m) => (
                       <tr key={m.label}>
@@ -223,7 +234,7 @@ export function PrintSheet({
 
         {children}
 
-        <table className="foot">
+        <table className="foot" style={{ width: '100%' }}>
           <colgroup>
             <col style={{ width: '58%' }} />
             <col />
@@ -274,7 +285,7 @@ export function PrintSheet({
               </td>
 
               <td className="foot-right">
-                <table className="grid totals">
+                <table className="grid totals" style={{ width: '100%' }}>
                   <tbody>
                     {totals.map((t) => (
                       <tr key={t.label}>
@@ -294,7 +305,7 @@ export function PrintSheet({
           </tbody>
         </table>
 
-        <table className="signblock">
+        <table className="signblock" style={{ width: '100%' }}>
           <colgroup>
             <col style={{ width: '60%' }} />
             <col />

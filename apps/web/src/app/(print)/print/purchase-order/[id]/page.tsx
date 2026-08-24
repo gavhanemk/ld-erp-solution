@@ -103,15 +103,15 @@ export default function PrintPurchaseOrder() {
   const showDiscountColumn = order.lines.some((l) => Number(l.discount) > 0)
 
   const columns = [
-    { key: 'sr', label: '#', width: '26px', align: 'right' as const },
-    { key: 'desc', label: 'Description' },
-    ...(template.showHsn ? [{ key: 'hsn', label: 'HSN', width: '56px' }] : []),
-    { key: 'qty', label: 'Qty', width: '62px', align: 'right' as const },
-    { key: 'uom', label: 'Unit', width: '36px' },
-    { key: 'rate', label: 'Rate', width: '64px', align: 'right' as const },
-    ...(showDiscountColumn ? [{ key: 'disc', label: 'Disc %', width: '44px', align: 'right' as const }] : []),
-    ...(taxMode !== 'NONE' ? [{ key: 'gst', label: 'GST %', width: '44px', align: 'right' as const }] : []),
-    { key: 'amt', label: 'Amount', width: '80px', align: 'right' as const },
+    { key: 'sr', label: '#', weight: 3, align: 'right' as const },
+    { key: 'desc', label: 'Description', weight: 30 },
+    ...(template.showHsn ? [{ key: 'hsn', label: 'HSN', weight: 9 }] : []),
+    { key: 'qty', label: 'Qty', weight: 10, align: 'right' as const },
+    { key: 'uom', label: 'Unit', weight: 6 },
+    { key: 'rate', label: 'Rate', weight: 10, align: 'right' as const },
+    ...(showDiscountColumn ? [{ key: 'disc', label: 'Disc %', weight: 7, align: 'right' as const }] : []),
+    ...(taxMode !== 'NONE' ? [{ key: 'gst', label: 'GST %', weight: 7, align: 'right' as const }] : []),
+    { key: 'amt', label: 'Amount', weight: 14, align: 'right' as const },
   ]
 
   const rows = order.lines.map((line, i) => ({
