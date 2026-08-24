@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest } from '../middleware/auth'
+import { getNumericPreference } from '../lib/preferences'
 
 const router = Router()
 
@@ -206,6 +207,10 @@ router.get('/recent-orders', async (req, res) => {
 router.get('/low-stock', async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10))
 
+  // Settings → Preferences can ask for a warning before stock actually reaches
+  // the reorder level, so there is time to raise a purchase order.
+  const bufferPercent = await getNumericPreference('lowStockBufferPercent', 0)
+
   const items = await prisma.item.findMany({
     where: { isActive: true, reorderLevel: { gt: 0 } },
     select: { id: true, code: true, name: true, reorderLevel: true, uom: { select: { symbol: true } } },
@@ -224,17 +229,24 @@ router.get('/low-stock', async (req, res) => {
   )
 
   const low = items
-    .map((i) => ({
-      id: i.id,
-      code: i.code,
-      name: i.name,
-      uom: i.uom?.symbol ?? '',
-      reorderLevel: Number(i.reorderLevel),
-      // An item that has never moved is at zero, which is genuinely below its
-      // reorder level and should be flagged.
-      currentStock: onHand.get(i.id) ?? 0,
-    }))
-    .filter((i) => i.currentStock <= i.reorderLevel)
+    .map((i) => {
+      const reorderLevel = Number(i.reorderLevel)
+      return {
+        id: i.id,
+        code: i.code,
+        name: i.name,
+        uom: i.uom?.symbol ?? '',
+        reorderLevel,
+        // An item that has never moved is at zero, which is genuinely below its
+        // reorder level and should be flagged.
+        currentStock: onHand.get(i.id) ?? 0,
+        warnAt: reorderLevel * (1 + bufferPercent / 100),
+      }
+    })
+    .filter((i) => i.currentStock <= i.warnAt)
+    // Items already at or under the reorder level are the real shortages; the
+    // buffer only brings the next ones into view, so they sort behind.
+    .map((i) => ({ ...i, belowReorder: i.currentStock <= i.reorderLevel }))
     .sort((a, b) => a.currentStock - a.reorderLevel - (b.currentStock - b.reorderLevel))
     .slice(0, limit)
 
@@ -298,11 +310,11 @@ router.get('/pending-approvals', async (req, res) => {
     }),
   ])
 
-  // Anything sitting unapproved for more than two working days is called out,
-  // so the oldest items do not quietly sink down the list.
-  const URGENT_AFTER_DAYS = 2
+  // Anything left unapproved for too long is called out, so the oldest items do
+  // not quietly sink down the list. How long is set in Settings → Preferences.
+  const urgentAfterDays = await getNumericPreference('approvalUrgentAfterDays', 2)
   const isUrgent = (d: Date) =>
-    (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24) > URGENT_AFTER_DAYS
+    (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24) > urgentAfterDays
 
   const approvals = [
     ...purchaseOrders.map((po) => ({

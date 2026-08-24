@@ -185,6 +185,24 @@ async function main() {
     })
   }
 
+  // 9b. GST rates the mill actually charges. Absolute ERP lets a rate be typed
+  // free-hand on every document, which is how two spellings of the same tax end
+  // up in one ledger; a short list avoids that.
+  const taxRates = [
+    { name: 'GST 0%', rate: 0, isDefault: false },
+    { name: 'GST 5%', rate: 5, isDefault: false },
+    { name: 'GST 12%', rate: 12, isDefault: true },
+    { name: 'GST 18%', rate: 18, isDefault: false },
+  ]
+
+  for (const t of taxRates) {
+    await prisma.taxRate.upsert({
+      where: { companyId_name: { companyId: company.id, name: t.name } },
+      update: {},
+      create: { ...t, companyId: company.id },
+    })
+  }
+
   // 10. Permission matrix (module x action), then wire it to the roles.
   // Without these rows every non-Admin user is refused by requirePermission.
   const MODULES = [

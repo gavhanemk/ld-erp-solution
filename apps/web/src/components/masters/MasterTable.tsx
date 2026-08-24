@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
 import { MasterFormDialog, type FormField } from './MasterFormDialog'
+import { useAppSettings } from '@/lib/appSettings'
 
 export interface Column<T> {
   key: string
@@ -46,8 +47,6 @@ interface MasterTableProps<T> {
   entityName?: string
 }
 
-const PAGE_SIZE = 25
-
 export function MasterTable<T extends { id: string; isActive?: boolean }>({
   title,
   resource,
@@ -76,6 +75,9 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   const [editing, setEditing] = useState<T | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
+  // Rows per page comes from Settings -> Preferences.
+  const { rowsPerPage } = useAppSettings()
+
   const client = useMemo(() => masterResource<T>(resource), [resource])
   const editable = Boolean(formFields?.length)
   const singular = entityName ?? title.replace(/s$/, '')
@@ -102,7 +104,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     try {
       const res: Paginated<T> = await client.list({
         page,
-        limit: PAGE_SIZE,
+        limit: rowsPerPage,
         q: debouncedSearch || undefined,
         sort,
         order,
@@ -129,7 +131,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     // `filters` is an object literal at most call sites, so it is compared by
     // its contents rather than identity to avoid an endless reload loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, page, debouncedSearch, sort, order, activeOnly, JSON.stringify(filters)])
+  }, [client, page, rowsPerPage, debouncedSearch, sort, order, activeOnly, JSON.stringify(filters)])
 
   useEffect(() => {
     void load()

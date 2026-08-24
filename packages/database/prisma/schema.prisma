@@ -260,6 +260,8 @@ model Company {
   warehouses   Warehouse[]
   departments  Department[]
   numberSeries NumberSeries[]
+  taxRates     TaxRate[]
+  settings     AppSetting[]
 
   @@map("company")
 }
@@ -296,6 +298,38 @@ model NumberSeries {
 
   @@unique([companyId, docType, financialYear])
   @@map("number_series")
+}
+
+/// GST rates the business actually charges, so the sales screens can offer a
+/// short list instead of a free-typed percentage nobody can reconcile later.
+model TaxRate {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  rate      Decimal  @db.Decimal(5, 2)
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, name])
+  @@map("tax_rates")
+}
+
+/// One row per preference. A key/value table rather than columns, so adding a
+/// preference never needs a migration — the catalogue of valid keys lives in
+/// the API, which is also what stops arbitrary keys being written.
+model AppSetting {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, key])
+  @@map("app_settings")
 }
 
 model ItemCategory {

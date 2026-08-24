@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api, currentUser, tokens } from '@/lib/api'
+import { useAppSettings } from '@/lib/appSettings'
 
 /** "Mahesh Ghavane" -> "MG"; a single name gives its first two letters. */
 function initialsOf(name: string): string {
@@ -120,6 +121,19 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
   const router = useRouter()
   const [openMenus, setOpenMenus] = useState<string[]>(['Masters'])
   const [user, setUser] = useState<{ name?: string; role?: string } | null>(null)
+  const { qcInDailyProduction } = useAppSettings()
+
+  // A mill that records output without a per-day QC entry should not be looking
+  // at a menu item it never uses. Settings → Preferences controls this.
+  const items = useMemo(() => {
+    if (qcInDailyProduction) return navItems
+
+    return navItems.map((item) =>
+      item.label === 'Production' && item.children
+        ? { ...item, children: item.children.filter((c) => c.href !== '/production/qc') }
+        : item,
+    )
+  }, [qcInDailyProduction])
 
   // localStorage is browser-only, so the signed-in user arrives after mount.
   useEffect(() => {
@@ -173,7 +187,7 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto no-scrollbar py-3 px-2">
         <div className="space-y-0.5">
-          {navItems.map((item) => {
+          {items.map((item) => {
             const Icon = item.icon
 
             if (item.children) {

@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sat 22 Aug 2026 — paused for the weekend, resuming Mon 24 Aug_
+_Last updated: Mon 24 Aug 2026 — Settings module built_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -32,28 +32,42 @@ connect.
 
 ---
 
-## Where we left off (Sat 22 Aug)
+## Where we left off (Mon 24 Aug)
 
-The ERP is running and Mahesh has seen it working. Reactions so far: the UI and
-typography landed well; the light theme was too bright and has been softened.
-He expects a round of modifications, but has not listed them yet — the plan is
-for him to use it first and collect changes, then do them in a batch.
+The Settings module is built and tested. It was designed against the real
+Absolute ERP — signed into and read page by page — rather than guessed at.
 
-**Pick up here on Monday:**
+**What Absolute showed.** Its Settings holds 24 sections. Eight are ISO
+compliance modules (9001, 14001, 22000, 45001, 20000-1, 27001, 50001, 13485)
+that LD Cotton Mills has never opened. Setup Preferences asks around forty
+yes/no questions, and most belong to a construction and projects business —
+cables and installation budgets, project codes, technical service, milestone
+headings. Perhaps six of those questions mean anything to a garment unit, and
+they sit mixed in with the rest. That is why Settings feels vast: it is every
+industry's settings at once.
 
-1. Ask what he noted down while using it. That list should drive the next round,
-   not a guess at what to build.
-2. If nothing is blocking, the natural next build is **entering a real sales
-   order end to end** — the list screen reads live data but there is no form to
-   create one, so nothing can flow through the system yet. That unlocks the
-   dashboard figures, approvals and manufacturing orders actually doing
-   something.
-3. The seeded admin account is still called "Admin User". He may want it renamed
-   to his own name, and a user created for each real person.
+**What was built instead.** Four tabs, holding nothing that does not apply:
 
-**Not yet discussed with him:** GEMINI_API_KEY is not set, so the AI assistant
-cannot answer anything yet. The plan treats AI as a must-have, so this needs a
-decision on whose API key to use and who pays for it.
+- **Company** — details and GSTIN, financial year, document numbering, GST rates
+- **People** — users, roles, and one permission grid
+- **Preferences** — five settings, each wired to something real
+- **System** — connections, your own password, the activity trail
+
+**Pick up here next:**
+
+1. Ask what Mahesh noted down while using the ERP. That list should drive the
+   next round, not a guess at what to build.
+2. Rename the seeded "Admin User" to his own name and add the real people —
+   Settings → People can do that now.
+3. The natural next build is **entering a real sales order end to end**. The
+   list screen reads live data but there is no form to create one, so nothing
+   flows through the system yet. That unlocks the dashboard figures, approvals
+   and manufacturing orders actually doing something.
+
+**Not yet discussed with him:** GEMINI_API_KEY is still not set, so the AI
+assistant cannot answer anything. Settings → System now says so plainly rather
+than leaving it a mystery. It still needs a decision on whose API key and who
+pays for it.
 
 ---
 
@@ -125,6 +139,21 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 - Sales order list reads the real API with status filtering
 - Manufacturing order list with progress against planned quantity
 
+**Settings — four tabs**
+- Company: profile and GSTIN, financial year, document numbering with a live
+  preview of the next number, GST rates with one default
+- People: add and edit users, reset a password, deactivate; roles with a
+  permission grid (13 modules × 6 actions) that can be ticked by row or column
+- Preferences: rows per page, date format, low-stock buffer, QC on daily
+  production, days before an approval is called urgent
+- System: connections checked live, change your own password, the full activity
+  trail with filters and paging
+- Guards that matter: you cannot deactivate yourself, change your own role, or
+  remove the last administrator; built-in roles cannot be renamed or deleted;
+  a role with people on it cannot be deleted; the Admin role cannot be narrowed
+  (the auth middleware bypasses the matrix for it, so the screen says so rather
+  than pretending otherwise); document counters cannot be edited by hand
+
 **AI**
 - Gemini function-calling service with 6 ERP tools and a daily MIS generator
 - Needs `GEMINI_API_KEY` in `apps/api/.env` before it will answer anything
@@ -181,13 +210,18 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 
 ## Notes for whoever picks this up
 
-- The migration SQL is committed at
-  `packages/database/prisma/migrations/00000000000000_init/migration.sql`. It
-  was applied through the Supabase connector because the database password was
-  not available, so Prisma's `_prisma_migrations` table does not know about it.
-  Before the first `prisma migrate dev`, run
-  `prisma migrate resolve --applied 00000000000000_init` or Prisma will try to
-  create all 56 tables again.
+- The init migration was applied through the Supabase connector before the
+  database password was available, so Prisma did not know about it. It has now
+  been marked applied (`prisma migrate resolve --applied 00000000000000_init`),
+  and `prisma migrate dev` works normally from here.
+- **Stop the API before running `prisma generate`.** The running server holds
+  `query_engine-windows.dll.node` open and the generate step fails with EPERM
+  partway through, which can leave the client half-written.
+- Two tables were added for Settings: `tax_rates` and `app_settings`.
+  `app_settings` is a key/value table, so adding a preference needs no
+  migration — the catalogue of valid keys lives in
+  `apps/api/src/schemas/settings.schemas.ts`, and that is also what stops
+  arbitrary keys being written.
 - `setup.ps1` runs install, generate, migrate and seed in one command, and
   refuses to start without enough memory or with the password placeholder still
   in place.

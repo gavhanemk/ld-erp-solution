@@ -23,6 +23,7 @@ import hrRoutes from './routes/hr.routes'
 import approvalRoutes from './routes/approvals.routes'
 import aiRoutes from './routes/ai.routes'
 import notificationRoutes from './routes/notification.routes'
+import settingsRoutes from './routes/settings.routes'
 import webhookRoutes from './routes/webhook.routes'
 
 import { errorHandler } from './middleware/errorHandler'
@@ -88,6 +89,7 @@ app.use('/api/hr', authMiddleware, hrRoutes)
 app.use('/api/approvals', authMiddleware, approvalRoutes)
 app.use('/api/ai', authMiddleware, aiRoutes)
 app.use('/api/notifications', authMiddleware, notificationRoutes)
+app.use('/api/settings', authMiddleware, settingsRoutes)
 
 // 404
 app.use('*', (req, res) => res.status(404).json({ error: 'Route not found', path: req.originalUrl }))

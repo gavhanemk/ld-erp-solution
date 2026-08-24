@@ -1,5 +1,6 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import { appSettings } from './appSettings'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -34,7 +35,17 @@ export function formatDate(date: Date | string, format: 'short' | 'long' | 'rela
     return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })
   }
 
-  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+  // The short form follows whatever was chosen in Settings → Preferences.
+  const pad = (n: number) => String(n).padStart(2, '0')
+
+  switch (appSettings().dateFormat) {
+    case 'DD/MM/YYYY':
+      return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`
+    case 'YYYY-MM-DD':
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    default:
+      return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+  }
 }
 
 export function generateDocNumber(prefix: string, fy: string, sequence: number, padding = 4): string {
