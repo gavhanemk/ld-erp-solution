@@ -2,12 +2,13 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Building2, Users, SlidersHorizontal, Activity, Sparkles } from 'lucide-react'
+import { Building2, Users, SlidersHorizontal, Activity, Sparkles, FileText } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
- * Four tabs, in the order someone actually sets an ERP up: describe the
- * business, let people in, then adjust how it behaves, and finally check on it.
+ * In the order someone actually sets an ERP up: describe the business, let
+ * people in, decide what your paperwork says, adjust how it behaves, connect
+ * the assistant, and finally check on it.
  */
 const tabs = [
   {
@@ -21,6 +22,12 @@ const tabs = [
     label: 'People',
     icon: Users,
     description: 'Who can sign in, and what each of them may do',
+  },
+  {
+    href: '/settings/documents',
+    label: 'Documents',
+    icon: FileText,
+    description: 'What appears on your printed invoices, orders and challans',
   },
   {
     href: '/settings/preferences',

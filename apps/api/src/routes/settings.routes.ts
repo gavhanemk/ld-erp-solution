@@ -771,6 +771,178 @@ router.patch('/preferences', requirePermission(SETTINGS, 'edit'), async (req: Au
 })
 
 // ═══════════════════════════════════════════
+// PRINTED DOCUMENTS
+// ═══════════════════════════════════════════
+
+/** Every document type we can print, in the order it appears on the tab. */
+const DOC_TYPES = [
+  { docType: 'INV', label: 'Sales Invoice', defaultTitle: 'TAX INVOICE' },
+  { docType: 'PO', label: 'Purchase Order', defaultTitle: 'PURCHASE ORDER' },
+  { docType: 'DC', label: 'Delivery Challan', defaultTitle: 'DELIVERY CHALLAN' },
+  { docType: 'JW', label: 'Job Work Challan', defaultTitle: 'DELIVERY CHALLAN (JOB WORK)' },
+] as const
+
+const documentTemplateSchema = z.object({
+  title: z.string().min(1, 'A heading is required').max(80),
+  termsText: z.string().max(4000).optional().nullable(),
+  declaration: z.string().max(1000).optional().nullable(),
+  footerNote: z.string().max(300).optional().nullable(),
+  showHsn: z.boolean().optional(),
+  showAmountInWords: z.boolean().optional(),
+  showBankDetails: z.boolean().optional(),
+  showSignature: z.boolean().optional(),
+  copies: z.array(z.string().max(60)).max(4).optional(),
+  isActive: z.boolean().optional(),
+})
+
+/**
+ * Images are held inline as data URLs rather than as files on disk.
+ *
+ * A logo is a few kilobytes, it belongs to the company record, and keeping it
+ * in the database means a backup of the database is a complete backup — no
+ * separate uploads folder to lose. The size cap is what stops someone pasting
+ * a two-megabyte photograph into a letterhead.
+ */
+const MAX_IMAGE_BYTES = 400 * 1024
+
+const imageDataUrl = z
+  .string()
+  .regex(/^data:image\/(png|jpeg|jpg|svg\+xml|webp);base64,/, 'That is not a PNG, JPG, SVG or WebP image')
+  .refine((v) => v.length * 0.75 <= MAX_IMAGE_BYTES, {
+    message: 'That image is too large. Keep it under 400 KB — a letterhead does not need more.',
+  })
+
+const brandingSchema = z.object({
+  logoUrl: z.union([imageDataUrl, z.literal('')]).optional().nullable(),
+  signatureUrl: z.union([imageDataUrl, z.literal('')]).optional().nullable(),
+  bankName: z.string().max(120).optional().nullable(),
+  bankBranch: z.string().max(120).optional().nullable(),
+  bankAccount: z.string().max(40).optional().nullable(),
+  bankIFSC: z
+    .union([z.string().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, 'Invalid IFSC code'), z.literal('')])
+    .optional()
+    .nullable(),
+  upiId: z.string().max(80).optional().nullable(),
+})
+
+router.get('/documents', requirePermission(SETTINGS, 'view'), async (_req, res) => {
+  const company = await prisma.company.findFirst()
+  if (!company) throw new AppError('Company profile not set up yet', 404, 'NOT_FOUND')
+
+  const saved = await prisma.documentTemplate.findMany({ where: { companyId: company.id } })
+  const byType = new Map(saved.map((d) => [d.docType, d]))
+
+  res.json({
+    success: true,
+    data: {
+      branding: {
+        logoUrl: company.logoUrl,
+        signatureUrl: company.signatureUrl,
+        bankName: company.bankName,
+        bankBranch: company.bankBranch,
+        bankAccount: company.bankAccount,
+        bankIFSC: company.bankIFSC,
+        upiId: company.upiId,
+      },
+      // Every document type is listed whether or not it has been set up, so the
+      // screen shows the full set rather than only what happens to exist.
+      documents: DOC_TYPES.map((t) => {
+        const row = byType.get(t.docType)
+        return {
+          docType: t.docType,
+          label: t.label,
+          title: row?.title ?? t.defaultTitle,
+          termsText: row?.termsText ?? null,
+          declaration: row?.declaration ?? null,
+          footerNote: row?.footerNote ?? null,
+          showHsn: row?.showHsn ?? true,
+          showAmountInWords: row?.showAmountInWords ?? true,
+          showBankDetails: row?.showBankDetails ?? t.docType === 'INV',
+          showSignature: row?.showSignature ?? true,
+          copies: row?.copies ?? [],
+          isActive: row?.isActive ?? true,
+          configured: Boolean(row),
+        }
+      }),
+    },
+  })
+})
+
+router.patch('/documents/branding', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const data = brandingSchema.parse(req.body)
+
+  const before = await prisma.company.findFirst()
+  if (!before) throw new AppError('Company profile not set up yet', 404, 'NOT_FOUND')
+
+  // An empty string means "remove this", which is different from not sending it.
+  const clean = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, v === '' ? null : v]),
+  )
+
+  const after = await prisma.company.update({ where: { id: before.id }, data: clean })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'DocumentBranding',
+    entityId: after.id,
+    // The images are large and unreadable in a log; record only that they moved.
+    before: { ...before, logoUrl: Boolean(before.logoUrl), signatureUrl: Boolean(before.signatureUrl) },
+    after: { ...after, logoUrl: Boolean(after.logoUrl), signatureUrl: Boolean(after.signatureUrl) },
+  })
+
+  res.json({ success: true, message: 'Saved.' })
+})
+
+router.patch('/documents/:docType', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const docType = req.params.docType.toUpperCase()
+  const known = DOC_TYPES.find((t) => t.docType === docType)
+  if (!known) throw new AppError(`There is no ${docType} document`, 404, 'UNKNOWN_DOC_TYPE')
+
+  const data = documentTemplateSchema.parse(req.body)
+  const company = await companyId()
+
+  const before = await prisma.documentTemplate.findUnique({
+    where: { companyId_docType: { companyId: company, docType } },
+  })
+
+  const after = await prisma.documentTemplate.upsert({
+    where: { companyId_docType: { companyId: company, docType } },
+    update: {
+      ...data,
+      termsText: data.termsText ?? null,
+      declaration: data.declaration ?? null,
+      footerNote: data.footerNote ?? null,
+    },
+    create: {
+      companyId: company,
+      docType,
+      title: data.title,
+      termsText: data.termsText ?? null,
+      declaration: data.declaration ?? null,
+      footerNote: data.footerNote ?? null,
+      showHsn: data.showHsn ?? true,
+      showAmountInWords: data.showAmountInWords ?? true,
+      showBankDetails: data.showBankDetails ?? docType === 'INV',
+      showSignature: data.showSignature ?? true,
+      copies: data.copies ?? [],
+      isActive: data.isActive ?? true,
+    },
+  })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: before ? 'UPDATE' : 'CREATE',
+    entityType: 'DocumentTemplate',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, data: { ...after, label: known.label } })
+})
+
+// ═══════════════════════════════════════════
 // ASSISTANT
 // ═══════════════════════════════════════════
 

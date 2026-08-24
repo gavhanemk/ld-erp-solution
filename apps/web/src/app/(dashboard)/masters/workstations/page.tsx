@@ -7,9 +7,9 @@ import type { FormField } from '@/components/masters/MasterFormDialog'
  * Workstations.
  *
  * Most of LD's stitching and finishing is done by outside units rather than on
- * their own floor, so a workstation is often a business — Nargis Fashion,
- * Ritesh Enterprises — not a machine. Linking one to the supplier we pay is
- * what makes their job-work bill addable at the end of the month.
+ * their own floor, so a workstation is often an outside business, not a
+ * machine. Linking one to the supplier we pay is what makes their job-work
+ * bill addable at the end of the month.
  */
 interface Workstation {
   id: string
@@ -81,7 +81,7 @@ const columns: Column<Workstation>[] = [
 
 const formFields: FormField[] = [
   { name: 'code', label: 'Code', required: true, placeholder: 'WS-STI-01', section: 'Identity' },
-  { name: 'name', label: 'Name', required: true, placeholder: 'Nargis Fashion', section: 'Identity' },
+  { name: 'name', label: 'Name', required: true, placeholder: 'Stitching Unit 1', section: 'Identity' },
   {
     name: 'departmentId',
     label: 'Process',

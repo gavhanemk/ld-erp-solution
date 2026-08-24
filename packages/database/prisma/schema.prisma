@@ -335,7 +335,17 @@ model Company {
   phone        String?
   email        String?
   website      String?
+  /// Printed at the top of every document. Stored inline so a mill PC with no
+  /// file server still prints a letterhead.
   logoUrl      String?
+  /// Printed above the signature line.
+  signatureUrl String?
+  /// The account a customer is asked to pay into, printed on the invoice.
+  bankName     String?
+  bankBranch   String?
+  bankAccount  String?
+  bankIFSC     String?
+  upiId        String?
   currentFY    String?
   fyStartMonth Int      @default(4)
   /// Nothing may be dated before the books open.
@@ -349,6 +359,7 @@ model Company {
   numberSeries NumberSeries[]
   taxRates     TaxRate[]
   settings     AppSetting[]
+  documents    DocumentTemplate[]
 
   @@map("company")
 }
@@ -1236,7 +1247,7 @@ model ProductionEntry {
   departmentId String
   department  Department         @relation(fields: [departmentId], references: [id])
   /// Which line or outside unit produced this. Without it, what is owed to a
-  /// job-work unit such as Nargis Fashion can never be totalled.
+  /// job-work unit can never be totalled.
   workstationId String?
   workstation Workstation?       @relation(fields: [workstationId], references: [id])
   shift       String?
@@ -1622,7 +1633,7 @@ model Broker {
 // ═══════════════════════════════════════════
 
 /// Where work physically happens. At LD most of these are not machines on our
-/// own floor — they are outside units such as Nargis Fashion and Ritesh
+/// own floor — many are outside job-work units. Linking one to the supplier
 /// Enterprises. Linking one to a supplier is what makes their job-work bill
 /// addable at the end of the month.
 model Workstation {
@@ -1936,4 +1947,45 @@ model DebitNoteLine {
   sortOrder    Int       @default(0)
 
   @@map("debit_note_lines")
+}
+
+// ═══════════════════════════════════════════
+// PRINTED DOCUMENTS
+// ═══════════════════════════════════════════
+
+/// What appears on one kind of printed document.
+///
+/// Deliberately not a layout editor. The arrangement of an Indian tax invoice
+/// is fixed by what the law requires on it, so there is nothing useful to drag
+/// around. What genuinely varies between businesses is the wording and which
+/// optional blocks are shown, and that is all this holds.
+model DocumentTemplate {
+  id        String  @id @default(cuid())
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  /// INV, PO, DC, JW — matches the document numbering series.
+  docType   String
+  /// Printed as the heading, e.g. "TAX INVOICE" or "DELIVERY CHALLAN".
+  title     String
+
+  /// Long-form terms printed at the foot.
+  termsText   String?
+  /// The line an Indian invoice normally carries certifying the particulars.
+  declaration String?
+  /// A short line under everything else, such as jurisdiction.
+  footerNote  String?
+
+  showHsn           Boolean @default(true)
+  showAmountInWords Boolean @default(true)
+  showBankDetails   Boolean @default(true)
+  showSignature     Boolean @default(true)
+  /// Copy labels printed one per page, e.g. Original for Recipient.
+  copies            String[]
+
+  isActive  Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, docType])
+  @@map("document_templates")
 }

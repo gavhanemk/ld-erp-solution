@@ -96,6 +96,32 @@ export interface ActivityEntry {
   changed: string[]
 }
 
+export interface DocumentBranding {
+  logoUrl: string | null
+  signatureUrl: string | null
+  bankName: string | null
+  bankBranch: string | null
+  bankAccount: string | null
+  bankIFSC: string | null
+  upiId: string | null
+}
+
+export interface DocumentTemplate {
+  docType: string
+  label: string
+  title: string
+  termsText: string | null
+  declaration: string | null
+  footerNote: string | null
+  showHsn: boolean
+  showAmountInWords: boolean
+  showBankDetails: boolean
+  showSignature: boolean
+  copies: string[]
+  isActive: boolean
+  configured: boolean
+}
+
 export interface AiSettings {
   configured: boolean
   keyHint: string | null
@@ -187,6 +213,17 @@ export const settingsApi = {
   },
 
   system: () => api.get<Single<SystemStatus>>('/settings/system'),
+
+  documents: {
+    get: () =>
+      api.get<Single<{ branding: DocumentBranding; documents: DocumentTemplate[] }>>(
+        '/settings/documents',
+      ),
+    saveBranding: (patch: Record<string, unknown>) =>
+      api.patch<{ success: boolean; message: string }>('/settings/documents/branding', patch),
+    saveTemplate: (docType: string, patch: Record<string, unknown>) =>
+      api.patch<Single<DocumentTemplate>>(`/settings/documents/${docType}`, patch),
+  },
 
   ai: {
     get: () => api.get<Single<AiSettings>>('/settings/ai'),
