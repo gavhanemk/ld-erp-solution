@@ -190,7 +190,7 @@ export function PrintSheet({
         <table className="grid">
           <colgroup>
             <col style={{ width: '58%' }} />
-            <col />
+            <col style={{ width: '42%' }} />
           </colgroup>
           <tbody>
             <tr>
@@ -348,14 +348,19 @@ const PRINT_CSS = `
   font-family: "Helvetica Neue", Arial, sans-serif; font-size: 10.5px; line-height: 1.45;
   box-shadow: 0 2px 18px rgba(0,0,0,.35);
 }
-.sheet table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+/* Ordinary automatic layout. Fixed layout was tried and is not worth it here:
+   the sheet has to cope with a one-word supplier and a four-line address, and
+   letting the browser measure them is what produced a sane sheet in the first
+   place. The colgroup below is a hint, not a straitjacket. */
+.sheet table { border-collapse: collapse; width: 100%; }
 .sheet .grid > thead > tr > th,
 .sheet .grid > tbody > tr > td { border: 0.6px solid #000; padding: 4px 6px; vertical-align: top; }
 .sheet .grid > thead > tr > th {
   background: #eee; font-weight: 700; font-size: 9px; text-transform: uppercase; letter-spacing: .03em;
 }
-.sheet .num { text-align: right; font-variant-numeric: tabular-nums; }
-.sheet td, .sheet th { word-wrap: break-word; overflow-wrap: anywhere; }
+/* Figures never wrap; a total split across two lines is unreadable. */
+.sheet .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sheet .grid > thead > tr > th { white-space: nowrap; }
 
 .letterhead { display: flex; align-items: flex-start; gap: 10px; }
 .letterhead .logo { max-width: 80px; max-height: 58px; object-fit: contain; }
