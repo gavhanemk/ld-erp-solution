@@ -83,7 +83,9 @@ export function PurchaseOrderDialog({
   const [poDate, setPoDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [deliveryDate, setDeliveryDate] = useState('')
   const [warehouseId, setWarehouseId] = useState('')
-  const [discountAmount, setDiscountAmount] = useState('0')
+  // Empty rather than '0'. A zero sitting in the box is not a value anyone
+  // typed, and typing 5000 after it produces 05000.
+  const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
   const [terms, setTerms] = useState('')
   const [lines, setLines] = useState<PoLine[]>([emptyLine()])
@@ -97,7 +99,9 @@ export function PurchaseOrderDialog({
     setPoDate((record?.poDate ?? new Date().toISOString()).slice(0, 10))
     setDeliveryDate(record?.deliveryDate?.slice(0, 10) ?? '')
     setWarehouseId(record?.deliveryWarehouseId ?? '')
-    setDiscountAmount(String(record?.discountAmount ?? '0'))
+    // An order saved with no discount reopens with the box empty, not with a
+    // zero in it.
+    setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
     setNotes(record?.notes ?? '')
     setTerms(record?.terms ?? '')
     setLines(
@@ -533,6 +537,7 @@ export function PurchaseOrderDialog({
                   type="number"
                   step="0.01"
                   min={0}
+                  placeholder="0"
                   className="form-input h-8 w-32 text-right"
                   value={discountAmount}
                   onChange={(e) => setDiscountAmount(e.target.value)}
