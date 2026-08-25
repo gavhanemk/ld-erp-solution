@@ -537,7 +537,9 @@ export function PurchaseOrderDialog({
                   type="number"
                   step="0.01"
                   min={0}
-                  placeholder="0"
+                  /* No placeholder. A grey 0 sitting in the box reads exactly
+                     like a typed 0 and raised the same question the empty box
+                     was meant to answer. The label says what the box is for. */
                   className="form-input h-8 w-32 text-right"
                   value={discountAmount}
                   onChange={(e) => setDiscountAmount(e.target.value)}
