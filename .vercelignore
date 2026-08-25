@@ -1,0 +1,7 @@
+# Local scripts and notes that have no business on a build machine.
+# apps/api is deliberately NOT excluded: pnpm needs every workspace package
+# present for the install at the repo root to resolve.
+*.ps1
+*.bat
+PROJECT_STATUS.md
+tools
