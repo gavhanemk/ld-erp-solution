@@ -1,0 +1,62 @@
+# Render blueprint for the API.
+#
+# Only the server half lives here. The web app is on Vercel, and the database is
+# on Supabase. Render is used because the API is a long-running Express process
+# with Socket.io, which a serverless platform cannot host.
+#
+# Nothing secret is written in this file — it is committed to the repository.
+# Every value marked `sync: false` is typed into the Render dashboard once and
+# stored there.
+
+services:
+  - type: web
+    name: ld-erp-api
+    runtime: node
+    plan: free
+    # Closest region to Bhiwandi, so the mill is not talking to another continent.
+    region: singapore
+    branch: main
+
+    # Installed from the repository root: this is a pnpm workspace, and the API
+    # depends on the database package alongside it. The Prisma client has to be
+    # generated during the build, because it is machine-specific and is never
+    # committed.
+    buildCommand: >-
+      corepack enable &&
+      pnpm install --no-frozen-lockfile &&
+      pnpm --filter @ld-erp/database generate &&
+      pnpm --filter api build
+    startCommand: node apps/api/dist/apps/api/src/index.js
+
+    # Render calls this to decide whether the service came up. It also gives the
+    # free plan something to wake up against.
+    healthCheckPath: /health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Supabase, pooled connection for the running app.
+      - key: DATABASE_URL
+        sync: false
+      # Direct connection, port 5432 — pgbouncer cannot run migrations.
+      - key: DIRECT_URL
+        sync: false
+
+      # Sign-in tokens. Generate fresh ones for production rather than reusing
+      # what is on the development machine.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 15m
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 7d
+
+      # Which website is allowed to call this API. Anything else is refused.
+      - key: FRONTEND_URL
+        value: https://ld-erp.vercel.app
+
+      # The assistant's key is set inside the ERP itself, under
+      # Settings → Assistant, so it does not need to be here.
