@@ -103,8 +103,9 @@ export default function PrintPurchaseOrder() {
   const showDiscountColumn = order.lines.some((l) => Number(l.discount) > 0)
 
   const columns = [
-    { key: 'sr', label: '#', weight: 3, align: 'right' as const },
-    { key: 'desc', label: 'Description', weight: 30 },
+    // Wide enough for a two-digit line number now that the widths are binding.
+    { key: 'sr', label: '#', weight: 5, align: 'right' as const },
+    { key: 'desc', label: 'Description', weight: 28 },
     ...(template.showHsn ? [{ key: 'hsn', label: 'HSN', weight: 9 }] : []),
     { key: 'qty', label: 'Qty', weight: 10, align: 'right' as const },
     { key: 'uom', label: 'Unit', weight: 6 },

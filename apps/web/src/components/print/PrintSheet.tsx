@@ -305,9 +305,11 @@ export function PrintSheet({
           </tbody>
         </table>
 
+        {/* 58% matches the supplier box and the totals block, so the three
+            splits down the sheet fall on the same line. */}
         <table className="signblock" style={{ width: '100%' }}>
           <colgroup>
-            <col style={{ width: '60%' }} />
+            <col style={{ width: '58%' }} />
             <col />
           </colgroup>
           <tbody>
@@ -359,11 +361,11 @@ const PRINT_CSS = `
   font-family: "Helvetica Neue", Arial, sans-serif; font-size: 10.5px; line-height: 1.45;
   box-shadow: 0 2px 18px rgba(0,0,0,.35);
 }
-/* Ordinary automatic layout. Fixed layout was tried and is not worth it here:
-   the sheet has to cope with a one-word supplier and a four-line address, and
-   letting the browser measure them is what produced a sane sheet in the first
-   place. The colgroup below is a hint, not a straitjacket. */
+/* The outer boxes — supplier, totals, signature — keep automatic layout. They
+   hold a one-word supplier or a four-line address, and letting the browser
+   measure them is what produced a sane sheet in the first place. */
 .sheet table { border-collapse: collapse; width: 100%; }
+
 .sheet .grid > thead > tr > th,
 .sheet .grid > tbody > tr > td { border: 0.6px solid #000; padding: 4px 6px; vertical-align: top; }
 .sheet .grid > thead > tr > th {
@@ -372,6 +374,30 @@ const PRINT_CSS = `
 /* Figures never wrap; a total split across two lines is unreadable. */
 .sheet .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sheet .grid > thead > tr > th { white-space: nowrap; }
+
+/* ── the line grid ──────────────────────────────────────────────
+   The one table whose proportions are decided by us rather than by whatever
+   happens to be in it.
+
+   Under automatic layout a colgroup width is only a suggestion, and the
+   browser drops it the moment content wants more room — so the percentages
+   worked out in DocumentTable had no effect at all, and a long item name
+   simply took the width and squeezed every other column. Fixed layout makes
+   those percentages binding, which is the entire point of computing them.
+
+   Safe here in a way it was not on the supplier box: under fixed layout a
+   column's width no longer depends on how narrow its content can be squeezed,
+   which is what once collapsed a supplier name to a single letter.
+
+   These rules must stay AFTER the .grid rules above. They carry the same
+   weight as those rules, so they win on order alone — placed earlier, as they
+   first were, the nowrap heading rule beat them and the headings spilled
+   across their own borders. */
+.sheet .lines { table-layout: fixed; }
+.sheet .lines > tbody > tr > td { overflow-wrap: break-word; }
+/* A heading that cannot wrap spills into the next column rather than widening
+   its own, so headings here wrap like any other text. */
+.sheet .lines > thead > tr > th { white-space: normal; }
 
 .letterhead { display: flex; align-items: flex-start; gap: 10px; }
 .letterhead .logo { max-width: 80px; max-height: 58px; object-fit: contain; }
