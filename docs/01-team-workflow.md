@@ -6,6 +6,24 @@ Repository: `https://github.com/gavhanemk/ld-erp-solution` (private)
 
 ---
 
+## 0. Do this once on your machine
+
+```bash
+git config core.hooksPath .githooks
+```
+
+That switches on a check that refuses a push straight to `main` and tells you
+what to do instead.
+
+**Run it the day you clone.** GitHub cannot enforce this for us — branch
+protection is a paid feature on a private repository — so the guard lives on
+each machine. It only protects a machine where it has been turned on.
+
+The repository itself is set up to help: merges are squash-only, and the branch
+is deleted automatically after it merges.
+
+---
+
 ## 1. Branches
 
 There is one permanent branch.

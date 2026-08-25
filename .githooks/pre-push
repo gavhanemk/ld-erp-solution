@@ -1,0 +1,38 @@
+#!/bin/sh
+#
+# Refuses a direct push to main.
+#
+# GitHub cannot enforce this for us: branch protection and rulesets are both
+# paid features on a private repository. So the check runs here instead, on
+# each developer's machine, before anything leaves it.
+#
+# Turn it on once, per machine:
+#
+#     git config core.hooksPath .githooks
+#
+# Git hands this script one line per ref being pushed:
+#     <local ref> <local sha> <remote ref> <remote sha>
+
+protected="refs/heads/main"
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    if [ "$remote_ref" = "$protected" ]; then
+        echo ""
+        echo "  Refused: you are pushing straight to main."
+        echo ""
+        echo "  Every change goes through a pull request. Do this instead:"
+        echo ""
+        echo "      git checkout -b feat/your-thing"
+        echo "      git push -u origin feat/your-thing"
+        echo ""
+        echo "  Then open a pull request on GitHub and have someone approve it."
+        echo "  See docs/01-team-workflow.md"
+        echo ""
+        echo "  If you genuinely must push to main, and you have agreed it with"
+        echo "  the team, add --no-verify to the command."
+        echo ""
+        exit 1
+    fi
+done
+
+exit 0
