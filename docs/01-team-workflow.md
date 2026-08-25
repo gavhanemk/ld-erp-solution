@@ -6,21 +6,32 @@ Repository: `https://github.com/gavhanemk/ld-erp-solution` (private)
 
 ---
 
-## 0. Do this once on your machine
+## 0. The guard on main
+
+`pnpm install` switches on a check that refuses a push straight to `main` and
+tells you what to do instead. You do not have to do anything — it happens the
+first time you install.
+
+If you ever need to turn it on by hand:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-That switches on a check that refuses a push straight to `main` and tells you
-what to do instead.
+**Why it works this way.** GitHub will not enforce this for us. Branch
+protection is a paid feature on a private repository, so there is no way to
+block a bad push from the server side. The guard lives on each machine instead.
 
-**Run it the day you clone.** GitHub cannot enforce this for us — branch
-protection is a paid feature on a private repository — so the guard lives on
-each machine. It only protects a machine where it has been turned on.
+Which means it has limits, and you should know them:
 
-The repository itself is set up to help: merges are squash-only, and the branch
-is deleted automatically after it merges.
+- It protects only a machine where it has been switched on.
+- `git push --no-verify` walks straight past it.
+
+So it stops the accident, not the decision. Do not treat a successful push to
+`main` as permission — the rule still stands.
+
+The repository settings back it up as far as they can: merges are squash-only,
+and a branch is deleted automatically once it merges.
 
 ---
 

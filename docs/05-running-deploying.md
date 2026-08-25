@@ -20,11 +20,10 @@ How to start it, fix it when it will not start, and put it live.
 git clone https://github.com/gavhanemk/ld-erp-solution.git
 cd "ld-erp-solution"
 pnpm install
-git config core.hooksPath .githooks
 ```
 
-That last line switches on the check that stops an accidental push to `main`.
-Do not skip it — see [team workflow](01-team-workflow.md).
+`pnpm install` also switches on the check that stops an accidental push to
+`main`. See [team workflow](01-team-workflow.md).
 
 Then create the two environment files. **They are not in the repository and never
 will be.**
