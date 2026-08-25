@@ -558,6 +558,20 @@ export function PurchaseOrderDialog({
                   No GST — this supplier is not registered.
                 </p>
               )}
+              {/* Which way the tax falls is decided by the supplier's state, so
+                  until one is chosen there is no CGST/SGST or IGST row to show.
+                  The tax was still being added to the total, which left the
+                  taxable value and the total not adding up on screen with
+                  nothing to account for the difference. It is shown as one
+                  provisional line instead. */}
+              {taxMode === null && (
+                <>
+                  <Row label="GST" value={totals.tax} />
+                  <p className="text-xs text-muted-foreground py-1">
+                    Choose a supplier to see whether this splits into CGST + SGST or is IGST.
+                  </p>
+                </>
+              )}
               <Row label="Rounding" value={totals.roundOff} />
               <div className="flex items-center justify-between pt-2 border-t border-border">
                 <span className="font-semibold text-foreground">Total</span>
