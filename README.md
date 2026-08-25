@@ -17,6 +17,23 @@
 
 ---
 
+## 📕 Read this before you write any code
+
+Everyone working on this project follows the same rules. They are in
+**[docs/](docs/README.md)**.
+
+| | |
+|---|---|
+| [Team workflow](docs/01-team-workflow.md) | Branches, commits, pull requests. **Never push to `main`.** |
+| [Design rules](docs/02-design-rules.md) | Colours, fonts, spacing, the components to reuse. **Never invent a colour.** |
+| [Build rules](docs/03-build-rules.md) | Folder layout, naming, how to add a module. |
+| [Business rules](docs/04-business-rules.md) | Numbering, GST, stock, money. The things that must never break. |
+| [Running and deploying](docs/05-running-deploying.md) | Setup, daily start, fixes, going live, backups. |
+
+Current state of the work: [PROJECT_STATUS.md](PROJECT_STATUS.md)
+
+---
+
 ## 🏗 Project Structure
 
 ```
