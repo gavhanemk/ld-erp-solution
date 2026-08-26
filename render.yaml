@@ -21,11 +21,17 @@ services:
     # depends on the database package alongside it. The Prisma client has to be
     # generated during the build, because it is machine-specific and is never
     # committed.
+    # pnpm is run through npx rather than installed.
+    #
+    # `corepack enable` was the obvious way to get pnpm and it cannot work here:
+    # it writes a shim into /usr/bin, which is read-only on the build machine,
+    # and the build died on that first command with EROFS. `npm install -g`
+    # would land in the same place. npx puts pnpm in a writable cache instead
+    # and needs no privileges at all.
     buildCommand: >-
-      corepack enable &&
-      pnpm install --no-frozen-lockfile &&
-      pnpm --filter @ld-erp/database generate &&
-      pnpm --filter api build
+      npx --yes pnpm@9 install --no-frozen-lockfile &&
+      npx --yes pnpm@9 --filter @ld-erp/database generate &&
+      npx --yes pnpm@9 --filter api build
     startCommand: node apps/api/dist/apps/api/src/index.js
 
     # Render calls this to decide whether the service came up. It also gives the
@@ -33,6 +39,12 @@ services:
     healthCheckPath: /health
 
     envVars:
+      # Pinned, not left to "20 or newer" in package.json. Read that way the
+      # build machine chose Node 26, which is newer than anything Prisma 5 has
+      # been tested against. 22 is the current long-term release.
+      - key: NODE_VERSION
+        value: "22"
+
       - key: NODE_ENV
         value: production
 
