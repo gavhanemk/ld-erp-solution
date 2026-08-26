@@ -28,8 +28,16 @@ services:
     # and the build died on that first command with EROFS. `npm install -g`
     # would land in the same place. npx puts pnpm in a writable cache instead
     # and needs no privileges at all.
+    #
+    # NODE_ENV is forced to development for the install step only. The service
+    # sets NODE_ENV=production, which Render also applies while building, and
+    # pnpm reads it as an instruction to skip devDependencies — so the install
+    # finished in thirteen seconds and the next line died on "prisma: not
+    # found". prisma and typescript are build tools and belong in
+    # devDependencies; they simply have to be present while building. The
+    # server itself still starts under production.
     buildCommand: >-
-      npx --yes pnpm@9 install --no-frozen-lockfile &&
+      NODE_ENV=development npx --yes pnpm@9 install --no-frozen-lockfile &&
       npx --yes pnpm@9 --filter @ld-erp/database generate &&
       npx --yes pnpm@9 --filter api build
     startCommand: node apps/api/dist/apps/api/src/index.js
