@@ -29,6 +29,7 @@ import webhookRoutes from './routes/webhook.routes'
 import { errorHandler } from './middleware/errorHandler'
 import { authMiddleware } from './middleware/auth'
 import { logger } from './utils/logger'
+import { prisma } from '@ld-erp/database'
 
 const app = express()
 const httpServer = createServer(app)
@@ -96,10 +97,51 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.use(morgan('dev', { stream: { write: (m) => logger.http(m.trim()) } }))
 
 // Health
-app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'LD ERP Solution API', version: '1.0.0',
-  timestamp: new Date().toISOString(), uptime: `${Math.floor(process.uptime())}s`,
-}))
+/**
+ * Health check.
+ *
+ * This used to report only that the process was running, which let the host
+ * show the service as live while it could not reach the database — an API that
+ * answers every request with a 500 is not healthy, and the check said nothing
+ * about it.
+ *
+ * The database is reached for real, with a short timeout so a stalled
+ * connection cannot hold the request open. Only whether it answered is
+ * reported: the error itself goes to the log, because a connection error can
+ * carry the host and user from the connection string and this endpoint is
+ * public.
+ *
+ * It answers 200 even when the database is down, deliberately. A failing health
+ * check makes the host restart the service, and restarting does not repair a
+ * database that is unreachable — it just replaces a diagnosable service with a
+ * restart loop.
+ */
+app.get('/health', async (_, res) => {
+  const started = Date.now()
+  let database: 'ok' | 'unreachable' = 'ok'
+
+  try {
+    await Promise.race([
+      prisma.$queryRaw`SELECT 1`,
+      new Promise((_ok, reject) =>
+        setTimeout(() => reject(new Error('timed out after 5s')), 5000),
+      ),
+    ])
+  } catch (err) {
+    database = 'unreachable'
+    logger.error(`Health check — database unreachable: ${(err as Error).message}`)
+  }
+
+  res.json({
+    status: 'ok',
+    service: 'LD ERP Solution API',
+    version: '1.0.0',
+    database,
+    databaseCheckMs: Date.now() - started,
+    timestamp: new Date().toISOString(),
+    uptime: `${Math.floor(process.uptime())}s`,
+  })
+})
 
 // Public Routes
 app.use('/api/auth', authLimit, authRoutes)
