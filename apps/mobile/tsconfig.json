@@ -1,0 +1,26 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ld-erp/shared": ["../../packages/shared/src/index.ts"],
+
+      // The flat install hoists one @types/react to the workspace root, and
+      // that one is the web app's React 18. React Native needs 19, so without
+      // this a component's children are typed against one copy and the library
+      // it is passed to against the other, and they are not the same type.
+      // Pinning the mobile app to its own copy settles it here without
+      // disturbing the web app's.
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts",
+    "nativewind-env.d.ts"
+  ]
+}

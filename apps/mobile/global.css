@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════
+   LD ERP — the same theme as the web app
+   Values copied from apps/web/src/app/globals.css.
+   Change one, change both.
+   ═══════════════════════════════════════════ */
+
+@layer base {
+  :root {
+    /* Light. A mill office is bright, and this is what a phone in daylight
+       gets. A warm grey ground rather than white, so the screen is not glaring
+       over a long shift. */
+    --background: 220 16% 93%;
+    --foreground: 222 40% 18%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 40% 18%;
+
+    /* Teal darkened, because the bright one is unreadable on white. */
+    --primary: 173 75% 33%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 16% 96%;
+    --secondary-foreground: 222 40% 18%;
+
+    --muted: 220 14% 90%;
+    --muted-foreground: 215 16% 42%;
+
+    --accent: 38 88% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 47%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 14% 85%;
+    --input: 220 14% 88%;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --background: 222 47% 7%;
+      --foreground: 213 31% 91%;
+
+      --card: 222 47% 10%;
+      --card-foreground: 213 31% 91%;
+
+      --primary: 173 80% 40%;
+      --primary-foreground: 0 0% 100%;
+
+      --secondary: 217 33% 17%;
+      --secondary-foreground: 213 31% 91%;
+
+      --muted: 217 33% 15%;
+      --muted-foreground: 215 20% 55%;
+
+      --accent: 38 92% 50%;
+      --accent-foreground: 222 47% 7%;
+
+      --destructive: 0 84% 60%;
+      --destructive-foreground: 0 0% 100%;
+
+      --border: 217 33% 20%;
+      --input: 217 33% 18%;
+    }
+  }
+}
