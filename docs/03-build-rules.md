@@ -309,12 +309,18 @@ pnpm db:generate    # rebuild the Prisma client after changing the schema
 pnpm db:migrate     # create and apply a migration
 pnpm db:studio      # browse the data
 pnpm db:seed        # load starter data
+pnpm db:seed:demo   # WIPES the database, then loads demo masters
 ```
 
 Rules:
 
 - **Stop the API before `db:generate` on Windows.** The running server holds the
   Prisma engine file open and the command fails with a permission error.
+- **Nothing invented goes in `prisma/seed-core.ts`.** That file has to run
+  unchanged for the next company that buys this system, so it holds only what
+  any install needs — roles, permissions, units, tax rates, number series.
+  Made-up customers, suppliers and items live in `prisma/seed-demo.ts`, which
+  wipes first and is never run against a database in use.
 - **Never edit a migration that has already been applied.** Write a new one.
 - **Never `prisma db push` against the live database.** Migrations only.
 - **Tell the team before you touch the schema.** It is the one file everyone shares.
