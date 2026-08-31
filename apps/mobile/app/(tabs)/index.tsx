@@ -1,7 +1,7 @@
 import { RefreshControl, ScrollView, Text, View, useWindowDimensions } from 'react-native'
 import { useRouter } from 'expo-router'
 import {
-  TrendingUp, Package, Factory, ArrowDownLeft, ArrowUpRight, ChevronRight,
+  TrendingUp, Package, Factory, ArrowDownLeft, ArrowUpRight, ChevronRight, Sparkles,
 } from 'lucide-react-native'
 import { api } from '@/lib/api'
 import { useFetch } from '@/lib/useFetch'
@@ -9,7 +9,7 @@ import { useAuth } from '@/lib/auth'
 import { shortMoney, money } from '@/lib/format'
 import { Screen, Card, CardButton, Loading, WakingServer, ErrorNotice } from '@/components/ui'
 import { TrendChart, BarList, ProgressRow, SERIES, type TrendPoint, type BarRow } from '@/components/charts'
-import { Reveal, CountUp } from '@/components/motion'
+import { Reveal, CountUp, Tappable } from '@/components/motion'
 
 interface Summary {
   activeOrders: number
@@ -124,7 +124,7 @@ function SectionTitle({ children }: { children: string }) {
 }
 
 export default function HomeScreen() {
-  const { user } = useAuth()
+  const { user, can } = useAuth()
   const router = useRouter()
   const { width } = useWindowDimensions()
 
@@ -172,11 +172,33 @@ export default function HomeScreen() {
         }
         contentContainerClassName="pb-10"
       >
-        <View className="px-4 pt-2 pb-1">
-          <Text className="text-xs text-muted-foreground">{greeting()}</Text>
-          <Text className="text-2xl font-bold text-foreground">
-            {user?.name?.split(' ')[0] ?? 'there'}
-          </Text>
+        <View className="flex-row items-center justify-between px-4 pt-2 pb-1">
+          <View>
+            <Text className="text-xs text-muted-foreground">{greeting()}</Text>
+            <Text className="text-2xl font-bold text-foreground">
+              {user?.name?.split(' ')[0] ?? 'there'}
+            </Text>
+          </View>
+
+          {/* The assistant gave up its tab to production, so it needs to stay
+              one tap from the screen people open first. */}
+          {can('ai', 'view') ? (
+            <Tappable onPress={() => router.push('/ai')}>
+              <View
+                className="flex-row items-center gap-1.5 rounded-full px-3 py-2"
+                style={{
+                  backgroundColor: 'rgba(245,158,11,0.14)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(245,158,11,0.3)',
+                }}
+              >
+                <Sparkles size={14} color={SERIES[1]} />
+                <Text className="text-xs font-semibold" style={{ color: SERIES[1] }}>
+                  Ask AI
+                </Text>
+              </View>
+            </Tappable>
+          ) : null}
         </View>
 
         {error ? <ErrorNotice message={error} onRetry={reload} /> : null}

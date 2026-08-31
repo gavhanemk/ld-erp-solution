@@ -5,6 +5,7 @@ import {
 } from 'react-native'
 import { Send, Sparkles } from 'lucide-react-native'
 import { api, ApiError } from '@/lib/api'
+import { Stack } from 'expo-router'
 import { Screen, PageHeading, Input, ErrorNotice } from '@/components/ui'
 
 /**
@@ -70,6 +71,7 @@ export default function AskAI() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={90}
       >
+        <Stack.Screen options={{ headerShown: true, title: 'Ask AI', headerBackTitle: 'Back' }} />
         <PageHeading title="Ask AI" subtitle="Ask about your orders, stock or money" />
 
         <ScrollView

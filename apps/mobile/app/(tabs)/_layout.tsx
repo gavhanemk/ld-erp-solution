@@ -1,6 +1,6 @@
 import { useColorScheme } from 'react-native'
 import { Tabs } from 'expo-router'
-import { Home, CheckSquare, FileText, Sparkles, Menu } from 'lucide-react-native'
+import { Home, CheckSquare, FileText, Factory, Menu } from 'lucide-react-native'
 import { useAuth } from '@/lib/auth'
 
 /**
@@ -11,8 +11,11 @@ import { useAuth } from '@/lib/auth'
  * is tidiness, not security — the server checks every request again, so the
  * same rule holds even if a screen is reached another way.
  *
- * Five tabs is the ceiling. Beyond that the labels stop being readable on a
- * phone, which is why everything else lives behind More.
+ * Five is the ceiling: past that the labels stop being readable on a phone.
+ * Which five is a real decision, and these are the places work happens every
+ * day. The assistant is not among them — it is reached from the header on Home
+ * and from the top of More, because it is something you go to with a question
+ * rather than somewhere you work.
  */
 
 // The tab bar takes real colour values, not class names, so these are the two
@@ -67,11 +70,11 @@ export default function TabsLayout() {
       />
 
       <Tabs.Screen
-        name="ai"
+        name="production"
         options={{
-          title: 'Ask AI',
-          href: can('ai', 'view') ? '/ai' : null,
-          tabBarIcon: ({ color, size }) => <Sparkles size={size} color={color} />,
+          title: 'Production',
+          href: can('production', 'view') ? '/production' : null,
+          tabBarIcon: ({ color, size }) => <Factory size={size} color={color} />,
         }}
       />
 

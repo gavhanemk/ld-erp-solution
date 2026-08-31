@@ -1,11 +1,15 @@
-import { ScrollView, Text, View } from 'react-native'
+import { useState } from 'react'
+import { Alert, ScrollView, Text, View } from 'react-native'
 import { Stack, useLocalSearchParams } from 'expo-router'
-import { api, type Single } from '@/lib/api'
+import { Send, Ban } from 'lucide-react-native'
+import * as Haptics from 'expo-haptics'
+import { api, ApiError, type Single } from '@/lib/api'
 import { useFetch } from '@/lib/useFetch'
+import { useAuth } from '@/lib/auth'
 import { money, shortDate } from '@/lib/format'
 import {
-  Screen, Card, Row, Badge, Loading, WakingServer, ErrorNotice,
-  statusKind, prettyStatus,
+  Screen, Card, Row, Badge, Button, Loading, WakingServer, ErrorNotice,
+  SuccessNotice, statusKind, prettyStatus,
 } from '@/components/ui'
 
 /**
@@ -51,11 +55,69 @@ interface Order {
 
 export default function PurchaseOrderDetail() {
   const { id } = useLocalSearchParams<{ id: string }>()
+  const { can } = useAuth()
+  const [working, setWorking] = useState<string | null>(null)
+  const [done, setDone] = useState<string | null>(null)
 
   const { data, loading, waking, error, reload } = useFetch(
     () => api.get<Single<Order>>(`/purchase/orders/${id}`).then((r) => r.data),
     [id],
   )
+
+  /**
+   * Marking an order sent or cancelled, from wherever the phone happens to be.
+   *
+   * Both are one-way. Once a supplier is holding the paper the order cannot go
+   * back to draft, and a cancelled one stays cancelled with its number — so
+   * both ask first, which is not the case for approving, where the common
+   * answer is yes and a confirmation on every one would make clearing a queue
+   * twice the taps.
+   */
+  async function act(action: 'send' | 'cancel') {
+    setWorking(action)
+    setDone(null)
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${id}/${action}`,
+        action === 'cancel' ? { reason: 'Cancelled from the phone' } : {},
+      )
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      setDone(res.message ?? 'Saved.')
+      await reload()
+    } catch (err) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
+      Alert.alert(
+        'Could not save that',
+        err instanceof ApiError ? err.message : 'Try again in a moment.',
+      )
+    } finally {
+      setWorking(null)
+    }
+  }
+
+  function confirm(action: 'send' | 'cancel', poNumber: string) {
+    const copy = {
+      send: {
+        title: `Mark ${poNumber} as sent?`,
+        body: 'It cannot be edited afterwards — the supplier is holding the paper.',
+        ok: 'Mark as sent',
+        style: 'default' as const,
+      },
+      cancel: {
+        title: `Cancel ${poNumber}?`,
+        body: 'The order stays on record with its number. It cannot be reopened.',
+        ok: 'Cancel order',
+        style: 'destructive' as const,
+      },
+    }[action]
+
+    Alert.alert(copy.title, copy.body, [
+      { text: 'Go back', style: 'cancel' },
+      { text: copy.ok, style: copy.style, onPress: () => void act(action) },
+    ])
+  }
 
   const header = (
     <Stack.Screen
@@ -79,6 +141,33 @@ export default function PurchaseOrderDetail() {
     <Screen>
       {header}
       <ScrollView contentContainerClassName="gap-3 px-4 py-4 pb-8">
+        {done ? <SuccessNotice message={done} /> : null}
+
+        {/* Only a draft can be acted on, which is the server's rule, not a
+            guess made here — it refuses anything else and says why. Showing
+            buttons that are certain to be refused would be worse than showing
+            none. */}
+        {data.status === 'DRAFT' && can('purchase', 'edit') ? (
+          <View className="flex-row gap-3">
+            <Button
+              label="Mark as sent"
+              onPress={() => confirm('send', data.poNumber)}
+              busy={working === 'send'}
+              disabled={working !== null}
+              icon={<Send size={16} color="#fff" />}
+              className="flex-1"
+            />
+            <Button
+              label="Cancel"
+              kind="secondary"
+              onPress={() => confirm('cancel', data.poNumber)}
+              disabled={working !== null}
+              icon={<Ban size={16} color="#94a3b8" />}
+              className="flex-1"
+            />
+          </View>
+        ) : null}
+
         <Card>
           <View className="flex-row items-start justify-between gap-3">
             <View className="flex-1">
