@@ -1,0 +1,39 @@
+{
+  "cli": {
+    "version": ">= 5.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "//": [
+      "Three profiles, one for each way this app reaches a phone.",
+      "",
+      "'preview' is the one that matters day to day: it produces a single .apk",
+      "file that installs by tapping a link. That is how the mill gets the app —",
+      "no store, no review, a new version in everybody's hands in minutes.",
+      "",
+      "The default Android build is an .aab, which the Play Store accepts and a",
+      "phone cannot install, so buildType has to be said explicitly."
+    ],
+
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
+    },
+
+    "preview": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "ios": { "simulator": false },
+      "channel": "preview"
+    },
+
+    "production": {
+      "autoIncrement": true,
+      "channel": "production"
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}
