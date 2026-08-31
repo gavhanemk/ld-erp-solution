@@ -80,9 +80,9 @@ const navItems: NavItem[] = [
   {
     label: 'Inventory', icon: Warehouse,
     children: [
-      { label: 'Stock Summary', href: '/inventory/stock', planned: true },
-      { label: 'Material Requisitions', href: '/inventory/requisitions', planned: true },
-      { label: 'Stock Ledger', href: '/inventory/ledger', planned: true },
+      { label: 'Stock', href: '/inventory/stock' },
+      { label: 'Material Requisitions', href: '/inventory/requisitions' },
+      { label: 'Stock Ledger', href: '/inventory/ledger' },
     ],
   },
   {

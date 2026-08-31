@@ -148,16 +148,21 @@ export default function More() {
       entries: [
         {
           label: 'Stock balances',
-          hint: 'What is on hand, by warehouse',
-          icon: <Boxes size={18} color={grey} />,
-          state: 'soon',
+          hint: 'What is on hand, store by store',
+          icon: <Boxes size={18} color={teal} />,
+          state: 'read',
+          href: '/stock',
           needs: ['inventory', 'view'],
         },
         {
+          // Approving one already works from the Approvals tab. Raising and
+          // issuing stay on the web: handing material over is a counter with a
+          // keyboard on it, and getting a quantity wrong with a thumb is how a
+          // cutting room starts a lay it cannot finish.
           label: 'Material requisitions',
-          hint: 'What the floor has asked stores for',
+          hint: 'Approve here; raise and issue on the web',
           icon: <ClipboardList size={18} color={grey} />,
-          state: 'soon',
+          state: 'web',
           needs: ['inventory', 'view'],
         },
       ],

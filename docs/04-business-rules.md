@@ -171,7 +171,8 @@ same.
 
 ## 6. Stock
 
-Not built yet. These are the rules before anyone starts.
+Built. All of it is enforced in one file:
+[`apps/api/src/services/stock.service.ts`](../apps/api/src/services/stock.service.ts).
 
 1. **Stock is never negative.** If 100 metres are on hand, 120 cannot be issued.
    Refuse it and say what is available.
@@ -184,8 +185,34 @@ Not built yet. These are the rules before anyone starts.
 4. **Stock lives in a warehouse.** "In stock" without a warehouse means nothing.
 5. **Job work stock is still ours.** Fabric at a job worker is our stock at their
    location. It is not sold and it is not gone. `StockOwnership` exists for this.
-6. **Value it consistently.** Pick one method — weighted average — and never mix
-   methods within an item.
+   The reverse also holds: a customer's fabric in our godown is **not** ours, and
+   is left out of the stock value.
+6. **Value it consistently.** Weighted average, chosen once, for everything.
+
+### How it is held
+
+**One writer.** Nothing outside `stock.service.ts` may create a row in
+`stock_ledger`. If you find yourself wanting to, you want a document instead.
+
+**Every out-movement is locked.** Two people issuing 60 against 100 on hand
+would both read "100 available" and both pass the check. A Postgres advisory
+lock on the item and warehouse makes the second one wait, so the balance cannot
+land at −20.
+
+**Value is derived, never stored.** Quantity is what came in minus what went
+out; value is the same sum priced at each row's own rate. Stock leaves at the
+running average, which is what keeps the two in step — an item at zero quantity
+is also at zero value.
+
+**Three people, not one.** A requisition is raised by one person, approved by a
+second and issued by a third. The person who raised it cannot approve it, and
+both doors — the inventory screen and the approvals inbox — enforce that.
+
+### What still has to come
+
+Goods receipt is the missing inward document. Until it exists, stock arrives
+only through opening balances and counts, and a purchase order does not yet
+increase stock when the goods turn up.
 
 ---
 

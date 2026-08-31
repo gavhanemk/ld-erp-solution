@@ -1,5 +1,11 @@
 import { PrismaClient } from '@prisma/client'
 import { seedCore } from './seed-core'
+import { loadEnv } from './load-env'
+
+// Before anything reaches Prisma. A script run through tsx does not read .env
+// by itself, and which folder the command was typed in should not decide
+// whether it can find the database.
+loadEnv(__dirname)
 
 /**
  * A database full of believable make-believe, for showing the ERP to people.
@@ -994,6 +1000,95 @@ async function main() {
   }
 
   // ───────────────────────────────────────────────────────────────────────
+  // Opening stock
+  //
+  // Normally the only thing allowed to write a stock movement is
+  // stock.service.ts in the API. This is the one exception, and it is the
+  // trivial case: one OPENING row per item and store, against an empty ledger.
+  // There is no prior balance to go negative, nothing to average against, and
+  // the closing balance is the quantity itself — so none of the rules the
+  // service exists to enforce have anything to do here.
+  //
+  // Quantities are set as a multiple of each item's reorder level so the stock
+  // screen shows a believable spread: most items comfortable, a few sitting
+  // below their reorder mark, which is what a real godown looks like on any
+  // given Tuesday.
+  // ───────────────────────────────────────────────────────────────────────
+  const stores = new Map(
+    (await prisma.warehouse.findMany()).map((w) => [w.code, w.id] as const),
+  )
+
+  /** Which store an item naturally lives in. */
+  const storeFor = (cat: string): string => {
+    if (cat === 'Fabric') return stores.get('WH-FAB')!
+    if (cat === 'Finished Goods') return stores.get('WH-FG')!
+    return stores.get('WH-TRIM')!
+  }
+
+  // A fixed pattern rather than Math.random, so two people running the seed get
+  // the same demo and can talk about the same numbers.
+  const SPREAD = [2.4, 0.8, 3.1, 1.6, 0.45, 2.0, 1.2, 4.0, 0.7, 1.9, 2.7, 0.35]
+
+  await prisma.stockLedger.deleteMany()
+
+  const openingDate = new Date()
+  openingDate.setMonth(openingDate.getMonth() - 1, 1)
+
+  let stockRows = 0
+  for (const [i, it] of itemData.entries()) {
+    // Finished goods are made, not opened with — they arrive from production.
+    if (it.type === 'FINISHED_GOOD') continue
+
+    const base = it.reorder ?? 100
+    const qty = Math.round(base * SPREAD[i % SPREAD.length])
+    if (qty <= 0) continue
+
+    const warehouseId = storeFor(it.cat)
+
+    await prisma.stockLedger.create({
+      data: {
+        itemId: items.get(it.code)!,
+        warehouseId,
+        transactionType: 'OPENING',
+        referenceType: 'OPENING_STOCK',
+        referenceId: 'DEMO-OPENING',
+        ownership: 'OWNED',
+        inQty: qty,
+        outQty: 0,
+        closingStock: qty,
+        unitRate: it.rate,
+        transactionDate: openingDate,
+        notes: 'Opening stock',
+      },
+    })
+    stockRows += 1
+  }
+
+  // One line of somebody else's fabric, because job work is real at LD and a
+  // demo where every roll in the godown is ours would hide the distinction the
+  // ledger exists to make.
+  await prisma.stockLedger.create({
+    data: {
+      itemId: items.get('FAB-PC-001')!,
+      warehouseId: stores.get('WH-JW')!,
+      transactionType: 'OPENING',
+      referenceType: 'OPENING_STOCK',
+      referenceId: 'DEMO-OPENING',
+      ownership: 'CUSTOMER_OWNED',
+      ownerCustomerId: customers.get('CUS-011')!,
+      inQty: 1800,
+      outQty: 0,
+      closingStock: 1800,
+      // Not ours, so it carries no value to us. It is in our godown and on our
+      // insurance, but it is not on our balance sheet.
+      unitRate: 0,
+      transactionDate: openingDate,
+      notes: 'Fabric sent in by Vasant Apparel for job work',
+    },
+  })
+  stockRows += 1
+
+  // ───────────────────────────────────────────────────────────────────────
   const counts = {
     customers: await prisma.customer.count(),
     suppliers: await prisma.supplier.count(),
@@ -1011,6 +1106,7 @@ async function main() {
     departments: await prisma.department.count(),
     operations: await prisma.operation.count(),
     sizes: await prisma.size.count(),
+    openingStockLines: stockRows,
   }
 
   console.log('')
@@ -1019,8 +1115,8 @@ async function main() {
     console.log(`   ${String(v).padStart(4)}  ${k}`)
   }
   console.log('')
-  console.log('   No orders, invoices or stock — those come from the modules,')
-  console.log('   so the demo shows the masters and an empty set of books.')
+  console.log('   Masters and opening stock only. No orders or invoices —')
+  console.log('   those come from the modules as they are built.')
 }
 
 main()
