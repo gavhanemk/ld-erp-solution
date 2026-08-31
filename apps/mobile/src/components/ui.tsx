@@ -1,4 +1,4 @@
-import { ActivityIndicator, Pressable, Text, View, TextInput } from 'react-native'
+import { ActivityIndicator, Platform, Pressable, Text, View, TextInput } from 'react-native'
 import { SafeAreaView } from 'react-native-safe-area-context'
 import { AlertCircle, CheckCircle2, Inbox, Clock } from 'lucide-react-native'
 
@@ -31,6 +31,24 @@ export function PageHeading({ title, subtitle }: { title: string; subtitle?: str
   )
 }
 
+/**
+ * Lift, so a card reads as sitting on the page rather than drawn onto it.
+ *
+ * The two platforms do this differently and neither honours the other's
+ * properties, so both are given. Kept deliberately shallow — a heavy shadow on
+ * every card turns a dense screen into soup.
+ */
+export const RAISED = Platform.select({
+  ios: {
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  android: { elevation: 2 },
+  default: {},
+})
+
 export function Card({
   children,
   className = '',
@@ -39,7 +57,9 @@ export function Card({
   className?: string
 }) {
   return (
-    <View className={`bg-card border border-border rounded-xl p-4 ${className}`}>{children}</View>
+    <View style={RAISED} className={`bg-card border border-border rounded-xl p-4 ${className}`}>
+      {children}
+    </View>
   )
 }
 
@@ -56,6 +76,7 @@ export function CardButton({
   return (
     <Pressable
       onPress={onPress}
+      style={RAISED}
       className={`bg-card border border-border rounded-xl p-4 active:opacity-70 ${className}`}
     >
       {children}
