@@ -4,6 +4,7 @@ import Svg, {
   Path, Line, Circle, Rect, Defs, LinearGradient, Stop, G,
 } from 'react-native-svg'
 import { shortMoney } from '@/lib/format'
+import { useDrawInValue } from './motion'
 
 /**
  * The charts.
@@ -67,6 +68,15 @@ export function TrendChart({
 }) {
   const ink = useChartInk()
 
+  /**
+   * The lines grow up out of the baseline rather than appearing finished.
+   *
+   * The scale is worked out from the full figures and held still, so the chart
+   * does not rescale while it animates — only the marks move, which is what
+   * makes the growth readable instead of dizzying.
+   */
+  const t = useDrawInValue(120, 800)
+
   const geom = useMemo(() => {
     const padL = 40
     const padR = 14
@@ -80,7 +90,7 @@ export function TrendChart({
     const max = Math.max(1, ...values)
 
     const x = (i: number) => padL + (data.length <= 1 ? w / 2 : (i / (data.length - 1)) * w)
-    const y = (v: number) => padT + h - (v / max) * h
+    const y = (v: number) => padT + h - ((v * t) / max) * h
 
     const line = (key: 'revenue' | 'expenses') =>
       data.map((d, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(d[key])}`).join(' ')
@@ -91,7 +101,7 @@ export function TrendChart({
         : ''
 
     return { padL, padT, padB, w, h, max, x, y, line, area }
-  }, [data, width, height])
+  }, [data, width, height, t])
 
   if (!data.length || width <= 0) return null
 
@@ -221,11 +231,14 @@ export interface BarRow {
 export function BarList({ rows, width }: { rows: BarRow[]; width: number }) {
   const max = Math.max(1, ...rows.map((r) => r.value))
   const track = Math.max(0, width - 8)
+  // Bars run out from the baseline. One shared clock, so they move as a set
+  // rather than a queue of separate little animations.
+  const t = useDrawInValue(180, 700)
 
   return (
     <View className="gap-3">
       {rows.map((r) => {
-        const w = Math.max(r.value > 0 ? 6 : 0, (r.value / max) * track)
+        const w = Math.max(r.value > 0 ? 6 : 0, (r.value / max) * track) * t
         return (
           <View key={r.label}>
             <View className="mb-1 flex-row items-center justify-between">
@@ -270,6 +283,7 @@ export function ProgressRow({
 }) {
   const pct = target > 0 ? Math.min(1, achieved / target) : 0
   const track = Math.max(0, width - 8)
+  const t = useDrawInValue(180, 700)
   // Behind, close, met — the three states anyone actually acts on.
   const colour = target === 0 ? SERIES[0] : pct >= 1 ? SERIES[2] : pct >= 0.8 ? SERIES[1] : SERIES[3]
 
@@ -289,7 +303,14 @@ export function ProgressRow({
       </View>
       <Svg width={track} height={8}>
         <Rect x={0} y={0} width={track} height={8} rx={4} fill="#94a3b833" />
-        <Rect x={0} y={0} width={Math.max(pct > 0 ? 6 : 0, pct * track)} height={8} rx={4} fill={colour} />
+        <Rect
+          x={0}
+          y={0}
+          width={Math.max(pct > 0 ? 6 : 0, pct * track) * t}
+          height={8}
+          rx={4}
+          fill={colour}
+        />
       </Svg>
       {/* Said in words as well as colour, so the state does not depend on being
           able to tell amber from red. */}

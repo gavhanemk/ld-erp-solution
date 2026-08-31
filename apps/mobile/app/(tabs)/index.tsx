@@ -9,6 +9,7 @@ import { useAuth } from '@/lib/auth'
 import { shortMoney, money } from '@/lib/format'
 import { Screen, Card, CardButton, Loading, WakingServer, ErrorNotice } from '@/components/ui'
 import { TrendChart, BarList, ProgressRow, SERIES, type TrendPoint, type BarRow } from '@/components/charts'
+import { Reveal, CountUp } from '@/components/motion'
 
 interface Summary {
   activeOrders: number
@@ -60,13 +61,19 @@ function greeting(): string {
 function Tile({
   label,
   value,
+  count,
+  format,
   hint,
   icon,
   accent,
   onPress,
 }: {
   label: string
-  value: string
+  /** A finished string, when the figure is not worth counting up. */
+  value?: string
+  /** A number to count up to, with the way it should be written. */
+  count?: number
+  format?: (n: number) => string
   hint?: string
   icon: React.ReactNode
   accent?: string
@@ -81,12 +88,21 @@ function Tile({
         </View>
         {onPress ? <ChevronRight size={14} color="#64748b" /> : null}
       </View>
-      <Text
-        className="mt-2 text-2xl font-bold text-foreground"
-        style={accent ? { color: accent } : undefined}
-      >
-        {value}
-      </Text>
+      {count !== undefined && format ? (
+        <CountUp
+          value={count}
+          format={format}
+          className="mt-2 text-2xl font-bold text-foreground"
+          style={accent ? { color: accent } : undefined}
+        />
+      ) : (
+        <Text
+          className="mt-2 text-2xl font-bold text-foreground"
+          style={accent ? { color: accent } : undefined}
+        >
+          {value}
+        </Text>
+      )}
       {hint ? <Text className="mt-0.5 text-xs text-muted-foreground">{hint}</Text> : null}
     </>
   )
@@ -167,83 +183,97 @@ export default function HomeScreen() {
 
         {s ? (
           <View className="px-4">
-            <View className="mt-4 flex-row gap-3">
-              <Tile
-                label="Waiting for you"
-                value={String(s.pendingApprovals)}
-                hint={s.pendingApprovals === 1 ? 'item to approve' : 'items to approve'}
-                icon={<Package size={14} color={SERIES[1]} />}
-                accent={s.pendingApprovals > 0 ? SERIES[1] : undefined}
-                onPress={() => router.push('/approvals')}
-              />
-              <Tile
-                label="Active orders"
-                value={String(s.activeOrders)}
-                hint="in hand"
-                icon={<TrendingUp size={14} color={SERIES[0]} />}
-                onPress={() => router.push('/orders')}
-              />
-            </View>
+            {/* Each block arrives a beat after the one above it, so the screen
+                assembles in the order it is read rather than all at once. */}
+            <Reveal index={0}>
+              <View className="mt-4 flex-row gap-3">
+                <Tile
+                  label="Waiting for you"
+                  count={s.pendingApprovals}
+                  format={(n) => String(Math.round(n))}
+                  hint={s.pendingApprovals === 1 ? 'item to approve' : 'items to approve'}
+                  icon={<Package size={14} color={SERIES[1]} />}
+                  accent={s.pendingApprovals > 0 ? SERIES[1] : undefined}
+                  onPress={() => router.push('/approvals')}
+                />
+                <Tile
+                  label="Active orders"
+                  count={s.activeOrders}
+                  format={(n) => String(Math.round(n))}
+                  hint="in hand"
+                  icon={<TrendingUp size={14} color={SERIES[0]} />}
+                  onPress={() => router.push('/orders')}
+                />
+              </View>
+            </Reveal>
 
             {/* The headline figure, then the shape behind it. The number is
                 what gets read; the chart is what gives it meaning. */}
-            <SectionTitle>Money</SectionTitle>
-            <Card>
-              <Text className="text-xs text-muted-foreground">Invoiced this month</Text>
-              <Text className="mt-1 text-3xl font-bold text-foreground">
-                ₹{money(s.revenueMTD)}
-              </Text>
-              {trend.length > 1 ? (
-                <View className="mt-4">
-                  <TrendChart data={trend} width={chartWidth} />
-                </View>
-              ) : (
-                <Text className="mt-3 text-xs text-muted-foreground">
-                  Not enough history yet to draw a trend.
-                </Text>
-              )}
-            </Card>
+            <Reveal index={1}>
+              <SectionTitle>Money</SectionTitle>
+              <Card>
+                <Text className="text-xs text-muted-foreground">Invoiced this month</Text>
+                <CountUp
+                  value={s.revenueMTD}
+                  format={(n) => `₹${money(n)}`}
+                  className="mt-1 text-3xl font-bold text-foreground"
+                />
+                {trend.length > 1 ? (
+                  <View className="mt-4">
+                    <TrendChart data={trend} width={chartWidth} />
+                  </View>
+                ) : (
+                  <Text className="mt-3 text-xs text-muted-foreground">
+                    Not enough history yet to draw a trend.
+                  </Text>
+                )}
+              </Card>
+            </Reveal>
 
-            <View className="mt-3 flex-row gap-3">
-              <Tile
-                label="They owe us"
-                value={shortMoney(s.outstandingReceivable)}
-                icon={<ArrowDownLeft size={14} color={SERIES[2]} />}
-                onPress={() => router.push('/outstanding')}
-              />
-              <Tile
-                label="We owe them"
-                value={shortMoney(s.outstandingPayable)}
-                icon={<ArrowUpRight size={14} color={SERIES[3]} />}
-              />
-            </View>
-
-            <SectionTitle>Today on the floor</SectionTitle>
-            <Card>
-              <View className="mb-3 flex-row items-center gap-2">
-                <Factory size={14} color={SERIES[0]} />
-                <Text className="text-xs text-muted-foreground">Production</Text>
+            <Reveal index={2}>
+              <View className="mt-3 flex-row gap-3">
+                <Tile
+                  label="They owe us"
+                  value={shortMoney(s.outstandingReceivable)}
+                  icon={<ArrowDownLeft size={14} color={SERIES[2]} />}
+                  onPress={() => router.push('/outstanding')}
+                />
+                <Tile
+                  label="We owe them"
+                  value={shortMoney(s.outstandingPayable)}
+                  icon={<ArrowUpRight size={14} color={SERIES[3]} />}
+                />
               </View>
-              <ProgressRow
-                label="Pieces made"
-                achieved={s.todayProduction.achieved}
-                target={s.todayProduction.target}
-                width={chartWidth}
-              />
-              {s.todayProduction.rejection > 0 ? (
-                <Text className="mt-3 text-xs" style={{ color: SERIES[3] }}>
-                  {s.todayProduction.rejection.toLocaleString('en-IN')} rejected today
-                </Text>
-              ) : null}
-            </Card>
+            </Reveal>
+
+            <Reveal index={3}>
+              <SectionTitle>Today on the floor</SectionTitle>
+              <Card>
+                <View className="mb-3 flex-row items-center gap-2">
+                  <Factory size={14} color={SERIES[0]} />
+                  <Text className="text-xs text-muted-foreground">Production</Text>
+                </View>
+                <ProgressRow
+                  label="Pieces made"
+                  achieved={s.todayProduction.achieved}
+                  target={s.todayProduction.target}
+                  width={chartWidth}
+                />
+                {s.todayProduction.rejection > 0 ? (
+                  <Text className="mt-3 text-xs" style={{ color: SERIES[3] }}>
+                    {s.todayProduction.rejection.toLocaleString('en-IN')} rejected today
+                  </Text>
+                ) : null}
+              </Card>
+            </Reveal>
 
             {statusRows.length > 0 ? (
-              <>
+              <Reveal index={4}>
                 <SectionTitle>Sales orders</SectionTitle>
                 <Card>
                   <BarList rows={statusRows} width={chartWidth} />
                 </Card>
-              </>
+              </Reveal>
             ) : null}
           </View>
         ) : null}

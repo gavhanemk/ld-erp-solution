@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Alert, RefreshControl, ScrollView, Text, View } from 'react-native'
 import { Check, X, AlertTriangle } from 'lucide-react-native'
+import * as Haptics from 'expo-haptics'
+import { Reveal } from '@/components/motion'
 import { api, ApiError } from '@/lib/api'
 import { useFetch } from '@/lib/useFetch'
 import { useAuth } from '@/lib/auth'
@@ -59,12 +61,20 @@ export default function ApprovalsScreen() {
   async function act(item: Approval, decision: 'approve' | 'reject') {
     setWorking(item.id)
     setDone(null)
+
+    // A tap on glass gives nothing back. On a shop floor, with the phone half
+    // watched, the buzz is how you know the tap landed before the server has
+    // said anything.
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+
     try {
       await api.post(`/approvals/${item.type}/${item.id}/${decision}`,
         decision === 'reject' ? { reason: 'Rejected from the phone' } : {})
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
       setDone(`${item.number} ${decision === 'approve' ? 'approved' : 'rejected'}.`)
       await reload()
     } catch (err) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error)
       Alert.alert(
         'Could not save that',
         err instanceof ApiError ? err.message : 'Try again in a moment.',
@@ -112,12 +122,15 @@ export default function ApprovalsScreen() {
           }
           contentContainerClassName="gap-3 px-4 pb-8"
         >
-          {items.map((item) => {
+          {items.map((item, i) => {
             const allowed = can(moduleFor[item.type], 'approve')
             const busy = working === item.id
 
             return (
-              <Card key={`${item.type}-${item.id}`}>
+              // Capped so a long list still finishes arriving promptly — an
+              // approval queue of thirty should not take three seconds to draw.
+              <Reveal key={`${item.type}-${item.id}`} index={Math.min(i, 6)}>
+              <Card>
                 <View className="flex-row items-start justify-between gap-3">
                   <View className="flex-1">
                     <Text className="text-xs text-muted-foreground">{TYPE_LABEL[item.type]}</Text>
@@ -169,6 +182,7 @@ export default function ApprovalsScreen() {
                   </View>
                 )}
               </Card>
+              </Reveal>
             )
           })}
         </ScrollView>

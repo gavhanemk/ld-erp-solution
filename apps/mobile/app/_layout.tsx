@@ -1,24 +1,32 @@
 import '../global.css'
 
-import { useEffect } from 'react'
-import { View, ActivityIndicator } from 'react-native'
+import { useCallback, useEffect, useState } from 'react'
+import { View } from 'react-native'
 import { Stack, useRouter, useSegments } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { AuthProvider, useAuth } from '@/lib/auth'
+import { Welcome } from '@/components/Welcome'
+import { Aurora } from '@/components/Aurora'
 
 /**
  * The shell every screen sits inside.
  *
- * Its one job beyond providing the sign-in state is the guard below: a signed
- * out user cannot reach the app, and a signed in one is not left staring at the
- * sign-in screen.
+ * Two jobs beyond holding the sign-in state. The guard keeps a signed-out
+ * person out of the app and a signed-in one off the sign-in screen. And the
+ * opening moment: a cold start has to wait for the stored session to be read
+ * back, so rather than a blank screen or a spinner, that wait carries the
+ * mill's mark and a greeting.
  */
 
-function Guard({ children }: { children: React.ReactNode }) {
+function Shell() {
   const { user, restoring } = useAuth()
   const segments = useSegments()
   const router = useRouter()
+
+  // Shown once per launch, over whatever is behind it.
+  const [greeted, setGreeted] = useState(false)
+  const finishGreeting = useCallback(() => setGreeted(true), [])
 
   useEffect(() => {
     // Nothing is decided until the stored session has been read back, or the
@@ -31,30 +39,37 @@ function Guard({ children }: { children: React.ReactNode }) {
     else if (user && onLoginScreen) router.replace('/')
   }, [user, restoring, segments, router])
 
-  if (restoring) {
-    return (
-      <View className="flex-1 items-center justify-center bg-background">
-        <ActivityIndicator />
-      </View>
-    )
-  }
+  /**
+   * The greeting covers the restore, and stays a moment longer for someone who
+   * is signed in. A person who is signed out goes straight to the sign-in
+   * screen instead — being greeted by name and then asked who you are would be
+   * a strange way to open an app.
+   */
+  const showGreeting = !greeted && (restoring || Boolean(user))
 
-  return <>{children}</>
+  return (
+    <View className="flex-1 bg-background">
+      <StatusBar style={showGreeting ? 'light' : 'auto'} />
+
+      {/* While the session is being read there is nothing to show underneath,
+          so the colour stands in for it and the change is never visible. */}
+      {restoring ? <Aurora /> : null}
+
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="login" />
+        <Stack.Screen name="(tabs)" />
+      </Stack>
+
+      {showGreeting ? <Welcome name={user?.name} onDone={finishGreeting} /> : null}
+    </View>
+  )
 }
 
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AuthProvider>
-        {/* Follows the phone's own light or dark setting, like the web app
-            follows the browser's. */}
-        <StatusBar style="auto" />
-        <Guard>
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="login" />
-            <Stack.Screen name="(tabs)" />
-          </Stack>
-        </Guard>
+        <Shell />
       </AuthProvider>
     </GestureHandlerRootView>
   )
