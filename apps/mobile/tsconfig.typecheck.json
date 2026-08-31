@@ -1,0 +1,13 @@
+{
+  "//": "Type checking only. Never read by the bundler — and that is the point.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./src/*"],
+      "@ld-erp/shared": ["../../packages/shared/src/index.ts"],
+
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"]
+    }
+  }
+}

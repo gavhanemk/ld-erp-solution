@@ -3,23 +3,15 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@/*": [
-        "./src/*"
-      ],
-      "@ld-erp/shared": [
-        "../../packages/shared/src/index.ts"
-      ],
-      "react": [
-        "./node_modules/@types/react"
-      ],
-      "react/*": [
-        "./node_modules/@types/react/*"
-      ]
+      "@/*": ["./src/*"],
+      "@ld-erp/shared": ["../../packages/shared/src/index.ts"]
     }
   },
   "include": [
     "**/*.ts",
     "**/*.tsx",
+    ".expo/types/**/*.ts",
+    "expo-env.d.ts",
     "nativewind-env.d.ts"
   ]
 }
