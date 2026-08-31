@@ -1,3 +1,14 @@
+/**
+ * Asks the build service what happened to a phone app build.
+ *
+ * The eas CLI needs a real terminal and refuses to run with its output
+ * redirected, which makes it useless from a script. This asks the same API
+ * directly, using the session the CLI already stored.
+ *
+ *   node tools/check-build.js <build-id>
+ *
+ * Prints IN_PROGRESS, FINISHED with the APK link, or ERRORED with the reason.
+ */
 const fs=require('fs'),os=require('os'),path=require('path'),https=require('https')
 const st=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.expo','state.json'),'utf8'))
 const id=process.argv[2]
