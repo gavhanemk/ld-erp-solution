@@ -21,6 +21,7 @@
     "db:migrate": "pnpm --filter @ld-erp/database migrate",
     "db:studio": "pnpm --filter @ld-erp/database studio",
     "db:seed": "pnpm --filter @ld-erp/database seed",
+    "db:seed:demo": "pnpm --filter @ld-erp/database seed:demo",
     "format": "prettier --write .",
     "dev:mobile": "pnpm --filter mobile dev",
     "build:mobile": "pnpm --filter mobile type-check"

@@ -62,6 +62,24 @@ Sign in with `admin@ldcottonmills.com` / `Admin@123`.
 
 **Change that password before anyone real uses the system.**
 
+### The two seeds — know which one you are running
+
+| Command | What it does |
+|---|---|
+| `pnpm db:seed` | Company, roles, permissions, units, categories, tax rates, number series. Nothing invented. **Safe** — it only fills in what is missing. |
+| `pnpm db:seed:demo` | **Deletes every customer, supplier, item, order, invoice and stock entry**, then puts back a full set of made-up masters to show people. |
+
+`db:seed:demo` is for a laptop or a demo database. Never run it against a
+database anyone is working in — there is no undo.
+
+Everything it creates is obviously fake on inspection: the GSTINs all carry the
+PAN block `DEMOC`, which is not an issued series, and every email address is on
+`example.com`, a domain that by standard can never receive mail. So a demo
+record can never be mistaken for a real party, and can never collide with one.
+
+What survives the wipe: the company profile, your users and roles, tax rates,
+number series, the app settings (the AI key lives there) and the audit log.
+
 ---
 
 ## 3. Starting it every day
