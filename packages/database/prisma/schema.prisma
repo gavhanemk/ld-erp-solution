@@ -87,6 +87,12 @@ enum MOStatus {
   CLOSED
 }
 
+/// Why a quantity moved. This is the label a store keeper reads on the ledger,
+/// so each one has to mean exactly one thing. ISSUE and PRODUCTION are separate
+/// from ADJUSTMENT on purpose: material going out to the floor and finished
+/// pieces coming back are normal daily traffic, while an adjustment means the
+/// book was wrong and somebody corrected it. Folding them together would hide
+/// the one movement that always deserves a second look.
 enum TransactionType {
   PURCHASE
   SALE
@@ -94,6 +100,8 @@ enum TransactionType {
   ADJUSTMENT
   RETURN
   OPENING
+  ISSUE
+  PRODUCTION
 }
 
 enum VoucherType {
@@ -250,6 +258,9 @@ model User {
   createdPOs      PurchaseOrder[]      @relation("POCreatedBy")
   approvedPOs     PurchaseOrder[]      @relation("POApprovedBy")
   createdMOs      ManufacturingOrder[] @relation("MOCreatedBy")
+  raisedMRs       MaterialRequisition[] @relation("MRRaisedBy")
+  approvedMRs     MaterialRequisition[] @relation("MRApprovedBy")
+  issuedMRs       MaterialRequisition[] @relation("MRIssuedBy")
 
   @@index([email])
   @@index([roleId])
@@ -1146,6 +1157,11 @@ model StockLedger {
   @@map("stock_ledger")
 }
 
+/// A department asking the store for material. This is the document that takes
+/// stock out for production, so it carries three different people: who asked,
+/// who allowed it, and who actually handed it over. They are separate columns
+/// because docs/04-business-rules.md forbids the person who raised a document
+/// from approving it, and that rule cannot be enforced against a single name.
 model MaterialRequisition {
   id           String              @id @default(cuid())
   mrNumber     String              @unique
@@ -1156,14 +1172,25 @@ model MaterialRequisition {
   requestDate  DateTime            @default(now())
   requiredDate DateTime?
   status       ApprovalStatus      @default(PENDING)
-  approvedBy   String?
+  raisedById   String?
+  raisedBy     User?               @relation("MRRaisedBy", fields: [raisedById], references: [id])
+  approvedById String?
+  approvedBy   User?               @relation("MRApprovedBy", fields: [approvedById], references: [id])
   approvedAt   DateTime?
+  /// Set the moment stock actually moves. A requisition can be approved on
+  /// Monday and issued on Wednesday, and the stock date is Wednesday.
+  issuedById   String?
+  issuedBy     User?               @relation("MRIssuedBy", fields: [issuedById], references: [id])
+  issuedAt     DateTime?
+  /// Why it was refused. A rejection with no reason just gets raised again.
+  rejectionReason String?
   notes        String?
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
 
   lines MaterialRequisitionLine[]
 
+  @@index([status])
   @@map("material_requisitions")
 }
 

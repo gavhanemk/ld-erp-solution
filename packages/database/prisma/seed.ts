@@ -1,5 +1,11 @@
 import { PrismaClient } from '@prisma/client'
 import { seedCore } from './seed-core'
+import { loadEnv } from './load-env'
+
+// Before anything reaches Prisma. A script run through tsx does not read .env
+// by itself, and which folder the command was typed in should not decide
+// whether it can find the database.
+loadEnv(__dirname)
 
 /**
  * The seed a real install runs: company, roles, permissions, units, tax rates

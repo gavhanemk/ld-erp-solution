@@ -113,10 +113,19 @@ async function approve(type: DocumentType, id: string, userId: string) {
   if (before.status !== 'PENDING') {
     throw new AppError(`This requisition is already ${before.status.toLowerCase()}`, 409, 'ALREADY_DECIDED')
   }
+  // Same rule as the inventory screen enforces. Approving from the inbox is a
+  // different door into the same decision, and it cannot be the unlocked one.
+  if (before.raisedById && before.raisedById === userId) {
+    throw new AppError(
+      'You raised this requisition, so somebody else has to approve it.',
+      403,
+      'SELF_APPROVAL',
+    )
+  }
 
   const after = await prisma.materialRequisition.update({
     where: { id },
-    data: { status: 'APPROVED', approvedBy: userId, approvedAt: new Date() },
+    data: { status: 'APPROVED', approvedById: userId, approvedAt: new Date() },
   })
   return { entityType: 'MaterialRequisition', number: before.mrNumber, before, after }
 }
@@ -149,7 +158,9 @@ async function reject(type: DocumentType, id: string, reason: string) {
 
   const after = await prisma.materialRequisition.update({
     where: { id },
-    data: { status: 'REJECTED', notes: appendReason(before.notes, reason) },
+    // The reason now has a column of its own, so it can be shown as a reason
+    // rather than as a line appended to whatever the notes already said.
+    data: { status: 'REJECTED', rejectionReason: reason },
   })
   return { entityType: 'MaterialRequisition', number: before.mrNumber, before, after }
 }
