@@ -1,6 +1,7 @@
 import { prisma } from '@ld-erp/database'
 import { logger } from '../../utils/logger'
 import { onHand } from '../stock.service'
+import { isWriteTool, runWriteTool, writeToolsFor, type Proposal } from './writeTools'
 
 /**
  * What the assistant is allowed to look up.
@@ -204,12 +205,20 @@ export const ERP_TOOLS: ErpTool[] = [
   },
 ]
 
-/** Only the tools this person's permissions allow. Admin holds everything. */
+/**
+ * Only the tools this person's permissions allow. Admin holds everything.
+ *
+ * Reads and writes are gathered separately because they are gated differently:
+ * a read needs one permission, a write needs two. See writeToolsFor.
+ */
 export function toolsFor(role: string, permissions: string[]): ErpTool[] {
-  if (role === 'Admin') return ERP_TOOLS
-  const granted = new Set(permissions)
-  return ERP_TOOLS.filter((t) => !t.needs || granted.has(t.needs))
+  const reads =
+    role === 'Admin' ? ERP_TOOLS : ERP_TOOLS.filter((t) => !t.needs || permissions.includes(t.needs))
+  return [...reads, ...writeToolsFor(role, permissions)]
 }
+
+/** Just the reads, for counting what a role cannot reach. */
+export const READ_TOOLS = ERP_TOOLS
 
 // ── Formatting helpers ──────────────────────────────────────────────────────
 //
@@ -252,10 +261,19 @@ const everyWord = (field: 'name' | 'code', v: unknown) => {
 
 // ── Running a tool ──────────────────────────────────────────────────────────
 
-/** What the asking person is allowed to see, for tools that mix subjects. */
+/** Who is asking. Read tools use it to narrow; write tools use it to refuse. */
 export interface Caller {
+  userId: string
+  userName: string
   role: string
   permissions: string[]
+  ip: string | null
+  /** How many things this person has said. Write confirmations hang off it. */
+  turnCount: number
+  /** Told about a change that was described, so it can be recalled next turn. */
+  onProposal?: (proposal: Proposal) => void
+  /** Told when something was saved, so the waiting proposal can be cleared. */
+  onCommitted?: () => void
 }
 
 const can = (caller: Caller, needed: string) =>
@@ -266,6 +284,21 @@ export async function executeTool(
   args: Record<string, unknown>,
   caller: Caller,
 ): Promise<unknown> {
+  // Arguments are logged for the reads. For a write they are logged by
+  // runWriteTool only once it commits, so a preview nobody agreed to does not
+  // leave a line that reads as though something happened.
+  if (isWriteTool(name)) {
+    return runWriteTool(name, args, {
+      userId: caller.userId,
+      userName: caller.userName,
+      ip: caller.ip,
+      turnCount: caller.turnCount,
+      can: (permission) => can(caller, permission),
+      onProposal: caller.onProposal,
+      onCommitted: caller.onCommitted,
+    })
+  }
+
   logger.info(`AI tool: ${name} ${JSON.stringify(args)}`)
 
   switch (name) {

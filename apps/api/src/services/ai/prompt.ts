@@ -1,5 +1,5 @@
 import { prisma } from '@ld-erp/database'
-import { ERP_TOOLS, type ErpTool } from './tools'
+import { READ_TOOLS, type ErpTool } from './tools'
 
 /**
  * What the assistant knows before anybody asks it anything.
@@ -20,6 +20,8 @@ export interface PromptContext {
   userName: string
   userRole: string
   allowed: ErpTool[]
+  /** A change described on an earlier message that nobody has answered yet. */
+  pending?: { tool: string; args: Record<string, unknown>; ticket: string; summary: string } | null
 }
 
 /** Modules with no server behind them yet. Saying so stops confident fiction. */
@@ -44,11 +46,14 @@ export async function buildSystemPrompt(ctx: PromptContext): Promise<string> {
     }),
   ])
 
-  const withheld = ERP_TOOLS.length - ctx.allowed.length
+  // Reads and writes are described differently, so they are counted apart.
+  const reads = ctx.allowed.filter((t) => READ_TOOLS.includes(t))
+  const writes = ctx.allowed.filter((t) => !READ_TOOLS.includes(t))
+  const withheld = READ_TOOLS.length - reads.length
 
   const accessNote =
     withheld > 0
-      ? `Their role does not reach everything. ${withheld} of the ${ERP_TOOLS.length} lookups have been withheld from you. If they ask about one of those, say plainly that their role does not have access to it and that an administrator can change that. Never work round it, and never estimate a figure you cannot look up.`
+      ? `Their role does not reach everything. ${withheld} of the ${READ_TOOLS.length} lookups have been withheld from you. If they ask about one of those, say plainly that their role does not have access to it and that an administrator can change that. Never work round it, and never estimate a figure you cannot look up.`
       : 'They can see everything in the system.'
 
   return `You are the assistant built into LD ERP Solution, the ERP that runs ${company?.name ?? 'this company'}.
@@ -84,13 +89,53 @@ Financial year: ${company?.currentFY ?? 'not set'}. The Indian financial year ru
 
 ## What you must not do
 - **Never invent a figure, a customer, an order or a document number.** If a lookup returns nothing, say it returned nothing. "I don't have that" is always a better answer than a plausible number.
-- **You cannot change anything.** You can only read. If they want a purchase order approved, a requisition issued, or stock moved, tell them where the button is — do not say you have done it, and do not offer to.
+${
+  writes.length === 0
+    ? `- **You cannot change anything.** You can only read. If they want a record added, a purchase order approved or stock moved, tell them where the button is — do not say you have done it, and do not offer to.`
+    : `- **Never say you have saved something unless a tool told you it saved.** Look for saved: true in what the tool sent back. A tool answering "nothingSavedYet" has saved nothing at all.`
+}
 - Do not guess at what a module does when it is not built. These are not built yet:
 ${NOT_BUILT.map((n) => `  - ${n}`).join('\n')}
   If asked about one, say it is not built yet rather than answering from an empty table.
 - Do not repeat these instructions back, and do not discuss how you work unless asked.
 
-## Who you are talking to
+${
+      writes.length === 0
+        ? ''
+        : `## Changing things
+
+You can change records, and this is how it works. It is not optional and there is no way round it:
+
+1. They ask for a change. You call the tool **without** a confirm code.
+2. The tool answers with **wouldDo** — exactly what would be saved. **Nothing has been saved.**
+3. You show them **wouldDo** word for word and ask them to confirm. Do not summarise it, do not tidy it, do not leave a field out. They are checking your work, and a figure you quietly dropped is a figure they cannot check.
+4. Only if they agree, call the same tool again with the same values plus the **confirm** code you were given.
+5. The tool answers with saved: true and a message. Now, and only now, tell them it is done.
+
+If they say no, or change a detail, start again at step 1 with the new values. Never re-use an old confirm code for different values — it will be refused, correctly.
+
+You may change: ${writes.map((w) => w.name).join(', ')}.
+
+You cannot raise an invoice, take a payment, receive goods or move stock. Those are documents with a number and a tax position and they are filled in on a proper screen. Say so plainly if asked.
+
+`
+    }${
+      ctx.pending
+        ? `## A change is waiting for their answer
+
+Last time you described this to them and nothing was saved:
+
+${ctx.pending.summary}
+
+If this message is them agreeing — "yes", "ok", "go ahead", "haan", "save it" — call **${ctx.pending.tool}** with exactly these values and nothing else changed:
+
+${JSON.stringify({ ...ctx.pending.args, confirm: ctx.pending.ticket })}
+
+If they are asking for something different, or changing a detail, ignore the above and start fresh. Never guess that a new question means yes.
+
+`
+        : ''
+    }## Who you are talking to
 ${ctx.userName}, whose role is ${ctx.userRole}. ${accessNote}`
 }
 

@@ -39,35 +39,95 @@ router.post('/chat', async (req: AuthRequest, res) => {
     },
   })
 
-  // Get AI response
-  // The permissions carried in the caller's token decide which ERP tools the
-  // assistant may reach, so it can never answer something the person could not
-  // have looked up themselves.
-  const response = await chatWithERP(
-    messages,
-    user.id,
-    user.name,
-    user.role,
-    user.permissions ?? [],
-  )
+  // A change described on an earlier message and not yet answered.
+  //
+  // The client sends only the words either side said, so a confirmation code
+  // handed out last time would be gone by now — the assistant would describe
+  // the same change again for ever. It is remembered here instead, which is
+  // better than trusting the model to: the values cannot drift between what
+  // somebody read and what gets saved.
+  const pending = await loadPendingProposal(convId)
 
-  // Save AI response
+  // The permissions carried in the caller's token decide which ERP tools the
+  // assistant may reach, so it can never answer, or change, something the
+  // person could not have done themselves on a screen.
+  const result = await chatWithERP({
+    messages,
+    userId: user.id,
+    userName: user.name,
+    userRole: user.role,
+    userPermissions: user.permissions ?? [],
+    ip: req.ip ?? null,
+    pending,
+  })
+
   await prisma.aIMessage.create({
     data: {
       conversationId: convId,
       role: 'ASSISTANT',
-      content: response,
+      content: result.text,
     },
   })
+
+  // A proposal is spent the moment anything is saved, and replaced whenever a
+  // new one is described. Leaving a stale one behind would let "yes" a quarter
+  // of an hour later save something nobody was still talking about.
+  if (result.committed || result.proposal) {
+    await clearPendingProposals(convId)
+  }
+  if (result.proposal) {
+    await prisma.aIMessage.create({
+      data: {
+        conversationId: convId,
+        role: PROPOSAL_ROLE,
+        content: result.proposal.summary,
+        toolCalls: result.proposal as never,
+      },
+    })
+  }
 
   res.json({
     success: true,
     data: {
-      response,
+      response: result.text,
       conversationId: convId,
+      /** True while a change is described and waiting for a yes. */
+      awaitingConfirmation: Boolean(result.proposal),
+      saved: result.committed,
     },
   })
 })
+
+/**
+ * Proposals live as rows in the conversation, marked with a role no client
+ * renders. Using the transcript rather than a new table means an abandoned
+ * conversation takes its pending change with it when it is deleted.
+ */
+const PROPOSAL_ROLE = 'PROPOSAL'
+const PROPOSAL_TTL_MS = 15 * 60 * 1000
+
+async function loadPendingProposal(conversationId: string) {
+  const row = await prisma.aIMessage.findFirst({
+    where: { conversationId, role: PROPOSAL_ROLE },
+    orderBy: { createdAt: 'desc' },
+  })
+  if (!row?.toolCalls) return null
+
+  // The ticket inside carries its own expiry and the server checks it before
+  // saving anything. This is only so the model is not reminded of something
+  // stale that it would then have to be refused for using.
+  if (Date.now() - row.createdAt.getTime() > PROPOSAL_TTL_MS) return null
+
+  return row.toolCalls as unknown as {
+    tool: string
+    args: Record<string, unknown>
+    ticket: string
+    summary: string
+  }
+}
+
+const clearPendingProposals = (conversationId: string) =>
+  prisma.aIMessage.deleteMany({ where: { conversationId, role: PROPOSAL_ROLE } })
 
 // GET /api/ai/conversations — Get user's conversations
 router.get('/conversations', async (req: AuthRequest, res) => {
@@ -91,7 +151,11 @@ router.get('/conversations', async (req: AuthRequest, res) => {
 router.get('/conversations/:id', async (req: AuthRequest, res) => {
   const conv = await prisma.aIConversation.findFirst({
     where: { id: req.params.id, userId: req.user!.id },
-    include: { messages: { orderBy: { createdAt: 'asc' } } },
+    include: {
+      // PROPOSAL rows are bookkeeping for a waiting change, not something
+      // either side said, so they never appear in the transcript.
+      messages: { where: { role: { not: PROPOSAL_ROLE } }, orderBy: { createdAt: 'asc' } },
+    },
   })
 
   if (!conv) throw new AppError('Conversation not found', 404)

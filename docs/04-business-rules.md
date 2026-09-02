@@ -296,20 +296,44 @@ It is given a short list of things it may **look up**, and it looks them up in
 the live database each time it is asked. That distinction decides everything
 about how it behaves.
 
-Three rules, all held in
-[`apps/api/src/services/ai/tools.ts`](../apps/api/src/services/ai/tools.ts):
+Two sets of tools, and they follow different rules.
+[`ai/tools.ts`](../apps/api/src/services/ai/tools.ts) answers questions.
+[`ai/writeTools.ts`](../apps/api/src/services/ai/writeTools.ts) changes records.
 
-1. **It can only read.** There is no tool that writes. It can tell you a
-   purchase order is waiting; approving it is a button a person presses, with
-   their name against it. An assistant that could approve things would make the
-   audit trail a work of fiction.
-2. **It never sees more than the person asking.** Each tool names the permission
+**Reading:**
+
+1. **It never sees more than the person asking.** Each tool names the permission
    it needs, and a tool that mixes subjects narrows its own answer field by
    field. A store keeper asking what customers owe is refused, in the same words
    the Accounts screen would use.
-3. **There is no tool for a module that is not built.** A tool over an empty
+2. **There is no tool for a module that is not built.** A tool over an empty
    table would teach it to say "nothing to report" about a feature nobody has
    written.
+
+**Changing:**
+
+3. **Two permissions, not one.** The module permission the same act would need
+   on a screen — `masters:create` to add a supplier — *and* a chat switch:
+   `ai:create` to change records, `ai:approve` to decide documents. So a role
+   can be allowed to add suppliers at a desk and not from a corridor. Both are
+   ticked per role in Settings → Roles. **No role has `ai:create` out of the
+   box.** Somebody has to decide to give it.
+4. **Nothing happens on the first ask.** Every change is described in full,
+   saved nowhere, and waits. It writes only when the person says yes and the
+   signed ticket comes back. The ticket is bound to the exact values, to the
+   person, and to the message it was issued on — so the assistant cannot propose
+   and confirm in the same breath, and the values cannot drift between what
+   somebody read and what gets written.
+5. **The same rules as the screens.** The same Zod schemas the web forms post
+   through, the same document numbering, the same refusals. There is no second,
+   laxer way into the database.
+6. **The audit row names the person who confirmed it**, never the assistant, and
+   records that it came through the chat.
+7. **Nothing that moves money or stock.** No invoices, no payments, no goods
+   receipts, no stock issues. Those carry a document number, a tax position and
+   a legal life, and they are worth the two minutes it takes to fill the form
+   in. Raising a requisition and approving a document are allowed, because
+   approving from a corridor is the whole reason an MD wanted this.
 
 To make it better at something, add a tool or add to the background in
 [`ai/prompt.ts`](../apps/api/src/services/ai/prompt.ts). Do not paste data into

@@ -330,6 +330,23 @@ const ACTION_LABELS: Record<string, string> = {
   export: 'Export',
 }
 
+/**
+ * Some tick boxes do not mean what their column heading says.
+ *
+ * "Add" under AI assistant does not mean adding assistants — it means this role
+ * may change records by asking the assistant to. Six identical column headings
+ * across thirteen rows is efficient to build and easy to misread, and a wrongly
+ * ticked box here hands somebody the ability to edit master data from a chat.
+ */
+const ACTION_LABEL_OVERRIDES: Record<string, string> = {
+  'ai:create': 'May change records',
+  'ai:edit': 'May change records',
+  'ai:delete': 'May change records',
+  'ai:approve': 'May approve documents',
+  'ai:view': 'May use the assistant',
+  'ai:export': 'May export answers',
+}
+
 router.get('/permissions', requirePermission(ADMIN, 'view'), async (_req, res) => {
   const permissions = await prisma.permission.findMany({ orderBy: [{ module: 'asc' }, { action: 'asc' }] })
 
@@ -340,7 +357,12 @@ router.get('/permissions', requirePermission(ADMIN, 'view'), async (_req, res) =
       label: MODULE_LABELS[p.module] ?? p.module,
       actions: [],
     }
-    entry.actions.push({ action: p.action, label: ACTION_LABELS[p.action] ?? p.action, key: `${p.module}:${p.action}` })
+    const key = `${p.module}:${p.action}`
+    entry.actions.push({
+      action: p.action,
+      label: ACTION_LABEL_OVERRIDES[key] ?? ACTION_LABELS[p.action] ?? p.action,
+      key,
+    })
     modules.set(p.module, entry)
   }
 

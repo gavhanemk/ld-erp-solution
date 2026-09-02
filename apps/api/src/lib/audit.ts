@@ -9,30 +9,44 @@ import type { AuthRequest } from '../middleware/auth'
  * logged and swallowed rather than thrown — a lost audit row is bad, a failed
  * customer update because of a lost audit row is worse.
  */
-export async function writeAuditLog(
-  req: AuthRequest,
-  entry: {
-    module: string
-    action: 'CREATE' | 'UPDATE' | 'DELETE' | 'APPROVE' | 'REJECT' | 'EXPORT'
-    entityType: string
-    entityId: string
-    before?: unknown
-    after?: unknown
-  },
-): Promise<void> {
-  if (!req.user) return
+export interface AuditEntry {
+  module: string
+  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'APPROVE' | 'REJECT' | 'EXPORT'
+  entityType: string
+  entityId: string
+  before?: unknown
+  after?: unknown
+}
 
+export async function writeAuditLog(req: AuthRequest, entry: AuditEntry): Promise<void> {
+  if (!req.user) return
+  await recordAudit(req.user.id, req.ip ?? null, entry)
+}
+
+/**
+ * The same row, for code that has a person but not a request.
+ *
+ * The assistant writes through here. The user id on the row is the person who
+ * confirmed the change, never the assistant — because that is who decided it.
+ * What the assistant adds is a note in `after` saying the change came through
+ * the chat, so a trail somebody reads next year says how as well as what.
+ */
+export async function recordAudit(
+  userId: string,
+  ipAddress: string | null,
+  entry: AuditEntry,
+): Promise<void> {
   try {
     await prisma.auditLog.create({
       data: {
-        userId: req.user.id,
+        userId,
         module: entry.module,
         action: entry.action,
         entityType: entry.entityType,
         entityId: entry.entityId,
         before: toJson(entry.before),
         after: toJson(entry.after),
-        ipAddress: req.ip ?? null,
+        ipAddress,
       },
     })
   } catch (err) {

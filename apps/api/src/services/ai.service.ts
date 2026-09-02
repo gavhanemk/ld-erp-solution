@@ -2,7 +2,8 @@ import { DEFAULT_MODEL, getAiConfig, type AiProvider } from '../lib/aiConfig'
 import { AppError } from '../middleware/errorHandler'
 import { buildSystemPrompt, misPrompt } from './ai/prompt'
 import { runConversation, type Turn } from './ai/providers'
-import { ERP_TOOLS, toolsFor } from './ai/tools'
+import type { Proposal } from './ai/writeTools'
+import { READ_TOOLS, toolsFor } from './ai/tools'
 
 /**
  * The assistant.
@@ -45,22 +46,48 @@ async function ready() {
   }
 }
 
-export async function chatWithERP(
-  messages: Turn[],
-  _userId: string,
-  userName: string,
-  userRole: string,
-  userPermissions: string[] = [],
-): Promise<string> {
+export interface ChatRequest {
+  messages: Turn[]
+  userId: string
+  userName: string
+  userRole: string
+  userPermissions?: string[]
+  ip?: string | null
+  /** A change described earlier that is still waiting on this person's answer. */
+  pending?: Proposal | null
+}
+
+export interface ChatResult {
+  text: string
+  /** A change described this time, for the caller to remember. */
+  proposal: Proposal | null
+  /** True when something was actually saved, so any waiting proposal is spent. */
+  committed: boolean
+}
+
+export async function chatWithERP(req: ChatRequest): Promise<ChatResult> {
+  const {
+    messages,
+    userId,
+    userName,
+    userRole,
+    userPermissions = [],
+    ip = null,
+    pending = null,
+  } = req
+
   if (messages.length === 0) {
     throw new AppError('There is nothing to answer.', 400, 'NO_MESSAGE')
   }
 
   const { provider, apiKey, model } = await ready()
   const tools = toolsFor(userRole, userPermissions)
-  const systemPrompt = await buildSystemPrompt({ userName, userRole, allowed: tools })
+  const systemPrompt = await buildSystemPrompt({ userName, userRole, allowed: tools, pending })
 
-  return runConversation(
+  let proposal: Proposal | null = null
+  let committed = false
+
+  const text = await runConversation(
     {
       provider,
       apiKey,
@@ -68,10 +95,28 @@ export async function chatWithERP(
       systemPrompt,
       tools,
       turns: messages,
-      caller: { role: userRole, permissions: userPermissions },
+      caller: {
+        userId,
+        userName,
+        role: userRole,
+        permissions: userPermissions,
+        ip,
+        // Counting what the person has said, not what the assistant replied. A
+        // write confirmation is only valid on a later message than the one that
+        // proposed it, and this is the number that proves it.
+        turnCount: messages.filter((m) => m.role === 'user').length,
+        onProposal: (p) => {
+          proposal = p
+        },
+        onCommitted: () => {
+          committed = true
+        },
+      },
     },
     userName,
   )
+
+  return { text, proposal, committed }
 }
 
 /**
@@ -85,7 +130,7 @@ export async function generateDailyMISReport(date: Date = new Date()): Promise<s
   const systemPrompt = await buildSystemPrompt({
     userName: 'the owner',
     userRole: 'Admin',
-    allowed: ERP_TOOLS,
+    allowed: READ_TOOLS,
   })
 
   return runConversation(
@@ -94,9 +139,18 @@ export async function generateDailyMISReport(date: Date = new Date()): Promise<s
       apiKey,
       model,
       systemPrompt,
-      tools: ERP_TOOLS,
+      // The summary runs on a schedule with nobody there to confirm anything,
+      // so it gets the lookups and none of the writes.
+      tools: READ_TOOLS,
       turns: [{ role: 'user', content: misPrompt(date) }],
-      caller: { role: 'Admin', permissions: [] },
+      caller: {
+        userId: 'system',
+        userName: 'the owner',
+        role: 'Admin',
+        permissions: [],
+        ip: null,
+        turnCount: 1,
+      },
     },
     'the owner',
   )
@@ -118,7 +172,14 @@ export async function testAssistant(): Promise<{ ok: true; provider: AiProvider;
       systemPrompt: 'Reply with the single word: ready',
       tools: [],
       turns: [{ role: 'user', content: 'Are you there?' }],
-      caller: { role: 'Admin', permissions: [] },
+      caller: {
+        userId: 'system',
+        userName: 'the system',
+        role: 'Admin',
+        permissions: [],
+        ip: null,
+        turnCount: 1,
+      },
     },
     'the system',
   )
