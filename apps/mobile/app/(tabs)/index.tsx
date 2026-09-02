@@ -15,9 +15,15 @@ interface Summary {
   activeOrders: number
   todayProduction: { achieved: number; target: number; efficiency: number; rejection: number }
   pendingApprovals: number
-  revenueMTD: number
-  outstandingReceivable: number
-  outstandingPayable: number
+  /**
+   * Null when this role has no accounts access. The server withholds these
+   * rather than sending a zero, so the blocks below are left out entirely — a
+   * zero would read as "nobody owes us anything", which is a different
+   * statement, and a wrong one.
+   */
+  revenueMTD: number | null
+  outstandingReceivable: number | null
+  outstandingPayable: number | null
 }
 
 interface StatusRow {
@@ -230,43 +236,50 @@ export default function HomeScreen() {
             </Reveal>
 
             {/* The headline figure, then the shape behind it. The number is
-                what gets read; the chart is what gives it meaning. */}
-            <Reveal index={1}>
-              <SectionTitle>Money</SectionTitle>
-              <Card>
-                <Text className="text-xs text-muted-foreground">Invoiced this month</Text>
-                <CountUp
-                  value={s.revenueMTD}
-                  format={(n) => `₹${money(n)}`}
-                  className="mt-1 text-3xl font-bold text-foreground"
-                />
-                {trend.length > 1 ? (
-                  <View className="mt-4">
-                    <TrendChart data={trend} width={chartWidth} />
-                  </View>
-                ) : (
-                  <Text className="mt-3 text-xs text-muted-foreground">
-                    Not enough history yet to draw a trend.
-                  </Text>
-                )}
-              </Card>
-            </Reveal>
+                what gets read; the chart is what gives it meaning.
 
-            <Reveal index={2}>
-              <View className="mt-3 flex-row gap-3">
-                <Tile
-                  label="They owe us"
-                  value={shortMoney(s.outstandingReceivable)}
-                  icon={<ArrowDownLeft size={14} color={SERIES[2]} />}
-                  onPress={() => router.push('/outstanding')}
-                />
-                <Tile
-                  label="We owe them"
-                  value={shortMoney(s.outstandingPayable)}
-                  icon={<ArrowUpRight size={14} color={SERIES[3]} />}
-                />
-              </View>
-            </Reveal>
+                Withheld entirely from a role with no accounts access — the
+                store keeper's home screen simply has no money on it. */}
+            {s.revenueMTD !== null && (
+              <Reveal index={1}>
+                <SectionTitle>Money</SectionTitle>
+                <Card>
+                  <Text className="text-xs text-muted-foreground">Invoiced this month</Text>
+                  <CountUp
+                    value={s.revenueMTD}
+                    format={(n) => `₹${money(n)}`}
+                    className="mt-1 text-3xl font-bold text-foreground"
+                  />
+                  {trend.length > 1 ? (
+                    <View className="mt-4">
+                      <TrendChart data={trend} width={chartWidth} />
+                    </View>
+                  ) : (
+                    <Text className="mt-3 text-xs text-muted-foreground">
+                      Not enough history yet to draw a trend.
+                    </Text>
+                  )}
+                </Card>
+              </Reveal>
+            )}
+
+            {s.outstandingReceivable !== null && (
+              <Reveal index={2}>
+                <View className="mt-3 flex-row gap-3">
+                  <Tile
+                    label="They owe us"
+                    value={shortMoney(s.outstandingReceivable)}
+                    icon={<ArrowDownLeft size={14} color={SERIES[2]} />}
+                    onPress={() => router.push('/outstanding')}
+                  />
+                  <Tile
+                    label="We owe them"
+                    value={shortMoney(s.outstandingPayable ?? 0)}
+                    icon={<ArrowUpRight size={14} color={SERIES[3]} />}
+                  />
+                </View>
+              </Reveal>
+            )}
 
             <Reveal index={3}>
               <SectionTitle>Today on the floor</SectionTitle>

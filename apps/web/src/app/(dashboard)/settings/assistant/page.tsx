@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Loader2, ShieldCheck, ExternalLink, Zap, CheckCircle2, XCircle } from 'lucide-react'
 import { ApiError } from '@/lib/api'
-import { settingsApi, type AiSettings } from '@/lib/settingsApi'
+import { settingsApi, type AiProvider, type AiSettings } from '@/lib/settingsApi'
 import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
 
 /**
@@ -21,6 +21,7 @@ export default function AssistantSettingsPage() {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
+  const [provider, setProvider] = useState<AiProvider>('openai')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
   const [enabled, setEnabled] = useState(true)
@@ -36,6 +37,7 @@ export default function AssistantSettingsPage() {
     try {
       const res = await settingsApi.ai.get()
       setSettings(res.data)
+      setProvider(res.data.provider)
       setModel(res.data.model)
       setEnabled(res.data.enabled)
       setDailySummary(res.data.dailySummary)
@@ -66,6 +68,7 @@ export default function AssistantSettingsPage() {
 
     try {
       const res = await settingsApi.ai.update({
+        provider,
         ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
         model,
         enabled,
@@ -88,7 +91,7 @@ export default function AssistantSettingsPage() {
     setTesting(true)
     setTestResult(null)
     try {
-      const res = await settingsApi.ai.test(apiKey.trim() || undefined)
+      const res = await settingsApi.ai.test()
       setTestResult({ ok: res.success, text: res.message })
     } catch (err) {
       setTestResult({
@@ -128,9 +131,50 @@ export default function AssistantSettingsPage() {
 
       <SettingsCard
         title="Connection"
-        description="The assistant runs on Google Gemini. It needs a key from your own Google account, so the usage and the bill are yours."
+        description="The assistant needs a key from your own account with whichever company you choose. The usage and the bill are yours, and nothing goes anywhere else."
       >
         <div className="space-y-5">
+          {/* Two providers, and the choice is real: a key that stops working,
+              a price change, or a model that starts refusing should never mean
+              waiting for a developer. */}
+          <div className="grid grid-cols-2 gap-3">
+            {(['openai', 'gemini'] as AiProvider[]).map((p) => {
+              const chosen = provider === p
+              const hasKey = settings?.available.includes(p)
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => {
+                    setProvider(p)
+                    // A Gemini model name pointed at OpenAI is a broken
+                    // assistant that still looks configured, so the model
+                    // moves with the provider.
+                    const first = settings?.models.find((m) => m.provider === p)
+                    if (first) setModel(first.value)
+                  }}
+                  className={`text-left p-3 rounded-lg border transition-colors ${
+                    chosen
+                      ? 'border-teal-500/60 bg-teal-500/10'
+                      : 'border-border bg-secondary/30 hover:border-border/80'
+                  }`}
+                >
+                  <p className="text-sm font-medium text-foreground">
+                    {p === 'openai' ? 'OpenAI' : 'Google Gemini'}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {p === 'openai'
+                      ? 'Paid per question. Pennies a day at this size.'
+                      : 'Has a free tier, with daily limits.'}
+                  </p>
+                  {hasKey && (
+                    <p className="text-[11px] text-emerald-400 mt-1">a key is saved</p>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
           <div className="flex items-center gap-3 p-3 rounded-lg border border-border bg-secondary/30">
             {settings?.configured ? (
               <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
@@ -168,7 +212,11 @@ export default function AssistantSettingsPage() {
               label={settings?.configured ? 'Replace the key' : 'API key'}
               htmlFor="ai-key"
               span={2}
-              help="Get one free at aistudio.google.com — sign in, then 'Get API key'. Leave blank to keep the saved one."
+              help={
+                provider === 'openai'
+                  ? 'From platform.openai.com → API keys. Leave blank to keep the saved one.'
+                  : "From aistudio.google.com — sign in, then 'Get API key'. Leave blank to keep the saved one."
+              }
             >
               <div className="flex gap-2">
                 <input
@@ -176,7 +224,7 @@ export default function AssistantSettingsPage() {
                   type="password"
                   autoComplete="off"
                   className="form-input font-mono flex-1"
-                  placeholder="AIza..."
+                  placeholder={provider === 'openai' ? 'sk-...' : 'AIza...'}
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                 />
@@ -184,7 +232,12 @@ export default function AssistantSettingsPage() {
                   type="button"
                   className="btn-secondary whitespace-nowrap"
                   onClick={() => void test()}
-                  disabled={testing || (!apiKey.trim() && !settings?.configured)}
+                  disabled={testing || !settings?.configured}
+                  title={
+                    settings?.configured
+                      ? 'Asks the model a real question'
+                      : 'Save a key first, then test it'
+                  }
                 >
                   {testing ? <Loader2 size={15} className="animate-spin" /> : <Zap size={15} />}
                   Test
@@ -192,18 +245,24 @@ export default function AssistantSettingsPage() {
               </div>
             </Field>
 
-            <Field label="Model" htmlFor="ai-model" help="Flash is fast and cheap; Pro reasons better">
+            <Field
+              label="Model"
+              htmlFor="ai-model"
+              help="The smaller model is fast and cheap and answers these questions perfectly well."
+            >
               <select
                 id="ai-model"
                 className="form-input"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
               >
-                {settings?.models.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
+                {settings?.models
+                  .filter((m) => m.provider === provider)
+                  .map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
               </select>
             </Field>
           </div>
@@ -214,12 +273,19 @@ export default function AssistantSettingsPage() {
 
           <p className="text-xs text-muted-foreground">
             <a
-              href="https://aistudio.google.com/app/apikey"
+              href={
+                provider === 'openai'
+                  ? 'https://platform.openai.com/api-keys'
+                  : 'https://aistudio.google.com/app/apikey'
+              }
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1"
             >
-              Open Google AI Studio to get a key <ExternalLink size={11} />
+              {provider === 'openai'
+                ? 'Open the OpenAI dashboard to get a key'
+                : 'Open Google AI Studio to get a key'}{' '}
+              <ExternalLink size={11} />
             </a>
           </p>
         </div>
@@ -267,8 +333,11 @@ export default function AssistantSettingsPage() {
 
       <div className="flex items-center justify-between gap-4">
         <p className="text-xs text-muted-foreground max-w-xl">
-          Gemini has a free tier that is generous enough for a mill this size. You are billed by
-          Google directly, and nothing here sends your data anywhere else.
+          {provider === 'openai'
+            ? 'OpenAI charges per question — a few paise each, so a busy day costs less than a cup of chai. You are billed by OpenAI directly.'
+            : 'Gemini has a free tier that is generous enough for a mill this size, with daily limits. You are billed by Google directly.'}{' '}
+          Only the figures needed to answer the question are sent, and nothing is used to train
+          anybody&rsquo;s model.
         </p>
         <SaveButton saving={saving} />
       </div>

@@ -234,6 +234,31 @@ The `Admin` role skips the check entirely. Because permissions live in the
 token, changing someone's role takes up to 15 minutes to bite — that is the
 access token lifetime, and it is deliberate.
 
+### When one screen mixes what different roles may see
+
+Some responses carry more than one subject. The dashboard is the home screen for
+the whole mill, so it cannot be guarded as a whole — but the money on it is an
+accounts fact, and a store keeper's role denies accounts.
+
+Use `userCan(req.user, module, action)` and leave the field out:
+
+```ts
+const money = userCan(req.user, 'accounts', 'view')
+
+res.json({
+  activeOrders,                                       // everyone
+  outstandingReceivable: money ? receivable : null,   // accounts only
+})
+```
+
+**Null, never zero.** Zero is a fact, and it is the wrong one — "nobody owes us
+anything" is a different statement from "you may not see this". The screen then
+leaves the card out rather than showing ₹0.
+
+This was found by the AI assistant answering a question it should have refused.
+The route had no guard at all, so every signed-in user had been getting the
+receivables figure on their home screen.
+
 ---
 
 ## 7. The audit trail

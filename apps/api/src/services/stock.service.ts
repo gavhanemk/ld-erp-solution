@@ -309,6 +309,16 @@ export async function onHand(
     /** Only rows at or below the item's reorder level. */
     lowOnly?: boolean
     search?: string
+    /**
+     * Every word must appear somewhere in the name or code, in any order.
+     *
+     * A single substring is enough for a person typing into a search box, who
+     * watches the list narrow and stops. It is not enough for the assistant,
+     * which asks once with a whole phrase: "cotton poplin white" is not a
+     * substring of "Cotton Poplin 40s — White", and one missed match becomes a
+     * confident "we don't have any".
+     */
+    searchWords?: string[]
   } = {},
 ): Promise<
   Array<{
@@ -376,6 +386,12 @@ export async function onHand(
       AND (${filters.search ?? null}::text      IS NULL
            OR i.name ILIKE '%' || ${filters.search ?? null} || '%'
            OR i.code ILIKE '%' || ${filters.search ?? null} || '%')
+      -- Every word has to appear somewhere in the name and code together, in
+      -- any order. Passed as an array so the number of words cannot change the
+      -- shape of the query.
+      AND (${filters.searchWords ?? null}::text[] IS NULL
+           OR (SELECT bool_and(i.name || ' ' || i.code ILIKE '%' || w || '%')
+               FROM unnest(${filters.searchWords ?? null}::text[]) AS w))
     GROUP BY i.id, i.code, i.name, u.symbol, c.name, i."reorderLevel",
              w.id, w.name, s."ownership", s."ownerCustomerId", cust.name
     HAVING SUM(s."inQty" - s."outQty") <> 0

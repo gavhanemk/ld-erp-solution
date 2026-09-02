@@ -1,12 +1,13 @@
 import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
-import { AuthRequest } from '../middleware/auth'
+import { AuthRequest, userCan } from '../middleware/auth'
 import { getNumericPreference } from '../lib/preferences'
 
 const router = Router()
 
 // GET /api/dashboard/summary
 router.get('/summary', async (req: AuthRequest, res) => {
+  const money = userCan(req.user, 'accounts', 'view')
   const today = new Date()
   const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate())
   const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59)
@@ -62,25 +63,36 @@ router.get('/summary', async (req: AuthRequest, res) => {
         rejection: todayProductionAgg._sum.rejection || 0,
       },
       pendingApprovals: pendingPOCount + pendingMRCount,
-      revenueMTD: revenueAgg._sum.totalAmount || 0,
-      outstandingReceivable: outstandingAgg._sum.balanceAmount || 0,
-      outstandingPayable: payableAgg._sum.balanceAmount || 0,
+      // The dashboard is the home screen for the whole mill, so it is not
+      // guarded as a whole — but the money on it is. A store keeper with no
+      // accounts access was being shown what every customer owes, which is
+      // exactly the figure the permission grid exists to withhold. Null rather
+      // than zero: zero is a fact, and it would be the wrong one.
+      revenueMTD: money ? revenueAgg._sum.totalAmount || 0 : null,
+      outstandingReceivable: money ? outstandingAgg._sum.balanceAmount || 0 : null,
+      outstandingPayable: money ? payableAgg._sum.balanceAmount || 0 : null,
       generatedAt: new Date().toISOString(),
     },
   })
 })
 
 // GET /api/dashboard/alerts
-router.get('/alerts', async (_, res) => {
-  const overdueInvoices = await prisma.salesInvoice.findMany({
-    where: {
-      status: { in: ['UNPAID', 'PARTIAL'] },
-      dueDate: { lt: new Date() },
-    },
-    include: { customer: { select: { name: true } } },
-    take: 5,
-    orderBy: { dueDate: 'asc' },
-  })
+router.get('/alerts', async (req: AuthRequest, res) => {
+  // Same rule as the summary: who is overdue, and for how much, is an accounts
+  // fact. It was being listed by customer name to anyone who could sign in.
+  const money = userCan(req.user, 'accounts', 'view')
+
+  const overdueInvoices = money
+    ? await prisma.salesInvoice.findMany({
+        where: {
+          status: { in: ['UNPAID', 'PARTIAL'] },
+          dueDate: { lt: new Date() },
+        },
+        include: { customer: { select: { name: true } } },
+        take: 5,
+        orderBy: { dueDate: 'asc' },
+      })
+    : []
 
   const pendingApprovals = await prisma.purchaseOrder.count({
     where: { status: 'DRAFT', approvedAt: null },
@@ -89,7 +101,7 @@ router.get('/alerts', async (_, res) => {
   res.json({
     success: true,
     data: {
-      overdueInvoices: overdueInvoices.length,
+      overdueInvoices: money ? overdueInvoices.length : null,
       pendingApprovals,
       overdueList: overdueInvoices.map((i) => ({
         invoice: i.invoiceNumber,
