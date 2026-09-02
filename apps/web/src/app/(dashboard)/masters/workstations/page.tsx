@@ -80,7 +80,7 @@ const columns: Column<Workstation>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Code', required: true, placeholder: 'WS-STI-01', section: 'Identity' },
+  { name: 'code', label: 'Code', generated: true, section: 'Identity' },
   { name: 'name', label: 'Name', required: true, placeholder: 'Stitching Unit 1', section: 'Identity' },
   {
     name: 'departmentId',

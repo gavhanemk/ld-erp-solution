@@ -43,6 +43,27 @@ export interface RunOptions {
  */
 const MAX_TOOL_ROUNDS = 6
 
+/**
+ * Drops an answer that is its own exact double.
+ *
+ * Models occasionally emit a short reply twice in one message — it happened
+ * here with a question that had been handed to it almost fully formed. No real
+ * answer is exactly itself repeated, so keeping one copy is safe, and a
+ * question asked twice reads to the person as a fault in the software.
+ */
+function deduplicate(text: string): string {
+  const trimmed = text.trim()
+  const half = Math.floor(trimmed.length / 2)
+  if (trimmed.length < 20 || trimmed.length % 2 === 0) {
+    const [a, b] = [trimmed.slice(0, half), trimmed.slice(half)]
+    if (a && a === b) return a.trim()
+  }
+  // The commoner shape: the same line, twice, separated by a newline.
+  const lines = trimmed.split('\n').map((l) => l.trim())
+  if (lines.length === 2 && lines[0] && lines[0] === lines[1]) return lines[0]
+  return trimmed
+}
+
 /** Runs one tool, never throwing: a failed lookup is an answer, not a crash. */
 async function runTool(
   name: string,
@@ -109,7 +130,9 @@ async function runOpenAi(opts: RunOptions, userName: string): Promise<string> {
     if (!message) throw new AppError('The assistant sent back nothing.', 502, 'AI_EMPTY')
 
     if (!message.tool_calls?.length) {
-      return message.content?.trim() || 'I could not put an answer together for that.'
+      return message.content
+        ? deduplicate(message.content)
+        : 'I could not put an answer together for that.'
     }
 
     messages.push(message)
@@ -190,7 +213,7 @@ async function runGemini(opts: RunOptions, userName: string): Promise<string> {
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const calls = response.functionCalls()
-    if (!calls?.length) return response.text().trim() || 'I could not put an answer together for that.'
+    if (!calls?.length) return deduplicate(response.text()) || 'I could not put an answer together for that.'
 
     const replies = await Promise.all(
       calls.map(async (call) => ({

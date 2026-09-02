@@ -4,6 +4,7 @@ import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from './audit'
+import { isGeneratedCode, withGeneratedCode } from './masterCode'
 
 export interface CrudOptions {
   /** Prisma delegate name, e.g. 'customer' for prisma.customer. */
@@ -133,7 +134,18 @@ export function crudRouter(options: CrudOptions): Router {
     }
 
     const data = createSchema.parse(body)
-    const created = await delegate().create({ data, include })
+
+    // The form no longer asks for a code, so one is made up here. Two people
+    // saving at the same instant can both read the same highest number; the
+    // unique constraint catches the loser and it simply takes the next one.
+    let created
+    if (isGeneratedCode(model) && !(data as Record<string, unknown>).code) {
+      created = await withGeneratedCode(model, data as Record<string, unknown>, (withCode) =>
+        delegate().create({ data: withCode, include }),
+      )
+    } else {
+      created = await delegate().create({ data, include })
+    }
 
     await writeAuditLog(req, {
       module,

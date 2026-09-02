@@ -1,6 +1,7 @@
 import { prisma } from '@ld-erp/database'
 import { recordAudit } from '../../lib/audit'
 import { nextDocumentNumber } from '../../lib/docNumber'
+import { withGeneratedCode } from '../../lib/masterCode'
 import { logger } from '../../utils/logger'
 import {
   createCustomerSchema,
@@ -64,7 +65,12 @@ export interface Proposal {
   tool: string
   args: Record<string, unknown>
   ticket: string
+  /** The same content as title/fields, flattened for the model. */
   summary: string
+  /** For the chat to draw a card. */
+  title: string
+  fields: Array<{ label: string; value: string }>
+  note?: string
 }
 
 export interface WriteContext {
@@ -80,13 +86,39 @@ export interface WriteContext {
   onCommitted?: () => void
 }
 
-/** What a write would do, once names have been turned into records. */
-interface Built {
-  /** The sentence the person reads before saying yes. */
-  summary: string
+/**
+ * What a write would do, once names have been turned into records.
+ *
+ * Structured rather than a paragraph, because the chat draws it as a card with
+ * a Confirm button. A person checking figures wants them in a column, not in a
+ * sentence — and a field the model quietly dropped is a field nobody can spot
+ * missing from prose.
+ */
+export interface Built {
+  /** "Add a supplier", "Change Meridian Zip Works". */
+  title: string
+  /** One row per thing that would be saved. */
+  fields: Array<{ label: string; value: string }>
+  /** Anything the person should know before agreeing. */
+  note?: string
   /** Carried from build to commit so the lookups are not done twice. */
   payload: Record<string, unknown>
 }
+
+/** The same thing as text, for the model to read back if it needs to. */
+export function asText(built: Built): string {
+  return [
+    `${built.title}:`,
+    ...built.fields.map((f) => `  ${f.label}: ${f.value}`),
+    ...(built.note ? ['', built.note] : []),
+  ].join('\n')
+}
+
+/** Turns a data object into display rows, skipping anything empty. */
+const rows = (o: Record<string, unknown>): Array<{ label: string; value: string }> =>
+  Object.entries(o)
+    .filter(([, v]) => has(v))
+    .map(([label, value]) => ({ label, value: String(value) }))
 
 interface WriteDefinition {
   tool: ErpTool
@@ -112,10 +144,47 @@ const given = (args: Args, drop: string[] = []): Args =>
     Object.entries(args).filter(([k, v]) => has(v) && k !== 'confirm' && !drop.includes(k)),
   )
 
-const describe = (data: Args) =>
+/**
+ * Field names as a person would say them.
+ *
+ * "creditDays" is what the column is called; "Days to pay" is what the person
+ * checking the card needs to read. A summary they have to decode is a summary
+ * they will wave through.
+ */
+const LABELS: Record<string, string> = {
+  name: 'Name',
+  type: 'Type',
+  category: 'Supplies',
+  phone: 'Phone',
+  email: 'Email',
+  gstin: 'GSTIN',
+  pan: 'PAN',
+  city: 'City',
+  state: 'State',
+  billingCity: 'City',
+  billingState: 'State',
+  billingStateCode: 'State code',
+  stateCode: 'State code',
+  creditDays: 'Days to pay',
+  creditLimit: 'Credit limit',
+  leadTimeDays: 'Lead time (days)',
+  isMsme: 'MSME registered',
+  hsnCode: 'HSN',
+  standardRate: 'Rate',
+  reorderLevel: 'Reorder level',
+  minStock: 'Minimum stock',
+  maxStock: 'Maximum stock',
+  code: 'Code',
+}
+
+/** Display rows, in a sensible order, with the code left out — it is automatic. */
+const readable = (data: Args, labels: Record<string, string>) =>
   Object.entries(data)
-    .map(([k, v]) => `  ${k}: ${v}`)
-    .join('\n')
+    .filter(([k, v]) => has(v) && k !== 'code')
+    .map(([k, v]) => ({
+      label: labels[k] ?? k,
+      value: typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v),
+    }))
 
 /** Runs a Zod schema and turns the first complaint into one plain sentence. */
 function check<T>(schema: { safeParse: (v: unknown) => { success: boolean; data?: T; error?: { errors: Array<{ path: (string | number)[]; message: string }> } } }, value: unknown): T {
@@ -168,27 +237,6 @@ async function findItem(needle: string) {
   return one(rows, needle, 'item')
 }
 
-/**
- * Makes up a code when nobody gave one.
- *
- * Codes are typed into search boxes and read off screens, so they follow the
- * pattern already in use rather than being a cuid nobody can say out loud.
- */
-async function nextCode(model: 'customer' | 'supplier' | 'item', prefix: string): Promise<string> {
-  const delegate = prisma[model] as unknown as {
-    findMany: (a: unknown) => Promise<Array<{ code: string }>>
-  }
-  const rows = await delegate.findMany({
-    where: { code: { startsWith: prefix } },
-    select: { code: true },
-  })
-  const highest = rows.reduce((max, r) => {
-    const n = Number(r.code.slice(prefix.length).replace(/\D/g, ''))
-    return Number.isFinite(n) && n > max ? n : max
-  }, 0)
-  return `${prefix}${String(highest + 1).padStart(3, '0')}`
-}
-
 async function auditWrite(
   ctx: WriteContext,
   module: string,
@@ -236,6 +284,14 @@ const WRITES: WriteDefinition[] = [
       description:
         'Add a customer. Shows exactly what would be saved and saves nothing until the person agrees.',
       needs: 'masters:create',
+      gather: [
+        'their full name, as it should read on an invoice',
+        'what kind of buyer they are — call get_options with customer_types and offer the list',
+        'which city they are in',
+        'their phone number',
+        'their GSTIN, or that they do not have one',
+        'how many days they get to pay',
+      ],
       parameters: {
         type: 'object',
         properties: {
@@ -245,7 +301,6 @@ const WRITES: WriteDefinition[] = [
             description: 'What kind of buyer',
             enum: ['DOMESTIC', 'EXPORT', 'JOB_WORK', 'VHAGAR_DEALER'],
           },
-          code: { type: 'string', description: 'Short code. Made up if left out.' },
           ...PARTY_FIELDS,
           city: { type: 'string', description: 'Billing city' },
           state: { type: 'string', description: 'Billing state' },
@@ -258,7 +313,6 @@ const WRITES: WriteDefinition[] = [
     gate: AI_GATE.change,
     build: async (a) => {
       const data = check(createCustomerSchema, {
-        code: a.code ?? (await nextCode('customer', 'CUS-')),
         name: a.name,
         type: a.type,
         phone: a.phone,
@@ -273,10 +327,17 @@ const WRITES: WriteDefinition[] = [
         creditDays: a.creditDays,
         creditLimit: a.creditLimit,
       })
-      return { summary: `Add a customer:\n${describe(given(data as Args))}`, payload: data as Args }
+      return {
+        title: 'Add a customer',
+        fields: readable(data as Args, LABELS),
+        note: 'A code will be given to it automatically.',
+        payload: data as Args,
+      }
     },
     commit: async ({ payload }, ctx) => {
-      const row = await prisma.customer.create({ data: payload as never })
+      const row = await withGeneratedCode('customer', payload, (data) =>
+        prisma.customer.create({ data: data as never }),
+      )
       await auditWrite(ctx, 'masters', 'CREATE', 'Customer', row.id, undefined, row)
       return { saved: true, message: `${row.name} added as ${row.code}.` }
     },
@@ -288,6 +349,14 @@ const WRITES: WriteDefinition[] = [
       description:
         'Add a supplier. Shows exactly what would be saved and saves nothing until the person agrees.',
       needs: 'masters:create',
+      gather: [
+        'their full name',
+        'what they supply — call get_options with supplier_categories and offer the list. NEVER guess this from their name.',
+        'which city they are in',
+        'their phone number',
+        'their GSTIN, or that they do not have one',
+        'how many days we get to pay them',
+      ],
       parameters: {
         type: 'object',
         properties: {
@@ -297,7 +366,6 @@ const WRITES: WriteDefinition[] = [
             description: 'What they supply',
             enum: ['FABRIC', 'THREAD', 'BUTTON', 'LINING', 'LABEL', 'PACKAGING', 'TRIM', 'TRANSPORT', 'SERVICE', 'OTHER'],
           },
-          code: { type: 'string', description: 'Short code. Made up if left out.' },
           ...PARTY_FIELDS,
           city: { type: 'string', description: 'City' },
           state: { type: 'string', description: 'State' },
@@ -314,7 +382,6 @@ const WRITES: WriteDefinition[] = [
     gate: AI_GATE.change,
     build: async (a) => {
       const data = check(createSupplierSchema, {
-        code: a.code ?? (await nextCode('supplier', 'SUP-')),
         name: a.name,
         category: a.category,
         phone: a.phone,
@@ -328,10 +395,17 @@ const WRITES: WriteDefinition[] = [
         leadTimeDays: a.leadTimeDays,
         isMsme: a.isMsme,
       })
-      return { summary: `Add a supplier:\n${describe(given(data as Args))}`, payload: data as Args }
+      return {
+        title: 'Add a supplier',
+        fields: readable(data as Args, LABELS),
+        note: 'A code will be given to it automatically.',
+        payload: data as Args,
+      }
     },
     commit: async ({ payload }, ctx) => {
-      const row = await prisma.supplier.create({ data: payload as never })
+      const row = await withGeneratedCode('supplier', payload, (data) =>
+        prisma.supplier.create({ data: data as never }),
+      )
       await auditWrite(ctx, 'masters', 'CREATE', 'Supplier', row.id, undefined, row)
       return { saved: true, message: `${row.name} added as ${row.code}.` }
     },
@@ -343,6 +417,14 @@ const WRITES: WriteDefinition[] = [
       description:
         'Add an item to the item master. Category, unit and GST rate are given by name and matched to the existing masters.',
       needs: 'masters:create',
+      gather: [
+        'what the item is called',
+        'which category — call get_options with item_categories and offer the real list',
+        'which unit it is measured in — call get_options with units and offer the real list',
+        'what kind of item it is — call get_options with item_types and offer the list',
+        'its usual rate per unit',
+        'the level at which it should be reordered',
+      ],
       parameters: {
         type: 'object',
         properties: {
@@ -354,7 +436,6 @@ const WRITES: WriteDefinition[] = [
             description: 'What kind of item',
             enum: ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'CONSUMABLE', 'PACKING_MATERIAL', 'TRIM'],
           },
-          code: { type: 'string', description: 'Item code. Made up if left out.' },
           hsnCode: { type: 'string', description: 'HSN code' },
           gstRate: { type: 'number', description: 'GST percentage, e.g. 5, 12, 18' },
           standardRate: { type: 'number', description: 'Usual rate per unit in rupees' },
@@ -390,7 +471,6 @@ const WRITES: WriteDefinition[] = [
       }
 
       const data = check(createItemSchema, {
-        code: a.code ?? (await nextCode('item', 'ITM-')),
         name: a.name,
         type: a.type,
         categoryId: category.id,
@@ -401,8 +481,7 @@ const WRITES: WriteDefinition[] = [
         reorderLevel: a.reorderLevel,
       })
 
-      const readable = {
-        code: (data as Args).code,
+      const shown = {
         name: a.name,
         type: a.type,
         category: category.name,
@@ -412,10 +491,16 @@ const WRITES: WriteDefinition[] = [
         ...(has(a.standardRate) ? { rate: `₹${a.standardRate}` } : {}),
         ...(has(a.reorderLevel) ? { reorderLevel: a.reorderLevel } : {}),
       }
-      return { summary: `Add an item:\n${describe(readable)}`, payload: data as Args }
+      return {
+        title: 'Add an item',
+        fields: rows(shown),
+        payload: data as Args,
+      }
     },
     commit: async ({ payload }, ctx) => {
-      const row = await prisma.item.create({ data: payload as never })
+      const row = await withGeneratedCode('item', payload, (data) =>
+        prisma.item.create({ data: data as never }),
+      )
       await auditWrite(ctx, 'masters', 'CREATE', 'Item', row.id, undefined, row)
       return { saved: true, message: `${row.name} added as ${row.code}.` }
     },
@@ -455,7 +540,9 @@ const WRITES: WriteDefinition[] = [
       const data = check(schema, changes)
 
       return {
-        summary: `Change ${row.name} (${row.code}):\n${describe(changes)}`,
+        title: `Change ${row.name}`,
+        fields: readable(changes, LABELS),
+        note: `${row.code} · only these are changed; everything else stays as it is.`,
         payload: { kind, id: row.id, name: row.name, data: data as Args },
       }
     },
@@ -502,7 +589,9 @@ const WRITES: WriteDefinition[] = [
       }
       const data = check(updateItemSchema, changes)
       return {
-        summary: `Change ${item.name} (${item.code}):\n${describe(changes)}`,
+        title: `Change ${item.name}`,
+        fields: readable(changes, LABELS),
+        note: `${item.code} · only these are changed; everything else stays as it is.`,
         payload: { id: item.id, data: data as Args },
       }
     },
@@ -542,7 +631,12 @@ const WRITES: WriteDefinition[] = [
       const kind = String(a.kind)
       const row = kind === 'item' ? await findItem(String(a.find)) : await findParty(kind as PartyKind, String(a.find))
       return {
-        summary: `Deactivate ${row.name} (${row.code}).\nIt leaves the dropdowns. Every document that already used it keeps working, and it can be switched back on.`,
+        title: `Deactivate ${row.name}`,
+        fields: [
+          { label: 'Code', value: row.code },
+          { label: 'Register', value: kind },
+        ],
+        note: 'It leaves the dropdowns. Every document that already used it keeps working, and it can be switched back on.',
         payload: { kind, id: row.id, name: row.name },
       }
     },
@@ -565,6 +659,12 @@ const WRITES: WriteDefinition[] = [
       description:
         'Raise a material requisition — a department asking the store for material. It is raised waiting for approval; somebody else approves it and the store issues it.',
       needs: 'inventory:create',
+      gather: [
+        'which department is asking — call get_options with departments and offer the list',
+        'which store it comes from — call get_options with warehouses and offer the list',
+        'what is wanted and how much of each',
+        'what it is for',
+      ],
       parameters: {
         type: 'object',
         properties: {
@@ -610,9 +710,13 @@ const WRITES: WriteDefinition[] = [
       }
 
       return {
-        summary: `Raise a material requisition:\n  Department: ${department.name}\n  From: ${warehouse.name}\n${lines
-          .map((l) => `  ${l.name} (${l.code}) × ${l.qty}`)
-          .join('\n')}\n\nIt will wait for someone else to approve it before the store can issue anything.`,
+        title: 'Raise a material requisition',
+        fields: [
+          { label: 'Department', value: department.name },
+          { label: 'From', value: warehouse.name },
+          ...lines.map((l) => ({ label: l.name, value: `${l.qty}` })),
+        ],
+        note: 'It will wait for someone else to approve it before the store can issue anything.',
         payload: {
           departmentId: department.id,
           warehouseId: warehouse.id,
@@ -673,10 +777,12 @@ const WRITES: WriteDefinition[] = [
         throw new Error('A refusal needs a reason. What should it say?')
       }
       return {
-        summary:
-          decision === 'approve'
-            ? `Approve ${doc.number} — ${doc.describe}.\nThis cannot be undone.`
-            : `Refuse ${doc.number} — ${doc.describe}.\nReason: ${a.reason}\nThis cannot be undone.`,
+        title: `${decision === 'approve' ? 'Approve' : 'Refuse'} ${doc.number}`,
+        fields: [
+          { label: 'Document', value: doc.describe },
+          ...(decision === 'reject' ? [{ label: 'Reason', value: String(a.reason) }] : []),
+        ],
+        note: 'This cannot be undone.',
         payload: { number: doc.number, decision, reason: has(a.reason) ? String(a.reason) : null },
       }
     },
@@ -855,20 +961,39 @@ export async function runWriteTool(
     // agreed to and then saved against a record that has since changed.
     const built = await write.build(args)
 
-    if (!has(args.confirm)) {
+    const ticket_ = has(args.confirm)
+      ? checkTicket(args.confirm, name, payload, ctx.userId, ctx.turnCount)
+      : null
+
+    // A ticket refused because the values moved is not a failure — it is the
+    // check doing its job. Somebody added a phone number after seeing the card,
+    // and what they agreed to is no longer what would be saved. So show the new
+    // figures and ask again, rather than reporting a code that did not match.
+    const valuesMoved = ticket_ !== null && !ticket_.ok && ticket_.reason.startsWith('The details have changed')
+
+    if (!has(args.confirm) || valuesMoved) {
       const ticket = mintTicket(name, payload, ctx.userId, ctx.turnCount)
-      ctx.onProposal?.({ tool: name, args: payload, ticket, summary: built.summary })
+      const summary = asText(built)
+      ctx.onProposal?.({
+        tool: name,
+        args: payload,
+        ticket,
+        summary,
+        title: built.title,
+        fields: built.fields,
+        note: built.note,
+      })
       return {
         nothingSavedYet: true,
-        wouldDo: built.summary,
+        wouldDo: summary,
         confirm: ticket,
-        instruction:
-          'Show wouldDo to the person word for word and ask them to confirm. Nothing has been saved. You will be reminded of the confirm code on their next message.',
+        instruction: valuesMoved
+          ? 'The details moved since they last saw them, so this is a fresh card with the new values. Nothing has been saved. Say one short line — "The details changed, so here it is again — check it and press Confirm." Do NOT repeat the fields; they are on the card.'
+          : 'Nothing has been saved. The person is being shown this as a card with a Confirm button, so do NOT repeat the fields — say one short line like "Here is what I will save — check it and press Confirm." You will be reminded of the confirm code on their next message.',
       }
     }
 
-    const ticket = checkTicket(args.confirm, name, payload, ctx.userId, ctx.turnCount)
-    if (!ticket.ok) return { error: ticket.reason }
+    if (!ticket_!.ok) return { error: ticket_!.reason }
 
     const result = await write.commit(built, ctx)
     ctx.onCommitted?.()

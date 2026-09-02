@@ -6,6 +6,7 @@ import {
   Download, Share2, Copy, ChevronDown, Sparkles
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ConfirmChangeCard, type PendingChange } from '@/components/ai/ConfirmChangeCard'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -49,6 +50,15 @@ Here are some things I can do:
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [conversationId, setConversationId] = useState<string>()
+  /**
+   * A change the assistant has described and saved nowhere.
+   *
+   * Held apart from the messages rather than on one of them: the proposal
+   * belongs to the conversation, only ever the latest one is live, and the
+   * message array is rebuilt on every reply — a flag on a message would end up
+   * attached to the wrong turn.
+   */
+  const [pendingChange, setPendingChange] = useState<PendingChange | null>(null)
   const [isListening, setIsListening] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -62,6 +72,7 @@ Here are some things I can do:
     if (!msg || isLoading) return
 
     setInput('')
+    setPendingChange(null)
     const userMsg: Message = { role: 'user', content: msg, timestamp: new Date() }
     const loadingMsg: Message = { role: 'assistant', content: '', timestamp: new Date(), isLoading: true }
 
@@ -84,6 +95,7 @@ Here are some things I can do:
 
       if (data.success) {
         setConversationId(data.data.conversationId)
+        setPendingChange(data.data.pendingChange ?? null)
         setMessages((m) => [
           ...m.slice(0, -1),
           { role: 'assistant', content: data.data.response, timestamp: new Date() },
@@ -95,6 +107,7 @@ Here are some things I can do:
         ])
       }
     } catch {
+      setPendingChange(null)
       setMessages((m) => [
         ...m.slice(0, -1),
         { role: 'assistant', content: '⚠️ Network error. Please check your connection and try again.', timestamp: new Date() },
@@ -245,6 +258,20 @@ Here are some things I can do:
               </div>
             </div>
           ))}
+
+          {pendingChange && !isLoading && (
+            <ConfirmChangeCard
+              change={pendingChange}
+              busy={isLoading}
+              onConfirm={() => void sendMessage('Yes, save it.')}
+              onCancel={() => void sendMessage('No, cancel that.')}
+              onEdit={() => {
+                setPendingChange(null)
+                inputRef.current?.focus()
+              }}
+            />
+          )}
+
           <div ref={messagesEndRef} />
         </div>
 

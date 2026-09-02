@@ -3,10 +3,11 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable,
   ScrollView, Text, View,
 } from 'react-native'
-import { Send, Sparkles } from 'lucide-react-native'
+import { Send, Sparkles, Check, X, ShieldAlert } from 'lucide-react-native'
+import * as Haptics from 'expo-haptics'
 import { api, ApiError } from '@/lib/api'
 import { Stack } from 'expo-router'
-import { Screen, PageHeading, Input, ErrorNotice } from '@/components/ui'
+import { Screen, PageHeading, Input, ErrorNotice, Card, Button, Badge } from '@/components/ui'
 
 /**
  * Ask the ERP a question in plain words.
@@ -15,6 +16,19 @@ import { Screen, PageHeading, Input, ErrorNotice } from '@/components/ui'
  * have looked up themselves — the server filters its tools by the permissions
  * in the token. So there is nothing to guard here beyond showing the answer.
  */
+
+/**
+ * A change the assistant has described and saved nowhere yet.
+ *
+ * Held apart from the messages because the messages array is posted back to
+ * the server verbatim on every turn, and the server validates its shape — an
+ * extra kind of entry in there is a 400, not a feature.
+ */
+interface PendingChange {
+  title: string
+  fields: Array<{ label: string; value: string }>
+  note?: string | null
+}
 
 interface Message {
   role: 'user' | 'model'
@@ -33,6 +47,7 @@ export default function AskAI() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [conversationId, setConversationId] = useState<string | undefined>()
+  const [pending, setPending] = useState<PendingChange | null>(null)
   const scroller = useRef<ScrollView>(null)
 
   async function send(text: string) {
@@ -44,15 +59,27 @@ export default function AskAI() {
     setDraft('')
     setBusy(true)
     setError(null)
+    // Cleared before the wait, not after — a card still offering to save
+    // something while the yes is in flight reads as though it were ignored.
+    setPending(null)
 
     try {
       const res = await api.post<{
         success: boolean
-        data: { response: string; conversationId: string }
+        data: {
+          response: string
+          conversationId: string
+          saved?: boolean
+          pendingChange?: PendingChange | null
+        }
       }>('/ai/chat', { messages: next, conversationId })
 
       setConversationId(res.data.conversationId)
       setMessages([...next, { role: 'model', content: res.data.response }])
+      setPending(res.data.pendingChange ?? null)
+      if (res.data.saved) {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
+      }
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'The assistant could not answer. Try again.',
@@ -112,6 +139,56 @@ export default function AskAI() {
               <Text className="text-sm text-foreground">{m.content}</Text>
             </View>
           ))}
+
+          {pending && !busy ? (
+            <Card className="border-amber-500/30 bg-amber-500/[0.07]">
+              <View className="flex-row items-center justify-between gap-3">
+                <View className="flex-row items-center gap-2 flex-1">
+                  <ShieldAlert size={16} color="#d97706" />
+                  <Text className="flex-1 text-sm font-semibold text-foreground">
+                    {pending.title}
+                  </Text>
+                </View>
+                <Badge label="Not saved" kind="warning" />
+              </View>
+
+              <View className="mt-3 gap-2 border-t border-border pt-3">
+                {pending.fields.map((f) => (
+                  <View key={f.label} className="flex-row items-start justify-between gap-4">
+                    <Text className="text-xs text-muted-foreground">{f.label}</Text>
+                    <Text className="flex-1 text-right text-sm text-foreground">{f.value}</Text>
+                  </View>
+                ))}
+              </View>
+
+              {pending.note ? (
+                <Text className="mt-3 text-xs text-muted-foreground">{pending.note}</Text>
+              ) : null}
+
+              {/* Both send an ordinary message. The yes has to arrive as
+                  something the person said, on a later turn than the proposal,
+                  or the server refuses it — so pressing the button and typing
+                  it are the same act. */}
+              <View className="mt-4 flex-row gap-3">
+                <Button
+                  label="Confirm"
+                  onPress={() => {
+                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+                    void send('Yes, save it.')
+                  }}
+                  icon={<Check size={16} color="#fff" />}
+                  className="flex-1"
+                />
+                <Button
+                  label="Cancel"
+                  kind="secondary"
+                  onPress={() => void send('No, cancel that.')}
+                  icon={<X size={16} color="#94a3b8" />}
+                  className="flex-1"
+                />
+              </View>
+            </Card>
+          ) : null}
 
           {busy ? (
             <View className="mr-auto flex-row items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3">

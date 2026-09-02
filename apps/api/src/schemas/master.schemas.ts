@@ -144,7 +144,9 @@ const isActive = z.boolean().optional()
 // ─────────────────────────────────────────────────────────────
 
 export const createCustomerSchema = z.object({
-  code,
+  // Left out on a new record: the server makes one up. Still validated when
+  // somebody does supply one, so an imported code cannot be malformed.
+  code: code.optional(),
   name,
   type: CustomerTypeEnum,
   gstin,
@@ -182,7 +184,9 @@ export const updateCustomerSchema = createCustomerSchema.partial()
 // ─────────────────────────────────────────────────────────────
 
 export const createSupplierSchema = z.object({
-  code,
+  // Left out on a new record: the server makes one up. Still validated when
+  // somebody does supply one, so an imported code cannot be malformed.
+  code: code.optional(),
   name,
   category: SupplierCategoryEnum,
   gstin,
@@ -216,7 +220,9 @@ export const updateSupplierSchema = createSupplierSchema.partial()
 
 export const createItemSchema = z
   .object({
-    code,
+    // Left out on a new record: the server makes one up. Still validated when
+    // somebody does supply one, so an imported code cannot be malformed.
+    code: code.optional(),
     name,
     description: optionalText,
     type: ItemTypeEnum,
@@ -301,7 +307,9 @@ export const updateBomSchema = z.object({
 
 export const createWarehouseSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
-  code,
+  // Left out on a new record: the server makes one up. Still validated when
+  // somebody does supply one, so an imported code cannot be malformed.
+  code: code.optional(),
   name,
   address: optionalText,
   isActive,
@@ -421,7 +429,9 @@ export const updateSizeSchema = createSizeSchema.partial()
 
 export const createWorkstationSchema = z
   .object({
-    code,
+    // Left out on a new record: the server makes one up. Still validated when
+    // somebody does supply one, so an imported code cannot be malformed.
+    code: code.optional(),
     name,
     departmentId: z.string().min(1, 'Pick the process this belongs to'),
     type: z.enum(['IN_HOUSE', 'JOB_WORK']).default('IN_HOUSE'),
@@ -453,7 +463,9 @@ export const updateWorkstationSchema = z.object({
 })
 
 export const createBrokerSchema = z.object({
-  code,
+  // Left out on a new record: the server makes one up. Still validated when
+  // somebody does supply one, so an imported code cannot be malformed.
+  code: code.optional(),
   name,
   phone,
   email,

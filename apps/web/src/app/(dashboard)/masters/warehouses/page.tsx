@@ -28,7 +28,7 @@ const columns: Column<Warehouse>[] = [
 
 // companyId is filled in by the API — there is only one company per install.
 const formFields: FormField[] = [
-  { name: 'code', label: 'Warehouse Code', required: true, placeholder: 'WH-FABRIC' },
+  { name: 'code', label: 'Warehouse Code', generated: true },
   { name: 'name', label: 'Warehouse Name', required: true, placeholder: 'Fabric Store' },
   { name: 'address', label: 'Address', type: 'textarea', span: 2 },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for stock movements' },

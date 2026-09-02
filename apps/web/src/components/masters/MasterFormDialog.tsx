@@ -34,6 +34,18 @@ export interface FormField {
    * code, which is what actually decides the tax on every document.
    */
   derives?: { field: string; from: (value: string) => string | null }
+  /**
+   * Filled in by the server, not by the person.
+   *
+   * A master code is a handle, not information — nobody decides a customer
+   * should be CUS-017 rather than CUS-018. Asking for one on a form is asking
+   * somebody to do the computer's job, and it is how a register ends up with
+   * CUST-1, Cust001 and C-1 all meaning different firms.
+   *
+   * So the field is not shown when adding. It is shown, greyed out, when
+   * editing — because by then it is on documents and people quote it.
+   */
+  generated?: boolean
   /** Fraction of the two-column grid this field occupies. */
   span?: 1 | 2
   /** Grouping heading this field sits under. */
@@ -177,6 +189,10 @@ export function MasterFormDialog<T extends { id: string }>({
     const payload: Record<string, unknown> = {}
 
     for (const f of fields) {
+      // Sending back a value nobody could have changed only risks a clash with
+      // a code the server has since handed to somebody else.
+      if (f.generated) continue
+
       const raw = values[f.name]
 
       if (f.type === 'checkbox') {
@@ -248,7 +264,10 @@ export function MasterFormDialog<T extends { id: string }>({
     }
   }
 
-  const sections = fields.reduce<Record<string, FormField[]>>((acc, f) => {
+  // A generated field has nothing to show before the record exists.
+  const visibleFields = fields.filter((f) => !f.generated || isEdit)
+
+  const sections = visibleFields.reduce<Record<string, FormField[]>>((acc, f) => {
     const key = f.section ?? ''
     ;(acc[key] ??= []).push(f)
     return acc
@@ -334,6 +353,29 @@ function Field({
   const wrapper = field.span === 2 || type === 'textarea' ? 'md:col-span-2' : ''
   const invalid = Boolean(error)
   const inputClass = `form-input ${invalid ? 'border-red-500/60' : ''}`
+
+  // Only ever reached when editing — a generated field is filtered out of a
+  // create form entirely. It is shown because the code is on documents by now
+  // and people quote it, and locked because changing it would orphan them.
+  if (field.generated) {
+    return (
+      <div className={wrapper}>
+        <label className="form-label" htmlFor={field.name}>
+          {field.label}
+        </label>
+        <input
+          id={field.name}
+          className="form-input font-mono text-muted-foreground cursor-not-allowed"
+          value={String(value ?? '')}
+          readOnly
+          disabled
+        />
+        <p className="mt-1 text-xs text-muted-foreground">
+          Given by the system. It appears on documents, so it cannot be changed.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className={wrapper}>

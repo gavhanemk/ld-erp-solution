@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
 import { AuthRequest } from '../middleware/auth'
 import { chatWithERP, generateDailyMISReport } from '../services/ai.service'
+import type { Proposal } from '../services/ai/writeTools'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 
@@ -91,9 +92,19 @@ router.post('/chat', async (req: AuthRequest, res) => {
     data: {
       response: result.text,
       conversationId: convId,
-      /** True while a change is described and waiting for a yes. */
-      awaitingConfirmation: Boolean(result.proposal),
       saved: result.committed,
+      /**
+       * What is waiting for a yes, so the chat can draw it as a card with a
+       * Confirm button. The ticket is deliberately left out — it is what
+       * authorises the write, and it has no business in a browser.
+       */
+      pendingChange: result.proposal
+        ? {
+            title: result.proposal.title,
+            fields: result.proposal.fields,
+            note: result.proposal.note ?? null,
+          }
+        : null,
     },
   })
 })
@@ -118,12 +129,7 @@ async function loadPendingProposal(conversationId: string) {
   // stale that it would then have to be refused for using.
   if (Date.now() - row.createdAt.getTime() > PROPOSAL_TTL_MS) return null
 
-  return row.toolCalls as unknown as {
-    tool: string
-    args: Record<string, unknown>
-    ticket: string
-    summary: string
-  }
+  return row.toolCalls as unknown as Proposal
 }
 
 const clearPendingProposals = (conversationId: string) =>

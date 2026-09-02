@@ -32,6 +32,15 @@ export interface ErpTool {
   description: string
   /** The permission a person needs before this tool is offered to the model. */
   needs: string | null
+  /**
+   * What must be asked, in order, before this may be called at all.
+   *
+   * Write tools only. Without it the assistant fills the gaps itself — it read
+   * "Vinayak Threads" and decided they supply thread, which is a good guess and
+   * a bad way to open a supplier account. Everything here is a question put to
+   * a person, in this order, one at a time.
+   */
+  gather?: string[]
   parameters: {
     type: 'object'
     properties: Record<string, { type: string; description: string; enum?: string[] }>
@@ -164,6 +173,33 @@ export const ERP_TOOLS: ErpTool[] = [
         },
       },
       required: ['type'],
+    },
+  },
+  {
+    name: 'get_options',
+    description:
+      "The real choices for a field, so you can offer them instead of guessing. Call this BEFORE asking somebody to pick a category, unit, department or store — never invent a list, and never make somebody guess what words you will accept.",
+    needs: 'masters:view',
+    parameters: {
+      type: 'object',
+      properties: {
+        what: {
+          type: 'string',
+          description: 'Which list',
+          enum: [
+            'item_categories',
+            'units',
+            'supplier_categories',
+            'customer_types',
+            'item_types',
+            'departments',
+            'warehouses',
+            'gst_rates',
+            'brands',
+          ],
+        },
+      },
+      required: ['what'],
     },
   },
   {
@@ -683,6 +719,67 @@ export async function executeTool(
           due: day(i.dueDate),
           overdue: i.dueDate ? i.dueDate < new Date() : false,
         })),
+      }
+    }
+
+    case 'get_options': {
+      switch (args.what) {
+        case 'item_categories':
+          return {
+            choices: (await prisma.itemCategory.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((c) => c.name),
+          }
+        case 'units':
+          return {
+            choices: (await prisma.uOM.findMany({ select: { symbol: true, name: true }, orderBy: { name: 'asc' } })).map((u) => `${u.symbol} (${u.name})`),
+          }
+        case 'departments':
+          return {
+            choices: (await prisma.department.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((d) => d.name),
+          }
+        case 'warehouses':
+          return {
+            choices: (await prisma.warehouse.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((w) => w.name),
+          }
+        case 'brands':
+          return {
+            choices: (await prisma.brand.findMany({ where: { isActive: true }, select: { name: true } })).map((b) => b.name),
+          }
+        case 'gst_rates':
+          return {
+            choices: (await prisma.taxRate.findMany({ where: { isActive: true }, select: { rate: true }, orderBy: { rate: 'asc' } })).map((t) => `${Number(t.rate)}%`),
+          }
+        // These are fixed in the software rather than set up per mill, so they
+        // are listed here with the words a person would use — "Job work", not
+        // "JOB_WORK", which is a column value and not something anybody says.
+        case 'supplier_categories':
+          return {
+            choices: [
+              'Fabric', 'Thread', 'Button', 'Lining', 'Label',
+              'Packaging', 'Trim', 'Transport', 'Service', 'Other',
+            ],
+          }
+        case 'customer_types':
+          return {
+            choices: [
+              'Domestic — sold within India',
+              'Export — sold abroad',
+              'Job work — they send their own fabric',
+              'VHAGAR dealer — sells our own brand',
+            ],
+          }
+        case 'item_types':
+          return {
+            choices: [
+              'Raw material — cloth, thread, anything consumed',
+              'Trim — buttons, zips, labels',
+              'Packing material — poly bags, cartons, tags',
+              'Consumable — needles, oil, chalk',
+              'Semi finished',
+              'Finished good — a garment ready to sell',
+            ],
+          }
+        default:
+          return { error: 'There is no list called that.' }
       }
     }
 

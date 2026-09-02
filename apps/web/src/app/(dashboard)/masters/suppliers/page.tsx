@@ -107,7 +107,7 @@ const columns: Column<Supplier>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Supplier Code', required: true, placeholder: 'SUP-001', section: 'Identity', uppercase: true },
+  { name: 'code', label: 'Supplier Code', generated: true, section: 'Identity' },
   { name: 'name', label: 'Supplier Name', required: true, placeholder: 'Shree Fabrics', section: 'Identity' },
   {
     name: 'category',
