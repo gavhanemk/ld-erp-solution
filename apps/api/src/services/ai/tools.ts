@@ -176,9 +176,27 @@ export const ERP_TOOLS: ErpTool[] = [
     },
   },
   {
+    name: 'offer_choices',
+    description:
+      "Ask a question whose answers are a fixed list. The choices are drawn as buttons the person taps, so they never have to type one back or guess your spelling. Use this for EVERY question with a set of answers — category, unit, type, department, store, yes/no. Say the question in your reply as one short line and do NOT list the choices in the text; they are already on screen.",
+    needs: null,
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', description: 'The question, in plain words' },
+        choices: {
+          type: 'string',
+          description:
+            'The answers, separated by a pipe |. Use the exact wording get_options returned — never a column value like PACKING_MATERIAL. Keep each under about 30 characters so it fits on a button.',
+        },
+      },
+      required: ['question', 'choices'],
+    },
+  },
+  {
     name: 'get_options',
     description:
-      "The real choices for a field, so you can offer them instead of guessing. Call this BEFORE asking somebody to pick a category, unit, department or store — never invent a list, and never make somebody guess what words you will accept.",
+      "Answers the question 'what categories/units/departments do we have?' when somebody asks it directly. DO NOT use this while adding a record — the create tool hands back its own choices, already drawn as buttons, and going round it means the create tool never gets to say what is still missing.",
     needs: 'masters:view',
     parameters: {
       type: 'object',
@@ -310,6 +328,8 @@ export interface Caller {
   onProposal?: (proposal: Proposal) => void
   /** Told when something was saved, so the waiting proposal can be cleared. */
   onCommitted?: () => void
+  /** Told when a question with fixed answers is asked, so it can be drawn as buttons. */
+  onQuestion?: (question: { question: string; choices: string[] }) => void
 }
 
 const can = (caller: Caller, needed: string) =>
@@ -332,6 +352,7 @@ export async function executeTool(
       can: (permission) => can(caller, permission),
       onProposal: caller.onProposal,
       onCommitted: caller.onCommitted,
+      onQuestion: caller.onQuestion,
     })
   }
 
@@ -719,6 +740,26 @@ export async function executeTool(
           due: day(i.dueDate),
           overdue: i.dueDate ? i.dueDate < new Date() : false,
         })),
+      }
+    }
+
+    case 'offer_choices': {
+      const choices = String(args.choices ?? '')
+        .split('|')
+        .map((c) => c.trim())
+        .filter(Boolean)
+        .slice(0, 12)
+
+      if (choices.length < 2) {
+        return { error: 'A choice needs at least two answers. Just ask it as a question instead.' }
+      }
+
+      caller.onQuestion?.({ question: String(args.question ?? '').trim(), choices })
+      // (offer_choices already refuses fewer than two, above.)
+      return {
+        shown: true,
+        instruction:
+          'The buttons are on screen. Reply with the question as one short line and nothing else — do not repeat the choices, do not number them, do not ask them to type one.',
       }
     }
 

@@ -48,6 +48,14 @@ export default function AskAI() {
   const [error, setError] = useState<string | null>(null)
   const [conversationId, setConversationId] = useState<string | undefined>()
   const [pending, setPending] = useState<PendingChange | null>(null)
+  /**
+   * A question with a fixed set of answers.
+   *
+   * On a phone this matters more than anywhere: typing "Packing Material" with
+   * a thumb, correctly, while standing in a godown, is the difference between
+   * using the assistant and not bothering.
+   */
+  const [choices, setChoices] = useState<{ question: string; choices: string[] } | null>(null)
   const scroller = useRef<ScrollView>(null)
 
   async function send(text: string) {
@@ -62,6 +70,7 @@ export default function AskAI() {
     // Cleared before the wait, not after — a card still offering to save
     // something while the yes is in flight reads as though it were ignored.
     setPending(null)
+    setChoices(null)
 
     try {
       const res = await api.post<{
@@ -71,12 +80,14 @@ export default function AskAI() {
           conversationId: string
           saved?: boolean
           pendingChange?: PendingChange | null
+          choices?: { question: string; choices: string[] } | null
         }
       }>('/ai/chat', { messages: next, conversationId })
 
       setConversationId(res.data.conversationId)
       setMessages([...next, { role: 'model', content: res.data.response }])
       setPending(res.data.pendingChange ?? null)
+      setChoices(res.data.choices ?? null)
       if (res.data.saved) {
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success)
       }
@@ -139,6 +150,22 @@ export default function AskAI() {
               <Text className="text-sm text-foreground">{m.content}</Text>
             </View>
           ))}
+
+          {choices && !busy ? (
+            <View className="flex-row flex-wrap gap-2">
+              {choices.choices.map((c) => (
+                <Pressable
+                  key={c}
+                  onPress={() => void send(c)}
+                  className="rounded-full border border-teal-500/30 bg-teal-500/10 px-3.5 py-2 active:opacity-70"
+                  accessibilityRole="button"
+                  accessibilityLabel={c}
+                >
+                  <Text className="text-xs text-teal-300">{c}</Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
 
           {pending && !busy ? (
             <Card className="border-amber-500/30 bg-amber-500/[0.07]">

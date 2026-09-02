@@ -63,6 +63,14 @@ export interface ChatResult {
   proposal: Proposal | null
   /** True when something was actually saved, so any waiting proposal is spent. */
   committed: boolean
+  /**
+   * A question with a fixed set of answers, for the chat to draw as buttons.
+   *
+   * Not remembered anywhere: it belongs to this one reply. The moment the
+   * person says anything the question has been answered or abandoned, and
+   * either way the buttons should go.
+   */
+  question: { question: string; choices: string[] } | null
 }
 
 export async function chatWithERP(req: ChatRequest): Promise<ChatResult> {
@@ -86,6 +94,7 @@ export async function chatWithERP(req: ChatRequest): Promise<ChatResult> {
 
   let proposal: Proposal | null = null
   let committed = false
+  let question: ChatResult['question'] = null
 
   const text = await runConversation(
     {
@@ -111,12 +120,17 @@ export async function chatWithERP(req: ChatRequest): Promise<ChatResult> {
         onCommitted: () => {
           committed = true
         },
+        onQuestion: (q) => {
+          question = q
+        },
       },
     },
     userName,
   )
 
-  return { text, proposal, committed }
+  // A proposal outranks a question: if there is something to confirm, that is
+  // what the person should be looking at.
+  return { text, proposal, committed, question: proposal ? null : question }
 }
 
 /**

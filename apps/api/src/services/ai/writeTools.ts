@@ -80,6 +80,8 @@ export interface WriteContext {
   /** How many things the person has said. A ticket can only be spent on a later one. */
   turnCount: number
   can: (permission: string) => boolean
+  /** Called when the tool still needs something, so it can be drawn as buttons. */
+  onQuestion?: (question: { question: string; choices: string[] }) => void
   /** Called when a change is described. The caller remembers it for next time. */
   onProposal?: (proposal: Proposal) => void
   /** Called once something is actually saved, so the waiting proposal is cleared. */
@@ -135,7 +137,109 @@ interface WriteDefinition {
 
 type Args = Record<string, unknown>
 
-const has = (v: unknown) => v !== undefined && v !== null && v !== ''
+/**
+ * Whether a value was actually given.
+ *
+ * The strings "undefined", "null" and "none" count as absent. A model asked to
+ * resend everything it has will sometimes fill a gap with the word for the
+ * gap, and "I do not have a category called undefined" is a poor thing to say
+ * to somebody.
+ */
+const has = (v: unknown): boolean => {
+  if (v === undefined || v === null || v === '') return false
+  if (typeof v !== 'string') return true
+  const t = v.trim().toLowerCase()
+  return t !== '' && t !== 'undefined' && t !== 'null' && t !== 'none' && t !== 'n/a'
+}
+
+/**
+ * Thrown by a build when something still has to be asked.
+ *
+ * Not an error in any real sense — it is the tool taking its turn in the
+ * conversation. It carries the question and, where there is a fixed set of
+ * answers, the buttons to draw.
+ */
+export class NeedMore extends Error {
+  constructor(
+    readonly field: string,
+    readonly question: string,
+    readonly choices?: string[],
+  ) {
+    super(question)
+    this.name = 'NeedMore'
+  }
+}
+
+/** One thing to ask for, in order. */
+interface Ask {
+  field: string
+  question: string
+  /** Fixed answers, drawn as buttons. A function when they come from the database. */
+  choices?: string[] | (() => Promise<string[]>)
+}
+
+/**
+ * Walks the list and stops at the first thing missing.
+ *
+ * A field the person has declined counts as answered — they said "skip", and
+ * asking again would be arguing with them. The model records that by naming
+ * the field in `skipped`.
+ */
+async function require_(args: Args, asks: Ask[]): Promise<void> {
+  const declined = new Set(
+    String(args.skipped ?? '')
+      .split(/[,|]/)
+      .map((f) => f.trim().toLowerCase())
+      .filter(Boolean),
+  )
+
+  for (const ask of asks) {
+    if (has(args[ask.field]) || declined.has(ask.field.toLowerCase())) continue
+    const choices =
+      typeof ask.choices === 'function' ? await ask.choices() : ask.choices
+    throw new NeedMore(ask.field, ask.question, choices)
+  }
+}
+
+/**
+ * Finds a record by a name somebody typed back.
+ *
+ * "Labels & Tags", "Labels and Tags" and "labels&tags" are the same answer. An
+ * exact contains treats them as three, and the person is told their own
+ * category does not exist — which is the most annoying possible reply.
+ */
+async function matchByName<T extends { id: string; name: string }>(
+  rows: T[],
+  needle: string,
+): Promise<T | null> {
+  const flatten = (v: string) =>
+    v.toLowerCase().replace(/and/g, '&').replace(/[^a-z0-9&]/g, '')
+
+  const wanted = flatten(needle)
+  if (!wanted) return null
+
+  return (
+    rows.find((r) => flatten(r.name) === wanted) ??
+    rows.find((r) => flatten(r.name).includes(wanted) || wanted.includes(flatten(r.name))) ??
+    null
+  )
+}
+
+/** The lists that live in the database, so a mill's own words come back. */
+const fromDb = {
+  itemCategories: async () =>
+    (await prisma.itemCategory.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((c) => c.name),
+  units: async () =>
+    (await prisma.uOM.findMany({ select: { symbol: true }, orderBy: { name: 'asc' } })).map((u) => u.symbol),
+  departments: async () =>
+    (await prisma.department.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((d) => d.name),
+  warehouses: async () =>
+    (await prisma.warehouse.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((w) => w.name),
+}
+
+/** Fixed in the software, written the way people say them. */
+const SUPPLIER_SUPPLIES = ['Fabric', 'Thread', 'Button', 'Lining', 'Label', 'Packaging', 'Trim', 'Transport', 'Service', 'Other']
+const CUSTOMER_KINDS = ['Domestic', 'Export', 'Job work', 'VHAGAR dealer']
 const like = (v: string) => ({ contains: v, mode: 'insensitive' as const })
 
 /** Only the keys the caller actually sent, so a partial update stays partial. */
@@ -215,6 +319,24 @@ function one<T extends { name: string; code: string }>(rows: T[], needle: string
 
 type PartyKind = 'customer' | 'supplier' | 'broker'
 
+/**
+ * What kind of item a category implies.
+ *
+ * Matched on a word within the category name rather than the whole thing, so a
+ * mill that renames "Fabric" to "Fabrics & Greige" keeps working. Anything not
+ * listed falls through and is asked about.
+ */
+const TYPE_FROM_CATEGORY: Array<[RegExp, string]> = [
+  [/fabric|cloth|greige|yarn|thread/i, 'RAW_MATERIAL'],
+  [/label|tag|button|fastener|trim|accessor|zip/i, 'TRIM'],
+  [/pack/i, 'PACKING_MATERIAL'],
+  [/consumable|spare|stationer/i, 'CONSUMABLE'],
+  [/finished|garment/i, 'FINISHED_GOOD'],
+]
+
+const typeForCategory = (categoryName: string): string | null =>
+  TYPE_FROM_CATEGORY.find(([pattern]) => pattern.test(categoryName))?.[1] ?? null
+
 async function findParty(kind: PartyKind, needle: string) {
   const delegate = prisma[kind] as unknown as {
     findMany: (a: unknown) => Promise<Array<{ id: string; name: string; code: string }>>
@@ -265,6 +387,11 @@ const CONFIRM_PARAM = {
     type: 'string',
     description: 'The confirmation code from the previous call, once the person has agreed.',
   },
+  skipped: {
+    type: 'string',
+    description:
+      'Fields the person declined to give, separated by commas — e.g. "phone,city". Add a field here when they say skip, later, or I do not know, so they are not asked again.',
+  },
 } as const
 
 const PARTY_FIELDS = {
@@ -282,7 +409,8 @@ const WRITES: WriteDefinition[] = [
     tool: {
       name: 'create_customer',
       description:
-        'Add a customer. Shows exactly what would be saved and saves nothing until the person agrees.',
+        'Add a customer.' +" Call this the moment somebody asks, with whatever they have already told you — even if that is only a name. It answers with the next thing it needs, and the choices to offer. Never hold back waiting until you have everything."+
+        ' Shows exactly what would be saved and saves nothing until the person agrees.',
       needs: 'masters:create',
       gather: [
         'their full name, as it should read on an invoice',
@@ -307,11 +435,18 @@ const WRITES: WriteDefinition[] = [
           creditLimit: { type: 'number', description: 'Credit limit in rupees' },
           ...CONFIRM_PARAM,
         },
-        required: ['name', 'type'],
+        required: [],
       },
     },
     gate: AI_GATE.change,
     build: async (a) => {
+      await require_(a, [
+        { field: 'name', question: 'What is the customer called?' },
+        { field: 'type', question: 'What kind of buyer are they?', choices: CUSTOMER_KINDS },
+        { field: 'city', question: 'Which city are they in?' },
+        { field: 'phone', question: 'What is their phone number?' },
+      ])
+
       const data = check(createCustomerSchema, {
         name: a.name,
         type: a.type,
@@ -347,7 +482,8 @@ const WRITES: WriteDefinition[] = [
     tool: {
       name: 'create_supplier',
       description:
-        'Add a supplier. Shows exactly what would be saved and saves nothing until the person agrees.',
+        'Add a supplier.' +" Call this the moment somebody asks, with whatever they have already told you — even if that is only a name. It answers with the next thing it needs, and the choices to offer. Never hold back waiting until you have everything."+
+        ' Shows exactly what would be saved and saves nothing until the person agrees.',
       needs: 'masters:create',
       gather: [
         'their full name',
@@ -376,11 +512,18 @@ const WRITES: WriteDefinition[] = [
           },
           ...CONFIRM_PARAM,
         },
-        required: ['name', 'category'],
+        required: [],
       },
     },
     gate: AI_GATE.change,
     build: async (a) => {
+      await require_(a, [
+        { field: 'name', question: 'What is the supplier called?' },
+        { field: 'category', question: 'What do they supply?', choices: SUPPLIER_SUPPLIES },
+        { field: 'city', question: 'Which city are they in?' },
+        { field: 'phone', question: 'What is their phone number?' },
+      ])
+
       const data = check(createSupplierSchema, {
         name: a.name,
         category: a.category,
@@ -415,14 +558,14 @@ const WRITES: WriteDefinition[] = [
     tool: {
       name: 'create_item',
       description:
-        'Add an item to the item master. Category, unit and GST rate are given by name and matched to the existing masters.',
+        'Add an item to the item master.' +" Call this the moment somebody asks, with whatever they have already told you — even if that is only a name. It answers with the next thing it needs, and the choices to offer. Never hold back waiting until you have everything."+
+        ' Category, unit and GST rate are given by name and matched to the existing masters.',
       needs: 'masters:create',
       gather: [
         'what the item is called',
-        'which category — call get_options with item_categories and offer the real list',
-        'which unit it is measured in — call get_options with units and offer the real list',
-        'what kind of item it is — call get_options with item_types and offer the list',
-        'its usual rate per unit',
+        'which category it belongs to — call get_options with item_categories, then offer_choices with that list',
+        'which unit it is measured in — call get_options with units, then offer_choices with that list',
+        'its usual rate per unit, in rupees',
         'the level at which it should be reordered',
       ],
       parameters: {
@@ -433,7 +576,8 @@ const WRITES: WriteDefinition[] = [
           unit: { type: 'string', description: 'Unit symbol, e.g. mtr, pcs, kg, roll' },
           type: {
             type: 'string',
-            description: 'What kind of item',
+            description:
+              'Leave this out. It is worked out from the category, and asking for it is asking the same question twice in words nobody uses. Send it only if the person volunteers a correction.',
             enum: ['RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'CONSUMABLE', 'PACKING_MATERIAL', 'TRIM'],
           },
           hsnCode: { type: 'string', description: 'HSN code' },
@@ -442,25 +586,42 @@ const WRITES: WriteDefinition[] = [
           reorderLevel: { type: 'number', description: 'Order more when stock falls to this' },
           ...CONFIRM_PARAM,
         },
-        required: ['name', 'category', 'unit', 'type'],
+        required: [],
       },
     },
     gate: AI_GATE.change,
     build: async (a) => {
-      const category = await prisma.itemCategory.findFirst({ where: { name: like(String(a.category)) } })
+      await require_(a, [
+        { field: 'name', question: 'What is the item called?' },
+        { field: 'category', question: 'Which category is it in?', choices: fromDb.itemCategories },
+        { field: 'unit', question: 'Which unit is it measured in?', choices: fromDb.units },
+        { field: 'standardRate', question: 'What is the usual rate for one unit?' },
+      ])
+
+      const category = await matchByName(
+        await prisma.itemCategory.findMany({ where: { isActive: true } }),
+        String(a.category),
+      )
       if (!category) {
-        const all = await prisma.itemCategory.findMany({ select: { name: true } })
-        throw new Error(
-          `No category called "${a.category}". There is: ${all.map((c) => c.name).join(', ')}.`,
+        throw new NeedMore(
+          'category',
+          `I do not have a category called "${a.category}". Which is it?`,
+          await fromDb.itemCategories(),
         )
       }
 
-      const uom = await prisma.uOM.findFirst({
-        where: { OR: [{ symbol: like(String(a.unit)) }, { name: like(String(a.unit)) }] },
-      })
+      const units = await prisma.uOM.findMany()
+      const uom =
+        (await matchByName(units.map((u) => ({ ...u, name: u.symbol })), String(a.unit))) ??
+        (await matchByName(units, String(a.unit)))
       if (!uom) {
-        const all = await prisma.uOM.findMany({ select: { symbol: true } })
-        throw new Error(`No unit called "${a.unit}". There is: ${all.map((u) => u.symbol).join(', ')}.`)
+        // Ask again with the buttons rather than stopping. Somebody typed
+        // "pices" and got told off; they should just be shown the list.
+        throw new NeedMore(
+          'unit',
+          `I do not have a unit called "${a.unit}". Which is it?`,
+          await fromDb.units(),
+        )
       }
 
       let taxRateId: string | undefined
@@ -470,9 +631,19 @@ const WRITES: WriteDefinition[] = [
         taxRateId = tax.id
       }
 
+      // Asked for only when the category does not settle it. "Labels & Tags"
+      // is a trim; nobody adding a label should be asked a second time in
+      // words they would never use.
+      const type = has(a.type) ? String(a.type) : typeForCategory(category.name)
+      if (!type) {
+        throw new Error(
+          `I cannot tell what kind of item goes in "${category.name}". Is it a raw material, a trim, packing material, a consumable, or a finished good?`,
+        )
+      }
+
       const data = check(createItemSchema, {
         name: a.name,
-        type: a.type,
+        type,
         categoryId: category.id,
         uomId: uom.id,
         hsnCode: a.hsnCode,
@@ -481,19 +652,31 @@ const WRITES: WriteDefinition[] = [
         reorderLevel: a.reorderLevel,
       })
 
+      const KIND: Record<string, string> = {
+        RAW_MATERIAL: 'Raw material',
+        SEMI_FINISHED: 'Semi finished',
+        FINISHED_GOOD: 'Finished good',
+        CONSUMABLE: 'Consumable',
+        PACKING_MATERIAL: 'Packing material',
+        TRIM: 'Trim',
+      }
+
       const shown = {
-        name: a.name,
-        type: a.type,
-        category: category.name,
-        unit: uom.symbol,
-        ...(has(a.hsnCode) ? { hsn: a.hsnCode } : {}),
-        ...(has(a.gstRate) ? { gst: `${a.gstRate}%` } : {}),
-        ...(has(a.standardRate) ? { rate: `₹${a.standardRate}` } : {}),
-        ...(has(a.reorderLevel) ? { reorderLevel: a.reorderLevel } : {}),
+        Name: a.name,
+        Kind: KIND[type] ?? type,
+        Category: category.name,
+        Unit: uom.symbol,
+        ...(has(a.hsnCode) ? { HSN: a.hsnCode } : {}),
+        ...(has(a.gstRate) ? { GST: `${a.gstRate}%` } : {}),
+        ...(has(a.standardRate) ? { Rate: `₹${a.standardRate}` } : {}),
+        ...(has(a.reorderLevel) ? { 'Reorder level': a.reorderLevel } : {}),
       }
       return {
         title: 'Add an item',
         fields: rows(shown),
+        note: has(a.type)
+          ? 'A code will be given to it automatically.'
+          : `Kind worked out from the category. A code will be given automatically.`,
         payload: data as Args,
       }
     },
@@ -678,19 +861,27 @@ const WRITES: WriteDefinition[] = [
           purpose: { type: 'string', description: 'What it is for' },
           ...CONFIRM_PARAM,
         },
-        required: ['department', 'warehouse', 'items'],
+        required: [],
       },
     },
     gate: AI_GATE.change,
     build: async (a) => {
-      const department = await prisma.department.findFirst({
-        where: { name: like(String(a.department)), isActive: true },
-      })
+      await require_(a, [
+        { field: 'department', question: 'Which department is asking?', choices: fromDb.departments },
+        { field: 'warehouse', question: 'Which store should it come from?', choices: fromDb.warehouses },
+        { field: 'items', question: 'What is wanted, and how much of each?' },
+      ])
+
+      const department = await matchByName(
+        await prisma.department.findMany({ where: { isActive: true } }),
+        String(a.department),
+      )
       if (!department) throw new Error(`No department called "${a.department}".`)
 
-      const warehouse = await prisma.warehouse.findFirst({
-        where: { name: like(String(a.warehouse)), isActive: true },
-      })
+      const warehouse = await matchByName(
+        await prisma.warehouse.findMany({ where: { isActive: true } }),
+        String(a.warehouse),
+      )
       if (!warehouse) throw new Error(`No store called "${a.warehouse}".`)
 
       const chunks = String(a.items)
@@ -955,6 +1146,7 @@ export async function runWriteTool(
   }
 
   const payload = given(args)
+  logger.info(`AI write: ${name} ${JSON.stringify(payload)}`)
 
   try {
     // Build on both passes. Validating only on the way in would let a preview be
@@ -1000,6 +1192,19 @@ export async function runWriteTool(
     logger.info(`AI write: ${name} confirmed by ${ctx.userName}`)
     return result
   } catch (err) {
+    if (err instanceof NeedMore) {
+      if (err.choices?.length) {
+        ctx.onQuestion?.({ question: err.question, choices: err.choices })
+      }
+      return {
+        askNext: err.field,
+        question: err.question,
+        ...(err.choices?.length ? { choicesShownAsButtons: err.choices } : {}),
+        instruction: err.choices?.length
+          ? 'Say the question as one short line. The choices are already on screen as buttons — do NOT list them in your reply.'
+          : 'Say the question as one short line.',
+      }
+    }
     return { error: (err as Error).message }
   }
 }

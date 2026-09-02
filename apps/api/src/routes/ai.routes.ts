@@ -105,6 +105,8 @@ router.post('/chat', async (req: AuthRequest, res) => {
             note: result.proposal.note ?? null,
           }
         : null,
+      /** A question with a fixed set of answers, drawn as buttons. */
+      choices: result.question,
     },
   })
 })
