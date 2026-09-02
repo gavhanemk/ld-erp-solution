@@ -285,3 +285,36 @@ If any of these appear as a literal in a file, it is a bug:
 - Approval limits
 - Terms and conditions, declarations, footers on printed documents
 - Rows per page, date format
+- Which AI company answers, and which model
+
+---
+
+## 12. The assistant
+
+The AI in this ERP is not trained on LD's data, and nobody should say it is.
+It is given a short list of things it may **look up**, and it looks them up in
+the live database each time it is asked. That distinction decides everything
+about how it behaves.
+
+Three rules, all held in
+[`apps/api/src/services/ai/tools.ts`](../apps/api/src/services/ai/tools.ts):
+
+1. **It can only read.** There is no tool that writes. It can tell you a
+   purchase order is waiting; approving it is a button a person presses, with
+   their name against it. An assistant that could approve things would make the
+   audit trail a work of fiction.
+2. **It never sees more than the person asking.** Each tool names the permission
+   it needs, and a tool that mixes subjects narrows its own answer field by
+   field. A store keeper asking what customers owe is refused, in the same words
+   the Accounts screen would use.
+3. **There is no tool for a module that is not built.** A tool over an empty
+   table would teach it to say "nothing to report" about a feature nobody has
+   written.
+
+To make it better at something, add a tool or add to the background in
+[`ai/prompt.ts`](../apps/api/src/services/ai/prompt.ts). Do not paste data into
+the prompt: it goes stale the moment somebody edits a record, and stale is worse
+than absent.
+
+Which company answers — OpenAI or Google — is a setting in
+Settings → Assistant, not a decision in the code.

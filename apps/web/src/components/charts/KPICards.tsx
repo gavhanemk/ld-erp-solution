@@ -17,9 +17,14 @@ interface DashboardSummary {
   activeOrders: number
   todayProduction: { achieved: number; target: number; efficiency: number; rejection: number }
   pendingApprovals: number
-  revenueMTD: number | string
-  outstandingReceivable: number | string
-  outstandingPayable: number | string
+  /**
+   * Null when the signed-in role has no accounts access. The server withholds
+   * these rather than sending a zero, because a zero is a fact and it would be
+   * the wrong one — so these cards are left out entirely instead.
+   */
+  revenueMTD: number | string | null
+  outstandingReceivable: number | string | null
+  outstandingPayable: number | string | null
   generatedAt: string
 }
 
@@ -72,30 +77,34 @@ function toCards(d: DashboardSummary): Card[] {
       icon: AlertCircle,
       color: 'red',
     },
-    {
-      id: 'revenue-mtd',
-      label: 'Revenue (MTD)',
-      value: formatCurrency(Number(d.revenueMTD)),
-      subValue: 'Invoiced this month',
-      icon: IndianRupee,
-      color: 'emerald',
-    },
-    {
-      id: 'receivable',
-      label: 'Receivable',
-      value: formatCurrency(Number(d.outstandingReceivable)),
-      subValue: 'Owed by customers',
-      icon: Clock,
-      color: 'amber',
-    },
-    {
-      id: 'payable',
-      label: 'Payable',
-      value: formatCurrency(Number(d.outstandingPayable)),
-      subValue: 'Owed to suppliers',
-      icon: Wallet,
-      color: 'purple',
-    },
+    ...(d.revenueMTD === null
+      ? []
+      : ([
+          {
+            id: 'revenue-mtd',
+            label: 'Revenue (MTD)',
+            value: formatCurrency(Number(d.revenueMTD)),
+            subValue: 'Invoiced this month',
+            icon: IndianRupee,
+            color: 'emerald',
+          },
+          {
+            id: 'receivable',
+            label: 'Receivable',
+            value: formatCurrency(Number(d.outstandingReceivable)),
+            subValue: 'Owed by customers',
+            icon: Clock,
+            color: 'amber',
+          },
+          {
+            id: 'payable',
+            label: 'Payable',
+            value: formatCurrency(Number(d.outstandingPayable)),
+            subValue: 'Owed to suppliers',
+            icon: Wallet,
+            color: 'purple',
+          },
+        ] as const)),
   ]
 }
 

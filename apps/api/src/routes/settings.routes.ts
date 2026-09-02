@@ -22,7 +22,8 @@ import {
   withDefaults,
 } from '../schemas/settings.schemas'
 import { getPreferences, invalidatePreferences } from '../lib/preferences'
-import { AI_MODELS, getAiConfig, maskKey, saveAiConfig } from '../lib/aiConfig'
+import { AI_MODELS, PROVIDER_LABEL, getAiConfig, maskKey, saveAiConfig } from '../lib/aiConfig'
+import { testAssistant } from '../services/ai.service'
 
 const router = Router()
 
@@ -967,6 +968,7 @@ router.patch('/documents/:docType', requirePermission(SETTINGS, 'edit'), async (
 // ═══════════════════════════════════════════
 
 const aiSettingsSchema = z.object({
+  provider: z.enum(['openai', 'gemini']).optional(),
   // An empty string clears the key; undefined leaves it alone.
   apiKey: z.string().max(200).optional(),
   model: z.string().max(60).optional(),
@@ -974,35 +976,51 @@ const aiSettingsSchema = z.object({
   dailySummary: z.boolean().optional(),
 })
 
-router.get('/ai', requirePermission(SETTINGS, 'view'), async (_req, res) => {
-  const config = await getAiConfig(true)
+/** Everything the assistant screen needs, minus the one thing it must never get. */
+function aiPayload(config: Awaited<ReturnType<typeof getAiConfig>>) {
+  return {
+    provider: config.provider,
+    providerLabel: PROVIDER_LABEL[config.provider],
+    // The key itself is never sent back — only enough to show one is saved.
+    configured: Boolean(config.apiKey),
+    keyHint: maskKey(config.apiKey),
+    source: config.source,
+    model: config.model,
+    enabled: config.enabled,
+    dailySummary: config.dailySummary,
+    models: AI_MODELS,
+    /** Which providers already have a key, so the screen can say so. */
+    available: config.available,
+    /** Explains the guardrail on screen rather than offering it as a toggle. */
+    permissionScoped: true,
+  }
+}
 
-  res.json({
-    success: true,
-    data: {
-      // The key itself is never sent back — only enough to show one is saved.
-      configured: Boolean(config.apiKey),
-      keyHint: maskKey(config.apiKey),
-      source: config.source,
-      model: config.model,
-      enabled: config.enabled,
-      dailySummary: config.dailySummary,
-      models: AI_MODELS,
-      /** Explains the guardrail on screen rather than offering it as a toggle. */
-      permissionScoped: true,
-    },
-  })
+router.get('/ai', requirePermission(SETTINGS, 'view'), async (_req, res) => {
+  res.json({ success: true, data: aiPayload(await getAiConfig(true)) })
 })
 
 router.patch('/ai', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
   const data = aiSettingsSchema.parse(req.body)
   const company = await companyId()
 
-  if (data.model && !AI_MODELS.some((m) => m.value === data.model)) {
-    throw new AppError('That model is not one we support', 400, 'INVALID_MODEL')
+  // A model belongs to one provider. Saving a Gemini model against OpenAI would
+  // leave the assistant broken in a way the screen would still call configured.
+  if (data.model) {
+    const chosen = AI_MODELS.find((m) => m.value === data.model)
+    const provider = data.provider ?? (await getAiConfig()).provider
+    if (!chosen) throw new AppError('That model is not one we support', 400, 'INVALID_MODEL')
+    if (chosen.provider !== provider) {
+      throw new AppError(
+        `${chosen.label.split(' —')[0]} is a ${PROVIDER_LABEL[chosen.provider]} model, and the assistant is set to ${PROVIDER_LABEL[provider]}.`,
+        400,
+        'MODEL_PROVIDER_MISMATCH',
+      )
+    }
   }
 
   await saveAiConfig(company, {
+    ...(data.provider !== undefined ? { provider: data.provider } : {}),
     ...(data.apiKey !== undefined ? { apiKey: data.apiKey.trim() || null } : {}),
     ...(data.model !== undefined ? { model: data.model } : {}),
     ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
@@ -1020,65 +1038,41 @@ router.patch('/ai', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest
     entityId: company,
     after: {
       apiKeyChanged: data.apiKey !== undefined,
+      provider: after.provider,
       model: after.model,
       enabled: after.enabled,
       dailySummary: after.dailySummary,
     },
   })
 
-  res.json({
-    success: true,
-    data: {
-      configured: Boolean(after.apiKey),
-      keyHint: maskKey(after.apiKey),
-      source: after.source,
-      model: after.model,
-      enabled: after.enabled,
-      dailySummary: after.dailySummary,
-    },
-  })
+  res.json({ success: true, data: aiPayload(after) })
 })
 
 /**
  * Asks the model a trivial question and reports what came back.
  *
  * A key that merely exists proves nothing — it can be revoked, mistyped, or out
- * of quota. This screen should say whether the assistant actually works.
+ * of credit — so this asks the real provider a real question. The provider
+ * adapter already turns the common failures into sentences a mill owner can act
+ * on, which is why there is no error handling of its own here beyond catching.
  */
-router.post('/ai/test', requirePermission(SETTINGS, 'edit'), async (req, res) => {
-  const { apiKey } = z.object({ apiKey: z.string().optional() }).parse(req.body ?? {})
-  const config = await getAiConfig(true)
-  const key = apiKey?.trim() || config.apiKey
-
-  if (!key) {
-    return res.json({ success: false, message: 'No API key to test. Paste one above first.' })
-  }
-
+router.post('/ai/test', requirePermission(SETTINGS, 'edit'), async (_req, res) => {
   const started = Date.now()
   try {
-    const { GoogleGenerativeAI } = await import('@google/generative-ai')
-    const model = new GoogleGenerativeAI(key).getGenerativeModel({ model: config.model })
-    const result = await model.generateContent('Reply with the single word: ready')
-    const text = result.response.text().trim().slice(0, 40)
-
+    const { provider, model } = await testAssistant()
     res.json({
       success: true,
-      message: `Answered in ${Date.now() - started} ms — "${text}"`,
-      model: config.model,
+      message: `${PROVIDER_LABEL[provider]} answered in ${Date.now() - started} ms.`,
+      model,
     })
   } catch (err) {
-    const raw = (err as Error).message ?? ''
-    // Google's errors are long and full of JSON; turn the common ones into
-    // something a mill owner can act on.
-    const message = /API_KEY_INVALID|API key not valid/i.test(raw)
-      ? 'That key was refused. Check you copied all of it from Google AI Studio.'
-      : /quota|RESOURCE_EXHAUSTED|429/i.test(raw)
-        ? 'The key works, but its free quota is used up for now. Try again later or add billing.'
-        : /not found|404/i.test(raw)
-          ? `The key works, but the model "${config.model}" is not available to it. Try another model.`
-          : `Could not reach Google: ${raw.slice(0, 160)}`
-
-    res.json({ success: false, message })
+    res.json({
+      success: false,
+      message:
+        err instanceof AppError
+          ? err.message
+          : `Could not reach the assistant: ${(err as Error).message.slice(0, 160)}`,
+    })
   }
 })
 
@@ -1177,7 +1171,10 @@ router.get('/system', requirePermission(SETTINGS, 'view'), async (_req, res) => 
       return Boolean(value) && !value!.startsWith('your-')
     })
 
-  const aiConfigured = configured('GEMINI_API_KEY')
+  // The assistant's key can live in Settings as well as in .env, so this asks
+  // the config rather than the environment. Reading only .env made the screen
+  // report "not connected" for a key that was working perfectly.
+  const ai = await getAiConfig()
   const emailConfigured = configured('SMTP_HOST', 'SMTP_USER', 'SMTP_PASS')
   const whatsappConfigured = configured('WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID')
 
@@ -1199,11 +1196,13 @@ router.get('/system', requirePermission(SETTINGS, 'view'), async (_req, res) => 
         },
         {
           key: 'ai',
-          name: 'AI assistant (Gemini)',
-          connected: aiConfigured,
-          detail: aiConfigured
-            ? `Model ${process.env.GEMINI_MODEL ?? 'gemini-2.0-flash-exp'}`
-            : 'No API key set, so the assistant cannot answer',
+          name: `AI assistant (${PROVIDER_LABEL[ai.provider]})`,
+          connected: Boolean(ai.apiKey) && ai.enabled,
+          detail: !ai.apiKey
+            ? 'No API key set, so the assistant cannot answer'
+            : !ai.enabled
+              ? 'A key is saved but the assistant is switched off'
+              : `Model ${ai.model}, key from ${ai.source === 'settings' ? 'Settings' : 'the server file'}`,
         },
         {
           key: 'whatsapp',
