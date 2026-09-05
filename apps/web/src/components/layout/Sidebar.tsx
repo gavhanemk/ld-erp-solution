@@ -72,7 +72,7 @@ const navItems: NavItem[] = [
     label: 'Purchase', icon: Package,
     children: [
       { label: 'Purchase Orders', href: '/purchase/orders' },
-      { label: 'Goods Receipt (GRN)', href: '/purchase/grn', planned: true },
+      { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
       { label: 'Purchase Bills', href: '/purchase/bills', planned: true },
       { label: 'Supplier Payments', href: '/purchase/payments', planned: true },
     ],
