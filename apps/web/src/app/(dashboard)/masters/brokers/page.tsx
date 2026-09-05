@@ -71,7 +71,7 @@ const columns: Column<Broker>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Code', required: true, placeholder: 'BRK-001', section: 'Identity' },
+  { name: 'code', label: 'Code', generated: true, section: 'Identity' },
   {
     name: 'name',
     label: 'Agent Name',

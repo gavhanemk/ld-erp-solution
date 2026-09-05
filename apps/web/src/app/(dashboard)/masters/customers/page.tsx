@@ -104,7 +104,7 @@ const columns: Column<Customer>[] = [
 ]
 
 const formFields: FormField[] = [
-  { name: 'code', label: 'Customer Code', required: true, placeholder: 'CUST-001', section: 'Identity', uppercase: true },
+  { name: 'code', label: 'Customer Code', generated: true, section: 'Identity' },
   { name: 'name', label: 'Customer Name', required: true, placeholder: 'Rajan Traders', section: 'Identity' },
   {
     name: 'type',

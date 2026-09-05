@@ -6,6 +6,7 @@ import {
   Download, Share2, Copy, ChevronDown, Sparkles
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ConfirmChangeCard, type PendingChange } from '@/components/ai/ConfirmChangeCard'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -49,6 +50,23 @@ Here are some things I can do:
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [conversationId, setConversationId] = useState<string>()
+  /**
+   * A change the assistant has described and saved nowhere.
+   *
+   * Held apart from the messages rather than on one of them: the proposal
+   * belongs to the conversation, only ever the latest one is live, and the
+   * message array is rebuilt on every reply — a flag on a message would end up
+   * attached to the wrong turn.
+   */
+  const [pendingChange, setPendingChange] = useState<PendingChange | null>(null)
+  /**
+   * A question with a fixed set of answers, drawn as buttons.
+   *
+   * Declared by the assistant rather than parsed out of its wording — reading
+   * a list back out of prose is guesswork, and the one time it guesses wrong
+   * the buttons say something the assistant will not accept.
+   */
+  const [choices, setChoices] = useState<{ question: string; choices: string[] } | null>(null)
   const [isListening, setIsListening] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -57,11 +75,21 @@ Here are some things I can do:
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  // Waiting for a reply used to disable the input, which blurred it — and the
+  // focus() in the finally ran a tick too early to put it back. Every answer
+  // meant reaching for the mouse. Now it is never disabled, and the cursor is
+  // there when the page opens and again after each reply.
+  useEffect(() => {
+    if (!isLoading) inputRef.current?.focus()
+  }, [isLoading])
+
   const sendMessage = async (text?: string) => {
     const msg = text || input.trim()
     if (!msg || isLoading) return
 
     setInput('')
+    setPendingChange(null)
+    setChoices(null)
     const userMsg: Message = { role: 'user', content: msg, timestamp: new Date() }
     const loadingMsg: Message = { role: 'assistant', content: '', timestamp: new Date(), isLoading: true }
 
@@ -84,6 +112,8 @@ Here are some things I can do:
 
       if (data.success) {
         setConversationId(data.data.conversationId)
+        setPendingChange(data.data.pendingChange ?? null)
+        setChoices(data.data.choices ?? null)
         setMessages((m) => [
           ...m.slice(0, -1),
           { role: 'assistant', content: data.data.response, timestamp: new Date() },
@@ -95,6 +125,8 @@ Here are some things I can do:
         ])
       }
     } catch {
+      setPendingChange(null)
+      setChoices(null)
       setMessages((m) => [
         ...m.slice(0, -1),
         { role: 'assistant', content: '⚠️ Network error. Please check your connection and try again.', timestamp: new Date() },
@@ -245,6 +277,39 @@ Here are some things I can do:
               </div>
             </div>
           ))}
+
+          {choices && !isLoading && (
+            <div className="flex flex-wrap gap-2 pl-11 animate-fade-in">
+              {choices.choices.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => void sendMessage(c)}
+                  className="px-3 py-1.5 rounded-full text-xs text-teal-300 bg-teal-500/10 border border-teal-500/25 hover:bg-teal-500/20 hover:border-teal-500/40 transition-colors"
+                >
+                  {c}
+                </button>
+              ))}
+              {/* Typing instead is always allowed — the answer may not be on a
+                  button, and somebody who already knows the word is faster. */}
+              <span className="self-center text-[10px] text-muted-foreground">
+                or type your answer
+              </span>
+            </div>
+          )}
+
+          {pendingChange && !isLoading && (
+            <ConfirmChangeCard
+              change={pendingChange}
+              busy={isLoading}
+              onConfirm={() => void sendMessage('Yes, save it.')}
+              onCancel={() => void sendMessage('No, cancel that.')}
+              onEdit={() => {
+                setPendingChange(null)
+                inputRef.current?.focus()
+              }}
+            />
+          )}
+
           <div ref={messagesEndRef} />
         </div>
 
@@ -275,7 +340,7 @@ Here are some things I can do:
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
               placeholder="Ask anything about your business... (Enter to send)"
               className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
-              disabled={isLoading}
+              autoFocus
             />
 
             <button

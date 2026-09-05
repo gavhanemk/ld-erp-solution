@@ -122,14 +122,20 @@ export interface DocumentTemplate {
   configured: boolean
 }
 
+export type AiProvider = 'openai' | 'gemini'
+
 export interface AiSettings {
+  provider: AiProvider
+  providerLabel: string
   configured: boolean
   keyHint: string | null
   source: 'settings' | 'environment' | 'none'
   model: string
   enabled: boolean
   dailySummary: boolean
-  models: { value: string; label: string }[]
+  models: { value: string; label: string; provider: AiProvider }[]
+  /** Providers that already have a usable key somewhere. */
+  available: AiProvider[]
   permissionScoped: boolean
 }
 
@@ -229,10 +235,10 @@ export const settingsApi = {
     get: () => api.get<Single<AiSettings>>('/settings/ai'),
     update: (patch: Record<string, unknown>) => api.patch<Single<AiSettings>>('/settings/ai', patch),
     /** Actually calls the model, rather than checking a string is present. */
-    test: (apiKey?: string) =>
-      api.post<{ success: boolean; message: string; model?: string }>('/settings/ai/test', {
-        ...(apiKey ? { apiKey } : {}),
-      }),
+    // Tests whatever is actually saved. Testing a key sitting unsaved in the
+    // box would report on a configuration the server is not using.
+    test: () =>
+      api.post<{ success: boolean; message: string; model?: string }>('/settings/ai/test', {}),
   },
 
   changeOwnPassword: (currentPassword: string, newPassword: string) =>

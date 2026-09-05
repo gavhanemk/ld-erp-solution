@@ -285,3 +285,101 @@ If any of these appear as a literal in a file, it is a bug:
 - Approval limits
 - Terms and conditions, declarations, footers on printed documents
 - Rows per page, date format
+- Which AI company answers, and which model
+
+---
+
+## 12. Master codes
+
+Every customer, supplier, item, broker, store and workstation has a short code.
+**Nobody types it.** The forms do not ask, and the assistant does not ask.
+
+A code is a handle, not information. Nobody at a cutting table decides that a
+customer should be CUS-017 rather than CUS-018 — it only has to be short,
+unique, and the same every time it is quoted. Asking a person to invent one is
+asking them to do the computer's job, and it is how a register ends up with
+CUST-1, Cust001 and C-1 all meaning three different firms.
+
+[`masterCode.ts`](../apps/api/src/lib/masterCode.ts) fills it in: the prefix
+already in use, then one past the highest number with that prefix. An item takes
+its prefix from its **category**, so a cotton poplin is FAB-011 and not ITM-011 —
+a store keeper searching "FAB" expects fabric.
+
+Two people saving at the same instant can read the same highest number. The
+unique constraint catches the second, and it takes the next one. Only a clash on
+the *code* is retried; every other failure is a real problem the person must see.
+
+**The two exceptions, where the code IS the information and is still typed:**
+
+| Master | Why |
+|---|---|
+| **Size** | The code is "40". It is the size, not a handle for it. |
+| **Style** | LD-SH-2601 says brand, garment and season. A merchandiser chooses it and buyers quote it. |
+
+On an edit form the code is shown, greyed out. By then it is on documents and
+people quote it, so hiding it would be unhelpful and changing it would orphan
+them.
+
+---
+
+## 13. The assistant
+
+The AI in this ERP is not trained on LD's data, and nobody should say it is.
+It is given a short list of things it may **look up**, and it looks them up in
+the live database each time it is asked. That distinction decides everything
+about how it behaves.
+
+Two sets of tools, and they follow different rules.
+[`ai/tools.ts`](../apps/api/src/services/ai/tools.ts) answers questions.
+[`ai/writeTools.ts`](../apps/api/src/services/ai/writeTools.ts) changes records.
+
+**Reading:**
+
+1. **It never sees more than the person asking.** Each tool names the permission
+   it needs, and a tool that mixes subjects narrows its own answer field by
+   field. A store keeper asking what customers owe is refused, in the same words
+   the Accounts screen would use.
+2. **There is no tool for a module that is not built.** A tool over an empty
+   table would teach it to say "nothing to report" about a feature nobody has
+   written.
+
+**Changing:**
+
+3. **Two permissions, not one.** The module permission the same act would need
+   on a screen — `masters:create` to add a supplier — *and* a chat switch:
+   `ai:create` to change records, `ai:approve` to decide documents. So a role
+   can be allowed to add suppliers at a desk and not from a corridor. Both are
+   ticked per role in Settings → Roles. **No role has `ai:create` out of the
+   box.** Somebody has to decide to give it.
+4. **It asks before it acts, one question at a time.** Somebody says "add ABC
+   Traders as a supplier" and nothing else — that is how people talk. The
+   assistant asks for the rest in turn, with the real choices in the question
+   (fetched live, never remembered), and **never guesses an answer from a name**:
+   "Vinayak Threads" may well sell buttons, and a guessed category is a wrong
+   ledger for years. Each write tool carries its own list of what must be asked.
+5. **Nothing happens on the first ask.** Every change is described in full,
+   saved nowhere, and waits. It writes only when the person says yes and the
+   signed ticket comes back — shown as a card with a Confirm button, not as a
+   paragraph, because prose is read the way people read terms and conditions.
+   The ticket is bound to the exact values, to the person, and to the message it
+   was issued on, so the assistant cannot propose and confirm in the same breath.
+   Change a detail after seeing the card and the ticket is refused — correctly —
+   and a fresh card appears with the new figures.
+6. **The same rules as the screens.** The same Zod schemas the web forms post
+   through, the same document numbering, the same refusals. There is no second,
+   laxer way into the database.
+7. **The audit row names the person who confirmed it**, never the assistant, and
+   records that it came through the chat.
+8. **Nothing that moves money or stock.** No invoices, no payments, no goods
+   receipts, no stock issues. Those carry a document number, a tax position and
+   a legal life, and they are worth the two minutes it takes to fill the form
+   in. Raising a requisition and approving a document are allowed, because
+   approving from a corridor is the whole reason an MD wanted this.
+
+To make it better at something, add a tool or add to the background in
+[`ai/prompt.ts`](../apps/api/src/services/ai/prompt.ts). Do not paste data into
+the prompt: it goes stale the moment somebody edits a record, and stale is worse
+than absent.
+
+Which company answers — OpenAI or Google — is a setting in
+Settings → Assistant, not a decision in the code.

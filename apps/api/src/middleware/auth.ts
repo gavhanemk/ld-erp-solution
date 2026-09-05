@@ -56,6 +56,26 @@ export const requireRole = (...roles: string[]) => {
  * The token is the source of truth, so a permission change only takes effect
  * once the user's access token is refreshed — 15 minutes at most.
  */
+/**
+ * The same question requirePermission asks, but as a plain answer.
+ *
+ * Some screens are open to everyone and only *parts* of them are restricted —
+ * the dashboard shows production to the whole mill but must not show what
+ * customers owe to somebody with no accounts access. Guarding the whole route
+ * would take the dashboard away from them; guarding nothing hands out the
+ * figures. This lets one response leave out what one reader may not see.
+ */
+export function userCan(
+  user: AuthRequest['user'],
+  module: string,
+  action: string,
+): boolean {
+  if (!user) return false
+  if (user.role === SUPER_ROLE) return true
+  const granted = user.permissions ?? []
+  return granted.includes(`${module}:${action}`) || granted.includes(`${module}:*`)
+}
+
 export const requirePermission = (module: string, action: string) => {
   const needed = `${module}:${action}`
 
