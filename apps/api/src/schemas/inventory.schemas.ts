@@ -123,3 +123,14 @@ export const issueRequisitionSchema = z.object({
     )
     .optional(),
 })
+
+/**
+ * Taking a transfer back out.
+ *
+ * The reason is required for the same purpose as on any other cancellation: a
+ * movement that was undone with no explanation is the one somebody has to go
+ * and reconstruct from memory six months later.
+ */
+export const cancelTransferSchema = z.object({
+  reason: z.string().min(5, 'Say why the transfer is being cancelled — one line is enough').max(500),
+})
