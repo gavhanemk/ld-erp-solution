@@ -82,6 +82,7 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Material Requisitions', href: '/inventory/requisitions' },
+      { label: 'Stock Documents', href: '/inventory/documents' },
       { label: 'Stock Ledger', href: '/inventory/ledger' },
     ],
   },
