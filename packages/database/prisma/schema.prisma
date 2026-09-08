@@ -261,6 +261,9 @@ model User {
   raisedMRs       MaterialRequisition[] @relation("MRRaisedBy")
   approvedMRs     MaterialRequisition[] @relation("MRApprovedBy")
   issuedMRs       MaterialRequisition[] @relation("MRIssuedBy")
+  movedStock      StockTransfer[]       @relation("TransferMovedBy")
+  cancelledStock  StockTransfer[]       @relation("TransferCancelledBy")
+  countedStock    StockAdjustment[]     @relation("AdjustmentMadeBy")
 
   @@index([email])
   @@index([roleId])
@@ -499,6 +502,8 @@ model Item {
   soLines       SalesOrderLine[]
   mrLines       MaterialRequisitionLine[]
   grnLines      GRNLine[]
+  transferLines StockTransferLine[]
+  countLines    StockAdjustmentLine[]
   invoiceLines  SalesInvoiceLine[]
   billLines     PurchaseInvoiceLine[]
   creditLines   CreditNoteLine[]
@@ -684,6 +689,9 @@ model Warehouse {
   mrLines        MaterialRequisitionLine[]
   grnLines       GRNLine[]
   purchaseOrders PurchaseOrder[]
+  transfersOut   StockTransfer[]           @relation("TransferFrom")
+  transfersIn    StockTransfer[]           @relation("TransferTo")
+  adjustments    StockAdjustment[]
 
   @@map("warehouses")
 }
@@ -1207,6 +1215,101 @@ model MaterialRequisitionLine {
   purpose      String?
 
   @@map("material_requisition_lines")
+}
+
+/// Moving our own stock from one of our stores to another.
+///
+/// The movement used to leave nothing behind but ledger rows tagged with the
+/// clock — `TRF-1788857668962` — which is not a document. Nobody could list
+/// what had been moved this month, reprint the slip the storekeeper hands over
+/// with the goods, or take a wrong movement back out. The rows now point at
+/// this, and it carries a real number from the series like every other
+/// document in the system.
+model StockTransfer {
+  id              String    @id @default(cuid())
+  transferNumber  String    @unique
+  fromWarehouseId String
+  fromWarehouse   Warehouse @relation("TransferFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouseId   String
+  toWarehouse     Warehouse @relation("TransferTo", fields: [toWarehouseId], references: [id])
+  transferDate    DateTime  @default(now())
+  notes           String?
+  movedById       String?
+  movedBy         User?     @relation("TransferMovedBy", fields: [movedById], references: [id])
+  /// Set when the movement is taken back out. The document and its number stay
+  /// — a cancelled transfer is still a thing that happened, and its number is
+  /// never handed to another document.
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledBy     User?     @relation("TransferCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason    String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  lines StockTransferLine[]
+
+  @@index([transferDate])
+  @@map("stock_transfers")
+}
+
+model StockTransferLine {
+  id         String        @id @default(cuid())
+  transferId String
+  transfer   StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  itemId     String
+  item       Item          @relation(fields: [itemId], references: [id])
+  qty        Decimal       @db.Decimal(10, 3)
+  /// What the stock was carried at when it moved, copied onto the line so the
+  /// note prints the same figure next year. Moving cloth across the yard must
+  /// not change what it is worth, and this is the record of that.
+  unitRate   Decimal?      @db.Decimal(10, 2)
+
+  @@map("stock_transfer_lines")
+}
+
+/// A correction after somebody has physically counted the rack.
+///
+/// This is the one movement with no document behind it in the real world: it
+/// says the book was wrong. That is exactly why it needs one here — an
+/// unexplained change to a stock figure is the first thing a stock audit asks
+/// about, and until now the answer lived only in a ledger note.
+///
+/// There is no cancelling an adjustment. It records what was counted on a day;
+/// if the count itself was wrong, you count again and adjust again, and both
+/// corrections stay on the record.
+model StockAdjustment {
+  id               String    @id @default(cuid())
+  adjustmentNumber String    @unique
+  warehouseId      String
+  warehouse        Warehouse @relation(fields: [warehouseId], references: [id])
+  adjustmentDate   DateTime  @default(now())
+  /// Why the figure was changed. Never optional.
+  reason           String
+  madeById         String?
+  madeBy           User?     @relation("AdjustmentMadeBy", fields: [madeById], references: [id])
+  createdAt        DateTime  @default(now())
+
+  lines StockAdjustmentLine[]
+
+  @@index([adjustmentDate])
+  @@map("stock_adjustments")
+}
+
+model StockAdjustmentLine {
+  id           String          @id @default(cuid())
+  adjustmentId String
+  adjustment   StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item            @relation(fields: [itemId], references: [id])
+  /// What the book said at the moment of counting. Kept so the correction can
+  /// be read back later without replaying the whole ledger to that date.
+  bookQty      Decimal         @db.Decimal(10, 3)
+  countedQty   Decimal         @db.Decimal(10, 3)
+  /// Counted minus book. Negative means stock was missing off the rack.
+  difference   Decimal         @db.Decimal(10, 3)
+  unitRate     Decimal?        @db.Decimal(10, 2)
+
+  @@map("stock_adjustment_lines")
 }
 
 // ═══════════════════════════════════════════
