@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Ban } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
+import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 
@@ -31,6 +32,7 @@ export default function PurchaseBillsPage() {
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
   const [overdueOnly, setOverdueOnly] = useState(false)
+  const [page, setPage] = useState(1)
   const [busy, setBusy] = useState(false)
   const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseBill | null }>({
     open: false,
@@ -46,7 +48,7 @@ export default function PurchaseBillsPage() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ limit: String(rowsPerPage) })
+      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
       if (debounced) qs.set('q', debounced)
       if (status) qs.set('status', status)
       if (overdueOnly) qs.set('overdue', 'true')
@@ -65,11 +67,17 @@ export default function PurchaseBillsPage() {
     } finally {
       setLoading(false)
     }
-  }, [debounced, status, overdueOnly, rowsPerPage])
+  }, [debounced, status, overdueOnly, page, rowsPerPage])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  // Narrowing a filter while on page 3 would show an empty page 3 of a shorter
+  // list, which reads as "nothing found" rather than "you moved".
+  useEffect(() => {
+    setPage(1)
+  }, [debounced, status, overdueOnly])
 
   const cancel = async (bill: PurchaseBill) => {
     const reason = prompt(
@@ -90,6 +98,8 @@ export default function PurchaseBillsPage() {
       setBusy(false)
     }
   }
+
+  const pages = Math.ceil(total / rowsPerPage) || 1
 
   const isOverdue = (b: PurchaseBill) =>
     b.dueDate != null &&
@@ -292,6 +302,8 @@ export default function PurchaseBillsPage() {
             </table>
           </div>
         )}
+
+        <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
       </div>
 
       <p className="text-xs text-muted-foreground">

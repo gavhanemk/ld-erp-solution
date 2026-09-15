@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Plus, Search, RefreshCw, AlertCircle, Ban, ChevronDown, ChevronRight } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
+import { Pagination } from '@/components/tables/Pagination'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -59,6 +60,13 @@ function stage(status: Receipt['status']): { label: string; cls: string } {
   }
 }
 
+/**
+ * Kept as the 50 this screen already asked for, rather than the user's rows-per-page
+ * setting that the order and bill lists follow. Changing it is a decision for
+ * whoever owns this screen, not a side effect of giving it a pager.
+ */
+const PER_PAGE = 50
+
 export default function GoodsReceiptPage() {
   const [rows, setRows] = useState<Receipt[]>([])
   const [total, setTotal] = useState(0)
@@ -70,6 +78,7 @@ export default function GoodsReceiptPage() {
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
+  const [page, setPage] = useState(1)
   const [open, setOpen] = useState<string | null>(null)
   const [dialog, setDialog] = useState(false)
 
@@ -82,7 +91,7 @@ export default function GoodsReceiptPage() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ limit: '50' })
+      const qs = new URLSearchParams({ page: String(page), limit: String(PER_PAGE) })
       if (debounced) qs.set('q', debounced)
       if (status) qs.set('status', status)
       const res = await api.get<Paginated<Receipt>>(`/purchase/grn?${qs}`)
@@ -100,11 +109,17 @@ export default function GoodsReceiptPage() {
     } finally {
       setLoading(false)
     }
-  }, [debounced, status])
+  }, [debounced, status, page])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  // Narrowing a filter while on page 3 would show an empty page 3 of a shorter
+  // list, which reads as "nothing found" rather than "you moved".
+  useEffect(() => {
+    setPage(1)
+  }, [debounced, status])
 
   const cancel = async (grn: Receipt) => {
     const reason = prompt(
@@ -309,6 +324,13 @@ export default function GoodsReceiptPage() {
             </table>
           </div>
         )}
+
+        <Pagination
+          page={page}
+          pages={Math.ceil(total / PER_PAGE) || 1}
+          onPageChange={setPage}
+          busy={loading}
+        />
       </div>
 
       {dialog && (
