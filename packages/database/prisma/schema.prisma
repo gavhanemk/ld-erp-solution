@@ -957,6 +957,20 @@ model PurchaseOrder {
   deliveryDate DateTime?
   status       PurchaseOrderStatus @default(DRAFT)
   poType       String              @default("STANDARD")
+  /// The supplier's quotation or our enquiry that this order answers. Carried
+  /// on the order because the first thing asked when a price is questioned
+  /// months later is which quote it came from, and that answer lived only in
+  /// somebody's email before now.
+  enquiryNo    String?
+  enquiryDate  DateTime?
+  /// Whatever the mill needs to quote back — a job number, an indent slip, the
+  /// buyer's own reference. Deliberately free text: every mill numbers these
+  /// differently and a fixed format would fit none of them.
+  reference    String?
+  /// An internal note. Separate from `notes`, which is printed on the order the
+  /// supplier receives — a remark about a supplier is not always something to
+  /// send them.
+  remark       String?
   /// Where the goods are delivered, as a two-digit GST state code. Compared
   /// against ours to decide whether the supplier should bill CGST+SGST or IGST.
   placeOfSupplyCode String?

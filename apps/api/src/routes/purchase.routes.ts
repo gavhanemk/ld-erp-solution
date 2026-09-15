@@ -36,6 +36,13 @@ const createSchema = z.object({
   poDate: z.coerce.date().optional(),
   deliveryDate: z.coerce.date().optional().nullable(),
   deliveryWarehouseId: z.string().optional().nullable(),
+  // Which quotation this order answers, and whatever the mill quotes back.
+  // Free text on purpose: every mill numbers these its own way.
+  enquiryNo: z.string().max(50).optional().nullable(),
+  enquiryDate: z.coerce.date().optional().nullable(),
+  reference: z.string().max(100).optional().nullable(),
+  // Internal. `notes` is printed on the supplier's copy; this is not.
+  remark: z.string().max(1000).optional().nullable(),
   discountAmount: z.number().min(0).optional(),
   notes: z.string().max(1000).optional().nullable(),
   terms: z.string().max(4000).optional().nullable(),
@@ -231,6 +238,10 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         poDate: data.poDate ?? new Date(),
         deliveryDate: data.deliveryDate ?? undefined,
         deliveryWarehouseId: data.deliveryWarehouseId || null,
+        enquiryNo: data.enquiryNo ?? null,
+        enquiryDate: data.enquiryDate ?? null,
+        reference: data.reference ?? null,
+        remark: data.remark ?? null,
         placeOfSupplyCode: tax.ourState,
         subtotal: priced.subtotal,
         discountAmount: priced.discount,
@@ -290,6 +301,23 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     )
   }
 
+  // The header fields are written by both paths below — with new lines and
+  // without. Kept in one place so a field added to one cannot be forgotten in
+  // the other, which is how an edit ends up saving on some screens only.
+  const headerPatch = {
+    ...(data.poDate ? { poDate: data.poDate } : {}),
+    ...(data.deliveryDate !== undefined ? { deliveryDate: data.deliveryDate ?? null } : {}),
+    ...(data.deliveryWarehouseId !== undefined
+      ? { deliveryWarehouseId: data.deliveryWarehouseId || null }
+      : {}),
+    ...(data.enquiryNo !== undefined ? { enquiryNo: data.enquiryNo ?? null } : {}),
+    ...(data.enquiryDate !== undefined ? { enquiryDate: data.enquiryDate ?? null } : {}),
+    ...(data.reference !== undefined ? { reference: data.reference ?? null } : {}),
+    ...(data.remark !== undefined ? { remark: data.remark ?? null } : {}),
+    ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
+    ...(data.terms !== undefined ? { terms: data.terms ?? null } : {}),
+  }
+
   const after = await prisma.$transaction(async (tx) => {
     if (data.lines) {
       const tax = await purchaseTaxContext(tx, data.supplierId ?? before.supplierId)
@@ -326,14 +354,8 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       return tx.purchaseOrder.update({
         where: { id: before.id },
         data: {
+          ...headerPatch,
           ...(data.supplierId ? { supplierId: data.supplierId } : {}),
-          ...(data.poDate ? { poDate: data.poDate } : {}),
-          ...(data.deliveryDate !== undefined ? { deliveryDate: data.deliveryDate ?? null } : {}),
-          ...(data.deliveryWarehouseId !== undefined
-            ? { deliveryWarehouseId: data.deliveryWarehouseId || null }
-            : {}),
-          ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
-          ...(data.terms !== undefined ? { terms: data.terms ?? null } : {}),
           subtotal: priced.subtotal,
           discountAmount: priced.discount,
           taxableAmount: priced.taxable,
@@ -349,15 +371,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
     return tx.purchaseOrder.update({
       where: { id: before.id },
-      data: {
-        ...(data.poDate ? { poDate: data.poDate } : {}),
-        ...(data.deliveryDate !== undefined ? { deliveryDate: data.deliveryDate ?? null } : {}),
-        ...(data.deliveryWarehouseId !== undefined
-          ? { deliveryWarehouseId: data.deliveryWarehouseId || null }
-          : {}),
-        ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
-        ...(data.terms !== undefined ? { terms: data.terms ?? null } : {}),
-      },
+      data: headerPatch,
       include: poInclude,
     })
   })

@@ -107,7 +107,13 @@ router.use(
     searchFields: ['name', 'code', 'description', 'hsnCode'],
     sortableFields: ['name', 'code', 'createdAt', 'standardRate'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { category: true, uom: true },
+    // taxRate travels with the item so an order form can fill the GST in from
+    // the item itself. Without it the purchase order screen read
+    // `item.taxRate.rate`, found nothing, and left the field blank for someone
+    // to type from memory — and a rate typed from memory is the one thing the
+    // business rules say must never happen. The alternative source, the tax
+    // rate list in Settings, needs a permission a purchase clerk does not have.
+    include: { category: true, uom: true, taxRate: true },
   }),
 )
 
