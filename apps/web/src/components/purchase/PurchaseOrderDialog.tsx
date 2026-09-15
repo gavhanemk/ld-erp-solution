@@ -475,17 +475,20 @@ export function PurchaseOrderDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-3">
-      {/* Height: 94vh rather than 90, and 12px of overlay padding rather than
-          24. Between them the form was giving up about 100px at the top of the
-          screen to nothing — a band of dimmed page above a form that then had
-          to be scrolled.
+      {/* `max-h-full`, not a vh figure.
 
-          `mb-3` is the slight lift. Extra margin below a centred flex item
-          moves it up by half of that margin, so the form sits a few pixels
-          above dead centre, which is where the eye expects it. Both margins
-          stay small and near enough equal. */}
+          A cap in vh is a guess about the window, and whatever is left over
+          becomes centring slack above and below the form — so the gap at the
+          top moved with the window size and never came down to the padding.
+          100% of the overlay's content box is exactly the screen minus that
+          padding, so when the form is taller than the screen the margin is
+          the padding and nothing else: 8px on a phone, 12px on a desktop,
+          top and bottom, equal by construction rather than by arithmetic.
+
+          A short form still centres, which is why this is not pinned to the
+          top. */}
       <div
-        className="glass-card w-full max-w-5xl max-h-[94vh] mb-3 flex flex-col overflow-hidden"
+        className="glass-card w-full max-w-5xl max-h-full flex flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="po-dialog-title"
