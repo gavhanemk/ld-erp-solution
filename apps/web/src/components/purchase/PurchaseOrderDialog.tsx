@@ -474,9 +474,18 @@ export function PurchaseOrderDialog({
   const destination = warehouses.find((w) => w.id === warehouseId) ?? null
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-3 sm:p-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-3">
+      {/* Height: 94vh rather than 90, and 12px of overlay padding rather than
+          24. Between them the form was giving up about 100px at the top of the
+          screen to nothing — a band of dimmed page above a form that then had
+          to be scrolled.
+
+          `mb-3` is the slight lift. Extra margin below a centred flex item
+          moves it up by half of that margin, so the form sits a few pixels
+          above dead centre, which is where the eye expects it. Both margins
+          stay small and near enough equal. */}
       <div
-        className="glass-card w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden"
+        className="glass-card w-full max-w-5xl max-h-[94vh] mb-3 flex flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="po-dialog-title"
