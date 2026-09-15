@@ -7,12 +7,21 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
+import {
+  createBillSchema,
+  updateBillSchema,
+  type BillChargeInput,
+  type BillLineInput,
+} from '../schemas/bill.schemas'
 
 const router = Router()
 const MODULE = 'purchase'
 
 /** Money is stored to two decimals; accumulating floats without rounding drifts. */
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** Quantities are Decimal(10,3); three places is the unit they are held in. */
+const round3 = (n: number) => Math.round(n * 1000) / 1000
 
 const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
@@ -422,6 +431,686 @@ router.patch('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req
   res.json({ success: true, data: after, message: `${after.poNumber} cancelled.` })
 })
 
+// ── Purchase bills ──────────────────────────────────────────────────────────
+//
+// The supplier's tax invoice, booked into our books. Two numbers live on it and
+// they are not interchangeable: `supplierInvoiceNo` is printed on their paper
+// and is what a GST officer matches against; `billNumber` is ours and comes
+// from the number series.
+//
+// The point of this document is the three-way match. A bill is only payable for
+// goods that were ordered and actually arrived, so every line that names a
+// receipt line is checked against what was accepted there.
+
+const billInclude = {
+  supplier: {
+    select: {
+      id: true, name: true, code: true, gstin: true, stateCode: true,
+      address: true, city: true, state: true, pincode: true, phone: true, email: true,
+      isMsme: true, creditDays: true,
+    },
+  },
+  po: { select: { id: true, poNumber: true } },
+  createdBy: { select: { id: true, name: true } },
+  lines: {
+    orderBy: { sortOrder: 'asc' as const },
+    include: {
+      item: { select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } } },
+      grnLine: {
+        select: {
+          id: true,
+          acceptedQty: true,
+          unitRate: true,
+          grn: { select: { id: true, grnNumber: true } },
+        },
+      },
+    },
+  },
+  charges: { include: { chargeType: { select: { id: true, name: true } } } },
+}
+
+/** One rate, split the way the two state codes say it must be split. */
+function taxSplit(taxableValue: number, gstRate: number, isIntraState: boolean) {
+  const tax = round2(taxableValue * (gstRate / 100))
+  return isIntraState
+    ? { cgst: round2(tax / 2), sgst: round2(tax / 2), igst: 0 }
+    : { cgst: 0, sgst: 0, igst: tax }
+}
+
+/**
+ * Prices a bill.
+ *
+ * Differs from an order in three ways that all cost money if they are missed:
+ * charges carry their own GST rate and cannot be folded into the goods value;
+ * reverse charge means the tax is ours to pay rather than the supplier's, so it
+ * is recorded but never added to what they are paid; and TDS is withheld from
+ * the payment while still settling the bill in full.
+ */
+function priceBill(opts: {
+  lines: BillLineInput[]
+  charges: BillChargeInput[]
+  discountAmount: number
+  isIntraState: boolean
+  chargeTax: boolean
+  isReverseCharge: boolean
+  tdsRate: number
+}) {
+  const { lines, charges, isIntraState, chargeTax, isReverseCharge } = opts
+
+  const lineGross = lines.map((l) => l.qty * l.unitPrice * (1 - (l.discount ?? 0) / 100))
+  const subtotal = round2(lineGross.reduce((s, n) => s + n, 0))
+
+  // Discount comes off before tax — see the business rules.
+  const discount = round2(Math.min(opts.discountAmount, subtotal))
+  const goodsTaxable = round2(subtotal - discount)
+  const factor = subtotal > 0 ? goodsTaxable / subtotal : 1
+
+  const pricedLines = lines.map((l, i) => {
+    const taxableValue = round2(lineGross[i] * factor)
+    const gstRate = chargeTax ? (l.gstRate ?? 0) : 0
+    const split = taxSplit(taxableValue, gstRate, isIntraState)
+    return {
+      taxableValue,
+      gstRate,
+      ...split,
+      amount: round2(taxableValue + split.cgst + split.sgst + split.igst),
+    }
+  })
+
+  const pricedCharges = charges.map((c) => {
+    const amount = round2(c.amount)
+    const gstRate = chargeTax ? (c.gstRate ?? 0) : 0
+    return { amount, gstRate, ...taxSplit(amount, gstRate, isIntraState) }
+  })
+
+  const chargeTotal = round2(pricedCharges.reduce((s, c) => s + c.amount, 0))
+  const taxable = round2(goodsTaxable + chargeTotal)
+
+  const sum = (key: 'cgst' | 'sgst' | 'igst') =>
+    round2(
+      pricedLines.reduce((s, l) => s + l[key], 0) + pricedCharges.reduce((s, c) => s + c[key], 0),
+    )
+
+  const cgst = sum('cgst')
+  const sgst = sum('sgst')
+  const igst = sum('igst')
+
+  // Under reverse charge the supplier's bill carries no tax — we pay it to the
+  // government ourselves. Recording it and then adding it to their payment
+  // would pay the tax twice.
+  const payable = isReverseCharge ? taxable : taxable + cgst + sgst + igst
+  const { rounded, roundOff } = applyRoundOff(payable)
+
+  // TDS is worked out on the taxable value, not on the tax.
+  const tdsAmount = round2(taxable * (opts.tdsRate / 100))
+
+  return {
+    pricedLines,
+    pricedCharges,
+    subtotal,
+    discount,
+    taxable,
+    cgst,
+    sgst,
+    igst,
+    roundOff,
+    total: rounded,
+    tdsAmount,
+    // The supplier is paid the total less the TDS we withhold, so the bill is
+    // settled in full by that smaller payment rather than being left with a
+    // stub outstanding against them forever.
+    balance: round2(rounded - tdsAmount),
+  }
+}
+
+/**
+ * The three-way match: ordered, received, billed.
+ *
+ * Refuses a bill for more than was accepted at the gate. This is the whole
+ * reason the document exists — without it the mill pays for goods that were
+ * short-delivered or rejected, and nothing in the system ever notices.
+ */
+async function checkAgainstReceipts(
+  tx: Prisma.TransactionClient,
+  lines: BillLineInput[],
+  supplierId: string,
+  excludeBillId?: string,
+) {
+  const grnLineIds = lines
+    .map((l) => l.grnLineId)
+    .filter((v): v is string => typeof v === 'string' && v.length > 0)
+
+  if (!grnLineIds.length) return
+
+  const receiptLines = await tx.gRNLine.findMany({
+    where: { id: { in: grnLineIds } },
+    select: {
+      id: true,
+      acceptedQty: true,
+      itemId: true,
+      item: { select: { name: true } },
+      grn: { select: { grnNumber: true, status: true, po: { select: { supplierId: true } } } },
+    },
+  })
+  const receiptById = new Map(receiptLines.map((r) => [r.id, r]))
+
+  // What earlier bills already claimed against these same receipt lines. A
+  // cancelled bill claims nothing.
+  const claimed = await tx.purchaseInvoiceLine.groupBy({
+    by: ['grnLineId'],
+    where: {
+      grnLineId: { in: grnLineIds },
+      bill: {
+        status: { not: 'CANCELLED' },
+        ...(excludeBillId ? { id: { not: excludeBillId } } : {}),
+      },
+    },
+    _sum: { qty: true },
+  })
+  const claimedById = new Map(claimed.map((c) => [c.grnLineId, Number(c._sum.qty ?? 0)]))
+
+  // Several bill lines can point at one receipt line; they have to be counted
+  // together or each would pass the check on its own.
+  const wantedById = new Map<string, number>()
+  for (const line of lines) {
+    if (!line.grnLineId) continue
+    wantedById.set(line.grnLineId, (wantedById.get(line.grnLineId) ?? 0) + line.qty)
+  }
+
+  for (const [grnLineId, wanted] of wantedById) {
+    const receipt = receiptById.get(grnLineId)
+    if (!receipt) {
+      throw new AppError('That goods receipt line no longer exists', 400, 'INVALID_GRN_LINE')
+    }
+
+    if (receipt.grn.po.supplierId !== supplierId) {
+      throw new AppError(
+        `${receipt.grn.grnNumber} was received against a different supplier. A bill can only cover this supplier's own receipts.`,
+        409,
+        'GRN_SUPPLIER_MISMATCH',
+      )
+    }
+
+    if (receipt.grn.status === 'CANCELLED') {
+      throw new AppError(
+        `${receipt.grn.grnNumber} was cancelled, so nothing on it can be billed.`,
+        409,
+        'GRN_CANCELLED',
+      )
+    }
+
+    const accepted = Number(receipt.acceptedQty)
+    const already = claimedById.get(grnLineId) ?? 0
+    const room = round3(accepted - already)
+
+    // Quantities are held to three decimals; comparing raw floats would refuse
+    // a bill that is short by a millionth of a metre.
+    if (round3(wanted) > room + 0.0005) {
+      const name = receipt.item.name
+      throw new AppError(
+        already > 0
+          ? `The bill claims ${round3(wanted)} of ${name}, but only ${room} is left to bill on ${receipt.grn.grnNumber} — ${already} of the ${accepted} accepted has already been billed.`
+          : `The bill claims ${round3(wanted)} of ${name}, but only ${accepted} was accepted on ${receipt.grn.grnNumber}. Check the bill against the receipt before booking it.`,
+        409,
+        'BILLED_MORE_THAN_RECEIVED',
+      )
+    }
+  }
+}
+
+router.get('/bills', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+  const status = typeof req.query.status === 'string' ? req.query.status : ''
+  const supplierId = typeof req.query.supplierId === 'string' ? req.query.supplierId : ''
+
+  const where: Prisma.PurchaseInvoiceWhereInput = {
+    ...(status ? { status: status as Prisma.EnumInvoiceStatusFilter['equals'] } : {}),
+    ...(supplierId ? { supplierId } : {}),
+    ...(req.query.overdue === 'true'
+      ? { dueDate: { lt: new Date() }, status: { in: ['UNPAID', 'PARTIAL'] } }
+      : {}),
+    ...(q
+      ? {
+          OR: [
+            { billNumber: { contains: q, mode: 'insensitive' as const } },
+            { supplierInvoiceNo: { contains: q, mode: 'insensitive' as const } },
+            { supplier: { name: { contains: q, mode: 'insensitive' as const } } },
+          ],
+        }
+      : {}),
+  }
+
+  const sort = typeof req.query.sort === 'string' ? req.query.sort : 'billDate'
+  const order = req.query.order === 'asc' ? 'asc' : 'desc'
+  const sortable = ['billDate', 'billNumber', 'dueDate', 'totalAmount', 'createdAt']
+  const orderBy = { [sortable.includes(sort) ? sort : 'billDate']: order }
+
+  const [rows, total] = await Promise.all([
+    prisma.purchaseInvoice.findMany({
+      where,
+      include: billInclude,
+      orderBy,
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.purchaseInvoice.count({ where }),
+  ])
+
+  res.json({
+    success: true,
+    data: rows,
+    pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+  })
+})
+
+router.get('/bills/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const bill = await prisma.purchaseInvoice.findUnique({
+    where: { id: req.params.id },
+    include: billInclude,
+  })
+  if (!bill) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
+  res.json({ success: true, data: bill })
+})
+
+/**
+ * What a receipt still has left to bill, ready to fill a new bill in.
+ *
+ * The clerk should not be retyping quantities off a receipt they already
+ * entered — that is how a bill ends up matching nothing.
+ */
+router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req, res) => {
+  const grn = await prisma.gRN.findUnique({
+    where: { id: req.params.grnId },
+    include: {
+      po: { select: { id: true, poNumber: true, supplierId: true, supplier: { select: { id: true, name: true, gstin: true } } } },
+      lines: {
+        include: {
+          item: { select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } } },
+          poLine: { select: { id: true, unitRate: true, gstRate: true, discount: true } },
+        },
+      },
+    },
+  })
+  if (!grn) throw new AppError('Goods receipt not found', 404, 'NOT_FOUND')
+
+  const claimed = await prisma.purchaseInvoiceLine.groupBy({
+    by: ['grnLineId'],
+    where: {
+      grnLineId: { in: grn.lines.map((l) => l.id) },
+      bill: { status: { not: 'CANCELLED' } },
+    },
+    _sum: { qty: true },
+  })
+  const claimedById = new Map(claimed.map((c) => [c.grnLineId, Number(c._sum.qty ?? 0)]))
+
+  res.json({
+    success: true,
+    data: {
+      grn: { id: grn.id, grnNumber: grn.grnNumber, grnDate: grn.grnDate, status: grn.status },
+      po: grn.po,
+      lines: grn.lines.map((l) => {
+        const billed = claimedById.get(l.id) ?? 0
+        return {
+          grnLineId: l.id,
+          item: l.item,
+          acceptedQty: Number(l.acceptedQty),
+          billedQty: billed,
+          // What is left to bill. Zero means this line is fully billed already.
+          pendingQty: round3(Number(l.acceptedQty) - billed),
+          // The rate that was ordered, so a difference on the bill is visible
+          // rather than quietly accepted.
+          orderedRate: l.poLine ? Number(l.poLine.unitRate) : Number(l.unitRate),
+          gstRate: l.poLine ? Number(l.poLine.gstRate) : 0,
+          hsnCode: l.item.hsnCode,
+        }
+      }),
+    },
+  })
+})
+
+router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createBillSchema.parse(req.body)
+
+  const bill = await prisma.$transaction(async (tx) => {
+    const billDate = data.billDate ?? new Date()
+
+    // The same supplier bill booked twice claims the input credit twice. The
+    // unique index is the real guard; this is the message the clerk should see
+    // instead of a constraint error.
+    if (data.supplierInvoiceNo) {
+      const existing = await tx.purchaseInvoice.findFirst({
+        where: { supplierId: data.supplierId, supplierInvoiceNo: data.supplierInvoiceNo },
+        select: { billNumber: true },
+      })
+      if (existing) {
+        throw new AppError(
+          `Invoice ${data.supplierInvoiceNo} from this supplier is already booked as ${existing.billNumber}.`,
+          409,
+          'DUPLICATE_SUPPLIER_INVOICE',
+        )
+      }
+    }
+
+    await checkAgainstReceipts(tx, data.lines, data.supplierId)
+
+    const tax = await purchaseTaxContext(tx, data.supplierId)
+    const billNumber = await nextDocumentNumber(tx, 'PB', billDate)
+
+    const items = await tx.item.findMany({
+      where: { id: { in: data.lines.map((l) => l.itemId) } },
+      select: { id: true, hsnCode: true },
+    })
+    if (items.length !== new Set(data.lines.map((l) => l.itemId)).size) {
+      throw new AppError('One of those items no longer exists', 400, 'INVALID_ITEM')
+    }
+    const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+    const charges = data.charges ?? []
+    const priced = priceBill({
+      lines: data.lines,
+      charges,
+      discountAmount: data.discountAmount ?? 0,
+      isIntraState: tax.isIntraState,
+      chargeTax: !tax.supplierIsUnregistered || (data.isReverseCharge ?? false),
+      isReverseCharge: data.isReverseCharge ?? false,
+      tdsRate: data.tdsRate ?? 0,
+    })
+
+    return tx.purchaseInvoice.create({
+      data: {
+        billNumber,
+        supplierId: data.supplierId,
+        poId: data.poId || null,
+        supplierInvoiceNo: data.supplierInvoiceNo ?? null,
+        supplierInvoiceDate: data.supplierInvoiceDate ?? null,
+        billDate,
+        dueDate: data.dueDate ?? null,
+        subtotal: priced.subtotal,
+        discountAmount: priced.discount,
+        taxableAmount: priced.taxable,
+        cgst: priced.cgst,
+        sgst: priced.sgst,
+        igst: priced.igst,
+        tdsSection: data.tdsSection ?? null,
+        tdsRate: data.tdsRate ?? null,
+        tdsAmount: priced.tdsAmount,
+        isReverseCharge: data.isReverseCharge ?? false,
+        roundOff: priced.roundOff,
+        totalAmount: priced.total,
+        paidAmount: 0,
+        balanceAmount: priced.balance,
+        notes: data.notes ?? null,
+        createdById: req.user!.id,
+        lines: {
+          create: data.lines.map((l, i) => ({
+            itemId: l.itemId,
+            grnLineId: l.grnLineId || null,
+            description: l.description ?? null,
+            // Frozen at booking, so correcting the item master later cannot
+            // change a bill that has already been claimed.
+            hsnCode: hsnById.get(l.itemId) ?? null,
+            qty: l.qty,
+            unitPrice: l.unitPrice,
+            discount: l.discount ?? 0,
+            taxableValue: priced.pricedLines[i].taxableValue,
+            gstRate: priced.pricedLines[i].gstRate,
+            cgst: priced.pricedLines[i].cgst,
+            sgst: priced.pricedLines[i].sgst,
+            igst: priced.pricedLines[i].igst,
+            amount: priced.pricedLines[i].amount,
+            sortOrder: i,
+          })),
+        },
+        charges: {
+          create: charges.map((c, i) => ({
+            chargeTypeId: c.chargeTypeId,
+            amount: priced.pricedCharges[i].amount,
+            gstRate: priced.pricedCharges[i].gstRate,
+            cgst: priced.pricedCharges[i].cgst,
+            sgst: priced.pricedCharges[i].sgst,
+            igst: priced.pricedCharges[i].igst,
+          })),
+        },
+      },
+      include: billInclude,
+    })
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'PurchaseInvoice',
+    entityId: bill.id,
+    after: bill,
+  })
+
+  res.status(201).json({ success: true, data: bill })
+})
+
+router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = updateBillSchema.parse(req.body)
+
+  const before = await prisma.purchaseInvoice.findUnique({
+    where: { id: req.params.id },
+    include: billInclude,
+  })
+  if (!before) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
+
+  if (before.status === 'CANCELLED') {
+    throw new AppError('A cancelled bill cannot be edited', 409, 'BILL_CANCELLED')
+  }
+  // Once money has moved against it the bill is part of the payment record.
+  if (Number(before.paidAmount) > 0) {
+    throw new AppError(
+      `${before.billNumber} has already been paid against and can no longer be edited. Raise a debit note instead.`,
+      409,
+      'BILL_PAID',
+    )
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const supplierId = data.supplierId ?? before.supplierId
+    const lines = data.lines ?? before.lines.map((l) => ({
+      itemId: l.itemId,
+      grnLineId: l.grnLineId,
+      description: l.description,
+      qty: Number(l.qty),
+      unitPrice: Number(l.unitPrice),
+      discount: Number(l.discount),
+      gstRate: Number(l.gstRate),
+    }))
+
+    const supplierInvoiceNo =
+      data.supplierInvoiceNo !== undefined ? data.supplierInvoiceNo : before.supplierInvoiceNo
+
+    if (supplierInvoiceNo) {
+      const clash = await tx.purchaseInvoice.findFirst({
+        where: {
+          supplierId,
+          supplierInvoiceNo,
+          id: { not: before.id },
+        },
+        select: { billNumber: true },
+      })
+      if (clash) {
+        throw new AppError(
+          `Invoice ${supplierInvoiceNo} from this supplier is already booked as ${clash.billNumber}.`,
+          409,
+          'DUPLICATE_SUPPLIER_INVOICE',
+        )
+      }
+    }
+
+    await checkAgainstReceipts(tx, lines, supplierId, before.id)
+
+    const tax = await purchaseTaxContext(tx, supplierId)
+    const charges =
+      data.charges ??
+      before.charges.map((c) => ({
+        chargeTypeId: c.chargeTypeId,
+        amount: Number(c.amount),
+        gstRate: Number(c.gstRate),
+      }))
+
+    const isReverseCharge = data.isReverseCharge ?? before.isReverseCharge
+    const tdsRate = data.tdsRate !== undefined ? (data.tdsRate ?? 0) : Number(before.tdsRate ?? 0)
+
+    const priced = priceBill({
+      lines,
+      charges,
+      discountAmount: data.discountAmount ?? Number(before.discountAmount),
+      isIntraState: tax.isIntraState,
+      chargeTax: !tax.supplierIsUnregistered || isReverseCharge,
+      isReverseCharge,
+      tdsRate,
+    })
+
+    const items = await tx.item.findMany({
+      where: { id: { in: lines.map((l) => l.itemId) } },
+      select: { id: true, hsnCode: true },
+    })
+    const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+    // Lines and charges are replaced wholesale rather than diffed. A bill is
+    // one statement of what the supplier claimed; patching rows individually
+    // is how a total stops agreeing with its own lines.
+    await tx.purchaseInvoiceLine.deleteMany({ where: { billId: before.id } })
+    await tx.purchaseInvoiceCharge.deleteMany({ where: { billId: before.id } })
+
+    return tx.purchaseInvoice.update({
+      where: { id: before.id },
+      data: {
+        supplierId,
+        poId: data.poId !== undefined ? data.poId || null : before.poId,
+        supplierInvoiceNo: supplierInvoiceNo ?? null,
+        supplierInvoiceDate:
+          data.supplierInvoiceDate !== undefined
+            ? data.supplierInvoiceDate ?? null
+            : before.supplierInvoiceDate,
+        billDate: data.billDate ?? before.billDate,
+        dueDate: data.dueDate !== undefined ? data.dueDate ?? null : before.dueDate,
+        subtotal: priced.subtotal,
+        discountAmount: priced.discount,
+        taxableAmount: priced.taxable,
+        cgst: priced.cgst,
+        sgst: priced.sgst,
+        igst: priced.igst,
+        tdsSection: data.tdsSection !== undefined ? data.tdsSection ?? null : before.tdsSection,
+        tdsRate: tdsRate || null,
+        tdsAmount: priced.tdsAmount,
+        isReverseCharge,
+        roundOff: priced.roundOff,
+        totalAmount: priced.total,
+        balanceAmount: round2(priced.total - priced.tdsAmount - Number(before.paidAmount)),
+        notes: data.notes !== undefined ? data.notes ?? null : before.notes,
+        lines: {
+          create: lines.map((l, i) => ({
+            itemId: l.itemId,
+            grnLineId: l.grnLineId || null,
+            description: l.description ?? null,
+            hsnCode: hsnById.get(l.itemId) ?? null,
+            qty: l.qty,
+            unitPrice: l.unitPrice,
+            discount: l.discount ?? 0,
+            taxableValue: priced.pricedLines[i].taxableValue,
+            gstRate: priced.pricedLines[i].gstRate,
+            cgst: priced.pricedLines[i].cgst,
+            sgst: priced.pricedLines[i].sgst,
+            igst: priced.pricedLines[i].igst,
+            amount: priced.pricedLines[i].amount,
+            sortOrder: i,
+          })),
+        },
+        charges: {
+          create: charges.map((c, i) => ({
+            chargeTypeId: c.chargeTypeId,
+            amount: priced.pricedCharges[i].amount,
+            gstRate: priced.pricedCharges[i].gstRate,
+            cgst: priced.pricedCharges[i].cgst,
+            sgst: priced.pricedCharges[i].sgst,
+            igst: priced.pricedCharges[i].igst,
+          })),
+        },
+      },
+      include: billInclude,
+    })
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'PurchaseInvoice',
+    entityId: updated.id,
+    before,
+    after: updated,
+  })
+
+  res.json({ success: true, data: updated })
+})
+
+router.patch('/bills/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = z.object({ reason: z.string().max(300).optional() }).parse(req.body ?? {})
+
+  const before = await prisma.purchaseInvoice.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
+  if (before.status === 'CANCELLED') {
+    throw new AppError('That bill is already cancelled', 409, 'BILL_CANCELLED')
+  }
+  if (Number(before.paidAmount) > 0) {
+    throw new AppError(
+      `${before.billNumber} has payments against it. Reverse those first, or raise a debit note.`,
+      409,
+      'BILL_PAID',
+    )
+  }
+
+  // Cancelled, never deleted: the number stays spent and the record stays
+  // visible. The quantities it claimed are freed for another bill because the
+  // match counts only bills that are not cancelled.
+  const after = await prisma.purchaseInvoice.update({
+    where: { id: before.id },
+    data: {
+      status: 'CANCELLED',
+      balanceAmount: 0,
+      notes: reason ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason}` : before.notes,
+    },
+    include: billInclude,
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'PurchaseInvoice',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, data: after, message: `${after.billNumber} cancelled.` })
+})
+
+router.get('/bills/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const bill = await prisma.purchaseInvoice.findUnique({
+    where: { id: req.params.id },
+    include: billInclude,
+  })
+  if (!bill) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('PB')
+
+  res.json({
+    success: true,
+    data: {
+      ...header,
+      bill,
+      totalInWords: amountInWords(Number(bill.totalAmount)),
+      taxMode: Number(bill.igst) > 0 ? 'IGST' : Number(bill.cgst) > 0 ? 'CGST_SGST' : 'NONE',
+    },
+  })
+})
+
 // ── Not built yet ───────────────────────────────────────────────────────────
 //
 // These used to return an empty list, which made the screens look as though
@@ -435,7 +1124,6 @@ const notBuilt = (what: string) => (_req: unknown, res: import('express').Respon
   })
 
 router.get('/grn', notBuilt('Goods receipt'))
-router.get('/invoices', notBuilt('Purchase bills'))
 router.get('/payments', notBuilt('Supplier payments'))
 
 export default router
