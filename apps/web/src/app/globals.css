@@ -78,7 +78,16 @@
     --secondary-foreground: 222 40% 18%;
 
     --muted: 220 14% 90%;
-    --muted-foreground: 215 16% 42%; /* readable secondary text, not faint grey */
+    /* Secondary text: labels, hints, placeholders, table headers, the small
+       print on a form. Darkened from 42% to 34% lightness, which takes it from
+       5.7:1 against a white card to 7.7:1.
+
+       It was passing AA either way, but almost all of it is set at 12px, and
+       at that size 5.7:1 is the difference between text you read and text you
+       squint at. The main ink is left alone — it already measures about 15:1,
+       so where a form felt unreadable it was never the body text, it was
+       everything around it. */
+    --muted-foreground: 215 20% 34%;
 
     --accent: 38 88% 45%;            /* amber is hard to read on white at full brightness */
     --accent-foreground: 0 0% 100%;
