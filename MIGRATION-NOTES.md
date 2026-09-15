@@ -87,15 +87,33 @@ This is exactly why the handbook says to merge a schema change the same day
 rather than sit on it. The gap is open until `feat/inventory-stock-documents`
 lands.
 
-To check where you stand:
+To check where you stand, read the entries in this file and make sure your
+branch has every migration they list:
 
 ```bash
-cd packages/database
-npx prisma migrate status
+ls packages/database/prisma/migrations
 ```
 
-"Database schema is up to date" means your migrations folder and the database
-agree, and you are safe.
+If one of them is missing from that folder, the database is ahead of you. Get
+the missing branch first. Do not migrate.
+
+> **Do not use `prisma migrate status` for this.** It was recommended here and
+> it does not work. Run on `main` on 15 Sep 2026, with the database three
+> migrations ahead, it printed "Database schema is up to date!" and exited 0.
+> It reports migrations you have and the database does not — the opposite of
+> the direction that puts the data at risk.
+>
+> What does show it is a diff against the live database:
+>
+> ```bash
+> cd packages/database
+> npx prisma migrate diff --from-schema-datasource prisma/schema.prisma \
+>   --to-schema-datamodel prisma/schema.prisma --script
+> ```
+>
+> On a branch that is level this prints "This is an empty migration." If it
+> prints `DROP TABLE` for tables somebody else added, you are behind and
+> migrating would offer to delete them.
 
 ### When the API goes live
 
@@ -103,8 +121,83 @@ Migrations do not run by themselves on the server. After merging a schema
 change, somebody has to run:
 
 ```bash
-pnpm --filter @ld-erp/database migrate:deploy
+pnpm --filter @ld-erp/database migrate:prod
 ```
 
-`migrate:deploy` only applies what is pending. It never resets, which is why it
-is the right command against anything real.
+That runs `prisma migrate deploy`, which only applies what is pending. It never
+resets, which is why it is the right command against anything real.
+
+(This said `migrate:deploy`, which is not a script that exists — the command
+would have failed at the moment somebody needed it to work.)
+
+---
+
+## 15 Sep 2026 — a purchase bill points at the goods receipt it settles
+
+**Migration:** `20260915122040_purchase_bill_receipt_match`
+**Branch:** `feat/purchase-bills`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Four additions to tables that were empty, and nothing renamed or dropped:
+
+| Table | Change |
+|---|---|
+| `purchase_invoice_lines` | `grnLineId` — the receipt line this bill line settles |
+| `purchase_invoices` | `createdById` — who booked it |
+| `supplier_payments` | `createdById` — who paid it |
+| `purchase_invoices` | unique on `(supplierId, supplierInvoiceNo)` |
+
+### Why it was needed
+
+A bill could be booked for more than was ever received, and nothing would
+notice. The receipt link makes the three-way match possible — ordered, received
+and billed have to agree one row at a time. It sits on the line rather than on
+the bill because a supplier routinely bills several deliveries together, and
+because a bill line for something never received is exactly the case the match
+has to catch.
+
+The unique index stops the same supplier invoice being booked twice, which would
+claim the input credit twice. Neither a bill nor a payment recorded who entered
+it, so the audit trail could not answer the question it exists for.
+
+### What you have to do
+
+Nothing to the database. On your machine, once the branch is merged:
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+---
+
+## 15 Sep 2026 — a purchase order remembers the quotation it answers
+
+**Migration:** `20260915151556_purchase_order_enquiry_and_reference`
+**Branch:** `feat/purchase-order-form`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Four optional columns on `purchase_orders`. Nothing renamed, nothing dropped,
+no existing data touched — every order already on the system predates them and
+simply has them empty.
+
+| Column | Holds |
+|---|---|
+| `enquiryNo` | The supplier's quotation number this order answers |
+| `enquiryDate` | The date on that quotation |
+| `reference` | Whatever the mill needs to quote back — a job number, an indent slip |
+| `remark` | An internal note. Not printed on the supplier's copy, unlike `notes` |
+
+### Why it was needed
+
+The first question asked when a price is queried months later is which quote it
+came from, and that answer lived only in somebody's email.
+
+### What you have to do
+
+Nothing to the database. Same three commands as the entry above.
