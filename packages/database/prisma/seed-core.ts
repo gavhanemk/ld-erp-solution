@@ -341,6 +341,10 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'CN', prefix: 'CN' },
     { docType: 'DN', prefix: 'DN' },
     { docType: 'VCH', prefix: 'VCH' },
+    // Stock moving between our own stores, and a correction after a count.
+    // Both used to leave nothing but a ledger row tagged with the clock.
+    { docType: 'STN', prefix: 'STN' },
+    { docType: 'ADJ', prefix: 'ADJ' },
   ]
 
   for (const s of series) {

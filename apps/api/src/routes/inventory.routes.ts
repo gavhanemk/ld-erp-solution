@@ -7,6 +7,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, onHand, recordMovement, transferStock } from '../services/stock.service'
 import {
   adjustmentSchema,
+  cancelTransferSchema,
   createRequisitionSchema,
   issueRequisitionSchema,
   openingStockSchema,
@@ -162,6 +163,24 @@ router.get('/valuation', requirePermission(MODULE, 'view'), async (_req, res) =>
 
 // ── Documents that move stock ───────────────────────────────────────────────
 
+const itemSelect = {
+  select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+}
+
+const transferInclude = {
+  fromWarehouse: { select: { id: true, name: true } },
+  toWarehouse: { select: { id: true, name: true } },
+  movedBy: { select: { id: true, name: true } },
+  cancelledBy: { select: { id: true, name: true } },
+  lines: { include: { item: itemSelect } },
+}
+
+const adjustmentInclude = {
+  warehouse: { select: { id: true, name: true } },
+  madeBy: { select: { id: true, name: true } },
+  lines: { include: { item: itemSelect } },
+}
+
 /**
  * Opening stock.
  *
@@ -245,21 +264,16 @@ router.post('/adjustments', requirePermission(MODULE, 'approve'), async (req: Au
   const data = adjustmentSchema.parse(req.body)
   const when = data.adjustmentDate ?? new Date()
 
-  const result = await prisma.$transaction(async (tx) => {
+  const adjustment = await prisma.$transaction(async (tx) => {
     const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
-    const reference = `ADJ-${Date.now()}`
-    const changes = []
+    const counted = []
 
     for (const line of data.lines) {
       const key = { itemId: line.itemId, warehouseId: data.warehouseId }
       const before = await balanceOf(tx, key)
       const difference = Number((line.countedQty - before.qty).toFixed(3))
-
-      // Counting the same figure the book already holds is not a mistake, but
-      // writing a zero-quantity row would clutter the ledger for no reason.
-      if (difference === 0) continue
 
       if (difference > 0 && before.qty === 0 && line.unitRate === undefined) {
         const item = await tx.item.findUnique({
@@ -273,90 +287,305 @@ router.post('/adjustments', requirePermission(MODULE, 'approve'), async (req: Au
         )
       }
 
-      await recordMovement(tx, {
-        ...key,
-        transactionType: 'ADJUSTMENT',
-        direction: difference > 0 ? 'IN' : 'OUT',
-        qty: Math.abs(difference),
-        unitRate: difference > 0 ? (line.unitRate ?? before.avgRate) : undefined,
-        referenceType: 'STOCK_ADJUSTMENT',
-        referenceId: reference,
-        transactionDate: when,
-        notes: data.reason,
-      })
-
-      changes.push({
+      counted.push({
         itemId: line.itemId,
         bookQty: before.qty,
         countedQty: line.countedQty,
         difference,
+        unitRate: difference > 0 ? (line.unitRate ?? before.avgRate) : before.avgRate,
       })
     }
 
-    return { reference, reason: data.reason, changes }
+    const adjustmentNumber = await nextDocumentNumber(tx, 'ADJ', when)
+
+    const created = await tx.stockAdjustment.create({
+      data: {
+        adjustmentNumber,
+        warehouseId: data.warehouseId,
+        adjustmentDate: when,
+        reason: data.reason,
+        madeById: req.user?.id ?? null,
+        // Every line that was counted is kept, including the ones that matched.
+        // "We counted forty items and three were wrong" is the useful sentence
+        // in a stock audit; recording only the three loses the forty.
+        lines: { create: counted },
+      },
+    })
+
+    for (const line of counted) {
+      // A figure that matched the book needs no movement. The line above is
+      // still the record that somebody counted it.
+      if (line.difference === 0) continue
+
+      await recordMovement(tx, {
+        itemId: line.itemId,
+        warehouseId: data.warehouseId,
+        transactionType: 'ADJUSTMENT',
+        direction: line.difference > 0 ? 'IN' : 'OUT',
+        qty: Math.abs(line.difference),
+        unitRate: line.difference > 0 ? line.unitRate : undefined,
+        referenceType: 'STOCK_ADJUSTMENT',
+        referenceId: created.id,
+        transactionDate: when,
+        notes: `${adjustmentNumber}: ${data.reason}`,
+      })
+    }
+
+    return tx.stockAdjustment.findUniqueOrThrow({
+      where: { id: created.id },
+      include: adjustmentInclude,
+    })
   })
 
   await writeAuditLog(req, {
     module: MODULE,
-    action: 'UPDATE',
+    action: 'CREATE',
     entityType: 'StockAdjustment',
-    entityId: result.reference,
-    after: result,
+    entityId: adjustment.id,
+    after: adjustment,
   })
+
+  const corrected = adjustment.lines.filter((l) => Number(l.difference) !== 0).length
 
   res.status(201).json({
     success: true,
-    message: result.changes.length
-      ? `${result.changes.length} ${result.changes.length === 1 ? 'figure' : 'figures'} corrected.`
-      : 'Everything counted matched the book. Nothing changed.',
-    data: result,
+    message: corrected
+      ? `${adjustment.adjustmentNumber} saved. ${corrected} ${corrected === 1 ? 'figure' : 'figures'} corrected.`
+      : `${adjustment.adjustmentNumber} saved. Everything counted matched the book, so no stock moved.`,
+    data: adjustment,
   })
 })
 
-/** Moving stock between two of our own stores. Value travels with it. */
+router.get('/adjustments', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+
+  const where: Record<string, unknown> = {}
+  if (str(req.query.warehouseId)) where.warehouseId = str(req.query.warehouseId)
+  if (str(req.query.q)) {
+    where.OR = [
+      { adjustmentNumber: { contains: str(req.query.q), mode: 'insensitive' } },
+      { reason: { contains: str(req.query.q), mode: 'insensitive' } },
+    ]
+  }
+
+  const [rows, total] = await Promise.all([
+    prisma.stockAdjustment.findMany({
+      where,
+      include: adjustmentInclude,
+      orderBy: [{ adjustmentDate: 'desc' }, { createdAt: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.stockAdjustment.count({ where }),
+  ])
+
+  res.json({
+    success: true,
+    data: rows,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  })
+})
+
+router.get('/adjustments/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const row = await prisma.stockAdjustment.findUnique({
+    where: { id: req.params.id },
+    include: adjustmentInclude,
+  })
+  if (!row) throw new AppError('That stock adjustment does not exist', 404, 'NOT_FOUND')
+  res.json({ success: true, data: row })
+})
+
+/**
+ * Moving stock between two of our own stores.
+ *
+ * Value travels with it: cloth carried across the yard is worth what it was
+ * worth on the other side. The rate each line left at is copied onto the
+ * document so the note prints the same figure a year later.
+ */
 router.post('/transfers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = transferSchema.parse(req.body)
   const when = data.transferDate ?? new Date()
 
-  const result = await prisma.$transaction(async (tx) => {
+  const transfer = await prisma.$transaction(async (tx) => {
     const [from, to] = await Promise.all([
       tx.warehouse.findUnique({ where: { id: data.fromWarehouseId } }),
       tx.warehouse.findUnique({ where: { id: data.toWarehouseId } }),
     ])
     if (!from || !to) throw new AppError('One of those warehouses does not exist', 404, 'NOT_FOUND')
 
-    const reference = `TRF-${Date.now()}`
+    const transferNumber = await nextDocumentNumber(tx, 'STN', when)
 
-    for (const line of data.lines) {
+    const created = await tx.stockTransfer.create({
+      data: {
+        transferNumber,
+        fromWarehouseId: data.fromWarehouseId,
+        toWarehouseId: data.toWarehouseId,
+        transferDate: when,
+        notes: data.notes ?? null,
+        movedById: req.user?.id ?? null,
+        lines: { create: data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty })) },
+      },
+      include: { lines: true },
+    })
+
+    for (const line of created.lines) {
+      // Read what it is carried at before it moves. transferStock prices the
+      // arriving stock at the same figure, so this is the rate the document
+      // should remember.
+      const carried = await balanceOf(tx, {
+        itemId: line.itemId,
+        warehouseId: data.fromWarehouseId,
+      })
+
       await transferStock(tx, {
         itemId: line.itemId,
         fromWarehouseId: data.fromWarehouseId,
         toWarehouseId: data.toWarehouseId,
-        qty: line.qty,
+        qty: Number(line.qty),
         referenceType: 'STOCK_TRANSFER',
-        referenceId: reference,
+        referenceId: created.id,
         transactionDate: when,
-        notes: data.notes ?? `${from.name} → ${to.name}`,
+        notes: `${transferNumber}: ${from.name} → ${to.name}`,
+      })
+
+      await tx.stockTransferLine.update({
+        where: { id: line.id },
+        data: { unitRate: carried.avgRate },
       })
     }
 
-    return { reference, from: from.name, to: to.name, lines: data.lines.length }
+    return tx.stockTransfer.findUniqueOrThrow({
+      where: { id: created.id },
+      include: transferInclude,
+    })
   })
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
     entityType: 'StockTransfer',
-    entityId: result.reference,
-    after: result,
+    entityId: transfer.id,
+    after: transfer,
   })
 
   res.status(201).json({
     success: true,
-    message: `Moved ${result.lines} ${result.lines === 1 ? 'item' : 'items'} from ${result.from} to ${result.to}.`,
-    data: result,
+    message: `${transfer.transferNumber} saved. ${transfer.lines.length} ${transfer.lines.length === 1 ? 'item' : 'items'} moved from ${transfer.fromWarehouse.name} to ${transfer.toWarehouse.name}.`,
+    data: transfer,
   })
 })
+
+router.get('/transfers', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+
+  const where: Record<string, unknown> = {}
+  if (str(req.query.warehouseId)) {
+    where.OR = [
+      { fromWarehouseId: str(req.query.warehouseId) },
+      { toWarehouseId: str(req.query.warehouseId) },
+    ]
+  }
+  if (str(req.query.q)) where.transferNumber = { contains: str(req.query.q), mode: 'insensitive' }
+
+  const [rows, total] = await Promise.all([
+    prisma.stockTransfer.findMany({
+      where,
+      include: transferInclude,
+      orderBy: [{ transferDate: 'desc' }, { createdAt: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.stockTransfer.count({ where }),
+  ])
+
+  res.json({
+    success: true,
+    data: rows,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  })
+})
+
+router.get('/transfers/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const row = await prisma.stockTransfer.findUnique({
+    where: { id: req.params.id },
+    include: transferInclude,
+  })
+  if (!row) throw new AppError('That stock transfer does not exist', 404, 'NOT_FOUND')
+  res.json({ success: true, data: row })
+})
+
+/**
+ * Taking a transfer back out.
+ *
+ * The goods walk back the way they came, so the reversal is a transfer in the
+ * other direction rather than a quiet deletion. If the stock has since moved on
+ * from the destination the stock service refuses and says how much is actually
+ * there — which is the right answer, because the goods have gone and pretending
+ * otherwise would leave the rack and the book disagreeing.
+ */
+router.patch(
+  '/transfers/:id/cancel',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = cancelTransferSchema.parse(req.body ?? {})
+
+    const after = await prisma.$transaction(async (tx) => {
+      const before = await tx.stockTransfer.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true, fromWarehouse: true, toWarehouse: true },
+      })
+      if (!before) throw new AppError('That stock transfer does not exist', 404, 'NOT_FOUND')
+
+      if (before.cancelledAt) {
+        throw new AppError(
+          `${before.transferNumber} was already cancelled on ${before.cancelledAt.toLocaleDateString('en-IN')}.`,
+          400,
+          'ALREADY_CANCELLED',
+        )
+      }
+
+      for (const line of before.lines) {
+        await transferStock(tx, {
+          itemId: line.itemId,
+          // Back the way it came.
+          fromWarehouseId: before.toWarehouseId,
+          toWarehouseId: before.fromWarehouseId,
+          qty: Number(line.qty),
+          referenceType: 'STOCK_TRANSFER_CANCELLED',
+          referenceId: before.id,
+          transactionDate: new Date(),
+          notes: `${before.transferNumber} cancelled: ${reason}`,
+        })
+      }
+
+      return tx.stockTransfer.update({
+        where: { id: before.id },
+        data: {
+          cancelledAt: new Date(),
+          cancelledById: req.user?.id ?? null,
+          cancelReason: reason,
+        },
+        include: transferInclude,
+      })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'StockTransfer',
+      entityId: after.id,
+      after,
+    })
+
+    res.json({
+      success: true,
+      message: `${after.transferNumber} cancelled and the stock moved back to ${after.fromWarehouse.name}.`,
+      data: after,
+    })
+  },
+)
 
 // ── Material requisitions ───────────────────────────────────────────────────
 

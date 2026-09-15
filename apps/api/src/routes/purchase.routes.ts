@@ -7,6 +7,8 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
+import { recordMovement } from '../services/stock.service'
+import { cancelGrnSchema, createGrnSchema } from '../schemas/grn.schemas'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -422,6 +424,410 @@ router.patch('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req
   res.json({ success: true, data: after, message: `${after.poNumber} cancelled.` })
 })
 
+// ── Goods receipt ───────────────────────────────────────────────────────────
+//
+// The inward document. Until this existed, stock could only arrive through an
+// opening balance or a correction, and an order stayed open forever because
+// nothing ever told it the goods had turned up.
+//
+// Receiving is one act, not a draft confirmed later. The lorry is at the gate,
+// the rolls are counted, and saving is what puts them on the rack — so the
+// receipt is written and the stock moves inside one transaction, and the
+// document cannot be edited afterwards. A mistake is cancelled and re-entered.
+
+/** Quantities are stored to three decimals; fabric is received in metres. */
+const round3 = (n: number) => Math.round(n * 1000) / 1000
+
+const grnInclude = {
+  po: {
+    select: {
+      id: true,
+      poNumber: true,
+      poDate: true,
+      status: true,
+      supplier: { select: { id: true, name: true, code: true } },
+    },
+  },
+  lines: {
+    include: {
+      item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+      warehouse: { select: { id: true, name: true } },
+    },
+  },
+}
+
+/**
+ * How much of each order line has actually been accepted, counted from the
+ * receipts themselves rather than from a running total on the order.
+ *
+ * The stored `receivedQty` is a convenience for the order screen; this is the
+ * figure every decision is made against, for the same reason a stock balance is
+ * summed from its movements — a total somebody keeps updating is a total that
+ * can drift away from the documents underneath it.
+ *
+ * A cancelled receipt is left out, which is what lets a cancellation give the
+ * quantity back to the order.
+ */
+async function acceptedByPoLine(
+  tx: Prisma.TransactionClient,
+  poLineIds: string[]
+): Promise<Map<string, number>> {
+  if (poLineIds.length === 0) return new Map()
+
+  const sums = await tx.gRNLine.groupBy({
+    by: ['poLineId'],
+    where: { poLineId: { in: poLineIds }, grn: { status: { not: 'CANCELLED' } } },
+    _sum: { acceptedQty: true },
+  })
+
+  return new Map(sums.map((s) => [s.poLineId as string, Number(s._sum.acceptedQty ?? 0)]))
+}
+
+/**
+ * Puts the order back in step with what has been received.
+ *
+ * Called after every receipt and every cancellation, so the order's status and
+ * its pending quantities are a reading of the receipts rather than a guess made
+ * at the time. Rejected goods do not count as received: they are going back on
+ * the lorry, and the order still needs those pieces.
+ */
+async function syncOrderFromReceipts(tx: Prisma.TransactionClient, poId: string) {
+  const po = await tx.purchaseOrder.findUnique({ where: { id: poId }, include: { lines: true } })
+  if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+  const accepted = await acceptedByPoLine(
+    tx,
+    po.lines.map((l) => l.id)
+  )
+
+  let anyReceived = false
+  let allComplete = true
+
+  for (const line of po.lines) {
+    const got = accepted.get(line.id) ?? 0
+    const ordered = Number(line.qty)
+
+    if (got > 0) anyReceived = true
+    if (got < ordered) allComplete = false
+
+    await tx.purchaseOrderLine.update({
+      where: { id: line.id },
+      data: { receivedQty: got, pendingQty: round3(Math.max(0, ordered - got)) },
+    })
+  }
+
+  // A cancelled order stays cancelled. Receiving against one is refused long
+  // before this runs, so the only way to be here is the cancellation of an old
+  // receipt — and that must not quietly reopen the order.
+  const status =
+    po.status === 'CANCELLED'
+      ? 'CANCELLED'
+      : anyReceived
+        ? allComplete
+          ? 'COMPLETED'
+          : 'PARTIALLY_RECEIVED'
+        : 'SENT'
+
+  return tx.purchaseOrder.update({ where: { id: po.id }, data: { status } })
+}
+
+router.get('/grn', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25))
+
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+
+  const where: Prisma.GRNWhereInput = {}
+  const poId = text(req.query.poId)
+  const status = text(req.query.status)
+  const q = text(req.query.q)
+
+  if (poId) where.poId = poId
+  if (status) where.status = status as Prisma.GRNWhereInput['status']
+  if (q) {
+    where.OR = [
+      { grnNumber: { contains: q, mode: 'insensitive' } },
+      { po: { poNumber: { contains: q, mode: 'insensitive' } } },
+      { po: { supplier: { name: { contains: q, mode: 'insensitive' } } } },
+    ]
+  }
+
+  const [rows, total] = await Promise.all([
+    prisma.gRN.findMany({
+      where,
+      include: grnInclude,
+      orderBy: [{ grnDate: 'desc' }, { createdAt: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.gRN.count({ where }),
+  ])
+
+  res.json({
+    success: true,
+    data: rows,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  })
+})
+
+router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const grn = await prisma.gRN.findUnique({ where: { id: req.params.id }, include: grnInclude })
+  if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+  res.json({ success: true, data: grn })
+})
+
+/**
+ * Booking goods in against an order.
+ *
+ * Everything happens in one transaction: the number, the receipt, the stock and
+ * the order's new state. A receipt saved without its stock, or stock in without
+ * its receipt, is exactly the half-truth that makes a stock figure impossible
+ * to defend six months later.
+ */
+router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createGrnSchema.parse(req.body)
+  const when = data.grnDate ?? new Date()
+
+  const grn = await prisma.$transaction(async (tx) => {
+    const po = await tx.purchaseOrder.findUnique({
+      where: { id: data.poId },
+      include: { lines: { include: { item: { select: { name: true } } } } },
+    })
+    if (!po) throw new AppError('That purchase order does not exist', 404, 'NOT_FOUND')
+
+    if (po.status === 'DRAFT') {
+      throw new AppError(
+        `${po.poNumber} has not been sent to the supplier yet. Send it first, then receive against it.`,
+        400,
+        'PO_NOT_SENT'
+      )
+    }
+    if (po.status === 'CANCELLED') {
+      throw new AppError(
+        `${po.poNumber} was cancelled, so nothing can be received against it.`,
+        400,
+        'PO_CANCELLED'
+      )
+    }
+    if (po.status === 'COMPLETED') {
+      throw new AppError(`Everything on ${po.poNumber} has already been received.`, 400, 'PO_DONE')
+    }
+
+    const poLines = new Map(po.lines.map((l) => [l.id, l]))
+    const already = await acceptedByPoLine(
+      tx,
+      po.lines.map((l) => l.id)
+    )
+
+    // Every line is checked before anything is written. A receipt that books
+    // three items in and then refuses the fourth would leave the store keeper
+    // guessing which ones landed.
+    const prepared = data.lines.map((line) => {
+      const poLine = poLines.get(line.poLineId)
+      if (!poLine) {
+        throw new AppError(
+          `One of those lines is not on ${po.poNumber}. Reopen the order and try again.`,
+          400,
+          'LINE_NOT_ON_ORDER'
+        )
+      }
+
+      const received = round3(line.receivedQty)
+      const rejected = round3(line.rejectedQty ?? 0)
+      const accepted = round3(received - rejected)
+      const ordered = Number(poLine.qty)
+      const soFar = already.get(poLine.id) ?? 0
+
+      if (round3(soFar + accepted) > ordered) {
+        const pending = round3(ordered - soFar)
+        throw new AppError(
+          pending > 0
+            ? `${poLine.item.name}: only ${pending} of the ${ordered} ordered is still due, and you are booking in ${accepted}. Raise a new order for the extra.`
+            : `${poLine.item.name}: all ${ordered} ordered has already been received.`,
+          400,
+          'OVER_RECEIPT'
+        )
+      }
+
+      return {
+        poLine,
+        warehouseId: line.warehouseId,
+        batchNumber: line.batchNumber ?? null,
+        orderedQty: ordered,
+        received,
+        rejected,
+        accepted,
+        // The rate comes off the order rather than being typed again. It is
+        // what was agreed, and what the supplier's bill gets checked against.
+        unitRate: Number(poLine.unitRate),
+      }
+    })
+
+    const warehouseIds = [...new Set(prepared.map((p) => p.warehouseId))]
+    const warehouses = await tx.warehouse.findMany({
+      where: { id: { in: warehouseIds } },
+      select: { id: true, name: true, isActive: true },
+    })
+
+    if (warehouses.length !== warehouseIds.length) {
+      throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+    }
+    const closed = warehouses.find((w) => !w.isActive)
+    if (closed) {
+      throw new AppError(
+        `${closed.name} is no longer in use. Pick another store for these goods.`,
+        400,
+        'WAREHOUSE_INACTIVE'
+      )
+    }
+
+    const grnNumber = await nextDocumentNumber(tx, 'GRN', when)
+
+    const created = await tx.gRN.create({
+      data: {
+        grnNumber,
+        poId: po.id,
+        grnDate: when,
+        vehicleNo: data.vehicleNo ?? null,
+        // The goods are on the rack the moment this saves. Any other status
+        // would be a receipt claiming stock the ledger does not have.
+        status: 'ACCEPTED',
+        notes: data.notes ?? null,
+        lines: {
+          create: prepared.map((p) => ({
+            poLineId: p.poLine.id,
+            itemId: p.poLine.itemId,
+            warehouseId: p.warehouseId,
+            orderedQty: p.orderedQty,
+            receivedQty: p.received,
+            rejectedQty: p.rejected,
+            acceptedQty: p.accepted,
+            batchNumber: p.batchNumber,
+            unitRate: p.unitRate,
+            amount: round2(p.accepted * p.unitRate),
+          })),
+        },
+      },
+    })
+
+    // Only what was accepted becomes stock. Rejected goods never reach the
+    // ledger — they are standing at the gate waiting to go back, and booking
+    // them in would put stock on the books that nobody can find.
+    for (const p of prepared) {
+      if (p.accepted <= 0) continue
+
+      await recordMovement(tx, {
+        itemId: p.poLine.itemId,
+        warehouseId: p.warehouseId,
+        transactionType: 'PURCHASE',
+        direction: 'IN',
+        qty: p.accepted,
+        unitRate: p.unitRate,
+        batchNumber: p.batchNumber,
+        referenceType: 'GRN',
+        referenceId: created.id,
+        transactionDate: when,
+        notes: `${grnNumber} against ${po.poNumber}`,
+      })
+    }
+
+    await syncOrderFromReceipts(tx, po.id)
+
+    return tx.gRN.findUniqueOrThrow({ where: { id: created.id }, include: grnInclude })
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'GRN',
+    entityId: grn.id,
+    after: grn,
+  })
+
+  const rejected = grn.lines.reduce((sum, l) => sum + Number(l.rejectedQty), 0)
+
+  res.status(201).json({
+    success: true,
+    message:
+      rejected > 0
+        ? `${grn.grnNumber} saved. ${rejected} was rejected and has not gone into stock.`
+        : `${grn.grnNumber} saved and the stock is in.`,
+    data: grn,
+  })
+})
+
+/**
+ * Cancelling a receipt.
+ *
+ * Takes the stock back out and gives the quantity back to the order. If any of
+ * it has already been issued the stock service refuses and says how much is
+ * actually left, which is the right answer — the goods are gone, and pretending
+ * otherwise would leave the rack and the book disagreeing.
+ */
+router.patch(
+  '/grn/:id/cancel',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = cancelGrnSchema.parse(req.body ?? {})
+
+    const after = await prisma.$transaction(async (tx) => {
+      const before = await tx.gRN.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!before) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+
+      if (before.status === 'CANCELLED') {
+        throw new AppError(`${before.grnNumber} is already cancelled.`, 400, 'ALREADY_CANCELLED')
+      }
+
+      for (const line of before.lines) {
+        const accepted = Number(line.acceptedQty)
+        if (accepted <= 0) continue
+
+        await recordMovement(tx, {
+          itemId: line.itemId,
+          warehouseId: line.warehouseId,
+          transactionType: 'RETURN',
+          direction: 'OUT',
+          qty: accepted,
+          referenceType: 'GRN_CANCELLED',
+          referenceId: before.id,
+          transactionDate: new Date(),
+          notes: `${before.grnNumber} cancelled: ${reason}`,
+        })
+      }
+
+      const cancelled = await tx.gRN.update({
+        where: { id: before.id },
+        data: {
+          status: 'CANCELLED',
+          notes: `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason}`,
+        },
+        include: grnInclude,
+      })
+
+      await syncOrderFromReceipts(tx, before.poId)
+
+      return cancelled
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'GRN',
+      entityId: after.id,
+      after,
+    })
+
+    res.json({
+      success: true,
+      message: `${after.grnNumber} cancelled and the stock taken back out.`,
+      data: after,
+    })
+  }
+)
+
 // ── Not built yet ───────────────────────────────────────────────────────────
 //
 // These used to return an empty list, which made the screens look as though
@@ -434,7 +840,6 @@ const notBuilt = (what: string) => (_req: unknown, res: import('express').Respon
     code: 'NOT_IMPLEMENTED',
   })
 
-router.get('/grn', notBuilt('Goods receipt'))
 router.get('/invoices', notBuilt('Purchase bills'))
 router.get('/payments', notBuilt('Supplier payments'))
 
