@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   X,
   Loader2,
@@ -217,7 +218,12 @@ export function PurchaseOrderDialog({
 
   const [saving, setSaving] = useState<'draft' | 'send' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [mounted, setMounted] = useState(false)
   const firstFieldRef = useRef<HTMLSelectElement | null>(null)
+
+  // document does not exist while this page is rendered on the server, so the
+  // portal can only be opened once the browser has it.
+  useEffect(() => setMounted(true), [])
 
   useEffect(() => {
     if (!open) return
@@ -360,7 +366,7 @@ export function PurchaseOrderDialog({
     return { lineAmounts, subtotal, discount, taxable, tax, roundOff: total - beforeRound, total }
   }, [lines, discountAmount, taxMode])
 
-  if (!open) return null
+  if (!open || !mounted) return null
 
   const setLine = (index: number, patch: Partial<PoLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
@@ -473,22 +479,36 @@ export function PurchaseOrderDialog({
   // address when none is picked.
   const destination = warehouses.find((w) => w.id === warehouseId) ?? null
 
-  return (
+  /**
+   * Rendered into `document.body` rather than where it sits in the page.
+   *
+   * `position: fixed` is only as good as its ancestors: a transform, a filter,
+   * a backdrop-filter or a `contain` anywhere above it silently turns that
+   * element into the containing block, and `inset-0` then means the corners of
+   * *that* box rather than the corners of the screen. This form lives inside
+   * the dashboard shell — sidebar, top bar, a padded main, an animated
+   * wrapper — and any one of those acquiring such a property later would put a
+   * band of undimmed page above the modal again, for a reason nobody would
+   * think to look for.
+   *
+   * From the body there is nothing above it to get in the way.
+   */
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-3">
-      {/* `max-h-full`, not a vh figure.
+      {/* `h-full`, not `max-h-full` and not a vh figure.
 
-          A cap in vh is a guess about the window, and whatever is left over
-          becomes centring slack above and below the form — so the gap at the
-          top moved with the window size and never came down to the padding.
-          100% of the overlay's content box is exactly the screen minus that
-          padding, so when the form is taller than the screen the margin is
-          the padding and nothing else: 8px on a phone, 12px on a desktop,
-          top and bottom, equal by construction rather than by arithmetic.
+          A cap only says how tall the card may not be. This form's content
+          came out a little shorter than the screen, so the card hugged it and
+          the leftover was split above and below as centring slack — about
+          27px of dimmed page over the top, which is what kept coming back
+          however the cap was tuned.
 
-          A short form still centres, which is why this is not pinned to the
-          top. */}
+          Filling the height instead makes the margin the padding and nothing
+          else, top and bottom, by construction rather than by arithmetic:
+          8px on a phone, 12px on a desktop. The body scrolls inside, which it
+          did already. */}
       <div
-        className="glass-card w-full max-w-5xl max-h-full flex flex-col overflow-hidden"
+        className="glass-card w-full max-w-5xl h-full max-h-full flex flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="po-dialog-title"
@@ -1116,6 +1136,7 @@ export function PurchaseOrderDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
