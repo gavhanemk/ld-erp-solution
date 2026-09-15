@@ -11,10 +11,9 @@ import {
   FileText,
   Package,
   Truck,
+  Building2,
   Paperclip,
-  Mail,
   ScrollText,
-  MapPin,
   Search,
   Lock,
 } from 'lucide-react'
@@ -123,14 +122,14 @@ function Section({
 }) {
   return (
     <section className="rounded-lg border border-border bg-secondary/20">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
-        <Icon size={15} className="text-muted-foreground shrink-0" />
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
+        <Icon size={14} className="text-muted-foreground shrink-0" />
         <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {title}
         </h3>
         {hint && <span className="text-xs text-muted-foreground ml-auto">{hint}</span>}
       </div>
-      <div className="p-4">{children}</div>
+      <div className="p-3">{children}</div>
     </section>
   )
 }
@@ -472,7 +471,7 @@ export function PurchaseOrderDialog({
         aria-labelledby="po-dialog-title"
       >
         {/* Header — stays put while the body scrolls, so it is always clear what is being filled in */}
-        <div className="shrink-0 flex items-start justify-between gap-4 px-6 py-4 border-b border-border">
+        <div className="shrink-0 flex items-start justify-between gap-4 px-4 py-3 border-b border-border">
           <div className="flex items-start gap-3">
             <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
               <ShoppingCart size={18} className="text-primary" />
@@ -494,7 +493,7 @@ export function PurchaseOrderDialog({
         </div>
 
         {/* Body — the only thing that scrolls */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {error && (
             <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
               <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
@@ -504,7 +503,7 @@ export function PurchaseOrderDialog({
 
           {/* 1 — Basic details */}
           <Section icon={FileText} title="Basic details">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
                 <label className="form-label" htmlFor="po-location">
                   Location
@@ -585,9 +584,9 @@ export function PurchaseOrderDialog({
             title="Items"
             hint={lines.length ? `${lines.length} on this order` : undefined}
           >
-            <div className="space-y-4">
+            <div className="space-y-3">
               <div className="rounded-lg border border-border bg-background/40 p-3">
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
                   <div className="md:col-span-3">
                     <label className="form-label" htmlFor="po-pick-search">
                       Item code
@@ -894,33 +893,37 @@ export function PurchaseOrderDialog({
           </Section>
 
           {/* 3 — Supplier */}
-          <Section icon={Truck} title="Supplier">
+          <Section icon={Building2} title="Supplier">
             <div className="space-y-2">
-              <div className="form-input flex items-center gap-2">
-                <Search size={14} className="text-muted-foreground shrink-0" />
-                <input
-                  className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
-                  placeholder="Narrow the list by name or code..."
-                  value={supplierFilter}
-                  onChange={(e) => setSupplierFilter(e.target.value)}
-                  aria-label="Search suppliers"
-                />
-              </div>
-              <select
-                className="form-input"
-                value={supplierId}
-                onChange={(e) => setSupplierId(e.target.value)}
-                aria-label="Supplier"
-              >
-                <option value="">
-                  {visibleSuppliers.length === 0 ? 'No supplier matches that' : 'Choose supplier'}
-                </option>
-                {visibleSuppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.code ? `${s.code} — ${s.name}` : s.name}
+              {/* Search beside the list rather than above it. Stacked, one
+                  field cost two rows of height on a form already too tall. */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <div className="form-input flex items-center gap-2">
+                  <Search size={14} className="text-muted-foreground shrink-0" />
+                  <input
+                    className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
+                    placeholder="Search name or code"
+                    value={supplierFilter}
+                    onChange={(e) => setSupplierFilter(e.target.value)}
+                    aria-label="Search suppliers"
+                  />
+                </div>
+                <select
+                  className="form-input md:col-span-2"
+                  value={supplierId}
+                  onChange={(e) => setSupplierId(e.target.value)}
+                  aria-label="Supplier"
+                >
+                  <option value="">
+                    {visibleSuppliers.length === 0 ? 'No supplier matches that' : 'Choose supplier'}
                   </option>
-                ))}
-              </select>
+                  {visibleSuppliers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code ? `${s.code} — ${s.name}` : s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
               {supplier && (
                 <p className="text-xs text-muted-foreground">
                   {supplier.gstin ? (
@@ -938,23 +941,26 @@ export function PurchaseOrderDialog({
             </div>
           </Section>
 
-          {/* 4 — Delivery and attachments */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <Section icon={Paperclip} title="Attachments">
-              <NotBuilt label="Attaching files is not built yet — nothing in the ERP can store one.">
-                <div className="rounded-lg border border-dashed border-border p-4 text-center">
-                  <Paperclip size={18} className="text-muted-foreground mx-auto" />
-                  <p className="text-sm text-foreground mt-2">Choose files</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Up to 5 files, 5MB each
-                  </p>
-                </div>
-              </NotBuilt>
-            </Section>
+          {/* 4 — Delivery and attachments. One section rather than two side by
+              side: a header and a border around each half cost more height
+              than the fields inside them. */}
+          <Section icon={Truck} title="Delivery and attachments">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div>
+                <h4 className="text-xs font-semibold text-foreground mb-2">Attachments</h4>
+                <NotBuilt label="Attaching files is not built yet — nothing in the ERP can store one.">
+                  <div className="rounded-lg border border-dashed border-border p-3 text-center">
+                    <Paperclip size={16} className="text-muted-foreground mx-auto" />
+                    <p className="text-sm text-foreground mt-1.5">Choose files</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">Up to 5 files, 5MB each</p>
+                  </div>
+                </NotBuilt>
+              </div>
 
-            <Section icon={MapPin} title="Deliver to">
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-4">
+              <div>
+                <h4 className="text-xs font-semibold text-foreground mb-2">Deliver to</h4>
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-4">
                   <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
                     <input
                       type="radio"
@@ -1002,59 +1008,64 @@ export function PurchaseOrderDialog({
                   </button>{' '}
                   at the top of this form.
                 </p>
-              </div>
-            </Section>
-          </div>
-
-          {/* 5 — Terms and notes */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <Section icon={ScrollText} title="Terms and conditions">
-              <textarea
-                rows={4}
-                className="form-input"
-                placeholder="Leave blank to use the terms set in Settings → Documents"
-                value={terms}
-                onChange={(e) => setTerms(e.target.value)}
-                aria-label="Terms and conditions"
-              />
-            </Section>
-
-            <Section icon={FileText} title="Notes">
-              <textarea
-                rows={4}
-                className="form-input"
-                placeholder="Printed on the order the supplier receives"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                aria-label="Notes"
-              />
-            </Section>
-          </div>
-
-          {/* 6 — Template and email */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <Section icon={FileText} title="Template">
-              <NotBuilt label="Choosing or editing a template is not built yet. Orders print on the standard sheet.">
-                <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2.5">
-                  <span className="text-sm text-foreground">Standard</span>
-                  <span className="text-xs text-muted-foreground">Edit</span>
                 </div>
-              </NotBuilt>
-            </Section>
+              </div>
+            </div>
+          </Section>
 
-            <Section icon={Mail} title="Email to">
-              <NotBuilt label="Sending the order by email is not built yet. Print it and send it yourself.">
-                <label className="flex items-center gap-2 text-sm text-foreground">
-                  <input type="checkbox" checked readOnly />
-                  {company?.email ?? 'accounts@example.com'}
-                </label>
-              </NotBuilt>
-            </Section>
-          </div>
+          {/* 5 — What the order says, and how it goes out. Four small things
+              that were four boxes; they fit in two. */}
+          <Section icon={ScrollText} title="Terms, notes and sending">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <div>
+                <h4 className="text-xs font-semibold text-foreground mb-2">Terms and conditions</h4>
+                <textarea
+                  rows={3}
+                  className="form-input"
+                  placeholder="Leave blank to use the terms set in Settings → Documents"
+                  value={terms}
+                  onChange={(e) => setTerms(e.target.value)}
+                  aria-label="Terms and conditions"
+                />
+              </div>
+
+              <div>
+                <h4 className="text-xs font-semibold text-foreground mb-2">Notes</h4>
+                <textarea
+                  rows={3}
+                  className="form-input"
+                  placeholder="Printed on the order the supplier receives"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  aria-label="Notes"
+                />
+              </div>
+
+              <div>
+                <h4 className="text-xs font-semibold text-foreground mb-2">Template</h4>
+                <NotBuilt label="Choosing or editing a template is not built yet. Orders print on the standard sheet.">
+                  <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2">
+                    <span className="text-sm text-foreground">Standard</span>
+                    <span className="text-xs text-muted-foreground">Edit</span>
+                  </div>
+                </NotBuilt>
+              </div>
+
+              <div>
+                <h4 className="text-xs font-semibold text-foreground mb-2">Email to</h4>
+                <NotBuilt label="Sending the order by email is not built yet. Print it and send it yourself.">
+                  <label className="flex items-center gap-2 text-sm text-foreground">
+                    <input type="checkbox" checked readOnly />
+                    {company?.email ?? 'accounts@example.com'}
+                  </label>
+                </NotBuilt>
+              </div>
+            </div>
+          </Section>
         </div>
 
         {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
-        <div className="shrink-0 flex flex-wrap items-center justify-end gap-3 px-6 py-4 border-t border-border">
+        <div className="shrink-0 flex flex-wrap items-center justify-end gap-3 px-4 py-3 border-t border-border">
           {incomplete && (
             <p className="text-xs text-muted-foreground mr-auto">
               {!supplierId ? 'Choose a supplier' : 'Add at least one item'} to save this order.
