@@ -261,6 +261,8 @@ model User {
   raisedMRs       MaterialRequisition[] @relation("MRRaisedBy")
   approvedMRs     MaterialRequisition[] @relation("MRApprovedBy")
   issuedMRs       MaterialRequisition[] @relation("MRIssuedBy")
+  createdBills    PurchaseInvoice[]     @relation("BillCreatedBy")
+  createdPayments SupplierPayment[]     @relation("PaymentCreatedBy")
 
   @@index([email])
   @@index([roleId])
@@ -1045,6 +1047,8 @@ model GRNLine {
   unitRate     Decimal            @default(0) @db.Decimal(10, 2)
   amount       Decimal            @default(0) @db.Decimal(12, 2)
 
+  billLines PurchaseInvoiceLine[]
+
   @@map("grn_lines")
 }
 
@@ -1094,6 +1098,8 @@ model PurchaseInvoice {
   balanceAmount       Decimal        @db.Decimal(12, 2)
   status              InvoiceStatus  @default(UNPAID)
   notes               String?
+  createdById         String
+  createdBy           User           @relation("BillCreatedBy", fields: [createdById], references: [id])
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
 
@@ -1102,6 +1108,13 @@ model PurchaseInvoice {
   charges    PurchaseInvoiceCharge[]
   debitNotes DebitNote[]
 
+  /// The same supplier bill must never be booked twice — a duplicate claims the
+  /// input credit a second time, which is the mistake a GST notice is written
+  /// about. Postgres treats NULLs as distinct, so bills with no supplier number
+  /// yet are unaffected.
+  @@unique([supplierId, supplierInvoiceNo])
+  @@index([supplierId])
+  @@index([status])
   @@map("purchase_invoices")
 }
 
@@ -1118,8 +1131,11 @@ model SupplierPayment {
   referenceNo   String?
   chequeDate    DateTime?
   notes         String?
+  createdById   String
+  createdBy     User             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
   createdAt     DateTime         @default(now())
 
+  @@index([supplierId])
   @@map("supplier_payments")
 }
 
@@ -1837,6 +1853,13 @@ model PurchaseInvoiceLine {
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
   itemId       String
   item         Item            @relation(fields: [itemId], references: [id])
+  /// The receipt line this bill line settles, which is what makes the
+  /// three-way match possible: ordered, received and billed have to agree one
+  /// row at a time. Held per line rather than once on the bill, because a
+  /// supplier routinely bills several deliveries together — and because a bill
+  /// line for something never received is exactly what the match must catch.
+  grnLineId    String?
+  grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id])
   description  String?
   hsnCode      String?
   qty          Decimal         @db.Decimal(10, 3)
