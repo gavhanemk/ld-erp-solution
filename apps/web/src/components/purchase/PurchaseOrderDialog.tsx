@@ -494,7 +494,13 @@ export function PurchaseOrderDialog({
    * From the body there is nothing above it to get in the way.
    */
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-3">
+    /* The overlay stops where the sidebar ends, so the menu is neither dimmed
+       nor covered and the app can still be navigated with the form open.
+       Stopping short of it beats raising the sidebar above the overlay: on a
+       narrower screen a sidebar sitting on top would clip the left edge of a
+       centred form. On a phone the sidebar already takes most of the width, so
+       there the overlay covers everything as before. */
+    <div className="fixed inset-0 sm:left-[var(--sidebar-current-width)] z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-3">
       {/* `h-full`, not `max-h-full` and not a vh figure.
 
           A cap only says how tall the card may not be. This form's content

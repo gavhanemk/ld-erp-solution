@@ -47,6 +47,11 @@
     --sidebar-border: 217 33% 18%;
     --sidebar-width: 260px;
     --sidebar-collapsed-width: 68px;
+    /* Whichever of the two the sidebar is showing right now. The dashboard
+       layout keeps it up to date, because a dialog is rendered outside that
+       layout's markup and cannot ask it directly — and a dialog needs to know
+       so its overlay can stop at the sidebar rather than burying it. */
+    --sidebar-current-width: 260px;
 
     /* Glass effect */
     --glass-bg: rgba(255, 255, 255, 0.04);

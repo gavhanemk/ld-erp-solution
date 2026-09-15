@@ -15,6 +15,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     void loadAppSettings()
   }, [])
 
+  /**
+   * Publishes the sidebar's current width so anything outside this markup can
+   * line up with it.
+   *
+   * A dialog is rendered into the document body, not into this tree, so it
+   * cannot read `sidebarCollapsed` from here. Without this it would have to
+   * guess, and a guess would be wrong every time somebody collapsed the
+   * sidebar.
+   */
+  useEffect(() => {
+    document.documentElement.style.setProperty(
+      '--sidebar-current-width',
+      sidebarCollapsed ? '68px' : '260px',
+    )
+  }, [sidebarCollapsed])
+
   return (
     <div className="min-h-screen bg-background">
       <Sidebar collapsed={sidebarCollapsed} onCollapse={setSidebarCollapsed} />
