@@ -187,8 +187,6 @@ export function PurchaseOrderDialog({
   // Header
   const [supplierId, setSupplierId] = useState('')
   const [supplierFilter, setSupplierFilter] = useState('')
-  const [poDate, setPoDate] = useState(() => new Date().toISOString().slice(0, 10))
-  const [deliveryDate, setDeliveryDate] = useState('')
   const [warehouseId, setWarehouseId] = useState('')
   const [enquiryNo, setEnquiryNo] = useState('')
   const [enquiryDate, setEnquiryDate] = useState('')
@@ -215,8 +213,6 @@ export function PurchaseOrderDialog({
     if (!open) return
     setSupplierId(record?.supplierId ?? '')
     setSupplierFilter('')
-    setPoDate((record?.poDate ?? new Date().toISOString()).slice(0, 10))
-    setDeliveryDate(record?.deliveryDate?.slice(0, 10) ?? '')
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setEnquiryNo(record?.enquiryNo ?? '')
     setEnquiryDate(record?.enquiryDate?.slice(0, 10) ?? '')
@@ -389,10 +385,12 @@ export function PurchaseOrderDialog({
     setError(null)
   }
 
+  // poDate and deliveryDate are deliberately absent. The form no longer asks
+  // for either, and omitting them rather than sending a value means a new
+  // order takes today's date from the API, while editing an existing draft
+  // leaves the date it already carries alone instead of overwriting it.
   const payload = () => ({
     supplierId,
-    poDate,
-    deliveryDate: deliveryDate || null,
     deliveryWarehouseId: warehouseId || null,
     enquiryNo: enquiryNo.trim() || null,
     enquiryDate: enquiryDate || null,
@@ -566,33 +564,7 @@ export function PurchaseOrderDialog({
                 />
               </div>
 
-              <div>
-                <label className="form-label" htmlFor="po-date">
-                  Order date
-                </label>
-                <input
-                  id="po-date"
-                  type="date"
-                  className="form-input"
-                  value={poDate}
-                  onChange={(e) => setPoDate(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label className="form-label" htmlFor="po-delivery">
-                  Wanted by
-                </label>
-                <input
-                  id="po-delivery"
-                  type="date"
-                  className="form-input"
-                  value={deliveryDate}
-                  onChange={(e) => setDeliveryDate(e.target.value)}
-                />
-              </div>
-
-              <div className="md:col-span-3">
+              <div className="md:col-span-2">
                 <label className="form-label" htmlFor="po-remark">
                   Remark
                 </label>
