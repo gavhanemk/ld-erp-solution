@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 24 Aug 2026 — Settings module, then a model correctness pass_
+_Last updated: Wed 2 Sep 2026 — stock, the ledger and material requisitions_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -142,15 +142,15 @@ where relations belonged, and 23 models with no way to reach them at all.
 
 **Pick up here next — the API and UI wiring:**
 
-1. `purchase`, `inventory`, `accounts` and `hr` route files are **13 endpoints
-   that all return `{success: true, data: []}`**. The screens therefore look
-   like they work and show "no data" rather than "not built". Replace them with
-   real handlers, or make them honest.
+1. ~~13 endpoints returning an empty array.~~ **Done.** Inventory is built for
+   real (see below). `accounts` and `hr` now answer 501 and say so on screen,
+   which is what docs/03-build-rules.md asks for. What is left is goods
+   receipt, still a 501 in `purchase.routes.ts`.
 2. No screens yet for the new masters: workstations, brokers, routings, size
    groups, charge types.
 3. Three models still have no route and no screen at all: `BankAccount`,
    `SalaryStructure`, `Voucher`.
-4. Invoice creation and document printing — nothing in the system can print.
+4. Invoice creation. The purchase order prints; nothing else does yet.
 
 Run `node <scratch>/audit.js` (kept in the session scratchpad) to re-check which
 models are reachable; it accounts for the CRUD factory's dynamic delegate and
@@ -231,7 +231,7 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 ## What is built
 
 **Database — live on Supabase**
-- 56 tables, 124 indexes, 71 foreign keys, 16 enum types in the `ld_erp` schema
+- 76 tables and 27 enum types in the `ld_erp` schema
 - Seeded: company, 5 roles, 2 users, 2 brands, 8 departments, 1 warehouse,
   8 UOMs, 7 item categories, 8 document number series
 - 78-entry permission matrix with per-role grants
@@ -265,6 +265,22 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 - Sales order list reads the real API with status filtering
 - Manufacturing order list with progress against planned quantity
 
+**Inventory and stock**
+- One writer for stock: `apps/api/src/services/stock.service.ts`. Nothing else
+  may write `stock_ledger`. It refuses to go negative and names the shortfall,
+  locks the item and warehouse so two issues cannot both pass the same check,
+  and values everything at weighted average
+- Balances are read back out of the movements, never stored, so quantity and
+  value cannot drift apart
+- Screens: stock on hand, one item's history, the full ledger, requisitions
+- Documents that move stock: opening balance, adjustment after a count,
+  transfer between stores, and issue against a requisition
+- Material requisitions run raise → approve → issue, with three different
+  people. The person who raised it cannot approve it, and both the inventory
+  screen and the approvals inbox enforce that
+- Customer-owned stock is held apart from ours and left out of the valuation
+- The phone app can read stock and one item's history
+
 **Settings — four tabs**
 - Company: profile and GSTIN, financial year, document numbering with a live
   preview of the next number, GST rates with one default
@@ -290,8 +306,9 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 
 - Creating sales orders, purchase orders and manufacturing orders from the UI
   (the API can create sales orders; there is no form yet)
-- Purchase, inventory, accounts and HR routes are still stubs returning empty
-  arrays
+- **Goods receipt.** Stock has no inward document, so a purchase order does not
+  increase stock when the goods turn up. Everything else about stock is built
+- Accounts and HR are not built and now say so — 501, not an empty array
 - Detail pages: `/sales/orders/[id]`, `/production/orders/[id]`
 - Export buttons are visibly disabled rather than functional
 - GST e-invoicing, WhatsApp bot, mobile app (Phases 2–5)
