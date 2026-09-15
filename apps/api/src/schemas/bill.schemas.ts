@@ -32,7 +32,14 @@ const percent = (what: string) =>
     .min(0, `${what} cannot be negative`)
     .max(100, `${what} cannot be more than 100%`)
 
-const id = (what: string) => z.string().min(1, `Pick ${what}`)
+// The message has to be set three times over. `.min()` only speaks when the
+// value arrived as a string and was empty; a field left off the request
+// entirely is an invalid_type, and its default wording is "Required", which
+// tells a clerk nothing about which box to go back to.
+const id = (what: string) =>
+  z
+    .string({ required_error: `Pick ${what}`, invalid_type_error: `Pick ${what}` })
+    .min(1, `Pick ${what}`)
 
 export const billLineSchema = z.object({
   itemId: id('an item'),
