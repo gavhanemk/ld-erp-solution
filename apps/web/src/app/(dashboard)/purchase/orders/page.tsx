@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Send, Ban } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
+import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 
@@ -28,6 +29,7 @@ export default function PurchaseOrdersPage() {
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
+  const [page, setPage] = useState(1)
   const [busy, setBusy] = useState(false)
   const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseOrder | null }>({
     open: false,
@@ -43,7 +45,7 @@ export default function PurchaseOrdersPage() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ limit: String(rowsPerPage) })
+      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
       if (debounced) qs.set('q', debounced)
       if (status) qs.set('status', status)
       const res = await api.get<Paginated<PurchaseOrder>>(`/purchase/orders?${qs}`)
@@ -61,11 +63,17 @@ export default function PurchaseOrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [debounced, status, rowsPerPage])
+  }, [debounced, status, page, rowsPerPage])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  // Narrowing the search while on page 3 would show an empty page 3 of a
+  // shorter list, which reads as "nothing found" rather than "you moved".
+  useEffect(() => {
+    setPage(1)
+  }, [debounced, status])
 
   const act = async (po: PurchaseOrder, what: 'send' | 'cancel') => {
     if (what === 'cancel' && !confirm(`Cancel ${po.poNumber}?`)) return
@@ -84,6 +92,8 @@ export default function PurchaseOrdersPage() {
 
   const money = (v: string | number) =>
     Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+  const pages = Math.ceil(total / rowsPerPage) || 1
 
   return (
     <div className="space-y-5">
@@ -242,6 +252,8 @@ export default function PurchaseOrdersPage() {
             </table>
           </div>
         )}
+
+        <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
       </div>
 
       <p className="text-xs text-muted-foreground">
