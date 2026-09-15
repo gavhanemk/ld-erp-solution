@@ -143,15 +143,26 @@ function Section({
  * throws it away is worse than no box — the same reason an unbuilt endpoint
  * here answers 501 instead of an empty list.
  */
-function NotBuilt({ label, children }: { label: string; children: React.ReactNode }) {
+function Faded({ children }: { children: React.ReactNode }) {
+  // 70%, not 50%. Half opacity takes a 7:1 label down to roughly 3:1, which is
+  // below the floor for text of any size — the control read as damaged rather
+  // than switched off. This is still visibly inactive and still legible.
+  return <div className="pointer-events-none select-none opacity-70">{children}</div>
+}
+
+/**
+ * One line covering everything in a section that cannot work yet.
+ *
+ * Shared rather than repeated per field: four of these sat on one screen, and
+ * four near-identical apologies read as a broken product instead of an
+ * unfinished one.
+ */
+function NotBuiltNote({ children }: { children: React.ReactNode }) {
   return (
-    <div>
-      <div className="pointer-events-none select-none opacity-50">{children}</div>
-      <p className="flex items-start gap-1.5 text-xs text-muted-foreground mt-1.5">
-        <Lock size={13} className="mt-0.5 shrink-0" />
-        {label}
-      </p>
-    </div>
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+      <Lock size={13} className="mt-0.5 shrink-0" />
+      {children}
+    </p>
   )
 }
 
@@ -941,26 +952,26 @@ export function PurchaseOrderDialog({
             </div>
           </Section>
 
-          {/* 4 — Delivery and attachments. One section rather than two side by
-              side: a header and a border around each half cost more height
-              than the fields inside them. */}
+          {/* 4 — Delivery and attachments. The dropzone became a single row:
+              it cannot accept a file yet, so three lines and a dashed border
+              were spending height to advertise something switched off. */}
           <Section icon={Truck} title="Delivery and attachments">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div>
-                <h4 className="text-xs font-semibold text-foreground mb-2">Attachments</h4>
-                <NotBuilt label="Attaching files is not built yet — nothing in the ERP can store one.">
-                  <div className="rounded-lg border border-dashed border-border p-3 text-center">
-                    <Paperclip size={16} className="text-muted-foreground mx-auto" />
-                    <p className="text-sm text-foreground mt-1.5">Choose files</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">Up to 5 files, 5MB each</p>
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-foreground">Attachments</h4>
+                <Faded>
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
+                    <span className="flex items-center gap-2 text-sm text-foreground">
+                      <Paperclip size={14} /> Choose files
+                    </span>
+                    <span className="text-xs text-muted-foreground">5 files, 5MB each</span>
                   </div>
-                </NotBuilt>
+                </Faded>
               </div>
 
-              <div>
-                <h4 className="text-xs font-semibold text-foreground mb-2">Deliver to</h4>
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-4">
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-foreground">Deliver to</h4>
+                <div className="flex flex-wrap items-center gap-4">
                   <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
                     <input
                       type="radio"
@@ -976,49 +987,47 @@ export function PurchaseOrderDialog({
                   </label>
                 </div>
 
-                <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
-                  <Lock size={13} className="mt-0.5 shrink-0" />
-                  Delivering straight to a customer is not built yet — an order has nowhere to keep
-                  their address.
-                </p>
-
                 {/* Shown, not repeated. An order has one destination, so a
                     second dropdown for it here would only mirror the Location
                     field above — change one and the other moves, which reads
                     as two settings that disagree. */}
-                <div className="rounded-lg border border-border bg-background/40 p-3">
+                <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
                   <p className="text-sm font-medium text-foreground">
                     {destination?.name ?? company?.name ?? 'Your company'}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
+                  <p className="text-xs text-muted-foreground">
                     {destination?.address ||
                       orgAddress ||
                       'Address not set — add it in Settings → Company.'}
                   </p>
-                </div>
-
-                <p className="text-xs text-muted-foreground">
-                  To send the goods somewhere else, change{' '}
-                  <button
-                    type="button"
-                    className="text-primary underline"
-                    onClick={() => document.getElementById('po-location')?.focus()}
-                  >
-                    Location
-                  </button>{' '}
-                  at the top of this form.
-                </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Somewhere else? Change{' '}
+                    <button
+                      type="button"
+                      className="text-primary underline"
+                      onClick={() => document.getElementById('po-location')?.focus()}
+                    >
+                      Location
+                    </button>{' '}
+                    above.
+                  </p>
                 </div>
               </div>
             </div>
+
+            <NotBuiltNote>
+              Attaching files and delivering straight to a customer are not built yet — nothing can
+              store a file, and an order has nowhere to keep a customer&rsquo;s address.
+            </NotBuiltNote>
           </Section>
 
-          {/* 5 — What the order says, and how it goes out. Four small things
-              that were four boxes; they fit in two. */}
+          {/* 5 — What the order says, and how it goes out. Template and email
+              share one row: neither does anything yet, so a column each was
+              height spent on two switched-off controls. */}
           <Section icon={ScrollText} title="Terms, notes and sending">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div>
-                <h4 className="text-xs font-semibold text-foreground mb-2">Terms and conditions</h4>
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-foreground">Terms and conditions</h4>
                 <textarea
                   rows={3}
                   className="form-input"
@@ -1029,8 +1038,8 @@ export function PurchaseOrderDialog({
                 />
               </div>
 
-              <div>
-                <h4 className="text-xs font-semibold text-foreground mb-2">Notes</h4>
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-foreground">Notes</h4>
                 <textarea
                   rows={3}
                   className="form-input"
@@ -1040,26 +1049,27 @@ export function PurchaseOrderDialog({
                   aria-label="Notes"
                 />
               </div>
+            </div>
 
-              <div>
-                <h4 className="text-xs font-semibold text-foreground mb-2">Template</h4>
-                <NotBuilt label="Choosing or editing a template is not built yet. Orders print on the standard sheet.">
-                  <div className="flex items-center justify-between rounded-lg border border-border bg-background/40 px-3 py-2">
-                    <span className="text-sm text-foreground">Standard</span>
+            <div className="mt-3 space-y-2">
+              <Faded>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
+                    <span className="text-sm text-foreground">Template: Standard</span>
                     <span className="text-xs text-muted-foreground">Edit</span>
                   </div>
-                </NotBuilt>
-              </div>
-
-              <div>
-                <h4 className="text-xs font-semibold text-foreground mb-2">Email to</h4>
-                <NotBuilt label="Sending the order by email is not built yet. Print it and send it yourself.">
-                  <label className="flex items-center gap-2 text-sm text-foreground">
+                  <div className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
                     <input type="checkbox" checked readOnly />
-                    {company?.email ?? 'accounts@example.com'}
-                  </label>
-                </NotBuilt>
-              </div>
+                    <span className="text-sm text-foreground truncate">
+                      {company?.email ?? 'accounts@example.com'}
+                    </span>
+                  </div>
+                </div>
+              </Faded>
+              <NotBuiltNote>
+                Choosing a template and emailing the order are not built yet. Orders print on the
+                standard sheet — print it and send it yourself.
+              </NotBuiltNote>
             </div>
           </Section>
         </div>
