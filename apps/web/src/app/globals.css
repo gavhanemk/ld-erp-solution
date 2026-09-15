@@ -283,6 +283,38 @@
            transition-colors duration-200;
   }
 
+  /* A dropdown is the same control as a text field and must look like one, but
+     it does not behave like one when a height is forced on it.
+
+     `.form-input` stands 42px tall on its own: a 20px line of text-sm between
+     10px of padding, inside a 1px border. The filter row above every list sets
+     `h-9` to line the control up with the buttons beside it, which leaves 14px
+     of content box for that 20px line. A text field simply overflows its box
+     and the browser still centres the caret, so nobody noticed. A select clips
+     its label against the padding box instead, and the words sit half-buried
+     along the bottom edge.
+
+     Padding is therefore dropped for a select and the centring left to the
+     height, which is what a select does well — the label ends up centred in
+     whatever height it is given, 36px in a filter row or the full 42px in a
+     form. The height below is deliberately not `min-height`: a minimum would
+     win against `h-9` and defeat the whole filter row.
+
+     The arrow is left to the browser. Drawing our own would mean choosing a
+     colour, and a colour chosen here is a colour that has to be chosen again
+     for the other theme.
+
+     `:where(select)` rather than `select`, because `:where()` adds no
+     specificity. Written as `select.form-input` this rule would outrank the
+     `.h-9` beside it in the markup and force all 44 of them to 42px — fixing
+     the clipping by quietly overriding every height the screens ask for. At
+     equal specificity Tailwind's utilities layer comes last and wins, which is
+     the behaviour a component class should have. */
+  :where(select).form-input {
+    @apply py-0;
+    height: 2.625rem;
+  }
+
   .form-label {
     @apply block text-sm font-medium text-foreground mb-1.5;
   }
