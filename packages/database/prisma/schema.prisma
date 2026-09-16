@@ -263,6 +263,7 @@ model User {
   issuedMRs       MaterialRequisition[] @relation("MRIssuedBy")
   createdBills    PurchaseInvoice[]     @relation("BillCreatedBy")
   createdPayments SupplierPayment[]     @relation("PaymentCreatedBy")
+  uploadedFiles   PurchaseOrderAttachment[] @relation("AttachmentUploadedBy")
   movedStock      StockTransfer[]       @relation("TransferMovedBy")
   cancelledStock  StockTransfer[]       @relation("TransferCancelledBy")
   countedStock    StockAdjustment[]     @relation("AdjustmentMadeBy")
@@ -624,6 +625,8 @@ model Customer {
   updatedAt       DateTime     @updatedAt
 
   salesOrders  SalesOrder[]
+  /// Purchase orders the supplier was told to deliver straight to this customer.
+  poDeliveries PurchaseOrder[] @relation("PODeliveryCustomer")
   invoices     SalesInvoice[]
   payments     PaymentReceipt[]
   creditNotes  CreditNote[]
@@ -987,6 +990,15 @@ model PurchaseOrder {
   /// Where the supplier is told to deliver.
   deliveryWarehouseId String?
   deliveryWarehouse   Warehouse?   @relation(fields: [deliveryWarehouseId], references: [id])
+  /// Set when the supplier ships straight to a customer instead of to us.
+  /// It changes the tax: goods are taxed where they are delivered, so a
+  /// customer in another state makes the supplier's bill IGST even though we
+  /// are in theirs.
+  deliveryCustomerId  String?
+  deliveryCustomer    Customer?    @relation("PODeliveryCustomer", fields: [deliveryCustomerId], references: [id])
+  /// The address as it read the day the order was raised. A customer moves;
+  /// an order already with a supplier must not.
+  deliveryAddress     String?
   notes        String?
   terms        String?
   createdById  String
@@ -997,14 +1009,46 @@ model PurchaseOrder {
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
 
-  lines    PurchaseOrderLine[]
-  grns     GRN[]
-  invoices PurchaseInvoice[]
+  lines       PurchaseOrderLine[]
+  grns        GRN[]
+  invoices    PurchaseInvoice[]
+  attachments PurchaseOrderAttachment[]
 
   @@index([poNumber])
   @@index([supplierId])
   @@index([status])
   @@map("purchase_orders")
+}
+
+/// A file kept against a purchase order — the supplier's quotation, a sample
+/// approval, a signed copy that came back.
+///
+/// The file itself lives in object storage, not in the database. What is kept
+/// here is where it is and what it was called, because a row is cheap to read
+/// and a blob in a row makes every query that touches the order slower.
+///
+/// `storagePath` is the whole address of the file. The bucket is private, so
+/// nothing here is reachable without a link the API signs on request and which
+/// expires — a purchase order is a commercial document and a guessable URL is
+/// how those end up indexed.
+model PurchaseOrderAttachment {
+  id          String        @id @default(cuid())
+  poId        String
+  po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  /// What the person called it on their own machine. Shown in the list; never
+  /// used to build the storage path, because two people upload "scan.pdf".
+  fileName    String
+  /// Where it sits in the bucket. Unique so a row can never point at a file
+  /// another row also claims.
+  storagePath String        @unique
+  mimeType    String?
+  sizeBytes   Int
+  uploadedById String
+  uploadedBy   User         @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt   DateTime      @default(now())
+
+  @@index([poId])
+  @@map("purchase_order_attachments")
 }
 
 model PurchaseOrderLine {

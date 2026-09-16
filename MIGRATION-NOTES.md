@@ -201,3 +201,90 @@ came from, and that answer lived only in somebody's email.
 ### What you have to do
 
 Nothing to the database. Same three commands as the entry above.
+
+---
+
+## 16 Sep 2026 — a supplier can deliver straight to a customer
+
+**Migration:** `20260916102317_purchase_order_deliver_to_customer`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Two optional columns on `purchase_orders`, and a foreign key.
+
+| Column | Holds |
+|---|---|
+| `deliveryCustomerId` | The customer the supplier ships to, instead of us |
+| `deliveryAddress` | That address as it read the day the order was raised |
+
+Nothing renamed, nothing dropped. Every order already on the system goes to one
+of our own warehouses and simply has both empty.
+
+### Why it was needed
+
+It is not only a delivery note — it changes the tax. Goods are taxed where they
+are delivered, so a supplier in our own state billing us for goods sent to a
+customer in another state raises IGST, not CGST/SGST. The old form had nowhere
+to say that, so the split came out wrong on exactly the orders where it mattered.
+
+The address is copied rather than looked up each time, because a customer moves
+and an order already sitting with a supplier must not change under it.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+---
+
+## 16 Sep 2026 — files kept against a purchase order
+
+**Migration:** `20260916103224_purchase_order_attachments`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+One new table, `purchase_order_attachments`. No existing table was touched.
+
+The file itself does **not** live in the database. The row records where the
+file sits in object storage, what the person originally called it, its size and
+type, and who uploaded it. A blob in a row would slow down every query that
+touches the order.
+
+`storagePath` is unique, so two rows can never claim the same file. Deleting an
+order takes its attachment rows with it (`ON DELETE CASCADE`); deleting the
+*file* is the API's job, not the database's.
+
+### There is also a storage bucket
+
+This migration is only half of it. The files need a private Supabase bucket
+named `ld-erp-documents`, limit 50MB, which **already exists** on our project —
+it is not created by any migration, so a fresh project would need it made by
+hand. The API reads its name from `SUPABASE_BUCKET`, falling back to that.
+
+The bucket must be **private**. A purchase order carries prices and terms, and a
+public bucket URL is one that can be guessed, shared and indexed. Every download
+goes through a link the API signs, which dies after five minutes.
+
+Two API environment variables are required, and the API returns a plain 501 with
+an explanation if they are missing rather than failing oddly:
+
+```
+SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+```
+
+The service role key never leaves the server.
+
+### What you have to do
+
+Nothing to the database. Same three commands as the entry above, plus the two
+environment variables in `apps/api/.env` if you want uploads working locally.
