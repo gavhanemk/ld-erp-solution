@@ -34,7 +34,14 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
   description: z.string().max(300).optional().nullable(),
-  // The garment style this material is bought for. A relation, not typed text.
+  /*
+   * The garment style, both ways round: what the buyer typed, and the master
+   * style it turned out to be. The browser sends both — it already has the
+   * style list — and `styleId` is only set when the text matched a code
+   * exactly, so nothing typed is ever dropped and the link is made whenever
+   * it can be.
+   */
+  styleNo: z.string().max(50).optional().nullable(),
   styleId: z.string().optional().nullable(),
   qty: z.number().positive('Quantity must be more than zero'),
   unitRate: z.number().min(0, 'Rate cannot be negative'),
@@ -491,6 +498,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
           create: data.lines.map((l, i) => ({
             itemId: l.itemId,
             description: l.description ?? null,
+            styleNo: l.styleNo?.trim() || null,
             styleId: l.styleId || null,
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
@@ -613,6 +621,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           poId: before.id,
           itemId: l.itemId,
           description: l.description ?? null,
+          styleNo: l.styleNo?.trim() || null,
           styleId: l.styleId || null,
           hsnCode: hsnById.get(l.itemId) ?? null,
           qty: l.qty,

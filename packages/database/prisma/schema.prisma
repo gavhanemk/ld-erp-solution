@@ -1065,12 +1065,19 @@ model PurchaseOrderLine {
   item        Item          @relation(fields: [itemId], references: [id])
   /// What we asked for in our own words, when it differs from the item name.
   description String?
-  /// The garment style this material is being bought for.
+  /// The garment style this material is being bought for, both ways round.
   ///
-  /// A relation rather than free text on purpose: the mill already keeps its
-  /// styles in a master, and a typed style number is the kind of field where
-  /// "SH-1042" and "SH1042" end up side by side and stop reconciling against
-  /// production.
+  /// `styleNo` is whatever the buyer typed. `styleId` is the master style it
+  /// turned out to be, set only when the text matches a style's code exactly.
+  ///
+  /// Both, rather than one or the other, because each alone loses something.
+  /// Free text alone lets "SH-1042" and "SH1042" sit side by side and stop
+  /// reconciling against production. The relation alone cannot hold a style
+  /// the mill has not set up yet — and on a purchase order that is common,
+  /// because material is often bought before the style is entered. Keeping
+  /// the text means nothing the buyer wrote is ever dropped; keeping the
+  /// relation means the link is there whenever it can be made.
+  styleNo     String?
   styleId     String?
   style       Style?        @relation(fields: [styleId], references: [id])
   /// Copied from the item when the order is raised, because an item's HSN can

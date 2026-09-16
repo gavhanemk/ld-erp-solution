@@ -358,3 +358,46 @@ git pull
 pnpm install
 pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
 ```
+
+---
+
+## 16 Sep 2026 — the style number as the buyer types it
+
+**Migration:** `20260916163807_purchase_order_line_style_no`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+One nullable column, `styleNo`, on `purchase_order_lines`. Additive: nothing
+renamed, nothing dropped. Existing lines keep their `styleId` and have no text.
+
+### Why both a text column and the relation
+
+The line already had `styleId`, a relation to the style master, and the form
+offered a dropdown. That was the wrong shape for a purchase order: **material
+is often bought before the style is set up**, so a dropdown of existing styles
+cannot hold what the buyer needs to write.
+
+Free text alone is no better — "SH-1042" and "SH1042" would sit side by side
+and stop reconciling against production, which is why the relation was chosen
+in the first place.
+
+So both. `styleNo` is whatever was typed and is never dropped. `styleId` is set
+only when that text matches a style's code exactly, and is cleared the moment
+it stops matching — a stale link would quietly reconcile material against the
+wrong garment. The style master's codes are offered in the cell as suggestions,
+so the common case still produces a linked line.
+
+Checked both ways on a real order: `LD-SH-2601` kept its text and linked to the
+master; `NEW-STYLE-9099` kept its text with no link.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
