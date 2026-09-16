@@ -371,8 +371,11 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
             </td>
             {/* Deliberately allowed to wrap. The column is wide enough for
                 every code we have, and a longer one in future should take a
-                second line rather than run into the HSN beside it. */}
-            <td style={{ ...td, ...NUM, fontSize: '10.5px', overflowWrap: 'anywhere' }}>
+                second line rather than run into the HSN beside it.
+                `break-word`, not `anywhere` — PROJECT_STATUS records a printed
+                supplier address that came out one letter per line because
+                `anywhere` lets a column collapse to a single character. */}
+            <td style={{ ...td, ...NUM, fontSize: '10.5px', overflowWrap: 'break-word' }}>
               {line.item.code}
             </td>
             <td style={{ ...td, ...NUM, fontSize: '10.5px', color: GREY }}>

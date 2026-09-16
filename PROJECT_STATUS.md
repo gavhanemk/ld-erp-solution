@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Wed 2 Sep 2026 — stock, the ledger and material requisitions_
+_Last updated: Wed 16 Sep 2026 — the purchase module: orders, bills, attachments and the printed sheet_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -66,32 +66,60 @@ bypass (CVE-2025-29927). Do not pin it back.
 
 ---
 
-## Where we left off (Mon 24 Aug, evening) — READ THIS FIRST
+## Where we left off (Wed 16 Sep 2026) — READ THIS FIRST
 
-Mahesh went home mid-test. The purchase order works end to end and prints; the
-last thing changed was the width of the columns on the printed sheet, and
-**nobody has looked at the result yet**.
+The purchase module is built: orders, goods receipt, bills with a three-way
+match, file attachments, and a printed order sheet. It is all on the
+`feat/purchase` branch and **not yet merged to `main`**, so none of it is on
+the live site.
 
-**First thing tomorrow:** open a purchase order, click the printer icon, and
-check the line table lines up with the supplier box above it and the totals
-below. If it does not, the column widths are weights in
-`apps/web/src/app/(print)/print/purchase-order/[id]/page.tsx` and the maths that
-turns them into percentages is in `DocumentTable` in
-`apps/web/src/components/print/PrintSheet.tsx`.
+**The one thing to check on paper.** The printed purchase order paginates
+itself rather than letting the browser break it, because a browser will not
+give you a page number and "Page 1 of 2" has to be true. Nine lines fit one
+sheet and thirteen go on the first of two. Those two numbers were calculated
+from the row height, not measured on paper, and they are the two to nudge:
+`FITS_ON_ONE_SHEET` and `ROWS_ON_FIRST_OF_TWO` at the top of
+`apps/web/src/app/(print)/print/purchase-order/[id]/page.tsx`. Print a long
+order and see where it breaks.
 
-Two print bugs were found and fixed today, both mine:
+Column widths on that sheet are plain percentages in the `COLS` array in the
+same file. **This file used to send people to `DocumentTable` in
+`PrintSheet.tsx` for them — that is no longer true.** The purchase order sheet
+draws its own table now and only borrows `PrintToolbar` and `money` from
+`PrintSheet`. The purchase *bill* sheet still uses `PrintSheet` proper.
+
+**Two open decisions, both his:**
+1. Merge `feat/purchase` to `main` and deploy, or keep going on the branch.
+2. `pnpm reset` maps to `prisma migrate reset --force`. `--force` means no
+   confirmation at all, so one mistyped word wipes the ERP. Worth a guard, but
+   it is a shared script.
+
+**Not ours, still missing.** The shared database has 13 migrations applied and
+this repo has 12. The odd one out is
+`20260916104500_bom_size_routing_and_status`, applied from another machine on
+16 Sep. It is nobody's on this laptop — a migration cannot be applied from a
+folder you do not have. Until somebody pushes it, **nobody should run
+`pnpm db:migrate`**: our schema has no BOM models in it, so Prisma reads their
+tables as unexplained and offers to drop them. That offer is the "drift / reset"
+prompt, and the answer is always no.
+
+**Two print bugs from 24 Aug, both still worth knowing:**
 - The sidebar and top bar were on the print page and would have printed. Print
   pages now live in their own route group with no app shell.
 - `overflow-wrap: anywhere` let a column shrink to one character, so the
   supplier address printed vertically, one letter per line. Never use
-  `anywhere` in a table; `break-word` does not count towards a column's minimum.
+  `anywhere` in a table; `break-word` does not count towards a column's
+  minimum.
 
 **How he works:** short, plain sentences. No jargon, no file paths, no rule
-numbers unless he asks. Answer the question first, then the detail.
+numbers unless he asks. Answer the question first, then the detail. He is not
+technical and will say "didn't understand" to a long technical answer — that is
+a signal to say it again shorter, not to add more detail.
 
 **Live demo data he entered** — a supplier (LD Silk Mills), one item (LIO LINEN)
 and PO-2627-0001 for ₹1,54,350. The HSN and some codes are deliberately not
-real; he said not to worry about them, they are for testing.
+real; he said not to worry about them, they are for testing. There are now 43
+items with categories, added as dummy data for testing the pickers.
 
 **Decisions he has given:**
 - No data comes across from Absolute ERP. Whatever is there stays there. Do not
@@ -100,9 +128,13 @@ real; he said not to worry about them, they are for testing.
 - LD Silk Mills is his own second company with its own GSTIN — a supplier here,
   never a second company inside one database.
 - Users and roles can be reconfigured later; not a priority.
+- **Nothing is committed until he says so**, and never to `main`. Work goes on
+  a branch and waits.
+- An item code is an item's identity, not a search box. Typing a full code
+  resolves that item; it does not filter a list.
 
-**Next after the print check:** Goods Receipt, so what arrives can be booked
-against the order. `/purchase/grn` is still marked "soon" in the sidebar.
+**Next:** supplier payments is the last 501 in the purchase module, so a bill
+can be raised but not paid. After that, sales orders have no form either.
 
 ---
 
@@ -144,13 +176,16 @@ where relations belonged, and 23 models with no way to reach them at all.
 
 1. ~~13 endpoints returning an empty array.~~ **Done.** Inventory is built for
    real (see below). `accounts` and `hr` now answer 501 and say so on screen,
-   which is what docs/03-build-rules.md asks for. What is left is goods
-   receipt, still a 501 in `purchase.routes.ts`.
-2. No screens yet for the new masters: workstations, brokers, routings, size
-   groups, charge types.
-3. Three models still have no route and no screen at all: `BankAccount`,
+   which is what docs/03-build-rules.md asks for.
+2. ~~Goods receipt, still a 501.~~ **Done.** Built, with a screen.
+3. ~~No screens yet for the new masters: workstations, brokers, routings, size
+   groups, charge types.~~ **Done.** All five exist, plus item categories.
+4. Three models still have no route and no screen at all: `BankAccount`,
    `SalaryStructure`, `Voucher`.
-4. Invoice creation. The purchase order prints; nothing else does yet.
+5. Sales invoice creation. Purchase orders and purchase bills both print;
+   nothing on the sales side does yet.
+6. Supplier payments — the last 501 in `purchase.routes.ts`. A bill can be
+   raised and matched, but not paid.
 
 Run `node <scratch>/audit.js` (kept in the session scratchpad) to re-check which
 models are reachable; it accounts for the CRUD factory's dynamic delegate and
@@ -231,7 +266,10 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 ## What is built
 
 **Database — live on Supabase**
-- 76 tables and 27 enum types in the `ld_erp` schema
+- 83 base tables and 28 enum types in the `ld_erp` schema, counted on
+  16 Sep 2026. That count includes Prisma's own `_prisma_migrations`, and the
+  tables from the BOM migration that is applied to the database but **not in
+  this repo** — see the top of this file
 - Seeded: company, 5 roles, 2 users, 2 brands, 8 departments, 1 warehouse,
   8 UOMs, 7 item categories, 8 document number series
 - 78-entry permission matrix with per-role grants
@@ -281,6 +319,33 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 - Customer-owned stock is held apart from ours and left out of the valuation
 - The phone app can read stock and one item's history
 
+**Purchase — orders, receipt and bills** (on `feat/purchase`, not yet merged)
+- Purchase orders created from the UI: a five-section form with the enquiry it
+  answers, the supplier, lines, delivery and terms
+- The item picker's four fields stay in agreement. Choosing an item fills its
+  category and subcategory; typing a full item code resolves that item. A stale
+  selection clears itself when the list beneath it changes
+- Goods receipt against an order, which is what finally lets a purchase
+  increase stock
+- Purchase bills with a three-way match: order against receipt against bill.
+  A unique index stops the same supplier invoice being booked twice, which
+  would claim the input credit twice
+- **Deliver to a customer.** The supplier can be told to ship straight to a
+  customer instead of to us. This is a tax change, not a delivery note: goods
+  are taxed where they are delivered, so a supplier in our own state billing us
+  for goods sent to a customer in another state raises IGST. The address is
+  copied onto the order, not looked up, because a customer moves and an order
+  already with a supplier must not move under it
+- **File attachments**, up to five per order, 50MB each — the supplier's
+  quotation, a sample approval, a signed copy that came back. The browser
+  uploads straight to a private Supabase bucket and the API only handles the
+  row; downloads go through a link the API signs, which dies after five minutes
+- A printed order sheet that paginates itself so its page numbers are true.
+  It prints the delivery destination, and calls out a direct-to-customer
+  delivery, because a supplier reading a sheet without it would ship to the
+  letterhead address
+- Item categories and subcategories have a masters screen
+
 **Settings — four tabs**
 - Company: profile and GSTIN, financial year, document numbering with a live
   preview of the next number, GST rates with one default
@@ -304,10 +369,11 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 
 ## What is not built yet
 
-- Creating sales orders, purchase orders and manufacturing orders from the UI
-  (the API can create sales orders; there is no form yet)
-- **Goods receipt.** Stock has no inward document, so a purchase order does not
-  increase stock when the goods turn up. Everything else about stock is built
+- Creating sales orders and manufacturing orders from the UI (the API can
+  create sales orders; there is no form yet). **Purchase orders can now be
+  created** — see above
+- **Supplier payments.** A purchase bill can be raised and matched but not
+  paid; the endpoint is a 501
 - Accounts and HR are not built and now say so — 501, not an empty array
 - Detail pages: `/sales/orders/[id]`, `/production/orders/[id]`
 - Export buttons are visibly disabled rather than functional
@@ -353,6 +419,37 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 
 ## Notes for whoever picks this up
 
+- **There are three `.env` files, not two.** `apps/api/.env`, `apps/web/.env.local`
+  and `packages/database/.env`. The third is the one the Prisma CLI reads, and
+  it is easy to miss because nothing mentions it until a migration command
+  cannot find a database. A day was lost to `apps/web/.env.local` being empty:
+  the login page called `/undefined/auth/login`, because it used raw `fetch`
+  with no fallback while `lib/api.ts` has one.
+- **`prisma migrate status` can give a false all-clear.** It printed "Database
+  schema is up to date!" and exited 0 while the branch was three migrations
+  behind the database. Do not trust it as a safety check — list the folders in
+  `packages/database/prisma/migrations/` and compare them against
+  `ld_erp._prisma_migrations` yourself.
+- **Read the SQL before applying any migration.** One generated migration would
+  have dropped four live stock tables, because the shared database was ahead of
+  the branch it was generated on. It was caught by reading the file. Grep a new
+  migration for `DROP` before it goes anywhere near the database.
+- **The deploy script is `migrate:prod`, not `migrate:deploy`.** The docs named
+  a script that does not exist.
+- **`pnpm reset` is `prisma migrate reset --force`.** `--force` means there is
+  no confirmation prompt. It wipes the ERP. It has no guard on it yet.
+- **File attachments need a bucket, and no migration creates it.** A private
+  Supabase bucket named `ld-erp-documents` with a 50MB limit, plus `SUPABASE_URL`
+  and `SUPABASE_SERVICE_ROLE_KEY` in `apps/api/.env`. It already exists on our
+  project; a fresh project would need it made by hand. The API returns a plain
+  501 explaining itself if the variables are missing. Keep the bucket
+  **private** — a purchase order carries prices and terms.
+- **Supabase's signed upload URL carries its token in the query string.** Send
+  it as an `Authorization: Bearer` header instead and you get a flat 400 with
+  nothing useful in it.
+- **`ld_erp` is not exposed to Supabase's public API**, which is why no RLS
+  policy is needed on it. If the dashboard advises adding RLS, check which
+  schema it means first.
 - The init migration was applied through the Supabase connector before the
   database password was available, so Prisma did not know about it. It has now
   been marked applied (`prisma migrate resolve --applied 00000000000000_init`),
