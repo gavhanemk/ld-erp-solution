@@ -1,9 +1,98 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 24 Aug 2026 — Settings module, then a model correctness pass_
+_Last updated: Wed 16 Sep 2026 — Bill of Materials extended_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Bill of Materials — extended (Wed 16 Sep) — READ THE MIGRATION NOTE
+
+The BOM module already existed. This round closed the gaps that stopped it
+being usable for a real garment costing.
+
+**What is new**
+
+- **Consumption by size.** `BOMLineSize` holds a per-size quantity as a sparse
+  override: a size with no row of its own consumes what the line consumes, so a
+  style with no size run behaves exactly as it did before. The base size is a
+  field now (`BOM.baseSizeId`) instead of the words "size 40 basis" sitting in
+  the notes where nothing could read them.
+- **A routing link.** `BOM.routingId` points at the Routing master rather than
+  repeating its steps, and `BOM.labourCost` is the sum of rate per piece across
+  them. The screen shows Material, Labour and Total — it used to say
+  "per piece" and mean material only, which is what a merchandiser would have
+  quoted a buyer.
+- **A status lifecycle.** DRAFT to APPROVED to OBSOLETE. Approving freezes the
+  components and retires any other approved BOM for that style in the same
+  transaction, so "which version is current" finally has an answer. An approved
+  BOM cannot be edited, so `POST /masters/bom/:id/copy` ships alongside it —
+  without a copy action people would simply edit the approved one.
+
+**Bugs found and fixed**
+
+- The assistant quoted a material cost from `boms[0]` on a query with no
+  ordering, so a style with two live versions answered differently on different
+  days. It reads the approved BOM now.
+- `GET /masters/bom` ignored `q`, `sort`, `order` and `active`. Because DELETE
+  only sets `isActive = false`, a retired BOM never left the list — retiring one
+  looked like it had done nothing.
+- A repeated version showed the clerk `styleId,version already exists`.
+- Line cost was worked out from the unrounded quantity while the rounded one was
+  displayed, so Effective times Rate did not equal Cost on screen.
+- An item with no standard rate was silently costed at zero. Saving still works
+  — a BOM is often costed before anyone has quoted — but the response now names
+  the components, and approving is refused outright.
+- The edit dialog loaded one page of active items and priced from it, so a
+  component deactivated since would show a blank dropdown and ₹0.00 while the
+  server held the real cost. A clerk would have deleted the row.
+- The BOM screen had no way to deactivate a BOM at all.
+
+**The migration has NOT been run**
+
+The schema is changed and `pnpm db:generate` is clean, but `prisma migrate dev`
+needs `DATABASE_URL` and `DIRECT_URL`, which the machine this was written on did
+not have. **Until it is run the code does not match the database.**
+
+Generate it with `--create-only` and append the status backfill before applying.
+`status` defaults to DRAFT, which would otherwise mark every existing BOM a
+draft that nothing can cost against:
+
+```sql
+-- Only where the answer is not ambiguous. A style with two active BOMs would
+-- get two approved ones, which is the very thing this work removes.
+update ld_erp.bom b set status = 'APPROVED'
+where b."isActive"
+  and (select count(*) from ld_erp.bom x
+       where x."styleId" = b."styleId" and x."isActive") = 1;
+```
+
+Then list the ambiguous ones so somebody can choose:
+
+```sql
+select s.code, count(b.id) from ld_erp.styles s
+join ld_erp.bom b on b."styleId" = s.id and b."isActive"
+group by s.code having count(b.id) > 1;
+```
+
+**Still open**
+
+- **Re-pricing a BOM after a rate change is still not possible.** The rate is
+  resolved and stored on the first write, so the item master is read once and
+  never again. Fixing it needs a column that tells a borrowed rate from a typed
+  one, and that is another schema change.
+- BOM still does not reach production. `POST /inventory/requisitions` is live and
+  working, so BOM to material requisition is the natural next branch. BOM to
+  manufacturing order is blocked until an MO can be created at all — every
+  handler in `production.routes.ts` is a GET.
+- `@@unique([bomId, componentItemId])` was considered and deliberately left out:
+  the same self fabric legitimately appears twice at two wastages, body and
+  collar. `BOMLine.component` labels the part instead, and the constraint would
+  have failed on any live data that already has a repeat.
+- `next build` fails prerendering `/404` with a React `useRef` error. It fails
+  the same way on a clean checkout, so it is not from this work — but somebody
+  should chase it, because it means the web app cannot be built for production.
 
 ---
 
@@ -253,6 +342,8 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   warehouses, and a dedicated bill of materials screen
 - BOM costing: wastage inflates consumed quantity, rate falls back to the
   item's standard rate, header total and lines written in one transaction
+- BOM also carries consumption by size, a link to the style routing for labour
+  cost, and a DRAFT/APPROVED/OBSOLETE lifecycle (see the top of this file)
 - Zod validation with real GSTIN, PAN, IFSC, HSN and PIN formats
 
 **Dashboard — real data, no mock**

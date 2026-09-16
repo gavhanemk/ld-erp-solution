@@ -891,8 +891,15 @@ export async function executeTool(
           where: styleWhere,
           include: {
             sizeGroup: { select: { name: true } },
+            // The approved BOM, and at most one of it, so boms[0] below is a
+            // definite answer. This used to ask for any active BOM with no
+            // ordering at all, which meant a style with two live versions had
+            // its material cost quoted from whichever row Postgres returned
+            // first — a different number on different days, to whoever asked.
             boms: {
-              where: { isActive: true },
+              where: { status: 'APPROVED' },
+              orderBy: { approvedAt: 'desc' },
+              take: 1,
               include: {
                 lines: { include: { componentItem: { select: { name: true, code: true } } } },
               },

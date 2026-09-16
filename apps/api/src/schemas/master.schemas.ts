@@ -277,18 +277,44 @@ export const updateStyleSchema = createStyleSchema.partial()
 // BOM — header plus its component lines
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * A size that draws more or less cloth than the base size. Only the sizes that
+ * actually differ are sent — everything else falls back to the line's own
+ * quantity, which is what lets a style with no size run carry on unchanged.
+ */
+export const bomLineSizeSchema = z.object({
+  sizeId: z.string().min(1, 'Pick a size'),
+  qtyPerUnit: decimal,
+})
+
 export const bomLineSchema = z.object({
   componentItemId: z.string().min(1, 'Component item is required'),
+  /**
+   * Which part of the garment this goes into. The same self fabric appears
+   * twice on a shirt BOM at two different wastages, and without a label the
+   * second line looks like somebody added it by mistake.
+   */
+  component: z.string().max(60).optional().nullable(),
   qtyPerUnit: decimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
   notes: optionalText,
   sortOrder: z.number().int().min(0).optional(),
+  sizes: z
+    .array(bomLineSizeSchema)
+    .optional()
+    .refine((rows) => !rows || new Set(rows.map((r) => r.sizeId)).size === rows.length, {
+      message: 'A size can only be given once on a component',
+    }),
 })
 
 export const createBomSchema = z.object({
   styleId: z.string().min(1, 'Style is required'),
   version: z.string().max(20).optional(),
+  /** The routing that supplies the labour half of the cost. Optional. */
+  routingId: z.string().optional().nullable(),
+  /** The size the quantities on the lines are measured against. */
+  baseSizeId: z.string().optional().nullable(),
   notes: optionalText,
   lines: z.array(bomLineSchema).min(1, 'A BOM needs at least one component'),
   isActive,
@@ -296,9 +322,20 @@ export const createBomSchema = z.object({
 
 export const updateBomSchema = z.object({
   version: z.string().max(20).optional(),
+  routingId: z.string().optional().nullable(),
+  baseSizeId: z.string().optional().nullable(),
   notes: optionalText,
   lines: z.array(bomLineSchema).min(1).optional(),
   isActive,
+})
+
+/**
+ * Approving freezes a BOM, so a new version has to start life as a copy. If it
+ * did not, the only way to change an approved costing would be to edit it in
+ * place, which is exactly what the freeze exists to stop.
+ */
+export const copyBomSchema = z.object({
+  version: z.string().min(1, 'Give the new version a number, such as 1.1').max(20),
 })
 
 // ─────────────────────────────────────────────────────────────

@@ -1,19 +1,30 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { X, Loader2, AlertCircle, Plus, Trash2 } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { X, Loader2, AlertCircle, Plus, Trash2, Ruler } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
+
+export interface BomLineSize {
+  id?: string
+  sizeId: string
+  qtyPerUnit: number | string
+  effectiveQty?: number | string
+  totalCost?: number | string | null
+  size?: { id: string; code: string; label: string; sequence: number }
+}
 
 export interface BomLine {
   id?: string
   componentItemId: string
+  component?: string | null
   qtyPerUnit: number | string
   wastagePercent: number | string
   effectiveQty?: number | string
   unitCost?: number | string | null
   totalCost?: number | string | null
   notes?: string | null
+  sizes?: BomLineSize[]
   componentItem?: {
     id: string
     code: string
@@ -23,18 +34,34 @@ export interface BomLine {
   }
 }
 
+export interface RoutingStepBrief {
+  id: string
+  sequence: number
+  isQcStep: boolean
+  ratePerPiece: number | string | null
+  smv: number | string | null
+  operation?: { id: string; name: string; code: string }
+}
+
 export interface Bom {
   id: string
   styleId: string
   version: string
+  status: string
   isActive: boolean
   totalCost: string | number | null
+  labourCost: string | number | null
   notes: string | null
-  style?: { id: string; code: string; name: string; brandType: string }
+  routingId: string | null
+  baseSizeId: string | null
+  style?: { id: string; code: string; name: string; brandType: string; sizeGroupId: string | null }
+  baseSize?: { id: string; code: string; label: string } | null
+  approvedBy?: { id: string; name: string } | null
+  routing?: { id: string; code: string; name: string; steps?: RoutingStepBrief[] } | null
   lines?: BomLine[]
 }
 
-interface Option {
+interface ItemOption {
   id: string
   code: string
   name: string
@@ -42,30 +69,80 @@ interface Option {
   uom?: { symbol: string } | null
 }
 
+interface StyleOption {
+  id: string
+  code: string
+  name: string
+  sizeGroupId: string | null
+}
+
+interface SizeOption {
+  id: string
+  code: string
+  label: string
+  sequence: number
+  sizeGroupId: string
+}
+
+interface RoutingOption {
+  id: string
+  code: string
+  name: string
+}
+
 interface Props {
   open: boolean
   onClose: () => void
-  onSaved: () => void
+  onSaved: (message?: string) => void
   record?: Bom | null
 }
 
-/** A blank component row, ready for the user to pick an item. */
-const emptyLine = (): BomLine => ({
+/** What the form holds while it is being typed, before it becomes a payload. */
+interface EditLine {
+  componentItemId: string
+  component: string
+  qtyPerUnit: string
+  wastagePercent: string
+  unitCost: string
+  notes: string
+  /** Whether this component's consumption differs by size. */
+  sizeWise: boolean
+  /** sizeId to quantity, only for the sizes actually typed. */
+  sizeQty: Record<string, string>
+  /** The step used by "Fill sizes", kept per line. */
+  step: string
+}
+
+const emptyLine = (): EditLine => ({
   componentItemId: '',
+  component: '',
   qtyPerUnit: '',
   wastagePercent: '0',
+  unitCost: '',
+  notes: '',
+  sizeWise: false,
+  sizeQty: {},
+  step: '',
 })
+
+const round = (n: number, dp: number) => Number(n.toFixed(dp))
 
 export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
   const isEdit = Boolean(record)
+  const frozen = Boolean(record && record.status !== 'DRAFT')
 
-  const [styles, setStyles] = useState<Option[]>([])
-  const [items, setItems] = useState<Option[]>([])
+  const [styles, setStyles] = useState<StyleOption[]>([])
+  const [items, setItems] = useState<ItemOption[]>([])
+  const [sizes, setSizes] = useState<SizeOption[]>([])
+  const [routings, setRoutings] = useState<RoutingOption[]>([])
+
   const [styleId, setStyleId] = useState('')
   const [version, setVersion] = useState('1.0')
+  const [routingId, setRoutingId] = useState('')
+  const [baseSizeId, setBaseSizeId] = useState('')
   const [notes, setNotes] = useState('')
   const [isActive, setIsActive] = useState(true)
-  const [lines, setLines] = useState<BomLine[]>([emptyLine()])
+  const [lines, setLines] = useState<EditLine[]>([emptyLine()])
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -76,16 +153,24 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
     setStyleId(record?.styleId ?? '')
     setVersion(record?.version ?? '1.0')
+    setRoutingId(record?.routingId ?? '')
+    setBaseSizeId(record?.baseSizeId ?? '')
     setNotes(record?.notes ?? '')
     setIsActive(record?.isActive ?? true)
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
             componentItemId: l.componentItemId,
+            component: l.component ?? '',
             qtyPerUnit: String(l.qtyPerUnit),
             wastagePercent: String(l.wastagePercent ?? 0),
             unitCost: l.unitCost != null ? String(l.unitCost) : '',
             notes: l.notes ?? '',
+            sizeWise: (l.sizes?.length ?? 0) > 0,
+            sizeQty: Object.fromEntries(
+              (l.sizes ?? []).map((s) => [s.sizeId, String(s.qtyPerUnit)]),
+            ),
+            step: '',
           }))
         : [emptyLine()],
     )
@@ -93,15 +178,37 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     setFieldErrors({})
 
     void Promise.all([
-      masterResource<Option>('styles').list({ limit: 200, active: true }),
-      masterResource<Option>('items').list({ limit: 200, active: true }),
+      masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
+      masterResource<ItemOption>('items').list({ limit: 200, active: true }),
+      masterResource<SizeOption>('sizes').list({ limit: 200 }),
     ])
-      .then(([s, i]) => {
-        setStyles((s as Paginated<Option>).data)
-        setItems((i as Paginated<Option>).data)
+      .then(([s, i, z]) => {
+        setStyles((s as Paginated<StyleOption>).data)
+        setItems((i as Paginated<ItemOption>).data)
+        setSizes((z as Paginated<SizeOption>).data)
       })
-      .catch(() => setError('Could not load styles and items.'))
+      .catch(() => setError('Could not load styles, items and sizes.'))
   }, [open, record])
+
+  // Routings belong to a style, so the list is refetched when the style changes.
+  useEffect(() => {
+    if (!open || !styleId) {
+      setRoutings([])
+      return
+    }
+    let cancelled = false
+    void api
+      .get<Paginated<RoutingOption>>(`/masters/routings?styleId=${styleId}&active=true&limit=200`)
+      .then((res) => {
+        if (!cancelled) setRoutings(res.data)
+      })
+      .catch(() => {
+        if (!cancelled) setRoutings([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, styleId])
 
   useEffect(() => {
     if (!open) return
@@ -115,30 +222,108 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     }
   }, [open, onClose])
 
+  /**
+   * The item list is one page of active items, which is not enough on its own:
+   * a component that has since been deactivated, or that sits past the first
+   * page, would render as a blank dropdown priced at zero — and the row would
+   * look like a mistake somebody should delete. The record already carries its
+   * own components, so they are merged back in.
+   */
+  const itemsById = useMemo(() => {
+    const map = new Map<string, ItemOption>()
+    for (const i of items) map.set(i.id, i)
+    for (const l of record?.lines ?? []) {
+      const c = l.componentItem
+      if (c && !map.has(c.id)) {
+        map.set(c.id, { id: c.id, code: c.code, name: c.name, standardRate: c.standardRate, uom: c.uom })
+      }
+    }
+    return map
+  }, [items, record])
+
+  const itemOptions = useMemo(
+    () => [...itemsById.values()].sort((a, b) => a.code.localeCompare(b.code)),
+    [itemsById],
+  )
+
+  const style = styles.find((s) => s.id === styleId) ?? record?.style
+  const groupSizes = useMemo(
+    () =>
+      style?.sizeGroupId
+        ? sizes.filter((s) => s.sizeGroupId === style.sizeGroupId).sort((a, b) => a.sequence - b.sequence)
+        : [],
+    [sizes, style],
+  )
+
   if (!open) return null
 
-  const setLine = (index: number, patch: Partial<BomLine>) => {
+  const setLine = (index: number, patch: Partial<EditLine>) => {
     setLines((ls) => ls.map((l, i) => (i === index ? { ...l, ...patch } : l)))
   }
 
   /**
-   * Mirrors the server's costing so the user sees the number before saving:
+   * Mirrors the server's costing so the number is on screen before saving:
    * wastage inflates the consumed quantity, and a blank rate falls back to the
    * item's standard rate.
    */
-  const priceOf = (line: BomLine) => {
-    const item = items.find((i) => i.id === line.componentItemId)
+  const priceOf = (line: EditLine) => {
+    const item = itemsById.get(line.componentItemId)
     const qty = Number(line.qtyPerUnit) || 0
     const wastage = Number(line.wastagePercent) || 0
-    const effective = qty * (1 + wastage / 100)
-    const rate =
-      line.unitCost !== '' && line.unitCost != null
-        ? Number(line.unitCost)
-        : Number(item?.standardRate ?? 0)
-    return { effective, rate, cost: effective * rate, uom: item?.uom?.symbol ?? '' }
+    const factor = 1 + wastage / 100
+    const rate = line.unitCost !== '' ? Number(line.unitCost) : Number(item?.standardRate ?? 0)
+    const effective = round(qty * factor, 4)
+    return {
+      effective,
+      rate,
+      cost: round(effective * rate, 2),
+      unit: item?.uom?.symbol ?? '',
+      factor,
+      hasRate: line.unitCost !== '' || item?.standardRate != null,
+    }
   }
 
-  const grandTotal = lines.reduce((sum, l) => sum + priceOf(l).cost, 0)
+  const grandTotal = round(
+    lines.reduce((sum, l) => sum + priceOf(l).cost, 0),
+    2,
+  )
+
+  /** Per-size totals, so the cost of a 3XL is visible before saving. */
+  const sizeTotals = groupSizes
+    .map((size) => {
+      let cost = 0
+      let anyWise = false
+      for (const line of lines) {
+        const { factor, rate, cost: base } = priceOf(line)
+        const own = line.sizeWise ? line.sizeQty[size.id] : undefined
+        if (own !== undefined && own !== '') {
+          anyWise = true
+          cost += round(round(Number(own) * factor, 4) * rate, 2)
+        } else {
+          cost += base
+        }
+      }
+      return { label: size.label, cost, anyWise }
+    })
+    .filter((s) => s.anyWise)
+
+  /**
+   * A size set is built as a fixed increment per size, not six free numbers.
+   * Filling walks outward from the base size so the merchandiser edits the
+   * exceptions rather than typing the whole run.
+   */
+  const fillSizes = (index: number) => {
+    const line = lines[index]
+    const base = Number(line.qtyPerUnit) || 0
+    const step = Number(line.step) || 0
+    const anchor = groupSizes.findIndex((s) => s.id === baseSizeId)
+    const from = anchor >= 0 ? anchor : Math.floor(groupSizes.length / 2)
+    const next: Record<string, string> = {}
+    groupSizes.forEach((s, i) => {
+      next[s.id] = String(round(base + step * (i - from), 4))
+    })
+    setLine(index, { sizeQty: next })
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -148,14 +333,23 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
     const payloadLines = lines
       .filter((l) => l.componentItemId && l.qtyPerUnit !== '')
-      .map((l, index) => ({
-        componentItemId: l.componentItemId,
-        qtyPerUnit: Number(l.qtyPerUnit),
-        wastagePercent: Number(l.wastagePercent) || 0,
-        ...(l.unitCost !== '' && l.unitCost != null ? { unitCost: Number(l.unitCost) } : {}),
-        ...(l.notes ? { notes: l.notes } : {}),
-        sortOrder: index,
-      }))
+      .map((l, index) => {
+        const sizes = l.sizeWise
+          ? Object.entries(l.sizeQty)
+              .filter(([, v]) => v !== '' && v != null)
+              .map(([sizeId, v]) => ({ sizeId, qtyPerUnit: Number(v) }))
+          : []
+        return {
+          componentItemId: l.componentItemId,
+          ...(l.component ? { component: l.component } : {}),
+          qtyPerUnit: Number(l.qtyPerUnit),
+          wastagePercent: Number(l.wastagePercent) || 0,
+          ...(l.unitCost !== '' ? { unitCost: Number(l.unitCost) } : {}),
+          ...(l.notes ? { notes: l.notes } : {}),
+          ...(sizes.length > 0 ? { sizes } : {}),
+          sortOrder: index,
+        }
+      })
 
     if (payloadLines.length === 0) {
       setError('Add at least one component with a quantity.')
@@ -163,13 +357,20 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
       return
     }
 
+    const body = {
+      version,
+      notes,
+      isActive,
+      routingId: routingId || null,
+      baseSizeId: baseSizeId || null,
+      lines: payloadLines,
+    }
+
     try {
-      if (isEdit && record) {
-        await api.patch(`/masters/bom/${record.id}`, { version, notes, isActive, lines: payloadLines })
-      } else {
-        await api.post('/masters/bom', { styleId, version, notes, isActive, lines: payloadLines })
-      }
-      onSaved()
+      const res = isEdit
+        ? await api.patch<{ message?: string }>(`/masters/bom/${record!.id}`, body)
+        : await api.post<{ message?: string }>('/masters/bom', { ...body, styleId })
+      onSaved(res?.message)
       onClose()
     } catch (err) {
       if (err instanceof ApiError) {
@@ -203,7 +404,17 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {frozen && (
+            <div className="flex items-start gap-3 p-3 rounded-lg border border-amber-500/40 bg-amber-500/5">
+              <AlertCircle size={16} className="text-amber-400 mt-0.5 shrink-0" />
+              <p className="text-sm text-foreground">
+                This BOM is approved, so its components cannot be changed. Copy it to a new version
+                instead.
+              </p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="md:col-span-2">
               <label className="form-label" htmlFor="bom-style">
                 Style<span className="text-red-400 ml-0.5">*</span>
@@ -244,18 +455,69 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 value={version}
                 onChange={(e) => setVersion(e.target.value)}
                 placeholder="1.0"
+                disabled={frozen}
               />
+            </div>
+
+            <div>
+              <label className="form-label" htmlFor="bom-base-size">
+                Sized on
+              </label>
+              <select
+                id="bom-base-size"
+                className="form-input"
+                value={baseSizeId}
+                onChange={(e) => setBaseSizeId(e.target.value)}
+                disabled={frozen || groupSizes.length === 0}
+              >
+                <option value="">No particular size</option>
+                {groupSizes.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                {groupSizes.length === 0
+                  ? 'This style has no size run yet. Add one on the style to set quantities per size.'
+                  : 'The size the quantities below are measured against.'}
+              </p>
+            </div>
+
+            <div className="md:col-span-2">
+              <label className="form-label" htmlFor="bom-routing">
+                Routing
+              </label>
+              <select
+                id="bom-routing"
+                className="form-input"
+                value={routingId}
+                onChange={(e) => setRoutingId(e.target.value)}
+                disabled={frozen || !styleId}
+              >
+                <option value="">No routing — material cost only</option>
+                {routings.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.code} — {r.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                The steps come from the routing — the BOM does not repeat them. Labour is the sum of
+                the rate per piece on each step.
+              </p>
             </div>
           </div>
 
           <div>
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 Components
               </h3>
               <button
                 type="button"
                 className="btn-ghost text-xs"
+                disabled={frozen}
                 onClick={() => setLines((ls) => [...ls, emptyLine()])}
               >
                 <Plus size={13} />
@@ -264,100 +526,197 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="data-table">
+              <table className="data-table min-w-[820px]">
                 <thead>
                   <tr>
                     <th className="min-w-56">Item</th>
+                    <th className="w-28">Part</th>
                     <th className="w-28 text-right">Qty / pc</th>
                     <th className="w-24 text-right">Wastage %</th>
                     <th className="w-28 text-right">Rate</th>
                     <th className="w-28 text-right">Cost</th>
-                    <th className="w-10" />
+                    <th className="w-20" />
                   </tr>
                 </thead>
                 <tbody>
                   {lines.map((line, index) => {
-                    const { effective, rate, cost, uom } = priceOf(line)
+                    const { effective, rate, cost, unit, hasRate } = priceOf(line)
 
                     return (
-                      <tr key={index}>
-                        <td>
-                          <select
-                            className="form-input"
-                            value={line.componentItemId}
-                            onChange={(e) => setLine(index, { componentItemId: e.target.value })}
-                          >
-                            <option value="">Select item...</option>
-                            {items.map((i) => (
-                              <option key={i.id} value={i.id}>
-                                {i.code} — {i.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="any"
-                            min="0"
-                            className="form-input text-right"
-                            value={String(line.qtyPerUnit)}
-                            onChange={(e) => setLine(index, { qtyPerUnit: e.target.value })}
-                            placeholder="1.65"
-                          />
-                          {uom && (
-                            <p className="text-[10px] text-muted-foreground text-right mt-0.5">
-                              {effective.toFixed(4)} {uom} after wastage
+                      <Fragment key={index}>
+                        <tr>
+                          <td>
+                            <select
+                              className="form-input"
+                              value={line.componentItemId}
+                              disabled={frozen}
+                              onChange={(e) => setLine(index, { componentItemId: e.target.value })}
+                            >
+                              <option value="">Select item...</option>
+                              {itemOptions.map((i) => (
+                                <option key={i.id} value={i.id}>
+                                  {i.code} — {i.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              className="form-input"
+                              value={line.component}
+                              disabled={frozen}
+                              placeholder="Body"
+                              onChange={(e) => setLine(index, { component: e.target.value })}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="any"
+                              min="0"
+                              className="form-input text-right"
+                              value={line.qtyPerUnit}
+                              disabled={frozen}
+                              onChange={(e) => setLine(index, { qtyPerUnit: e.target.value })}
+                              placeholder="1.65"
+                            />
+                            {unit && (
+                              <p className="text-xs text-muted-foreground text-right mt-1">
+                                {effective} {unit} after wastage
+                              </p>
+                            )}
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="any"
+                              min="0"
+                              max="100"
+                              className="form-input text-right"
+                              value={line.wastagePercent}
+                              disabled={frozen}
+                              onChange={(e) => setLine(index, { wastagePercent: e.target.value })}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="any"
+                              min="0"
+                              className="form-input text-right"
+                              value={line.unitCost}
+                              disabled={frozen}
+                              onChange={(e) => setLine(index, { unitCost: e.target.value })}
+                              placeholder={rate ? String(rate) : '0'}
+                            />
+                            <p className="text-xs text-muted-foreground text-right mt-1">
+                              {hasRate ? 'Blank uses the standard rate' : 'No rate on this item yet'}
                             </p>
-                          )}
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="any"
-                            min="0"
-                            max="100"
-                            className="form-input text-right"
-                            value={String(line.wastagePercent)}
-                            onChange={(e) => setLine(index, { wastagePercent: e.target.value })}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="any"
-                            min="0"
-                            className="form-input text-right"
-                            value={line.unitCost != null ? String(line.unitCost) : ''}
-                            onChange={(e) => setLine(index, { unitCost: e.target.value })}
-                            placeholder={rate ? String(rate) : '0'}
-                          />
-                          <p className="text-[10px] text-muted-foreground text-right mt-0.5">
-                            blank uses standard rate
-                          </p>
-                        </td>
-                        <td className="text-right font-semibold align-top pt-3">
-                          {formatCurrency(cost)}
-                        </td>
-                        <td className="align-top pt-3">
-                          <button
-                            type="button"
-                            className="btn-ghost p-1.5 text-red-400"
-                            aria-label="Remove component"
-                            onClick={() =>
-                              setLines((ls) =>
-                                ls.length === 1 ? [emptyLine()] : ls.filter((_, i) => i !== index),
-                              )
-                            }
-                          >
-                            <Trash2 size={14} />
-                          </button>
-                        </td>
-                      </tr>
+                          </td>
+                          <td className="text-right font-semibold align-top pt-3">
+                            {formatCurrency(cost)}
+                          </td>
+                          <td className="align-top pt-3">
+                            <div className="flex items-center gap-1 justify-end">
+                              {groupSizes.length > 0 && (
+                                <button
+                                  type="button"
+                                  className="btn-ghost p-1.5"
+                                  disabled={frozen}
+                                  title={line.sizeWise ? 'Same for every size' : 'Size-wise'}
+                                  onClick={() =>
+                                    setLine(index, {
+                                      sizeWise: !line.sizeWise,
+                                      sizeQty: line.sizeWise ? {} : line.sizeQty,
+                                    })
+                                  }
+                                >
+                                  <Ruler
+                                    size={14}
+                                    className={line.sizeWise ? 'text-teal-400' : undefined}
+                                  />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="btn-ghost p-1.5 text-red-400"
+                                aria-label="Remove component"
+                                disabled={frozen}
+                                onClick={() =>
+                                  setLines((ls) =>
+                                    ls.length === 1
+                                      ? [emptyLine()]
+                                      : ls.filter((_, i) => i !== index),
+                                  )
+                                }
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+
+                        {line.sizeWise && groupSizes.length > 0 && (
+                          <tr>
+                            <td colSpan={7} className="bg-secondary/40">
+                              <div className="flex flex-wrap items-end gap-3 py-2">
+                                {groupSizes.map((s) => (
+                                  <div key={s.id} className="w-20">
+                                    <label className="form-label" htmlFor={`sz-${index}-${s.id}`}>
+                                      {s.label}
+                                    </label>
+                                    <input
+                                      id={`sz-${index}-${s.id}`}
+                                      type="number"
+                                      step="any"
+                                      min="0"
+                                      className="form-input text-right"
+                                      value={line.sizeQty[s.id] ?? ''}
+                                      disabled={frozen}
+                                      onChange={(e) =>
+                                        setLine(index, {
+                                          sizeQty: { ...line.sizeQty, [s.id]: e.target.value },
+                                        })
+                                      }
+                                    />
+                                  </div>
+                                ))}
+                                <div className="w-24">
+                                  <label className="form-label" htmlFor={`step-${index}`}>
+                                    Step up by
+                                  </label>
+                                  <input
+                                    id={`step-${index}`}
+                                    type="number"
+                                    step="any"
+                                    className="form-input text-right"
+                                    value={line.step}
+                                    disabled={frozen}
+                                    placeholder="0.05"
+                                    onChange={(e) => setLine(index, { step: e.target.value })}
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  disabled={frozen}
+                                  onClick={() => fillSizes(index)}
+                                >
+                                  Fill sizes
+                                </button>
+                                <p className="text-xs text-muted-foreground flex-1 min-w-48">
+                                  Only fabric and interlining usually change by size. A size left
+                                  blank uses the quantity above.
+                                </p>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     )
                   })}
                   <tr>
-                    <td colSpan={4} className="text-right font-semibold">
+                    <td colSpan={5} className="text-right font-semibold">
                       Total material cost per piece
                     </td>
                     <td className="text-right font-bold text-teal-400">
@@ -368,6 +727,16 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 </tbody>
               </table>
             </div>
+
+            {sizeTotals.length > 0 && (
+              <p className="flex flex-wrap gap-3 text-xs text-muted-foreground mt-2">
+                {sizeTotals.map((s) => (
+                  <span key={s.label}>
+                    {s.label} {formatCurrency(s.cost)}
+                  </span>
+                ))}
+              </p>
+            )}
           </div>
 
           <div>
@@ -390,7 +759,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
               checked={isActive}
               onChange={(e) => setIsActive(e.target.checked)}
             />
-            Active
+            Offer this BOM on new orders
           </label>
 
           <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
