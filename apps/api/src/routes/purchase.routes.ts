@@ -7,6 +7,15 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
+import {
+  MAX_FILES_PER_DOCUMENT,
+  MAX_FILE_BYTES,
+  removeObject,
+  signedDownloadUrl,
+  signedUploadUrl,
+  statObject,
+  storagePathFor,
+} from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
 import { cancelGrnSchema, createGrnSchema } from '../schemas/grn.schemas'
 import {
@@ -36,6 +45,8 @@ const createSchema = z.object({
   poDate: z.coerce.date().optional(),
   deliveryDate: z.coerce.date().optional().nullable(),
   deliveryWarehouseId: z.string().optional().nullable(),
+  // Ship straight to a customer instead of to one of our warehouses.
+  deliveryCustomerId: z.string().optional().nullable(),
   // Which quotation this order answers, and whatever the mill quotes back.
   // Free text on purpose: every mill numbers these its own way.
   enquiryNo: z.string().max(50).optional().nullable(),
@@ -56,14 +67,29 @@ const poInclude = {
     select: {
       id: true, name: true, code: true, gstin: true, stateCode: true,
       address: true, city: true, state: true, pincode: true, phone: true, email: true,
+      // Printed on the order, so the supplier is told the terms they are being
+      // held to rather than being left to assume them.
+      paymentTerms: true, creditDays: true,
     },
   },
   deliveryWarehouse: { select: { id: true, name: true, address: true } },
+  deliveryCustomer: { select: { id: true, name: true, code: true, gstin: true } },
   createdBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
   lines: {
     orderBy: { sortOrder: 'asc' as const },
-    include: { item: { select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } } } },
+    include: {
+      item: {
+        select: {
+          id: true, code: true, name: true, hsnCode: true,
+          uom: { select: { symbol: true } },
+          // The category, and its parent where it has one. An item sits in
+          // whichever level it was filed under, so the parent is what the list
+          // shows as the category and the item's own becomes the subcategory.
+          category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+        },
+      },
+    },
   },
 }
 
@@ -74,7 +100,19 @@ const poInclude = {
  * CGST+SGST or IGST. Getting it wrong on the order means the bill that comes
  * back will not reconcile against it.
  */
-async function purchaseTaxContext(tx: Prisma.TransactionClient, supplierId: string) {
+async function purchaseTaxContext(
+  tx: Prisma.TransactionClient,
+  supplierId: string,
+  /**
+   * Where the goods actually land, when that is not our own address.
+   *
+   * Goods are taxed where they are delivered. Ask a supplier in Maharashtra to
+   * ship straight to a customer in Gujarat and their bill is IGST, even though
+   * we are in Maharashtra with them. Comparing the supplier against *us* would
+   * call that CGST+SGST and the credit would be refused.
+   */
+  destinationStateCode?: string | null,
+) {
   const [company, supplier] = await Promise.all([
     tx.company.findFirst({ select: { stateCode: true, gstin: true } }),
     tx.supplier.findUnique({ where: { id: supplierId }, select: { stateCode: true, gstin: true, name: true } }),
@@ -95,12 +133,73 @@ async function purchaseTaxContext(tx: Prisma.TransactionClient, supplierId: stri
   // order carries no tax, so this must not be treated as an error.
   const theirState = supplier.stateCode || supplier.gstin?.slice(0, 2) || null
 
+  // Our own address unless the order says otherwise. Warehouses carry no state
+  // of their own, so only a customer delivery can move it.
+  const placeOfSupply = destinationStateCode || ourState
+
   return {
     ourState,
     theirState,
-    isIntraState: theirState ? theirState === ourState : true,
+    placeOfSupply,
+    isIntraState: theirState ? theirState === placeOfSupply : true,
     supplierIsUnregistered: !supplier.gstin,
   }
+}
+
+/**
+ * The state the goods are going to, when they are going to a customer.
+ *
+ * Shipping beats billing, because that is where the goods physically land, and
+ * the GSTIN is the last resort — its first two digits are the state code. If
+ * none of the three is known the order is refused rather than guessed at: a
+ * wrong split means the credit cannot be claimed, and that surfaces months
+ * later as somebody else's problem.
+ */
+async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: string) {
+  const customer = await tx.customer.findUnique({
+    where: { id: customerId },
+    select: {
+      name: true,
+      shippingStateCode: true,
+      billingStateCode: true,
+      shippingGstin: true,
+      gstin: true,
+      shippingAddress: true,
+      shippingCity: true,
+      shippingPincode: true,
+      billingAddress: true,
+      billingCity: true,
+      billingPincode: true,
+    },
+  })
+  if (!customer) throw new AppError('Customer not found', 404, 'NOT_FOUND')
+
+  const stateCode =
+    customer.shippingStateCode ||
+    customer.billingStateCode ||
+    customer.shippingGstin?.slice(0, 2) ||
+    customer.gstin?.slice(0, 2)
+
+  if (!stateCode) {
+    throw new AppError(
+      `No GST state code on ${customer.name}. Add one on the customer, or the tax on this order cannot be worked out.`,
+      409,
+      'NO_PLACE_OF_SUPPLY',
+    )
+  }
+
+  // Frozen onto the order, because a customer moves and an order already with
+  // a supplier must still say where it was sent.
+  const address =
+    [customer.shippingAddress, customer.shippingCity, customer.shippingPincode]
+      .filter(Boolean)
+      .join(', ') ||
+    [customer.billingAddress, customer.billingCity, customer.billingPincode]
+      .filter(Boolean)
+      .join(', ') ||
+    null
+
+  return { stateCode, address, name: customer.name }
 }
 
 function priceOrder(
@@ -211,7 +310,14 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   const po = await prisma.$transaction(async (tx) => {
     // A back-dated order belongs to its own financial year's series.
     const poNumber = await nextDocumentNumber(tx, 'PO', data.poDate ?? new Date())
-    const tax = await purchaseTaxContext(tx, data.supplierId)
+
+    // Where the goods land decides the tax, so this has to be settled before
+    // anything is priced.
+    const destination = data.deliveryCustomerId
+      ? await customerDeliveryState(tx, data.deliveryCustomerId)
+      : null
+
+    const tax = await purchaseTaxContext(tx, data.supplierId, destination?.stateCode)
 
     // HSN is copied onto the line now, so an order already sent to a supplier
     // does not change if the item master is corrected next week.
@@ -238,11 +344,13 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         poDate: data.poDate ?? new Date(),
         deliveryDate: data.deliveryDate ?? undefined,
         deliveryWarehouseId: data.deliveryWarehouseId || null,
+        deliveryCustomerId: data.deliveryCustomerId || null,
+        deliveryAddress: destination?.address ?? null,
         enquiryNo: data.enquiryNo ?? null,
         enquiryDate: data.enquiryDate ?? null,
         reference: data.reference ?? null,
         remark: data.remark ?? null,
-        placeOfSupplyCode: tax.ourState,
+        placeOfSupplyCode: tax.placeOfSupply,
         subtotal: priced.subtotal,
         discountAmount: priced.discount,
         taxableAmount: priced.taxable,
@@ -310,6 +418,9 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     ...(data.deliveryWarehouseId !== undefined
       ? { deliveryWarehouseId: data.deliveryWarehouseId || null }
       : {}),
+    ...(data.deliveryCustomerId !== undefined
+      ? { deliveryCustomerId: data.deliveryCustomerId || null }
+      : {}),
     ...(data.enquiryNo !== undefined ? { enquiryNo: data.enquiryNo ?? null } : {}),
     ...(data.enquiryDate !== undefined ? { enquiryDate: data.enquiryDate ?? null } : {}),
     ...(data.reference !== undefined ? { reference: data.reference ?? null } : {}),
@@ -320,7 +431,18 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
   const after = await prisma.$transaction(async (tx) => {
     if (data.lines) {
-      const tax = await purchaseTaxContext(tx, data.supplierId ?? before.supplierId)
+      // Changing who it is delivered to changes the tax, so the destination is
+      // resolved again rather than carried over from when it was first raised.
+      const customerId =
+        data.deliveryCustomerId !== undefined
+          ? data.deliveryCustomerId
+          : before.deliveryCustomerId
+      const destination = customerId ? await customerDeliveryState(tx, customerId) : null
+      const tax = await purchaseTaxContext(
+        tx,
+        data.supplierId ?? before.supplierId,
+        destination?.stateCode,
+      )
       const items = await tx.item.findMany({
         where: { id: { in: data.lines.map((l) => l.itemId) } },
         select: { id: true, hsnCode: true },
@@ -356,6 +478,8 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
         data: {
           ...headerPatch,
           ...(data.supplierId ? { supplierId: data.supplierId } : {}),
+          placeOfSupplyCode: tax.placeOfSupply,
+          deliveryAddress: destination?.address ?? null,
           subtotal: priced.subtotal,
           discountAmount: priced.discount,
           taxableAmount: priced.taxable,
@@ -442,6 +566,152 @@ router.patch('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req
   })
 
   res.json({ success: true, data: after, message: `${after.poNumber} cancelled.` })
+})
+
+// ── Files kept against an order ─────────────────────────────────────────────
+//
+// Three steps, because the bytes never pass through here: ask for a link, send
+// the file straight to storage, then tell us it landed so the row can be
+// written. See lib/storage.ts for why.
+
+const attachmentInclude = {
+  uploadedBy: { select: { id: true, name: true } },
+}
+
+router.get('/orders/:id/attachments', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.purchaseOrderAttachment.findMany({
+    where: { poId: req.params.id },
+    include: attachmentInclude,
+    orderBy: { createdAt: 'asc' },
+  })
+  res.json({ success: true, data: rows })
+})
+
+/** Step one: a one-use link to send the file to. Nothing is recorded yet. */
+router.post(
+  '/orders/:id/attachments/upload-url',
+  requirePermission(MODULE, 'edit'),
+  async (req, res) => {
+    const { fileName, sizeBytes } = z
+      .object({
+        fileName: z.string().min(1, 'The file needs a name').max(255),
+        sizeBytes: z
+          .number()
+          .int()
+          .positive('That file is empty')
+          .max(MAX_FILE_BYTES, `Files have to be ${MAX_FILE_BYTES / 1024 / 1024}MB or smaller`),
+      })
+      .parse(req.body)
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, poNumber: true, status: true },
+    })
+    if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+    // Checked before the link is handed out rather than after the file has
+    // been sent, so nobody waits for an upload that was never going to count.
+    const already = await prisma.purchaseOrderAttachment.count({ where: { poId: po.id } })
+    if (already >= MAX_FILES_PER_DOCUMENT) {
+      throw new AppError(
+        `${po.poNumber} already has ${MAX_FILES_PER_DOCUMENT} files. Remove one before adding another.`,
+        409,
+        'TOO_MANY_FILES',
+      )
+    }
+
+    const path = storagePathFor('purchase-orders', po.id, fileName)
+    const { uploadUrl } = await signedUploadUrl(path)
+
+    res.json({ success: true, data: { uploadUrl, storagePath: path, fileName, sizeBytes } })
+  },
+)
+
+/** Step three: the file is in the bucket, so record it. */
+router.post('/orders/:id/attachments', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { fileName, storagePath } = z
+    .object({
+      fileName: z.string().min(1).max(255),
+      storagePath: z.string().min(1),
+    })
+    .parse(req.body)
+
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, poNumber: true },
+  })
+  if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+  // A path is only ever handed out for one order, and this is what stops a
+  // reply being replayed against another one.
+  if (!storagePath.startsWith(`purchase-orders/${po.id}/`)) {
+    throw new AppError('That file does not belong to this order', 400, 'WRONG_DOCUMENT')
+  }
+
+  // The browser told us the size. Ask storage instead — the row must describe
+  // a file that is really there, at the size it really is.
+  const { sizeBytes, mimeType } = await statObject(storagePath)
+  if (sizeBytes > MAX_FILE_BYTES) {
+    await removeObject(storagePath).catch(() => {})
+    throw new AppError(
+      `That file is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_BYTES / 1024 / 1024}MB.`,
+      400,
+      'FILE_TOO_LARGE',
+    )
+  }
+
+  const attachment = await prisma.purchaseOrderAttachment.create({
+    data: {
+      poId: po.id,
+      fileName,
+      storagePath,
+      mimeType,
+      sizeBytes,
+      uploadedById: req.user!.id,
+    },
+    include: attachmentInclude,
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'PurchaseOrderAttachment',
+    entityId: attachment.id,
+    after: attachment,
+  })
+
+  res.status(201).json({ success: true, data: attachment })
+})
+
+/** A link that works for a few minutes. The bucket itself stays private. */
+router.get('/attachments/:id/link', requirePermission(MODULE, 'view'), async (req, res) => {
+  const file = await prisma.purchaseOrderAttachment.findUnique({ where: { id: req.params.id } })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+
+  res.json({ success: true, data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName } })
+})
+
+router.delete('/attachments/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const file = await prisma.purchaseOrderAttachment.findUnique({
+    where: { id: req.params.id },
+    include: attachmentInclude,
+  })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+
+  // The row goes first. A row pointing at a file that is gone is a broken
+  // download; a file with no row is invisible and merely wastes space.
+  await prisma.purchaseOrderAttachment.delete({ where: { id: file.id } })
+  await removeObject(file.storagePath).catch(() => {})
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'DELETE',
+    entityType: 'PurchaseOrderAttachment',
+    entityId: file.id,
+    before: file,
+  })
+
+  res.json({ success: true, message: `${file.fileName} removed.` })
 })
 
 // ── Goods receipt ───────────────────────────────────────────────────────────
