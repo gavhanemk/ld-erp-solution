@@ -48,6 +48,9 @@ export type PoType = 'ITEM_LEVEL' | 'ORDER_LEVEL' | 'NONE'
 export interface PoLine {
   itemId: string
   description?: string | null
+  /** The style number as it was typed. */
+  styleNo?: string | null
+  /** The master style that text turned out to be, when it matched one. */
   styleId?: string | null
   qty: number | string
   unitRate: number | string
@@ -55,6 +58,25 @@ export interface PoLine {
   gstRate: number | string
   /** Priced by the API. Absent on a line the form is still building. */
   amount?: number | string
+  /**
+   * Whether `discount` is a percentage or a number of rupees.
+   *
+   * Browser only. A stored line keeps a percentage, so a rupee figure is
+   * converted on save — against the quantity and rate *as they are then*,
+   * which is why what was typed is kept rather than converted on entry. Change
+   * the quantity after typing ₹200 off and it is still ₹200.
+   */
+  discountUnit?: '%' | 'INR'
+  /*
+   * The four below never leave the browser. They are how one row remembers
+   * what it is in the middle of choosing: which category is narrowing its item
+   * dropdown, and what has been typed into its code box before it matches
+   * anything. Stripped in `payload`.
+   */
+  categoryId?: string
+  subcategoryId?: string
+  codeText?: string
+  /** Sent back by the API on a saved line, so the row can reopen showing it. */
   style?: { id: string; code: string; name: string } | null
   item?: {
     id: string
@@ -163,9 +185,6 @@ interface CompanyLite {
 const MAX_FILE_MB = 50
 const MAX_FILES = 5
 
-/** Two decimals, the same as the API — so what is sent and what is stored agree. */
-const round2 = (n: number) => Math.round(n * 100) / 100
-
 const num = (v: unknown) => {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
@@ -175,6 +194,41 @@ const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 /** One boxed group. Every section is the same shape so the form reads as a list of steps. */
+/**
+ * One width per column of the item table, read by both the header and the rows.
+ *
+ * The table is `w-full table-fixed`, so it always fills the box it is in and
+ * the header row's widths are what decide the layout. A row cell that quietly
+ * disagreed with its header would be a trap for whoever edits this next, so
+ * both sides read from here.
+ *
+ * Item and Description are blank on purpose. Under a fixed layout the columns
+ * that declare no width of their own share out whatever is left over, so those
+ * two stretch to fill a wide screen instead of leaving a band of white space
+ * to the right of Amount. They are also the two that earn it: a free-typed
+ * description and a full item name are the only cells holding a sentence, the
+ * rest being a figure or a short code that gains nothing from being wider.
+ *
+ * The table's `min-w` below is the sum of the fixed widths plus a workable
+ * share for those two, so a narrow screen scrolls sideways rather than
+ * crushing thirteen columns into whatever it has.
+ */
+const COL = {
+  code: 'w-32',
+  item: '',
+  category: 'w-36',
+  subcategory: 'w-36',
+  style: 'w-32',
+  description: '',
+  qty: 'w-20',
+  rate: 'w-24',
+  discount: 'w-32',
+  tax: 'w-20',
+  netPrice: 'w-28',
+  amount: 'w-36',
+  remove: 'w-10',
+} as const
+
 function Section({
   icon: Icon,
   title,
@@ -267,8 +321,13 @@ export function PurchaseOrderDialog({
   const [supplierId, setSupplierId] = useState('')
   const [poType, setPoType] = useState<PoType>('ITEM_LEVEL')
   const [warehouseId, setWarehouseId] = useState('')
-  const [enquiryNo, setEnquiryNo] = useState('')
-  const [enquiryDate, setEnquiryDate] = useState('')
+  /// The date on the order. Asked for now, so a back-dated order lands in the
+  /// right month rather than always taking today.
+  const [poDate, setPoDate] = useState('')
+  /// The next number, previewed. Read-only: it is allocated by the server when
+  /// the order is written, because two people filling this form at once must
+  /// not be shown the same number as though it were theirs.
+  const [nextPoNumber, setNextPoNumber] = useState('')
   const [reference, setReference] = useState('')
   /// Internal. Unlike `notes` it is not printed on the supplier's copy, which
   /// is the whole reason the two are separate fields.
@@ -279,35 +338,22 @@ export function PurchaseOrderDialog({
   const [notes, setNotes] = useState('')
   const [terms, setTerms] = useState('')
 
-  // Lines, and the picker that adds to them
-  const [lines, setLines] = useState<PoLine[]>([])
-  const [pickSearch, setPickSearch] = useState('')
-  const [pickCategory, setPickCategory] = useState('')
-  const [pickSubcategory, setPickSubcategory] = useState('')
-  const [pickItem, setPickItem] = useState('')
-  // Typed with the item rather than in the table afterwards, so one line is
-  // entered in one pass and Add is the last thing touched.
-  const [pickDescription, setPickDescription] = useState('')
-  const [pickQty, setPickQty] = useState('')
-  // Offered from the item master when there is one, and overtypable. A first
-  // purchase of a brand-new item has no rate on file at all, which is exactly
-  // when this box has to be typed into.
-  const [pickRate, setPickRate] = useState('')
-  const [pickDiscount, setPickDiscount] = useState('')
-  const [pickDiscountUnit, setPickDiscountUnit] = useState<'%' | 'INR'>('%')
-  const [pickTaxPct, setPickTaxPct] = useState('')
-  const [pickTaxExempt, setPickTaxExempt] = useState(false)
-  const [pickStyleId, setPickStyleId] = useState('')
   /*
    * What has been typed against each kind of charge, keyed by charge type id.
    *
    * A map rather than a list because the rows are the charge master's rows —
-   * the form does not decide which charges exist, Masters → Charges does. Add
-   * a charge type there and a row appears here.
+   * the form does not decide which charges exist, Masters → Charges does.
    */
   const [charges, setCharges] = useState<Record<string, string>>({})
   const [otherCharges, setOtherCharges] = useState('')
 
+  /*
+   * The order's lines. Each carries its own item, its own category narrowing
+   * and its own figures, because the table is where a line is both entered and
+   * corrected now.
+   */
+  const [lines, setLines] = useState<PoLine[]>([])
+  // Nothing about the item picker is held here any more — see `blankLine`.
   const [attachments, setAttachments] = useState<Attachment[]>([])
   // Files chosen on a new order, held here until it has a number to hang them
   // on. They go up the moment it is saved.
@@ -318,7 +364,6 @@ export function PurchaseOrderDialog({
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
   const firstFieldRef = useRef<HTMLSelectElement | null>(null)
-  const qtyRef = useRef<HTMLInputElement | null>(null)
 
   // document does not exist while this page is rendered on the server, so the
   // portal can only be opened once the browser has it.
@@ -333,8 +378,7 @@ export function PurchaseOrderDialog({
       record?.poType === 'ORDER_LEVEL' || record?.poType === 'NONE' ? record.poType : 'ITEM_LEVEL',
     )
     setWarehouseId(record?.deliveryWarehouseId ?? '')
-    setEnquiryNo(record?.enquiryNo ?? '')
-    setEnquiryDate(record?.enquiryDate?.slice(0, 10) ?? '')
+    setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
     setReference(record?.reference ?? '')
     setRemark(record?.remark ?? '')
     setDeliveryCustomerId(record?.deliveryCustomerId ?? '')
@@ -345,28 +389,33 @@ export function PurchaseOrderDialog({
     setNotes(record?.notes ?? '')
     setTerms(record?.terms ?? '')
     setLines(
-      record?.lines?.map((l) => ({
-        itemId: l.itemId,
-        description: l.description ?? '',
-        styleId: l.styleId ?? '',
-        qty: String(l.qty),
-        unitRate: String(l.unitRate),
-        discount: String(l.discount ?? 0),
-        gstRate: String(l.gstRate ?? ''),
-      })) ?? [],
+      record?.lines?.length
+        ? record.lines.map((l) => {
+            const cat = categories.find((c) => c.id === l.item?.category?.id)
+            return {
+              itemId: l.itemId,
+              codeText: l.item?.code ?? '',
+              // Reopened at the level the item is actually filed under, so the
+              // two dropdowns agree with the item beside them.
+              categoryId: cat?.parentId ?? cat?.id ?? '',
+              subcategoryId: cat?.parentId ? cat.id : '',
+              description: l.description ?? '',
+              // Falls back to the linked style's code for lines written before
+              // this column existed, so an older order reopens showing its
+              // style rather than an empty box.
+              styleNo: l.styleNo ?? l.style?.code ?? '',
+              styleId: l.styleId ?? '',
+              qty: String(l.qty),
+              unitRate: String(l.unitRate),
+              // A stored line holds a percentage, so it reopens as one.
+              discount: String(l.discount ?? 0),
+              discountUnit: '%' as const,
+              gstRate: String(l.gstRate ?? ''),
+            }
+          })
+        : // Always one row to type into. An empty table has nowhere to start.
+          [blankLine()],
     )
-    setPickSearch('')
-    setPickCategory('')
-    setPickSubcategory('')
-    setPickItem('')
-    setPickDescription('')
-    setPickQty('')
-    setPickRate('')
-    setPickDiscount('')
-    setPickDiscountUnit('%')
-    setPickTaxPct('')
-    setPickTaxExempt(false)
-    setPickStyleId('')
     setCharges(
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)])),
     )
@@ -397,7 +446,19 @@ export function PurchaseOrderDialog({
       // the only place that serves it and a purchase clerk may not be allowed
       // in there, so the address is treated as a nicety, not a requirement.
       api.get<{ success: boolean; data: CompanyLite }>('/settings/company').catch(() => null),
-    ]).then(([s, i, w, cust, c, st, ct, co]) => {
+      /*
+       * What the next purchase order number will be, for the read-only box.
+       *
+       * Settings is the only place that knows, and a purchase clerk may not be
+       * allowed in there — so a refusal costs the preview, not the form. The
+       * real number is allocated by the server on save either way.
+       */
+      api
+        .get<{ success: boolean; data: { docType: string; nextNumber: string }[] }>(
+          '/settings/number-series',
+        )
+        .catch(() => null),
+    ]).then(([s, i, w, cust, c, st, ct, co, ns]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -415,6 +476,7 @@ export function PurchaseOrderDialog({
           : [],
       )
       setCompany(co?.data ?? null)
+      setNextPoNumber(ns?.data.find((x) => x.docType === 'PO')?.nextNumber ?? '')
     })
 
     return () => {
@@ -462,30 +524,70 @@ export function PurchaseOrderDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const supplier = suppliers.find((s) => s.id === supplierId)
 
+  /**
+   * Everything about finding an item now lives on the row it belongs to.
+   *
+   * There used to be a form above the table holding a category, a subcategory,
+   * a code box and an item dropdown, and then the same item appeared again as
+   * a row below it. Two sets of controls for one line, and roughly 180px of
+   * height spent saying the same thing twice. The row is the only place now.
+   */
   const topCategories = useMemo(() => categories.filter((c) => !c.parentId), [categories])
-  const subCategories = useMemo(
-    () => (pickCategory ? categories.filter((c) => c.parentId === pickCategory) : []),
-    [categories, pickCategory],
-  )
 
-  /** Items narrowed by the code search and whichever category level is chosen. */
-  const visibleItems = useMemo(() => {
-    const q = pickSearch.trim().toLowerCase()
-    const childIds = new Set(subCategories.map((c) => c.id))
+  /** The children of one category, for that row's second dropdown. */
+  const subCategoriesOf = (categoryId?: string | null) =>
+    categoryId ? categories.filter((c) => c.parentId === categoryId) : []
 
-    return items.filter((it) => {
-      if (pickSubcategory && it.categoryId !== pickSubcategory) return false
-      if (pickCategory && !pickSubcategory) {
-        if (it.categoryId !== pickCategory && !childIds.has(it.categoryId ?? '')) return false
+  /**
+   * The items one row may choose from, narrowed by whichever category level
+   * that row has picked. Narrowing is per row on purpose: a fabric line and a
+   * button line sit on the same order and were never looking at the same list.
+   */
+  const itemsFor = (line: PoLine) => {
+    const childIds = new Set(subCategoriesOf(line.categoryId).map((c) => c.id))
+    const inCategory = items.filter((it) => {
+      if (line.subcategoryId) return it.categoryId === line.subcategoryId
+      if (line.categoryId) {
+        return it.categoryId === line.categoryId || childIds.has(it.categoryId ?? '')
       }
-      if (!q) return true
-      return (
-        (it.code ?? '').toLowerCase().includes(q) ||
-        it.name.toLowerCase().includes(q) ||
-        (it.hsnCode ?? '').toLowerCase().includes(q)
-      )
+      return true
     })
-  }, [items, pickSearch, pickCategory, pickSubcategory, subCategories])
+
+    /*
+     * A half-typed code narrows the list as well.
+     *
+     * Only while the row has no item yet. Once one is chosen the code box
+     * holds that item's exact code, and narrowing by it would leave the Item
+     * dropdown with a single option — so changing your mind about the item
+     * would mean clearing the code box first.
+     */
+    const typed = (line.codeText ?? '').trim().toLowerCase()
+    if (line.itemId || !typed) return inCategory
+
+    return inCategory.filter(
+      (it) =>
+        (it.code ?? '').toLowerCase().includes(typed) || it.name.toLowerCase().includes(typed),
+    )
+  }
+
+  /** A fresh, empty row. The table always has at least one. */
+  const blankLine = (): PoLine => ({
+    itemId: '',
+    codeText: '',
+    categoryId: '',
+    subcategoryId: '',
+    description: '',
+    styleNo: '',
+    styleId: '',
+    qty: '',
+    unitRate: '',
+    discount: '0',
+    discountUnit: '%',
+    gstRate: '',
+  })
+
+  /** Rows that have an item on them. A blank row is not part of the order. */
+  const activeLines = lines.filter((l) => l.itemId)
 
   const deliveryCustomer =
     deliverTo === 'CUSTOMER' ? (customers.find((c) => c.id === deliveryCustomerId) ?? null) : null
@@ -528,7 +630,15 @@ export function PurchaseOrderDialog({
    * with figures already typed must not leave them quietly in the total, so
    * they are ignored here as well as being greyed out.
    */
-  const lineDiscountOf = (l: PoLine) => (poType === 'ITEM_LEVEL' ? num(l.discount) : 0)
+  const lineDiscountOf = (l: PoLine) => {
+    if (poType !== 'ITEM_LEVEL') return 0
+    const typed = num(l.discount)
+    if ((l.discountUnit ?? '%') === '%') return Math.min(typed, 100)
+    // Rupees. Capped at the line's own value, so a discount cannot take a line
+    // below nothing.
+    const gross = num(l.qty) * num(l.unitRate)
+    return gross > 0 ? Math.min((typed / gross) * 100, 100) : 0
+  }
   const orderDiscount = poType === 'ORDER_LEVEL' ? num(discountAmount) : 0
 
   const totals = useMemo(() => {
@@ -594,70 +704,29 @@ export function PurchaseOrderDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines, discountAmount, taxMode, poType, chargeTypes, charges, otherCharges])
 
-  /**
-   * The line being typed, priced as it is typed.
-   *
-   * Net price and Amount are shown beside Add so the buyer can check both
-   * against the quotation in front of them before the line joins the order.
-   * A rupee discount is held as rupees here and converted once, on Add.
-   */
-  const draft = useMemo(() => {
-    const qty = num(pickQty)
-    const rate = num(pickRate)
-    const gross = qty * rate
-    const typed = poType === 'ITEM_LEVEL' ? num(pickDiscount) : 0
-    const discountValue =
-      pickDiscountUnit === '%' ? (gross * typed) / 100 : Math.min(typed, gross)
-    const amount = Math.max(gross - discountValue, 0)
-
-    return {
-      gross,
-      discountValue,
-      amount,
-      netPrice: qty > 0 ? amount / qty : Math.max(rate - discountValue, 0),
-      // The only shape a line can be stored in, so a rupee figure becomes the
-      // percentage that produces the same amount.
-      discountPct: gross > 0 ? Math.min((discountValue / gross) * 100, 100) : 0,
-    }
-  }, [pickQty, pickRate, pickDiscount, pickDiscountUnit, poType])
+  /** One row's own figures, worked out for the row it is shown in. */
+  const priceOf = (l: PoLine) => {
+    const qty = num(l.qty)
+    const gross = qty * num(l.unitRate)
+    const amount = gross * (1 - lineDiscountOf(l) / 100)
+    return { gross, amount, netPrice: qty > 0 ? amount / qty : 0 }
+  }
 
   /**
-   * A selection that no longer matches the filters is dropped.
+   * Rows that carry an item but are not finished.
    *
-   * A `<select>` whose value is not among its options renders blank while the
-   * state still holds the old id — so the box looked empty and Add would have
-   * put an item on the order that matched neither the code typed nor the
-   * category chosen. Clearing it here covers every cause at once rather than
-   * being remembered in three separate handlers.
+   * Checked at save rather than as you type, so a buyer can put every item on
+   * the order first and work down the columns afterwards — which is how a
+   * quotation is read. Each row is named and its empty cell is outlined, so on
+   * a long order "which one" is never a hunt.
    */
-  useEffect(() => {
-    if (pickItem && !visibleItems.some((i) => i.id === pickItem)) setPickItem('')
-  }, [visibleItems, pickItem])
-
-  /**
-   * What the picker is still waiting for.
-   *
-   * The Add button used to be disabled with nothing to say why, which is the
-   * same as being broken from where the clerk is sitting.
-   */
-  const pickedItem = pickItem ? (itemById.get(pickItem) ?? null) : null
-  const alreadyOnOrder = Boolean(pickedItem && lines.some((l) => l.itemId === pickedItem.id))
-  const typedCode = pickSearch.trim()
-  const pickHint = !pickItem
-    ? visibleItems.length === 0
-      ? typedCode
-        ? `No item matches “${typedCode}”. Check the code, or clear the box and choose a category.`
-        : 'Nothing matches those filters. Choose a different category.'
-      : null
-    : alreadyOnOrder
-      ? `${pickedItem?.name} is already on this order — change its quantity in the table below.`
-      : num(pickQty) <= 0
-        ? `Enter how much ${pickedItem?.name} you want, then press Add.`
-        : !pickRate.trim()
-          ? // Named separately from the quantity so the buyer is told which of
-            // the two boxes is still empty, not merely that something is.
-            `Enter the rate you are paying for ${pickedItem?.name}, then press Add.`
-          : null
+  const unfinished = activeLines
+    .map((l) => ({
+      name: itemById.get(l.itemId)?.name ?? 'A line',
+      noQty: num(l.qty) <= 0,
+      noRate: String(l.unitRate).trim() === '',
+    }))
+    .filter((r) => r.noQty || r.noRate)
 
   if (!open || !mounted) return null
 
@@ -665,143 +734,105 @@ export function PurchaseOrderDialog({
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
 
   /**
-   * Puts the chosen item on the order.
+   * Puts an item on one row.
    *
-   * Rate and GST come across from the item master rather than being typed —
-   * a rate typed from memory is the mistake the business rules exist to stop.
-   * Both stay editable, because a quoted price is often not the standard one.
-   */
-  /**
-   * Picking an item sets the category boxes to where that item is actually
-   * filed.
+   * The master's rate and GST are offered rather than imposed: the rate on
+   * file is the one agreed last time and usually right, but a quoted price is
+   * often not the standard one and an item never bought before has nothing on
+   * file at all. Only filled when the cell is still empty, so a figure already
+   * typed is never overwritten by changing the item.
    *
-   * Otherwise the four fields sit there contradicting each other — a screen
-   * reading "Category: All, Subcategory: None, Item: BOPP Tape" when the tape
-   * is plainly filed under Packing Material. The boxes are one statement
-   * about one item, so they are kept saying the same thing.
+   * The category cells follow the item to wherever it is actually filed,
+   * otherwise the row sits there contradicting itself — "Category: Fabric,
+   * Item: BOPP Tape" when the tape is plainly under Packing Material.
    */
-  const selectItem = (itemId: string) => {
-    setPickItem(itemId)
+  const pickItemFor = (index: number, itemId: string) => {
     setError(null)
-    if (!itemId) return
 
-    /*
-     * The master's figures are offered, not imposed.
-     *
-     * A rate on file is the one agreed last time and is usually right, so it
-     * saves typing. It is only a starting figure: a quoted price is often not
-     * the standard one, and an item never bought before has nothing on file at
-     * all — which is the case that made taking the rate from the master and
-     * locking it the wrong answer.
-     *
-     * Only filled when the box is still empty, so a rate already typed is
-     * never overwritten by changing the item in the dropdown.
-     */
-    const chosen = itemById.get(itemId)
-    if (chosen?.standardRate != null && !pickRate.trim()) setPickRate(String(chosen.standardRate))
-    if (chosen?.taxRate && !pickTaxPct.trim()) setPickTaxPct(String(chosen.taxRate.rate))
-
-    const cat = categories.find((c) => c.id === itemById.get(itemId)?.categoryId)
-    if (!cat) return
-
-    if (cat.parentId) {
-      setPickCategory(cat.parentId)
-      setPickSubcategory(cat.id)
-    } else {
-      setPickCategory(cat.id)
-      setPickSubcategory('')
+    if (!itemId) {
+      setLine(index, { itemId: '', codeText: '' })
+      return
     }
+
+    // The same item twice makes the order hard to check against the bill that
+    // follows, and is nearly always a slip.
+    if (lines.some((l, i) => i !== index && l.itemId === itemId)) {
+      const clash = itemById.get(itemId)
+      setError(
+        `${clash?.name ?? 'That item'} is already on another row. Change the quantity there instead of adding it twice.`,
+      )
+      return
+    }
+
+    const item = itemById.get(itemId)
+    const cat = categories.find((c) => c.id === item?.categoryId)
+    const line = lines[index]
+
+    setLine(index, {
+      itemId,
+      codeText: item?.code ?? '',
+      ...(cat
+        ? cat.parentId
+          ? { categoryId: cat.parentId, subcategoryId: cat.id }
+          : { categoryId: cat.id, subcategoryId: '' }
+        : {}),
+      ...(item?.standardRate != null && String(line.unitRate).trim() === ''
+        ? { unitRate: String(item.standardRate) }
+        : {}),
+      ...(item?.taxRate && String(line.gstRate).trim() === ''
+        ? { gstRate: String(item.taxRate.rate) }
+        : {}),
+    })
   }
 
   /**
-   * The code box resolves an item rather than merely narrowing the list.
+   * The code cell resolves an item rather than merely narrowing the list.
    *
    * Every item has one unique code and that code is its identity — it is what
-   * is quoted on the phone and written on the rack. So typing one in full
-   * picks that item outright, and the category boxes follow. Anything shorter
-   * still narrows the dropdown, which is what you want while you are only
-   * part way through remembering it.
+   * is quoted on the phone and written on the rack. Typing one in full picks
+   * that item outright. Anything shorter is left alone, because it is a code
+   * half remembered, not a mistake.
    */
-  const onCodeTyped = (raw: string) => {
-    setPickSearch(raw)
+  const typeCodeFor = (index: number, raw: string) => {
+    setLine(index, { codeText: raw })
     setError(null)
 
     const typed = raw.trim().toLowerCase()
     if (!typed) return
 
     const exact = items.find((i) => (i.code ?? '').toLowerCase() === typed)
-    if (exact) selectItem(exact.id)
+    if (exact) pickItemFor(index, exact.id)
   }
 
-  /** Enter on the code box takes the only match and moves to the quantity. */
-  const onCodeEnter = () => {
-    if (visibleItems.length === 1) selectItem(visibleItems[0].id)
-    if (visibleItems.length <= 1) qtyRef.current?.focus()
+  /**
+   * The style cell keeps what was typed and links it when it can.
+   *
+   * `styleNo` is always whatever is in the box. `styleId` is set only on an
+   * exact match against a style's code, and cleared the moment the text stops
+   * matching — a stale link to the style the text used to be would quietly
+   * reconcile this material against the wrong garment.
+   */
+  const typeStyleFor = (index: number, raw: string) => {
+    const typed = raw.trim().toLowerCase()
+    const match = typed ? styles.find((st) => (st.code ?? '').toLowerCase() === typed) : undefined
+    setLine(index, { styleNo: raw, styleId: match?.id ?? '' })
   }
 
-  const addLine = () => {
-    const item = itemById.get(pickItem)
-    if (!item) {
-      setError('Choose an item before adding it.')
-      return
-    }
-    if (num(pickQty) <= 0) {
-      setError(`How much ${item.name} do you want? Enter a quantity above zero.`)
-      return
-    }
-
-    // The same item twice is nearly always a slip, and two lines for it make
-    // the order hard to check against the bill that follows. Say so and point
-    // at the line that already exists rather than quietly making a second.
-    if (lines.some((l) => l.itemId === item.id)) {
-      setError(
-        `${item.name} is already on this order. Change its quantity in the table below instead of adding it twice.`,
-      )
-      return
-    }
-
-    /*
-     * A rate of zero is allowed by the API — some purchases genuinely are free
-     * of charge — so nothing downstream would query a blank box. Asked for
-     * here, because a blank on this form is far more likely to be a rate the
-     * buyer has not got to yet than a gift.
-     */
-    if (!pickRate.trim()) {
-      setError(`What rate are you paying for ${item.name}? Enter it, then press Add.`)
-      return
-    }
-
-    setLines((prev) => [
-      ...prev,
-      {
-        itemId: item.id,
-        description: pickDescription.trim(),
-        styleId: pickStyleId || null,
-        qty: pickQty,
-        unitRate: pickRate,
-        // Held as a percentage whichever way it was typed — see `draft`.
-        // Only an item-level order keeps one: on an order-level order the
-        // single discount lives in the totals, and on a no-discount order
-        // there is none to keep.
-        discount: poType === 'ITEM_LEVEL' ? String(round2(draft.discountPct)) : '0',
-        gstRate: pickTaxExempt || taxMode === 'NONE' ? '0' : pickTaxPct,
-      },
-    ])
-
-    // The category filters stay put: the next line is usually from the same
-    // place, and clearing them would make the clerk choose twice.
-    setPickItem('')
-    setPickDescription('')
-    setPickQty('')
-    setPickRate('')
-    setPickDiscount('')
-    // The tax rate, the exemption and the style stay put. A run of lines is
-    // nearly always one style bought at one rate, and re-picking them per line
-    // is how one line ends up wrong. A run of lines from one
-    // supplier is nearly always taxed the same way, and re-picking it per line
-    // is the kind of repetition that gets one line wrong.
+  const addRow = () => {
+    setLines((prev) => [...prev, blankLine()])
     setError(null)
   }
+
+  /**
+   * Removing the last row leaves a blank one behind rather than an empty
+   * table: there is nowhere to start typing otherwise, and "add a row" would
+   * be a second thing to discover before any work could be done.
+   */
+  const removeRow = (index: number) =>
+    setLines((prev) => {
+      const left = prev.filter((_, i) => i !== index)
+      return left.length ? left : [blankLine()]
+    })
 
   // poDate and deliveryDate are deliberately absent. The form no longer asks
   // for either, and omitting them rather than sending a value means a new
@@ -970,8 +1001,7 @@ export function PurchaseOrderDialog({
     poType,
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
-    enquiryNo: enquiryNo.trim() || null,
-    enquiryDate: enquiryDate || null,
+    poDate: poDate || undefined,
     reference: reference.trim() || null,
     remark: remark.trim() || null,
     // Only an order-level order has one. Sending whatever is in the box on an
@@ -986,12 +1016,19 @@ export function PurchaseOrderDialog({
     otherCharges: num(otherCharges),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
-    lines: lines.map((l) => ({
+    /*
+     * Only rows that have an item, and only the fields the API knows about.
+     * The category narrowing and the code box are how a row found its item;
+     * they are not part of the order and are dropped here.
+     */
+    lines: activeLines.map((l) => ({
       itemId: l.itemId,
       description: (l.description as string)?.trim() || null,
+      styleNo: (l.styleNo as string)?.trim() || null,
       styleId: (l.styleId as string) || null,
       qty: num(l.qty),
       unitRate: num(l.unitRate),
+      // A percentage whichever unit it was typed in — see `lineDiscountOf`.
       discount: lineDiscountOf(l),
       gstRate: num(l.gstRate),
     })),
@@ -1091,7 +1128,7 @@ export function PurchaseOrderDialog({
   // not five of each.
   const fileCount = attachments.length + pendingFiles.length
 
-  const incomplete = !supplierId || lines.length === 0
+  const incomplete = !supplierId || activeLines.length === 0 || unfinished.length > 0
   const busy = saving !== null
   const orgAddress = [company?.address, company?.city, company?.pincode].filter(Boolean).join(', ')
   // Where the goods are actually going: the chosen warehouse, or our own
@@ -1172,143 +1209,169 @@ export function PurchaseOrderDialog({
             </div>
           )}
 
-          {/* 1 — What the order is, and who it is to.
+          {/* 1 — What the order is and who it is to.
 
-              Two boxes on one row, the way the form has always been laid out:
-              the order's own details on the left, the supplier on the right.
-              The supplier is one field and gets a box of its own because that
-              is where the clerk looks for it. */}
-          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-3 items-start">
-            <Section icon={FileText} title="Basic details">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label className="form-label" htmlFor="po-location">
-                    Location
-                  </label>
-                  <select
-                    id="po-location"
-                    ref={firstFieldRef}
-                    className="form-input"
-                    value={warehouseId}
-                    onChange={(e) => setWarehouseId(e.target.value)}
-                  >
-                    <option value="">Head office</option>
-                    {warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="po-enquiry-no">
-                    Purchase enquiry no.
-                  </label>
-                  <input
-                    id="po-enquiry-no"
-                    className="form-input"
-                    placeholder="Their quotation number"
-                    value={enquiryNo}
-                    onChange={(e) => setEnquiryNo(e.target.value)}
-                  />
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="po-enquiry-date">
-                    Enquiry date
-                  </label>
-                  <input
-                    id="po-enquiry-date"
-                    type="date"
-                    className="form-input"
-                    value={enquiryDate}
-                    onChange={(e) => setEnquiryDate(e.target.value)}
-                  />
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="po-reference">
-                    Reference
-                  </label>
-                  <input
-                    id="po-reference"
-                    className="form-input"
-                    placeholder="Job number, indent slip, anything to quote back"
-                    value={reference}
-                    onChange={(e) => setReference(e.target.value)}
-                  />
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="form-label" htmlFor="po-remark">
-                    Remark
-                  </label>
-                  <input
-                    id="po-remark"
-                    className="form-input"
-                    placeholder="Internal note, not printed on the order"
-                    value={remark}
-                    onChange={(e) => setRemark(e.target.value)}
-                  />
-                </div>
+              Six fields, two rows of three, in the order the mill reads them:
+              where it is going and which order this is, then who it is from
+              and what to quote back. The supplier sits in here rather than in
+              a box of its own — it is one dropdown, and a box to itself left a
+              column of empty space beside it. */}
+          <Section icon={FileText} title="Basic details">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="form-label" htmlFor="po-location">
+                  Location
+                </label>
+                <select
+                  id="po-location"
+                  ref={firstFieldRef}
+                  className="form-input"
+                  value={warehouseId}
+                  onChange={(e) => setWarehouseId(e.target.value)}
+                >
+                  <option value="">Head office</option>
+                  {warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
               </div>
-            </Section>
 
-            <Section icon={Building2} title="Supplier">
-              <label className="form-label" htmlFor="po-supplier">
-                Supplier<span className="text-red-400 ml-0.5">*</span>
-              </label>
-              <select
-                id="po-supplier"
-                className="form-input"
-                value={supplierId}
-                onChange={(e) => setSupplierId(e.target.value)}
-              >
-                <option value="">Choose supplier</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.code ? `${s.code} — ${s.name}` : s.name}
-                  </option>
-                ))}
-              </select>
-              {supplier && (
-                <p className="text-xs text-muted-foreground mt-2">
-                  {supplier.gstin ? (
-                    <>
-                      GSTIN {supplier.gstin} ·{' '}
-                      {taxMode === 'CGST_SGST'
-                        ? 'within the state, CGST + SGST'
-                        : 'other state, IGST'}
-                    </>
-                  ) : (
-                    'No GSTIN on file — this order will carry no GST'
-                  )}
-                </p>
-              )}
-            </Section>
-          </div>
+              <div>
+                <label className="form-label" htmlFor="po-number">
+                  Purchase order
+                </label>
+                {/* Read-only on purpose. The number comes from the counter in
+                    Settings → Company when the order is written, so that two
+                    clerks filling this form at the same moment cannot both be
+                    handed the same one. What is shown on a new order is a
+                    preview of what is next, not a reservation. */}
+                <input
+                  id="po-number"
+                  className="form-input font-mono"
+                  value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
+                  readOnly
+                  placeholder="Allocated on save"
+                  aria-describedby={isEdit ? undefined : 'po-number-note'}
+                />
+                {!isEdit && (
+                  <p id="po-number-note" className="text-xs text-muted-foreground mt-1">
+                    Allocated when you save.
+                  </p>
+                )}
+              </div>
 
-          {/* 2 — Choosing what goes on the order.
+              <div>
+                <label className="form-label" htmlFor="po-date">
+                  Date
+                </label>
+                <input
+                  id="po-date"
+                  type="date"
+                  className="form-input"
+                  value={poDate}
+                  onChange={(e) => setPoDate(e.target.value)}
+                />
+              </div>
 
-              Every box the old ERP had, in the order it had them. Rate is
-              typed, not taken from the master and locked: a purchase order is
-              often the first time an item is bought at all, so there is no
-              rate on file to take. The master's rate is offered as the
-              starting figure when there is one, and can be overtyped. */}
-          <Section icon={Package} title="Select items from indent items">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <h4 className="text-xs font-semibold text-foreground">Item &amp; description</h4>
-              <div className="flex items-center gap-2">
+              <div>
+                <label className="form-label" htmlFor="po-supplier">
+                  Supplier<span className="text-red-400 ml-0.5">*</span>
+                </label>
+                <select
+                  id="po-supplier"
+                  className="form-input"
+                  value={supplierId}
+                  onChange={(e) => setSupplierId(e.target.value)}
+                >
+                  <option value="">Choose supplier</option>
+                  {suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code ? `${s.code} — ${s.name}` : s.name}
+                    </option>
+                  ))}
+                </select>
+                {supplier && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {supplier.gstin ? (
+                      <>
+                        GSTIN {supplier.gstin} ·{' '}
+                        {taxMode === 'CGST_SGST'
+                          ? 'within the state, CGST + SGST'
+                          : 'other state, IGST'}
+                      </>
+                    ) : (
+                      'No GSTIN on file — this order will carry no GST'
+                    )}
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="form-label" htmlFor="po-reference">
+                  Reference
+                </label>
+                <input
+                  id="po-reference"
+                  className="form-input"
+                  placeholder="Job number, indent slip, anything to quote back"
+                  value={reference}
+                  onChange={(e) => setReference(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="form-label" htmlFor="po-remark">
+                  Remark
+                </label>
+                <input
+                  id="po-remark"
+                  className="form-input"
+                  placeholder="Internal note, not printed on the order"
+                  value={remark}
+                  onChange={(e) => setRemark(e.target.value)}
+                />
+              </div>
+            </div>
+          </Section>
+
+          {/* 2 — The order's lines, entered where they are shown.
+
+              One table, not a form above a table. Every field a line has is a
+              column in it, and a row is typed left to right; "+ Add item row"
+              puts a fresh one underneath. There used to be two sets of the
+              same ten controls — one to enter a line, one to correct it — and
+              about 180px of height spent saying everything twice.
+
+              There are thirteen columns, so the table scrolls sideways and the
+              two that say *which* line this is stay pinned to the left edge.
+              Scrolled to the far right you can still see you are on the poplin
+              and not the buttons. */}
+          <Section icon={Package} title="Items" hint={`${activeLines.length} on this order`}>
+            {/* Lost when this section was rebuilt as one table, which left the
+                discount mode stuck on whatever the order opened with and no
+                way to change it. It belongs above the grid: it decides which
+                discount cells are live, so it is chosen before any figure is
+                typed into them. */}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+              <p className="text-xs text-muted-foreground">
+                {poType === 'ITEM_LEVEL'
+                  ? 'A discount per line, in the Discount column — percent or rupees.'
+                  : poType === 'ORDER_LEVEL'
+                    ? 'One discount off the whole order, entered as Total discount on the right. The per-line Discount cells are switched off.'
+                    : 'No discount on this order. Both the per-line cells and the order-level box are switched off.'}
+              </p>
+              <div className="flex items-center gap-2 shrink-0">
                 <label
-                  className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
                   htmlFor="po-type"
+                  className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
                 >
                   Purchase order type
                 </label>
                 <select
                   id="po-type"
-                  className="form-input w-auto"
+                  className="form-input h-8 w-auto px-2 text-xs"
                   value={poType}
                   onChange={(e) => setPoType(e.target.value as PoType)}
                 >
@@ -1318,437 +1381,346 @@ export function PurchaseOrderDialog({
                 </select>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground mb-2">
-              {poType === 'ITEM_LEVEL'
-                ? 'A discount per line. Total discount in the box on the right adds them up.'
-                : poType === 'ORDER_LEVEL'
-                  ? 'One discount off the whole order — enter it as Total discount on the right. The per-line discount boxes are switched off.'
-                  : 'No discount anywhere on this order. Both the per-line and the order-level boxes are switched off.'}
-            </p>
 
-            <div className="rounded-lg border border-border bg-background/40 p-3">
-              <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
-                <div>
-                  <label className="form-label" htmlFor="po-pick-cat">
-                    Category
-                  </label>
-                  <select
-                    id="po-pick-cat"
-                    className="form-input"
-                    value={pickCategory}
-                    onChange={(e) => {
-                      // The item is not cleared here. It is dropped by the
-                      // effect above, and only if it does not belong under the
-                      // category just chosen — so narrowing to the category an
-                      // item is already in keeps it.
-                      setPickCategory(e.target.value)
-                      setPickSubcategory('')
-                      setError(null)
-                    }}
-                  >
-                    <option value="">All</option>
-                    {topCategories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
+            {/* One list for every row — unlike items, styles are not narrowed
+                by anything, so there is no reason to repeat it per row. */}
+            <datalist id="po-style-codes">
+              {styles.map((st) => (
+                <option key={st.id} value={st.code ?? st.name} label={st.name} />
+              ))}
+            </datalist>
+
+            <div className="overflow-x-auto border border-border rounded-lg bg-card">
+              <table className="w-full table-fixed min-w-[1590px] text-sm border-collapse">
+                <thead>
+                  <tr className="bg-secondary">
+                    {[
+                      ['Item code', `${COL.code} sticky left-0 z-20 bg-secondary`, 'left'],
+                      ['Item', `${COL.item} sticky left-32 z-20 bg-secondary`, 'left'],
+                      ['Category', COL.category, 'left'],
+                      ['Subcategory', COL.subcategory, 'left'],
+                      ['Style no.', COL.style, 'left'],
+                      ['Description', COL.description, 'left'],
+                      ['Qty', COL.qty, 'right'],
+                      ['Rate', COL.rate, 'right'],
+                      ['Discount', COL.discount, 'right'],
+                      ['Tax %', COL.tax, 'right'],
+                      ['Net price', COL.netPrice, 'right'],
+                      ['Amount', COL.amount, 'right'],
+                      ['', COL.remove, 'left'],
+                    ].map(([label, width, align], i) => (
+                      <th
+                        key={label || i}
+                        className={`${width} border-b border-border px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground align-bottom ${
+                          align === 'right' ? 'text-right' : 'text-left'
+                        }`}
+                      >
+                        {label}
+                      </th>
                     ))}
-                  </select>
-                </div>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((line, i) => {
+                    const item = itemById.get(line.itemId)
 
-                <div>
-                  <label className="form-label" htmlFor="po-pick-sub">
-                    Subcategory
-                  </label>
-                  <select
-                    id="po-pick-sub"
-                    className="form-input"
-                    value={pickSubcategory}
-                    disabled={subCategories.length === 0}
-                    onChange={(e) => {
-                      setPickSubcategory(e.target.value)
-                      setError(null)
-                    }}
-                  >
-                    <option value="">{subCategories.length === 0 ? 'None' : 'All'}</option>
-                    {subCategories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                    /*
+                     * Where this row's item is actually filed, used when the
+                     * row has not narrowed anything itself.
+                     *
+                     * Worked out here rather than stored on the line, because
+                     * the category list arrives from the server after the form
+                     * has already been filled from the record — an order
+                     * opened for editing in that first moment would have shown
+                     * "All / None" beside an item that is plainly under Fabric.
+                     * Derived, it is right whenever the list arrives.
+                     */
+                    const filed = categories.find((c) => c.id === item?.categoryId)
+                    const view = {
+                      ...line,
+                      categoryId: line.categoryId || filed?.parentId || filed?.id || '',
+                      subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
+                    }
 
-                <div>
-                  <label className="form-label" htmlFor="po-pick-search">
-                    Items code
-                  </label>
-                  {/* form-input on the wrapper rather than a hand-set height:
-                      it is the same box as every other field and lines up with
-                      them without a magic number. */}
-                  <div className="form-input flex items-center gap-2">
-                    <Search size={14} className="text-muted-foreground shrink-0" />
-                    <input
-                      id="po-pick-search"
-                      className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
-                      placeholder="Code"
-                      value={pickSearch}
-                      onChange={(e) => onCodeTyped(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault()
-                          onCodeEnter()
-                        }
-                      }}
-                    />
-                  </div>
-                </div>
+                    const subs = subCategoriesOf(view.categoryId)
+                    const choices = itemsFor(view)
+                    const money = priceOf(line)
+                    // Outlined only once the row has an item — a blank row is
+                    // not unfinished, it is just empty.
+                    const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
+                    const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
+                    const cell = 'form-input h-8 px-2 text-xs'
 
-                <div>
-                  <label className="form-label" htmlFor="po-pick-item">
-                    Items
-                  </label>
-                  <select
-                    id="po-pick-item"
-                    className="form-input"
-                    value={pickItem}
-                    onChange={(e) => selectItem(e.target.value)}
-                  >
-                    <option value="">
-                      {visibleItems.length === 0 ? 'Nothing matches' : 'Select...'}
-                    </option>
-                    {/* The name alone. The code sits in the box to the left and
-                        again in the table below, and repeating it here only
-                        made the option too long to read. */}
-                    {visibleItems.map((it) => (
-                      <option key={it.id} value={it.id}>
-                        {it.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                    return (
+                      <tr
+                        key={i}
+                        className="bg-card border-b border-border/50 last:border-0 [&>td]:align-top [&>td]:px-2 [&>td]:py-1.5"
+                      >
+                        <td className={`${COL.code} sticky left-0 z-10 bg-card`}>
+                          {/* A real combobox, using the browser's own: type a
+                              code and the list narrows, or open it and pick
+                              one. `datalist` rather than a hand-built dropdown
+                              because it needs no package, it keeps the cell a
+                              plain text box for anyone who already knows the
+                              code by heart, and it cannot be scrolled out of
+                              the table the way an absolutely positioned menu
+                              inside a sideways-scrolling grid can.
 
-                <div>
-                  <label className="form-label" htmlFor="po-pick-style">
-                    Style no.
-                  </label>
-                  {/* The style master, not a typed box. "SH-1042" and
-                      "SH1042" typed into different orders would stop the
-                      material ever reconciling against what was produced. */}
-                  <select
-                    id="po-pick-style"
-                    className="form-input"
-                    value={pickStyleId}
-                    onChange={(e) => setPickStyleId(e.target.value)}
-                  >
-                    <option value="">None</option>
-                    {styles.map((st) => (
-                      <option key={st.id} value={st.id}>
-                        {st.code ? `${st.code} — ${st.name}` : st.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+                              One list per row, because each row narrows its
+                              items by its own category. */}
+                          <input
+                            className={`${cell} font-mono`}
+                            list={`po-codes-${i}`}
+                            placeholder="Code"
+                            value={line.codeText ?? ''}
+                            onChange={(e) => typeCodeFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item code`}
+                          />
+                          <datalist id={`po-codes-${i}`}>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.code ?? ''} label={it.name} />
+                            ))}
+                          </datalist>
+                        </td>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mt-2">
-                <div>
-                  <label className="form-label" htmlFor="po-pick-qty">
-                    Quantity
-                  </label>
-                  <input
-                    id="po-pick-qty"
-                    ref={qtyRef}
-                    type="number"
-                    step="0.001"
-                    min={0}
-                    className="form-input text-right"
-                    placeholder="0"
-                    value={pickQty}
-                    onChange={(e) => setPickQty(e.target.value)}
-                  />
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="po-pick-rate">
-                    Rate
-                  </label>
-                  <input
-                    id="po-pick-rate"
-                    type="number"
-                    step="0.01"
-                    min={0}
-                    className="form-input text-right"
-                    placeholder="0.00"
-                    value={pickRate}
-                    onChange={(e) => setPickRate(e.target.value)}
-                  />
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="po-pick-disc">
-                    Discount
-                  </label>
-                  {/* Percent or rupees, as the old form allowed. A rupee
-                      figure is converted to the equivalent percentage when the
-                      line is added, because that is the only shape the line
-                      can be stored in — the arithmetic is identical either
-                      way, so nothing is lost. */}
-                  <div className="flex gap-1.5">
-                    <input
-                      id="po-pick-disc"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      className="form-input text-right flex-1 min-w-0"
-                      placeholder="0"
-                      disabled={poType !== 'ITEM_LEVEL'}
-                      value={poType === 'ITEM_LEVEL' ? pickDiscount : ''}
-                      onChange={(e) => setPickDiscount(e.target.value)}
-                    />
-                    <select
-                      className="form-input w-16 shrink-0"
-                      aria-label="Discount in percent or rupees"
-                      disabled={poType !== 'ITEM_LEVEL'}
-                      value={pickDiscountUnit}
-                      onChange={(e) => setPickDiscountUnit(e.target.value as '%' | 'INR')}
-                    >
-                      <option value="%">%</option>
-                      <option value="INR">₹</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="po-pick-tax">
-                    Tax value
-                  </label>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      id="po-pick-tax"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      max={100}
-                      className="form-input text-right flex-1 min-w-0"
-                      placeholder="0"
-                      disabled={pickTaxExempt || taxMode === 'NONE'}
-                      value={pickTaxExempt || taxMode === 'NONE' ? '' : pickTaxPct}
-                      onChange={(e) => setPickTaxPct(e.target.value)}
-                    />
-                    <span className="text-sm text-muted-foreground">%</span>
-                  </div>
-                  <label className="flex items-center gap-2 mt-1.5 text-xs text-foreground cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={pickTaxExempt}
-                      disabled={taxMode === 'NONE'}
-                      onChange={(e) => setPickTaxExempt(e.target.checked)}
-                    />
-                    Is tax exempt
-                  </label>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end mt-2">
-                <div className="md:col-span-6">
-                  <label className="form-label" htmlFor="po-pick-desc">
-                    Description
-                  </label>
-                  <input
-                    id="po-pick-desc"
-                    className="form-input"
-                    placeholder="Printed under the item on the order"
-                    value={pickDescription}
-                    onChange={(e) => setPickDescription(e.target.value)}
-                  />
-                </div>
-
-                {/* Worked out, not typed. Shown because the buyer checks these
-                    two against the quotation before pressing Add. */}
-                <div className="md:col-span-2">
-                  <span className="form-label block">Net price</span>
-                  <p className="text-sm tabular-nums text-foreground py-2">{inr(draft.netPrice)}</p>
-                </div>
-
-                <div className="md:col-span-2">
-                  <span className="form-label block">Amount</span>
-                  <p className="text-sm font-medium tabular-nums text-foreground py-2">
-                    {inr(draft.amount)}
-                  </p>
-                </div>
-
-                <div className="md:col-span-2">
-                  <button
-                    type="button"
-                    className="btn-primary w-full justify-center"
-                    onClick={addLine}
-                    disabled={!pickItem || alreadyOnOrder}
-                  >
-                    <Plus size={15} /> Add
-                  </button>
-                </div>
-              </div>
-
-              {pickHint && <p className="text-xs text-amber-400 mt-2.5">{pickHint}</p>}
-              <div className="mt-2.5">
-                <NotBuiltNote>
-                  Purchase indents are not built yet, so items come from the item list rather than
-                  from an indent.
-                </NotBuiltNote>
-              </div>
-            </div>
-          </Section>
-
-          {/* 3 — What is on the order so far. Every figure stays editable, so
-              a slip is corrected in place rather than by removing the line and
-              entering it again. */}
-          <Section
-            icon={ListChecks}
-            title="Items added"
-            hint={lines.length ? `${lines.length} on this order` : undefined}
-          >
-            {lines.length === 0 ? (
-              <p className="text-sm text-muted-foreground px-1 py-2">
-                Nothing on this order yet. Pick an item above, enter a quantity and rate, and press
-                Add.
-              </p>
-            ) : (
-              <div className="overflow-x-auto border border-border rounded-lg">
-                <table className="w-full text-sm min-w-[1040px]">
-                  <thead>
-                    <tr className="border-b border-border bg-secondary/40">
-                      {['Item code', 'Item', 'Description', 'Style no.', 'Qty', 'Rate', 'Disc %', 'Tax %', 'Amount', ''].map(
-                        (h, i) => (
-                          <th
-                            key={h || i}
-                            className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-3 ${
-                              ['Qty', 'Rate', 'Disc %', 'Tax %', 'Amount'].includes(h)
-                                ? 'text-right'
-                                : 'text-left'
-                            }`}
+                        <td className={`${COL.item} sticky left-32 z-10 bg-card border-r border-border`}>
+                          <select
+                            className={cell}
+                            value={line.itemId}
+                            onChange={(e) => pickItemFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item`}
                           >
-                            {h}
-                          </th>
-                        ),
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {lines.map((line, i) => {
-                      const item = itemById.get(line.itemId)
-                      return (
-                        <tr
-                          key={`${line.itemId}-${i}`}
-                          className="border-b border-border/50 last:border-0"
-                        >
-                          <td className="py-2 px-3 font-mono text-xs text-teal-400 whitespace-nowrap">
-                            {item?.code ?? '—'}
-                          </td>
-                          <td className="py-2 px-3 min-w-[160px]">
-                            <div className="font-medium text-foreground">{item?.name ?? 'Item'}</div>
-                            {item?.hsnCode && (
-                              <p className="text-[10px] text-muted-foreground mt-0.5 font-mono">
-                                HSN {item.hsnCode}
-                              </p>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 min-w-[160px]">
-                            <input
-                              className="form-input h-8"
-                              placeholder="Optional"
-                              value={(line.description as string) ?? ''}
-                              onChange={(e) => setLine(i, { description: e.target.value })}
-                              aria-label={`Line ${i + 1} description`}
-                            />
-                          </td>
-                          <td className="py-2 px-3 w-40">
-                            <select
-                              className="form-input h-9"
-                              value={(line.styleId as string) ?? ''}
-                              onChange={(e) => setLine(i, { styleId: e.target.value })}
-                              aria-label={`Line ${i + 1} style`}
-                            >
-                              <option value="">None</option>
-                              {styles.map((st) => (
-                                <option key={st.id} value={st.id}>
-                                  {st.code ?? st.name}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td className="py-2 px-3 w-24">
-                            <input
-                              type="number"
-                              step="0.001"
-                              min={0}
-                              className="form-input h-9 text-right"
-                              value={String(line.qty)}
-                              onChange={(e) => setLine(i, { qty: e.target.value })}
-                              aria-label={`Line ${i + 1} quantity`}
-                            />
-                            {item?.uom?.symbol && (
-                              <p className="text-[10px] text-muted-foreground mt-0.5 text-right">
-                                {item.uom.symbol}
-                              </p>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 w-24">
+                            <option value="">
+                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
+                            </option>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.id}>
+                                {it.name}
+                              </option>
+                            ))}
+                          </select>
+                          {item?.hsnCode && (
+                            <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                              HSN {item.hsnCode}
+                            </p>
+                          )}
+                        </td>
+
+                        <td className={COL.category}>
+                          <select
+                            className={cell}
+                            value={view.categoryId}
+                            onChange={(e) =>
+                              // Clearing the subcategory with it: the one
+                              // chosen a moment ago belongs to the category
+                              // just replaced.
+                              setLine(i, { categoryId: e.target.value, subcategoryId: '' })
+                            }
+                            aria-label={`Row ${i + 1} category`}
+                          >
+                            <option value="">All</option>
+                            {topCategories.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+
+                        <td className={COL.subcategory}>
+                          <select
+                            className={cell}
+                            value={view.subcategoryId}
+                            disabled={subs.length === 0}
+                            onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                            aria-label={`Row ${i + 1} subcategory`}
+                          >
+                            <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
+                            {subs.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+
+                        <td className={COL.style}>
+                          {/* Typed, not chosen from a list — material is often
+                              bought before the style has been set up, so a
+                              dropdown of existing styles could not hold what
+                              the buyer needs to write.
+
+                              The master's codes are still offered as
+                              suggestions, and picking one links the line to
+                              that style so it reconciles against production.
+                              Type something the master has never heard of and
+                              the text is kept anyway. */}
+                          <input
+                            className={cell}
+                            list="po-style-codes"
+                            placeholder="Style"
+                            value={(line.styleNo as string) ?? ''}
+                            onChange={(e) => typeStyleFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} style number`}
+                          />
+                          {/* Shown only when the text matched nothing, so the
+                              buyer knows this order will not tie back to a
+                              style — not an error, just a fact about it. */}
+                          {line.styleNo && !line.styleId && (
+                            <p className="text-[10px] text-muted-foreground mt-0.5">Not in master</p>
+                          )}
+                        </td>
+
+                        <td className={COL.description}>
+                          <input
+                            className={cell}
+                            placeholder="Optional"
+                            value={(line.description as string) ?? ''}
+                            onChange={(e) => setLine(i, { description: e.target.value })}
+                            aria-label={`Row ${i + 1} description`}
+                          />
+                        </td>
+
+                        <td className={COL.qty}>
+                          <input
+                            type="number"
+                            step="0.001"
+                            min={0}
+                            className={`${cell} text-right ${needsQty ? 'border-amber-500/70' : ''}`}
+                            placeholder="0"
+                            value={String(line.qty)}
+                            onChange={(e) => setLine(i, { qty: e.target.value })}
+                            aria-label={`Row ${i + 1} quantity`}
+                          />
+                          {item?.uom?.symbol && (
+                            <p className="text-[10px] text-muted-foreground text-right mt-0.5">
+                              {item.uom.symbol}
+                            </p>
+                          )}
+                        </td>
+
+                        <td className={COL.rate}>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            className={`${cell} text-right ${needsRate ? 'border-amber-500/70' : ''}`}
+                            placeholder="0.00"
+                            value={String(line.unitRate)}
+                            onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                            aria-label={`Row ${i + 1} rate`}
+                          />
+                        </td>
+
+                        <td className={COL.discount}>
+                          {/* Percent or rupees, as the mill's old form
+                              allowed. Both sit in the cell, so which one this
+                              figure is can never be in doubt. */}
+                          <div className="flex items-stretch gap-1">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
-                              className="form-input h-9 text-right"
-                              value={String(line.unitRate)}
-                              onChange={(e) => setLine(i, { unitRate: e.target.value })}
-                              aria-label={`Line ${i + 1} rate`}
-                            />
-                          </td>
-                          <td className="py-2 px-3 w-20">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min={0}
-                              max={100}
-                              className="form-input h-9 text-right"
+                              max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
+                              className={`${cell} text-right flex-1 min-w-0`}
+                              placeholder="0"
                               disabled={poType !== 'ITEM_LEVEL'}
                               value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
                               onChange={(e) => setLine(i, { discount: e.target.value })}
-                              aria-label={`Line ${i + 1} discount percent`}
+                              aria-label={`Row ${i + 1} discount`}
                             />
-                          </td>
-                          <td className="py-2 px-3 w-20">
+                            <select
+                              className={`${cell} w-11 shrink-0 px-1`}
+                              disabled={poType !== 'ITEM_LEVEL'}
+                              value={line.discountUnit ?? '%'}
+                              onChange={(e) =>
+                                setLine(i, { discountUnit: e.target.value as '%' | 'INR' })
+                              }
+                              aria-label={`Row ${i + 1} discount in percent or rupees`}
+                            >
+                              <option value="%">%</option>
+                              <option value="INR">₹</option>
+                            </select>
+                          </div>
+                        </td>
+
+                        <td className={COL.tax}>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            max={100}
+                            className={`${cell} text-right`}
+                            placeholder="0"
+                            disabled={taxMode === 'NONE'}
+                            value={taxMode === 'NONE' ? '' : String(line.gstRate)}
+                            onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                            aria-label={`Row ${i + 1} tax percent`}
+                          />
+                          {/* The old form's "Is tax exempt". It is the same
+                              thing as a rate of nothing, so it sets the box
+                              above rather than being a second field that can
+                              disagree with it. */}
+                          <label className="flex items-center justify-end gap-1 mt-0.5 text-[10px] text-muted-foreground cursor-pointer">
                             <input
-                              type="number"
-                              step="0.01"
-                              min={0}
-                              max={100}
-                              className="form-input h-9 text-right"
+                              type="checkbox"
+                              className="scale-75"
                               disabled={taxMode === 'NONE'}
-                              value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                              onChange={(e) => setLine(i, { gstRate: e.target.value })}
-                              aria-label={`Line ${i + 1} tax percent`}
+                              checked={num(line.gstRate) === 0}
+                              onChange={(e) =>
+                                setLine(i, {
+                                  gstRate: e.target.checked
+                                    ? '0'
+                                    : item?.taxRate
+                                      ? String(item.taxRate.rate)
+                                      : '',
+                                })
+                              }
                             />
-                          </td>
-                          <td className="py-2 px-3 text-right font-medium tabular-nums w-28">
+                            Exempt
+                          </label>
+                        </td>
+
+                        <td className={COL.netPrice}>
+                          <div className="h-8 flex items-center justify-end tabular-nums text-xs text-muted-foreground whitespace-nowrap">
+                            {inr(money.netPrice)}
+                          </div>
+                        </td>
+
+                        <td className={COL.amount}>
+                          <div className="h-8 flex items-center justify-end tabular-nums font-medium whitespace-nowrap">
                             {inr(totals.lineAmounts[i] ?? 0)}
-                          </td>
-                          <td className="py-2 px-3 w-12">
+                          </div>
+                        </td>
+
+                        <td className={COL.remove}>
+                          <div className="h-8 flex items-center">
                             <button
                               type="button"
-                              onClick={() => setLines((p) => p.filter((_, x) => x !== i))}
+                              onClick={() => removeRow(i)}
                               className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                              aria-label={`Remove ${item?.name ?? 'line'}`}
+                              aria-label={`Remove row ${i + 1}`}
                             >
                               <Trash2 size={13} />
                             </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 mt-2">
+              <button type="button" onClick={addRow} className="btn-secondary">
+                <Plus size={15} /> Add item row
+              </button>
+              <NotBuiltNote>
+                Purchase indents are not built yet, so items come from the item list rather than
+                from an indent.
+              </NotBuiltNote>
+            </div>
           </Section>
 
           {/* 4 — Where it goes, what is attached, and what it comes to.
@@ -2162,8 +2134,24 @@ export function PurchaseOrderDialog({
         {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
         <div className="shrink-0 flex flex-wrap items-center justify-end gap-3 px-4 py-3 border-t border-border">
           {incomplete && (
-            <p className="text-xs text-muted-foreground mr-auto">
-              {!supplierId ? 'Choose a supplier' : 'Add at least one item'} to save this order.
+            <p className="text-xs text-amber-400 mr-auto max-w-xl">
+              {!supplierId
+                ? 'Choose a supplier to save this order.'
+                : activeLines.length === 0
+                  ? 'Add at least one item to save this order.'
+                  : /* Named, with the empty cell outlined in the table, so a
+                       long order does not have to be read twice to find it. */
+                    `Still to fill in: ${unfinished
+                      .slice(0, 3)
+                      .map(
+                        (r) =>
+                          `${r.name} (${[r.noQty && 'quantity', r.noRate && 'rate']
+                            .filter(Boolean)
+                            .join(' and ')})`,
+                      )
+                      .join(', ')}${
+                      unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ''
+                    }.`}
             </p>
           )}
           <button type="button" onClick={onClose} className="btn-secondary" disabled={busy}>
