@@ -52,7 +52,15 @@ interface Line {
   discount: string
   gstRate: string
   amount: string
-  item: { code: string; name: string; uom?: { symbol: string } | null }
+  item: {
+    code: string
+    name: string
+    uom?: { symbol: string } | null
+    /// An item sits at whichever level it was filed under, so the parent is
+    /// the category and the item's own is the subcategory — the same way round
+    /// the form and the orders list read them.
+    category?: { name: string; parent?: { name: string } | null } | null
+  }
 }
 
 interface PrintPayload {
@@ -71,6 +79,11 @@ interface PrintPayload {
     poNumber: string
     poDate: string
     poType: string | null
+    /// The supplier's own quotation this order answers. First thing anyone
+    /// reaches for when a price is queried months later, and the reason the
+    /// field was added to the form.
+    enquiryNo: string | null
+    enquiryDate: string | null
     reference: string | null
     notes: string | null
     terms: string | null
@@ -104,8 +117,18 @@ interface PrintPayload {
  *
  * These two are the numbers to nudge if the break falls in the wrong place.
  */
-const FITS_ON_ONE_SHEET = 12
-const ROWS_ON_FIRST_OF_TWO = 16
+/*
+ * Both came down by three when the sheet started carrying the delivery
+ * destination and the enquiry. The band is about 58px and the order panel
+ * gained two rows, call it 100px, and a row is about 40px — so two and a half
+ * rows' worth of room went, and three is the safe side of that.
+ *
+ * Erring low costs white space at the foot of a page. Erring high no longer
+ * cuts lines off (the sheet is a minimum height now, not a fixed one) but the
+ * browser inserts its own break instead, and then "Page 1 of 2" is a lie.
+ */
+const FITS_ON_ONE_SHEET = 9
+const ROWS_ON_FIRST_OF_TWO = 13
 
 const BLACK = '#000000'
 const INK = '#111111'
@@ -136,6 +159,17 @@ const NAVY = '#1e293b'
 
 const SANS = 'Inter, system-ui, sans-serif'
 const MONO = '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace'
+
+/**
+ * "Packaging > Tapes" from whichever level the item was filed under.
+ *
+ * An item can sit on a parent category directly, in which case there is no
+ * subcategory and the one name is the whole answer.
+ */
+function categoryPath(c?: { name: string; parent?: { name: string } | null } | null): string | null {
+  if (!c) return null
+  return c.parent ? `${c.parent.name} › ${c.name}` : c.name
+}
 
 /** Every figure on the sheet goes through here, so columns align. */
 const NUM: React.CSSProperties = { fontFamily: MONO, fontVariantNumeric: 'tabular-nums' }
@@ -242,17 +276,30 @@ function TotalRow({ label, value }: { label: string; value: string }) {
 
 /* ── The line table, used on both sheets ──────────────────────────────────── */
 
+/*
+ * Color is gone. It was in the design we were handed, but there is no colour
+ * field on an order line, so it printed an em-dash on every row of every sheet
+ * — a column whose only content was the news that it had no content.
+ *
+ * Its 8% went to Code, and that is what pays for the category line below.
+ * "PKG-TAPE-001" was wrapping to two lines in 12%, so every row was already
+ * two lines tall because of the code, while Description used only one. Giving
+ * Code enough width to sit on one line frees the second line of the row for
+ * the category, and the row height does not change. The page breaks are
+ * counted in rows, so a taller row would have cost lines off every sheet.
+ */
 const COLS = [
   { w: '5%', label: 'S.N', align: 'center' as const },
-  { w: '30%', label: 'Description', align: 'left' as const },
-  { w: '8%', label: 'Color', align: 'center' as const },
-  { w: '12%', label: 'Code', align: 'left' as const },
+  { w: '32%', label: 'Description', align: 'left' as const },
+  // 15% is about 14 mono characters. The longest code in the item master is
+  // 12, so there is room for the master to grow before this wraps again.
+  { w: '15%', label: 'Code', align: 'left' as const },
   { w: '8%', label: 'HSN', align: 'left' as const },
   { w: '9%', label: 'Qty', align: 'right' as const },
   { w: '6%', label: 'UOM', align: 'center' as const },
-  { w: '9%', label: 'Rate', align: 'right' as const },
+  { w: '8%', label: 'Rate', align: 'right' as const },
   { w: '6%', label: 'Disc.', align: 'right' as const },
-  { w: '12%', label: 'Amount', align: 'right' as const },
+  { w: '11%', label: 'Amount', align: 'right' as const },
 ]
 
 function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number }) {
@@ -300,24 +347,34 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
             </td>
             <td style={td}>
               <div style={{ fontWeight: 700 }}>{line.item.name}</div>
-              {line.description && (
-                <div
-                  style={{
-                    fontSize: '9px',
-                    letterSpacing: '.06em',
-                    textTransform: 'uppercase',
-                    color: GREY,
-                    marginTop: '1.5px',
-                  }}
-                >
-                  {line.description}
-                </div>
-              )}
+              {(() => {
+                // Category and subcategory share one line with the line's own
+                // note, because the row has exactly one line spare and both
+                // are secondary to the item name.
+                const filing = categoryPath(line.item.category)
+                const parts = [filing, line.description].filter(Boolean)
+                if (!parts.length) return null
+                return (
+                  <div
+                    style={{
+                      fontSize: '9px',
+                      letterSpacing: '.06em',
+                      textTransform: 'uppercase',
+                      color: GREY,
+                      marginTop: '1.5px',
+                    }}
+                  >
+                    {parts.join('  ·  ')}
+                  </div>
+                )
+              })()}
             </td>
-            <td style={{ ...td, textAlign: 'center' }}>
-              <Dash />
+            {/* Deliberately allowed to wrap. The column is wide enough for
+                every code we have, and a longer one in future should take a
+                second line rather than run into the HSN beside it. */}
+            <td style={{ ...td, ...NUM, fontSize: '10.5px', overflowWrap: 'anywhere' }}>
+              {line.item.code}
             </td>
-            <td style={{ ...td, ...NUM, fontSize: '10.5px' }}>{line.item.code}</td>
             <td style={{ ...td, ...NUM, fontSize: '10.5px', color: GREY }}>
               {line.hsnCode || <Dash />}
             </td>
@@ -345,6 +402,88 @@ function LineTable({ lines, startIndex }: { lines: Line[]; startIndex: number })
         ))}
       </tbody>
     </table>
+  )
+}
+
+/**
+ * Where the goods go.
+ *
+ * This was missing from the sheet entirely, which is the worst of the gaps
+ * the form had opened up: the order form can now send a purchase straight to
+ * a customer, and the paper the supplier works from said nothing about it. A
+ * supplier reading the old sheet would have shipped to the address in the
+ * letterhead, which is us, and the goods would have gone to the wrong place.
+ *
+ * The delivery-to-customer case is called out rather than just named, because
+ * it is an instruction that differs from what the supplier does every other
+ * day of the week.
+ */
+function DeliverToBand({
+  order,
+  companyName,
+  companyAddress,
+}: {
+  order: PrintPayload['order']
+  companyName: string | null
+  companyAddress: string | null
+}) {
+  const toCustomer = Boolean(order.deliveryCustomer)
+
+  const name = order.deliveryCustomer
+    ? order.deliveryCustomer.name
+    : order.deliveryWarehouse
+      ? order.deliveryWarehouse.name
+      : companyName
+
+  // The address frozen onto the order wins. A customer moves, and an order
+  // already sitting with a supplier must not move under it.
+  const address =
+    order.deliveryAddress || order.deliveryWarehouse?.address || (toCustomer ? null : companyAddress)
+
+  if (!name && !address) return null
+
+  return (
+    <div
+      style={{
+        marginTop: '9px',
+        border: `1px solid ${toCustomer ? BLACK : RULE}`,
+        borderRadius: '5px',
+        padding: '9px 11px',
+        display: 'flex',
+        gap: '14px',
+        alignItems: 'baseline',
+      }}
+    >
+      <Eyebrow style={{ flexShrink: 0 }}>Deliver To</Eyebrow>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: '12px', fontWeight: 800, textTransform: 'uppercase' }}>
+          {name}
+          {order.deliveryCustomer?.code && (
+            <span style={{ fontWeight: 600, color: GREY, marginLeft: '7px', ...NUM }}>
+              {order.deliveryCustomer.code}
+            </span>
+          )}
+        </div>
+        {address && (
+          <div style={{ fontSize: '10.5px', color: GREY, lineHeight: 1.55, marginTop: '2px' }}>
+            {address}
+          </div>
+        )}
+        {toCustomer && (
+          <div
+            style={{
+              fontSize: '9px',
+              fontWeight: 700,
+              letterSpacing: '.09em',
+              textTransform: 'uppercase',
+              marginTop: '3px',
+            }}
+          >
+            Ship direct to this address — not to our works
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -452,9 +591,13 @@ export default function PrintPurchaseOrder() {
    * supplier.
    */
   const sampleCount = Number(params.get('lines'))
-  const preview = Number.isFinite(sampleCount) && sampleCount >= 1 && sampleCount <= 60
+  const sampleLines = Number.isFinite(sampleCount) && sampleCount >= 1 && sampleCount <= 60
+  // `?to=customer` previews the direct-to-customer band on an order that goes
+  // to one of our own godowns, which is every order on the system so far.
+  const sampleCustomer = params.get('to') === 'customer'
+  const preview = sampleLines || sampleCustomer
   const lines: Line[] =
-    preview && order.lines.length
+    sampleLines && order.lines.length
       ? Array.from({ length: sampleCount }, (_, i) => {
           const src = order.lines[i % order.lines.length]
           return { ...src, id: `${src.id}-preview-${i}` }
@@ -475,9 +618,31 @@ export default function PrintPurchaseOrder() {
   const totalQtyLabel =
     uoms.length === 1 ? `${money(totalQty)} ${uoms[0]}` : `${money(totalQty)} (mixed units)`
 
-  const deliverTo = order.deliveryCustomer
-    ? `${order.deliveryCustomer.name}${order.deliveryAddress ? `, ${order.deliveryAddress}` : ''}`
-    : order.deliveryWarehouse?.name || null
+  /*
+   * The order used for the blocks that most orders have nothing in yet.
+   *
+   * Every order on the system predates the enquiry fields and goes to one of
+   * our own godowns, so without this the new rows and the new band can only be
+   * looked at empty. Only ever built when a preview flag is set, and the sheet
+   * is stamped DO NOT SEND whenever it is.
+   */
+  const sheetOrder: PrintPayload['order'] = preview
+    ? {
+        ...order,
+        enquiryNo: order.enquiryNo ?? 'SQ/2026/0187',
+        enquiryDate: order.enquiryDate ?? order.poDate,
+        reference: order.reference ?? 'IND-4471',
+        ...(sampleCustomer
+          ? {
+              deliveryCustomer: { name: 'Shreeji Garments', code: 'CUST-0042', gstin: null },
+              deliveryWarehouse: null,
+              deliveryAddress:
+                'Gala 7, Sai Industrial Estate, Dapoda Road, Bhiwandi, Thane, Maharashtra, 421302',
+            }
+          : {}),
+      }
+    : order
+
   const paymentTerms =
     supplier.paymentTerms || (supplier.creditDays ? `${supplier.creditDays} days` : null)
 
@@ -527,7 +692,15 @@ export default function PrintPurchaseOrder() {
         flexShrink: 0,
       }}
     >
-      Layout preview — {sampleCount} sample lines, not this order. Do not send.
+      Layout preview —{' '}
+      {[
+        sampleLines ? `${sampleCount} sample lines` : null,
+        'a sample enquiry number',
+        sampleCustomer ? 'a sample delivery customer' : null,
+      ]
+        .filter(Boolean)
+        .join(', ')}
+      . Not this order. Do not send.
     </div>
   )
 
@@ -801,7 +974,8 @@ export default function PrintPurchaseOrder() {
                 <div style={{ borderTop: `1px solid ${RULE}`, margin: '8px 0 4px' }} />
                 <DetailRow label="GST No" value={supplier.gstin} mono />
                 <DetailRow label="Contact No" value={supplier.phone} mono />
-                <DetailRow label="Kind Attention" value={null} />
+                {/* Kind Attention was in the design we were handed and there is
+                    no such field on an order, so it printed a dash forever. */}
                 <DetailRow label="Payment Terms" value={paymentTerms} last />
               </div>
 
@@ -816,13 +990,27 @@ export default function PrintPurchaseOrder() {
                 <Eyebrow>Order Details</Eyebrow>
                 <div style={{ marginTop: '4px' }}>
                   <DetailRow label="Order type" value={order.poType || null} />
+                  {/* Their quotation number goes above our own reference: it is
+                      the supplier's way in, and this is the supplier's copy. */}
+                  <DetailRow label="Enquiry No" value={sheetOrder.enquiryNo} mono />
+                  <DetailRow
+                    label="Enquiry Date"
+                    value={sheetOrder.enquiryDate ? shortDate(sheetOrder.enquiryDate) : null}
+                    mono
+                  />
+                  <DetailRow label="Your reference" value={sheetOrder.reference} />
                   <DetailRow label="Line items" value={String(lines.length)} mono />
                   <DetailRow label="Total qty" value={totalQtyLabel} mono />
-                  <DetailRow label="Your reference" value={order.reference} />
                   <DetailRow label="Currency" value="INR (₹)" last />
                 </div>
               </div>
             </div>
+
+            <DeliverToBand
+              order={sheetOrder}
+              companyName={company.name}
+              companyAddress={companyAddress}
+            />
 
             {/* Lines */}
             <div style={{ marginTop: '12px' }}>
@@ -844,7 +1032,9 @@ export default function PrintPurchaseOrder() {
                 }}
               >
                 <span>
-                  Lines 1–{firstLines.length} of {lines.length} — continued on page 2
+                  {restLines.length > 0
+                    ? `Lines 1–${firstLines.length} of ${lines.length} — continued on page 2`
+                    : `All ${lines.length} lines shown — nothing continues overleaf`}
                 </span>
                 <span style={{ color: MUTED }}>Totals and terms overleaf</span>
               </div>
@@ -903,9 +1093,14 @@ export default function PrintPurchaseOrder() {
                 </div>
               </div>
 
-              <div style={{ marginTop: '11px' }}>
-                <LineTable lines={restLines} startIndex={firstLines.length} />
-              </div>
+              {/* When the lines all fitted on page 1 and only the totals
+                  came over, there is nothing to tabulate — and a column
+                  header with no rows beneath it reads as lost data. */}
+              {restLines.length > 0 && (
+                <div style={{ marginTop: '11px' }}>
+                  <LineTable lines={restLines} startIndex={firstLines.length} />
+                </div>
+              )}
 
               {closingBlock}
             </div>
