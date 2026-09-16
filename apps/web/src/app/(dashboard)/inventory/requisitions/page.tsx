@@ -45,11 +45,37 @@ interface Requisition {
 const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
 
-/** What this requisition is actually waiting for, in the words people use. */
-function stage(mr: Requisition): { label: string; cls: string } {
+/**
+ * What this requisition is waiting for, and who has to do it.
+ *
+ * The status on its own was not enough. "Waiting for approval" is true, but it
+ * leaves the person who raised it looking for a button that is deliberately not
+ * there — so the stage now says whose move it is and where they make it.
+ */
+function stage(
+  mr: Requisition,
+  isMine: boolean
+): { label: string; cls: string; next?: string } {
   if (mr.status === 'REJECTED') return { label: 'Refused', cls: 'badge-danger' }
-  if (mr.status === 'PENDING') return { label: 'Waiting for approval', cls: 'badge-warning' }
-  if (!mr.issuedAt) return { label: 'Approved — not collected', cls: 'badge-info' }
+
+  if (mr.status === 'PENDING') {
+    return {
+      label: 'Waiting for approval',
+      cls: 'badge-warning',
+      next: isMine
+        ? 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
+        : 'Yours to approve or refuse.',
+    }
+  }
+
+  if (!mr.issuedAt) {
+    return {
+      label: 'Approved — not collected',
+      cls: 'badge-info',
+      next: 'Nothing has moved yet. Press issue when the store hands the material over.',
+    }
+  }
+
   return { label: 'Issued', cls: 'badge-success' }
 }
 
@@ -213,11 +239,11 @@ export default function RequisitionsPage() {
               </thead>
               <tbody>
                 {rows.map((mr) => {
-                  const s = stage(mr)
                   const expanded = open === mr.id
                   // The server refuses this too; hiding the button just avoids
                   // offering somebody a door that is certain to be shut.
-                  const isMine = me?.id && mr.raisedBy?.id === me.id
+                  const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
+                  const s = stage(mr, isMine)
 
                   return (
                     <Fragment key={mr.id}>
@@ -249,6 +275,11 @@ export default function RequisitionsPage() {
                               {mr.rejectionReason}
                             </div>
                           )}
+                          {s.next && (
+                            <div className="mt-1 max-w-[240px] text-[10px] text-muted-foreground">
+                              {s.next}
+                            </div>
+                          )}
                         </td>
                         <td className="text-right whitespace-nowrap">
                           <div className="flex justify-end gap-1">
@@ -273,11 +304,6 @@ export default function RequisitionsPage() {
                                   <X size={15} />
                                 </button>
                               </>
-                            )}
-                            {mr.status === 'PENDING' && isMine && (
-                              <span className="text-[10px] text-muted-foreground px-2">
-                                yours — someone else approves
-                              </span>
                             )}
                             {mr.status === 'APPROVED' && !mr.issuedAt && (
                               <button
