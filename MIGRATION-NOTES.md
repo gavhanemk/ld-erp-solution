@@ -70,6 +70,8 @@ whether the schema still matches.
 
 ---
 
+---
+
 ## 8 Sep 2026 — stock transfers and stock adjustments become documents
 
 **Migration:** `20260908102141_add_stock_transfer_and_adjustment_documents`

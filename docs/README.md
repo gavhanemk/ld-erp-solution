@@ -12,6 +12,7 @@ Read them in this order. The first two are compulsory before you write any code.
 | 3 | [Build rules](03-build-rules.md) | Before you add a module. Folder layout, naming, the patterns to copy. |
 | 4 | [Business rules](04-business-rules.md) | Before you touch numbering, tax, stock or money. The things that must never break. |
 | 5 | [Running and deploying](05-running-deploying.md) | To start it, fix it, back it up, put it live. |
+| 6 | [Git commands](06-git-commands.md) | When you know the rule and want the line to type. Branching, pushing, merging, undoing. |
 
 ## The short version
 
