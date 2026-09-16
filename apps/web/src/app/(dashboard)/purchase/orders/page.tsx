@@ -112,7 +112,7 @@ export default function PurchaseOrdersPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
-            <Plus size={15} /> New Order
+            <Plus size={15} /> New Purchase Order
           </button>
         </div>
       </div>

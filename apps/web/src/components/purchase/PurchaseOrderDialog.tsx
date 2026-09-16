@@ -9,6 +9,10 @@ import {
   Plus,
   Trash2,
   ShoppingCart,
+  Building2,
+  ListChecks,
+  Printer,
+  Calculator,
   FileText,
   Package,
   Truck,
@@ -32,15 +36,26 @@ import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
  * Only the middle section is real work; the rest is mostly already known.
  */
 
+/**
+ * Where a discount is allowed to sit on this order.
+ *
+ * The buyer picks it before typing any figures, because it decides which
+ * discount boxes are live. Stored in `poType`, a column that has existed since
+ * the first migration and that nothing has ever set until now.
+ */
+export type PoType = 'ITEM_LEVEL' | 'ORDER_LEVEL' | 'NONE'
+
 export interface PoLine {
   itemId: string
   description?: string | null
+  styleId?: string | null
   qty: number | string
   unitRate: number | string
   discount: number | string
   gstRate: number | string
   /** Priced by the API. Absent on a line the form is still building. */
   amount?: number | string
+  style?: { id: string; code: string; name: string } | null
   item?: {
     id: string
     code: string
@@ -56,6 +71,7 @@ export interface PurchaseOrder {
   poNumber: string
   supplierId: string
   poDate: string
+  poType?: string | null
   deliveryDate: string | null
   deliveryWarehouseId: string | null
   deliveryCustomerId: string | null
@@ -72,10 +88,23 @@ export interface PurchaseOrder {
   igst: string | number
   roundOff: string | number
   totalAmount: string | number
+  otherCharges?: string | number | null
+  charges?: {
+    chargeTypeId: string
+    amount: string | number
+    gstRate: string | number
+  }[]
   notes: string | null
   terms: string | null
   supplier?: { id: string; name: string; code: string; gstin: string | null; stateCode: string | null }
   lines?: PoLine[]
+}
+
+/** One kind of charge the mill puts on a purchase — transport, freight, dyeing. */
+interface ChargeTypeOption {
+  id: string
+  name: string
+  defaultGstRate: string | number
 }
 
 interface Option {
@@ -133,6 +162,9 @@ interface CompanyLite {
  */
 const MAX_FILE_MB = 50
 const MAX_FILES = 5
+
+/** Two decimals, the same as the API — so what is sent and what is stored agree. */
+const round2 = (n: number) => Math.round(n * 100) / 100
 
 const num = (v: unknown) => {
   const n = Number(v)
@@ -227,14 +259,20 @@ export function PurchaseOrderDialog({
   const [warehouses, setWarehouses] = useState<Option[]>([])
   const [customers, setCustomers] = useState<Option[]>([])
   const [categories, setCategories] = useState<Option[]>([])
+  const [styles, setStyles] = useState<Option[]>([])
+  const [chargeTypes, setChargeTypes] = useState<ChargeTypeOption[]>([])
   const [company, setCompany] = useState<CompanyLite | null>(null)
 
   // Header
   const [supplierId, setSupplierId] = useState('')
+  const [poType, setPoType] = useState<PoType>('ITEM_LEVEL')
   const [warehouseId, setWarehouseId] = useState('')
   const [enquiryNo, setEnquiryNo] = useState('')
   const [enquiryDate, setEnquiryDate] = useState('')
   const [reference, setReference] = useState('')
+  /// Internal. Unlike `notes` it is not printed on the supplier's copy, which
+  /// is the whole reason the two are separate fields.
+  const [remark, setRemark] = useState('')
   const [deliverTo, setDeliverTo] = useState<'ORGANIZATION' | 'CUSTOMER'>('ORGANIZATION')
   const [deliveryCustomerId, setDeliveryCustomerId] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
@@ -247,7 +285,28 @@ export function PurchaseOrderDialog({
   const [pickCategory, setPickCategory] = useState('')
   const [pickSubcategory, setPickSubcategory] = useState('')
   const [pickItem, setPickItem] = useState('')
+  // Typed with the item rather than in the table afterwards, so one line is
+  // entered in one pass and Add is the last thing touched.
+  const [pickDescription, setPickDescription] = useState('')
   const [pickQty, setPickQty] = useState('')
+  // Offered from the item master when there is one, and overtypable. A first
+  // purchase of a brand-new item has no rate on file at all, which is exactly
+  // when this box has to be typed into.
+  const [pickRate, setPickRate] = useState('')
+  const [pickDiscount, setPickDiscount] = useState('')
+  const [pickDiscountUnit, setPickDiscountUnit] = useState<'%' | 'INR'>('%')
+  const [pickTaxPct, setPickTaxPct] = useState('')
+  const [pickTaxExempt, setPickTaxExempt] = useState(false)
+  const [pickStyleId, setPickStyleId] = useState('')
+  /*
+   * What has been typed against each kind of charge, keyed by charge type id.
+   *
+   * A map rather than a list because the rows are the charge master's rows —
+   * the form does not decide which charges exist, Masters → Charges does. Add
+   * a charge type there and a row appears here.
+   */
+  const [charges, setCharges] = useState<Record<string, string>>({})
+  const [otherCharges, setOtherCharges] = useState('')
 
   const [attachments, setAttachments] = useState<Attachment[]>([])
   // Files chosen on a new order, held here until it has a number to hang them
@@ -255,7 +314,7 @@ export function PurchaseOrderDialog({
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
 
-  const [saving, setSaving] = useState<'draft' | 'send' | null>(null)
+  const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
   const firstFieldRef = useRef<HTMLSelectElement | null>(null)
@@ -268,10 +327,16 @@ export function PurchaseOrderDialog({
   useEffect(() => {
     if (!open) return
     setSupplierId(record?.supplierId ?? '')
+    // Orders raised before this form asked carry the old default, which meant
+    // a discount per line — so they reopen as that rather than as a blank.
+    setPoType(
+      record?.poType === 'ORDER_LEVEL' || record?.poType === 'NONE' ? record.poType : 'ITEM_LEVEL',
+    )
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setEnquiryNo(record?.enquiryNo ?? '')
     setEnquiryDate(record?.enquiryDate?.slice(0, 10) ?? '')
     setReference(record?.reference ?? '')
+    setRemark(record?.remark ?? '')
     setDeliveryCustomerId(record?.deliveryCustomerId ?? '')
     setDeliverTo(record?.deliveryCustomerId ? 'CUSTOMER' : 'ORGANIZATION')
     // An order saved with no discount reopens with the box empty, not with a
@@ -283,6 +348,7 @@ export function PurchaseOrderDialog({
       record?.lines?.map((l) => ({
         itemId: l.itemId,
         description: l.description ?? '',
+        styleId: l.styleId ?? '',
         qty: String(l.qty),
         unitRate: String(l.unitRate),
         discount: String(l.discount ?? 0),
@@ -293,7 +359,18 @@ export function PurchaseOrderDialog({
     setPickCategory('')
     setPickSubcategory('')
     setPickItem('')
+    setPickDescription('')
     setPickQty('')
+    setPickRate('')
+    setPickDiscount('')
+    setPickDiscountUnit('%')
+    setPickTaxPct('')
+    setPickTaxExempt(false)
+    setPickStyleId('')
+    setCharges(
+      Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)])),
+    )
+    setOtherCharges(num(record?.otherCharges) > 0 ? String(record?.otherCharges) : '')
     setAttachments([])
     setPendingFiles([])
     setError(null)
@@ -310,17 +387,33 @@ export function PurchaseOrderDialog({
       masterResource<Option>('warehouses').list({ limit: 100, active: true }),
       masterResource<Option>('customers').list({ limit: 500, active: true }),
       masterResource<Option>('item-categories').list({ limit: 200, active: true }).catch(() => null),
+      masterResource<Option>('styles').list({ limit: 500, active: true }).catch(() => null),
+      // The charge rows in the totals are these, one row each. Failing to load
+      // them costs the charge boxes, not the form.
+      masterResource<ChargeTypeOption>('charge-types')
+        .list({ limit: 100, active: true })
+        .catch(() => null),
       // The company block under "deliver to" is our own address. Settings is
       // the only place that serves it and a purchase clerk may not be allowed
       // in there, so the address is treated as a nicety, not a requirement.
       api.get<{ success: boolean; data: CompanyLite }>('/settings/company').catch(() => null),
-    ]).then(([s, i, w, cust, c, co]) => {
+    ]).then(([s, i, w, cust, c, st, ct, co]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
       setWarehouses((w as Paginated<Option>).data)
       setCustomers((cust as Paginated<Option>).data)
       setCategories(c ? (c as Paginated<Option>).data : [])
+      setStyles(st ? (st as Paginated<Option>).data : [])
+      // Only the charges the mill actually puts on a purchase. The sales-only
+      // ones are in the same master and would be noise here.
+      setChargeTypes(
+        ct
+          ? (ct as Paginated<ChargeTypeOption & { applyOnPurchase?: boolean }>).data.filter(
+              (t) => t.applyOnPurchase !== false,
+            )
+          : [],
+      )
       setCompany(co?.data ?? null)
     })
 
@@ -426,23 +519,107 @@ export function PurchaseOrderDialog({
         ? 'CGST_SGST'
         : 'IGST'
 
+  /**
+   * Which discounts this order is allowed to have.
+   *
+   * The dropdown at the top of the items box is not decoration — it decides
+   * where a discount may sit, and the calculation has to agree with it or the
+   * form shows one figure and saves another. Switching to "without discount"
+   * with figures already typed must not leave them quietly in the total, so
+   * they are ignored here as well as being greyed out.
+   */
+  const lineDiscountOf = (l: PoLine) => (poType === 'ITEM_LEVEL' ? num(l.discount) : 0)
+  const orderDiscount = poType === 'ORDER_LEVEL' ? num(discountAmount) : 0
+
   const totals = useMemo(() => {
-    const lineAmounts = lines.map((l) => num(l.qty) * num(l.unitRate) * (1 - num(l.discount) / 100))
-    const subtotal = lineAmounts.reduce((s, n) => s + n, 0)
-    const discount = Math.min(num(discountAmount), subtotal)
+    const lineGross = lines.map((l) => num(l.qty) * num(l.unitRate))
+    const lineAmounts = lines.map((l, i) => lineGross[i] * (1 - lineDiscountOf(l) / 100))
+    const subtotal = lineAmounts.reduce((sum, n) => sum + n, 0)
+
+    const discount = Math.min(orderDiscount, subtotal)
     const taxable = subtotal - discount
     const factor = subtotal > 0 ? taxable / subtotal : 1
 
-    const tax =
+    const lineTax =
       taxMode === 'NONE'
         ? 0
-        : lines.reduce((s, l, i) => s + lineAmounts[i] * factor * (num(l.gstRate) / 100), 0)
+        : lines.reduce((sum, l, i) => sum + lineAmounts[i] * factor * (num(l.gstRate) / 100), 0)
 
-    const beforeRound = taxable + tax
+    /*
+     * Each charge is taxed at its own rate and is not discountable — the
+     * mill's discount is negotiated on the goods, not on the transporter's
+     * bill. Kept as rows so each one can be shown with its own GST.
+     */
+    const chargeRows = chargeTypes
+      .map((t) => ({
+        chargeTypeId: t.id,
+        name: t.name,
+        gstRate: num(t.defaultGstRate),
+        amount: num(charges[t.id]),
+      }))
+      .map((c) => ({ ...c, tax: taxMode === 'NONE' ? 0 : c.amount * (c.gstRate / 100) }))
+
+    const chargeTotal = chargeRows.reduce((sum, c) => sum + c.amount, 0)
+    const chargeTax = chargeRows.reduce((sum, c) => sum + c.tax, 0)
+    const tax = lineTax + chargeTax
+
+    // No GST of its own, and added after tax — the way the old system had it.
+    const other = num(otherCharges)
+
+    const beforeRound = taxable + chargeTotal + tax + other
     const total = Math.round(beforeRound)
 
-    return { lineAmounts, subtotal, discount, taxable, tax, roundOff: total - beforeRound, total }
-  }, [lines, discountAmount, taxMode])
+    /*
+     * "Total discount" is every discount on the order added up, and "Gross
+     * total" is what is left after them. Two rows that only make sense read in
+     * that order, which is why the old form put them that way round.
+     */
+    const totalDiscount =
+      lines.reduce((sum, l, i) => sum + lineGross[i] * (lineDiscountOf(l) / 100), 0) + discount
+
+    return {
+      lineAmounts,
+      subtotal,
+      discount,
+      totalDiscount,
+      grossTotal: taxable,
+      taxable,
+      chargeRows,
+      chargeTotal,
+      other,
+      tax,
+      roundOff: total - beforeRound,
+      total,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines, discountAmount, taxMode, poType, chargeTypes, charges, otherCharges])
+
+  /**
+   * The line being typed, priced as it is typed.
+   *
+   * Net price and Amount are shown beside Add so the buyer can check both
+   * against the quotation in front of them before the line joins the order.
+   * A rupee discount is held as rupees here and converted once, on Add.
+   */
+  const draft = useMemo(() => {
+    const qty = num(pickQty)
+    const rate = num(pickRate)
+    const gross = qty * rate
+    const typed = poType === 'ITEM_LEVEL' ? num(pickDiscount) : 0
+    const discountValue =
+      pickDiscountUnit === '%' ? (gross * typed) / 100 : Math.min(typed, gross)
+    const amount = Math.max(gross - discountValue, 0)
+
+    return {
+      gross,
+      discountValue,
+      amount,
+      netPrice: qty > 0 ? amount / qty : Math.max(rate - discountValue, 0),
+      // The only shape a line can be stored in, so a rupee figure becomes the
+      // percentage that produces the same amount.
+      discountPct: gross > 0 ? Math.min((discountValue / gross) * 100, 100) : 0,
+    }
+  }, [pickQty, pickRate, pickDiscount, pickDiscountUnit, poType])
 
   /**
    * A selection that no longer matches the filters is dropped.
@@ -476,7 +653,11 @@ export function PurchaseOrderDialog({
       ? `${pickedItem?.name} is already on this order — change its quantity in the table below.`
       : num(pickQty) <= 0
         ? `Enter how much ${pickedItem?.name} you want, then press Add.`
-        : null
+        : !pickRate.trim()
+          ? // Named separately from the quantity so the buyer is told which of
+            // the two boxes is still empty, not merely that something is.
+            `Enter the rate you are paying for ${pickedItem?.name}, then press Add.`
+          : null
 
   if (!open || !mounted) return null
 
@@ -503,6 +684,22 @@ export function PurchaseOrderDialog({
     setPickItem(itemId)
     setError(null)
     if (!itemId) return
+
+    /*
+     * The master's figures are offered, not imposed.
+     *
+     * A rate on file is the one agreed last time and is usually right, so it
+     * saves typing. It is only a starting figure: a quoted price is often not
+     * the standard one, and an item never bought before has nothing on file at
+     * all — which is the case that made taking the rate from the master and
+     * locking it the wrong answer.
+     *
+     * Only filled when the box is still empty, so a rate already typed is
+     * never overwritten by changing the item in the dropdown.
+     */
+    const chosen = itemById.get(itemId)
+    if (chosen?.standardRate != null && !pickRate.trim()) setPickRate(String(chosen.standardRate))
+    if (chosen?.taxRate && !pickTaxPct.trim()) setPickTaxPct(String(chosen.taxRate.rate))
 
     const cat = categories.find((c) => c.id === itemById.get(itemId)?.categoryId)
     if (!cat) return
@@ -563,22 +760,46 @@ export function PurchaseOrderDialog({
       return
     }
 
+    /*
+     * A rate of zero is allowed by the API — some purchases genuinely are free
+     * of charge — so nothing downstream would query a blank box. Asked for
+     * here, because a blank on this form is far more likely to be a rate the
+     * buyer has not got to yet than a gift.
+     */
+    if (!pickRate.trim()) {
+      setError(`What rate are you paying for ${item.name}? Enter it, then press Add.`)
+      return
+    }
+
     setLines((prev) => [
       ...prev,
       {
         itemId: item.id,
-        description: '',
+        description: pickDescription.trim(),
+        styleId: pickStyleId || null,
         qty: pickQty,
-        unitRate: item.standardRate != null ? String(item.standardRate) : '',
-        discount: '0',
-        gstRate: item.taxRate ? String(item.taxRate.rate) : '',
+        unitRate: pickRate,
+        // Held as a percentage whichever way it was typed — see `draft`.
+        // Only an item-level order keeps one: on an order-level order the
+        // single discount lives in the totals, and on a no-discount order
+        // there is none to keep.
+        discount: poType === 'ITEM_LEVEL' ? String(round2(draft.discountPct)) : '0',
+        gstRate: pickTaxExempt || taxMode === 'NONE' ? '0' : pickTaxPct,
       },
     ])
 
     // The category filters stay put: the next line is usually from the same
     // place, and clearing them would make the clerk choose twice.
     setPickItem('')
+    setPickDescription('')
     setPickQty('')
+    setPickRate('')
+    setPickDiscount('')
+    // The tax rate, the exemption and the style stay put. A run of lines is
+    // nearly always one style bought at one rate, and re-picking them per line
+    // is how one line ends up wrong. A run of lines from one
+    // supplier is nearly always taxed the same way, and re-picking it per line
+    // is the kind of repetition that gets one line wrong.
     setError(null)
   }
 
@@ -746,23 +967,32 @@ export function PurchaseOrderDialog({
 
   const payload = () => ({
     supplierId,
+    poType,
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     enquiryNo: enquiryNo.trim() || null,
     enquiryDate: enquiryDate || null,
     reference: reference.trim() || null,
-    // `remark` is deliberately not sent. The form no longer asks for it, and
-    // omitting it leaves whatever an older order already carries untouched
-    // rather than wiping it with a blank.
-    discountAmount: num(discountAmount),
+    remark: remark.trim() || null,
+    // Only an order-level order has one. Sending whatever is in the box on an
+    // item-level order would take the discount twice.
+    discountAmount: poType === 'ORDER_LEVEL' ? num(discountAmount) : 0,
+    // Only the kind and the amount. The GST rate is read off the charge type
+    // on the server, so a rate corrected in the master since this form loaded
+    // cannot be overridden from the browser.
+    charges: totals.chargeRows
+      .filter((c) => c.amount > 0)
+      .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.amount })),
+    otherCharges: num(otherCharges),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
     lines: lines.map((l) => ({
       itemId: l.itemId,
       description: (l.description as string)?.trim() || null,
+      styleId: (l.styleId as string) || null,
       qty: num(l.qty),
       unitRate: num(l.unitRate),
-      discount: num(l.discount),
+      discount: lineDiscountOf(l),
       gstRate: num(l.gstRate),
     })),
   })
@@ -774,7 +1004,7 @@ export function PurchaseOrderDialog({
    * second call on purpose — the order exists either way, so if marking it
    * sent fails the work is not lost, it is a draft waiting to be sent.
    */
-  const save = async (mode: 'draft' | 'send') => {
+  const save = async (mode: 'draft' | 'send' | 'print') => {
     setSaving(mode)
     setError(null)
 
@@ -818,7 +1048,7 @@ export function PurchaseOrderDialog({
         }
       }
 
-      if (mode === 'send' && id) {
+      if (mode !== 'draft' && id) {
         try {
           await api.patch(`/purchase/orders/${id}/send`, {})
         } catch (err) {
@@ -831,6 +1061,21 @@ export function PurchaseOrderDialog({
           setSaving(null)
           return
         }
+      }
+
+      /*
+       * Printing opens the sheet in a second tab rather than printing from
+       * here. The print page is a route of its own that fetches the saved
+       * order, so it can only show what was actually written — printing from
+       * the form's own state could put a sheet in the supplier's hands that
+       * does not match the order on the system.
+       *
+       * Opened before the form closes, while this click is still the reason
+       * anything is happening: a popup blocker refuses a window that no
+       * longer traces back to a user action.
+       */
+      if (mode === 'print' && id) {
+        window.open(`/print/purchase-order/${id}`, '_blank', 'noopener')
       }
 
       onSaved()
@@ -888,7 +1133,7 @@ export function PurchaseOrderDialog({
           8px on a phone, 12px on a desktop. The body scrolls inside, which it
           did already. */}
       <div
-        className="glass-card w-full max-w-5xl h-full max-h-full flex flex-col overflow-hidden"
+        className="glass-card w-full h-full max-h-full flex flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="po-dialog-title"
@@ -901,12 +1146,15 @@ export function PurchaseOrderDialog({
             </div>
             <div>
               <h2 id="po-dialog-title" className="text-lg font-semibold text-foreground">
-                {isEdit ? `Edit ${record?.poNumber}` : 'Add New Purchase Order'}
+                Purchase Order
               </h2>
+              {/* The number moves down here rather than into the heading. The
+                  heading says what the form is; the line under it says which
+                  one and what may be done to it. */}
               <p className="text-xs text-muted-foreground mt-0.5">
                 {isEdit
-                  ? 'Only a draft order can be changed'
-                  : 'Create a new purchase order with all required details'}
+                  ? `${record?.poNumber} — only a draft order can be changed`
+                  : 'New order to a supplier'}
               </p>
             </div>
           </div>
@@ -924,639 +1172,927 @@ export function PurchaseOrderDialog({
             </div>
           )}
 
-          {/* 1 — Basic details */}
-          <Section icon={FileText} title="Basic details">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div>
-                <label className="form-label" htmlFor="po-location">
-                  Location
+          {/* 1 — What the order is, and who it is to.
+
+              Two boxes on one row, the way the form has always been laid out:
+              the order's own details on the left, the supplier on the right.
+              The supplier is one field and gets a box of its own because that
+              is where the clerk looks for it. */}
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-3 items-start">
+            <Section icon={FileText} title="Basic details">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="form-label" htmlFor="po-location">
+                    Location
+                  </label>
+                  <select
+                    id="po-location"
+                    ref={firstFieldRef}
+                    className="form-input"
+                    value={warehouseId}
+                    onChange={(e) => setWarehouseId(e.target.value)}
+                  >
+                    <option value="">Head office</option>
+                    {warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-enquiry-no">
+                    Purchase enquiry no.
+                  </label>
+                  <input
+                    id="po-enquiry-no"
+                    className="form-input"
+                    placeholder="Their quotation number"
+                    value={enquiryNo}
+                    onChange={(e) => setEnquiryNo(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-enquiry-date">
+                    Enquiry date
+                  </label>
+                  <input
+                    id="po-enquiry-date"
+                    type="date"
+                    className="form-input"
+                    value={enquiryDate}
+                    onChange={(e) => setEnquiryDate(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-reference">
+                    Reference
+                  </label>
+                  <input
+                    id="po-reference"
+                    className="form-input"
+                    placeholder="Job number, indent slip, anything to quote back"
+                    value={reference}
+                    onChange={(e) => setReference(e.target.value)}
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="form-label" htmlFor="po-remark">
+                    Remark
+                  </label>
+                  <input
+                    id="po-remark"
+                    className="form-input"
+                    placeholder="Internal note, not printed on the order"
+                    value={remark}
+                    onChange={(e) => setRemark(e.target.value)}
+                  />
+                </div>
+              </div>
+            </Section>
+
+            <Section icon={Building2} title="Supplier">
+              <label className="form-label" htmlFor="po-supplier">
+                Supplier<span className="text-red-400 ml-0.5">*</span>
+              </label>
+              <select
+                id="po-supplier"
+                className="form-input"
+                value={supplierId}
+                onChange={(e) => setSupplierId(e.target.value)}
+              >
+                <option value="">Choose supplier</option>
+                {suppliers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.code ? `${s.code} — ${s.name}` : s.name}
+                  </option>
+                ))}
+              </select>
+              {supplier && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  {supplier.gstin ? (
+                    <>
+                      GSTIN {supplier.gstin} ·{' '}
+                      {taxMode === 'CGST_SGST'
+                        ? 'within the state, CGST + SGST'
+                        : 'other state, IGST'}
+                    </>
+                  ) : (
+                    'No GSTIN on file — this order will carry no GST'
+                  )}
+                </p>
+              )}
+            </Section>
+          </div>
+
+          {/* 2 — Choosing what goes on the order.
+
+              Every box the old ERP had, in the order it had them. Rate is
+              typed, not taken from the master and locked: a purchase order is
+              often the first time an item is bought at all, so there is no
+              rate on file to take. The master's rate is offered as the
+              starting figure when there is one, and can be overtyped. */}
+          <Section icon={Package} title="Select items from indent items">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <h4 className="text-xs font-semibold text-foreground">Item &amp; description</h4>
+              <div className="flex items-center gap-2">
+                <label
+                  className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
+                  htmlFor="po-type"
+                >
+                  Purchase order type
                 </label>
                 <select
-                  id="po-location"
-                  ref={firstFieldRef}
-                  className="form-input"
-                  value={warehouseId}
-                  onChange={(e) => setWarehouseId(e.target.value)}
+                  id="po-type"
+                  className="form-input w-auto"
+                  value={poType}
+                  onChange={(e) => setPoType(e.target.value as PoType)}
                 >
-                  <option value="">Head office</option>
-                  {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
+                  <option value="ITEM_LEVEL">With discount at item level</option>
+                  <option value="ORDER_LEVEL">With discount at order level</option>
+                  <option value="NONE">Without discount</option>
                 </select>
-              </div>
-
-              <div>
-                <label className="form-label" htmlFor="po-enquiry-no">
-                  Purchase enquiry no.
-                </label>
-                <input
-                  id="po-enquiry-no"
-                  className="form-input"
-                  placeholder="Their quotation number"
-                  value={enquiryNo}
-                  onChange={(e) => setEnquiryNo(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label className="form-label" htmlFor="po-enquiry-date">
-                  Enquiry date
-                </label>
-                <input
-                  id="po-enquiry-date"
-                  type="date"
-                  className="form-input"
-                  value={enquiryDate}
-                  onChange={(e) => setEnquiryDate(e.target.value)}
-                />
-              </div>
-
-              <div>
-                <label className="form-label" htmlFor="po-reference">
-                  Reference
-                </label>
-                <input
-                  id="po-reference"
-                  className="form-input"
-                  placeholder="Job number, indent slip, anything to quote back"
-                  value={reference}
-                  onChange={(e) => setReference(e.target.value)}
-                />
-              </div>
-
-              {/* The supplier sits here rather than in a section of its own.
-                  It is one field, and it belongs with the rest of what the
-                  order is. */}
-              <div className="md:col-span-2">
-                <label className="form-label" htmlFor="po-supplier">
-                  Supplier<span className="text-red-400 ml-0.5">*</span>
-                </label>
-                <select
-                  id="po-supplier"
-                  className="form-input"
-                  value={supplierId}
-                  onChange={(e) => setSupplierId(e.target.value)}
-                >
-                  <option value="">Choose supplier</option>
-                  {suppliers.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.code ? `${s.code} — ${s.name}` : s.name}
-                    </option>
-                  ))}
-                </select>
-                {supplier && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {supplier.gstin ? (
-                      <>
-                        GSTIN {supplier.gstin} ·{' '}
-                        {taxMode === 'CGST_SGST'
-                          ? 'within the state, CGST + SGST'
-                          : 'other state, IGST'}
-                      </>
-                    ) : (
-                      'No GSTIN on file — this order will carry no GST'
-                    )}
-                  </p>
-                )}
               </div>
             </div>
-          </Section>
+            <p className="text-xs text-muted-foreground mb-2">
+              {poType === 'ITEM_LEVEL'
+                ? 'A discount per line. Total discount in the box on the right adds them up.'
+                : poType === 'ORDER_LEVEL'
+                  ? 'One discount off the whole order — enter it as Total discount on the right. The per-line discount boxes are switched off.'
+                  : 'No discount anywhere on this order. Both the per-line and the order-level boxes are switched off.'}
+            </p>
 
-          {/* 2 — Items */}
-          <Section
-            icon={Package}
-            title="Items"
-            hint={lines.length ? `${lines.length} on this order` : undefined}
-          >
-            <div className="space-y-3">
-              <div className="rounded-lg border border-border bg-background/40 p-3">
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-                  <div className="md:col-span-3">
-                    <label className="form-label" htmlFor="po-pick-search">
-                      Item code
-                    </label>
-                    {/* form-input on the wrapper rather than a hand-set height:
-                        it is the same box as every other field and lines up
-                        with them without a magic number. */}
-                    <div className="form-input flex items-center gap-2">
-                      <Search size={14} className="text-muted-foreground shrink-0" />
-                      <input
-                        id="po-pick-search"
-                        className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
-                        placeholder="Code or name"
-                        value={pickSearch}
-                        onChange={(e) => onCodeTyped(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault()
-                            onCodeEnter()
-                          }
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="md:col-span-2">
-                    <label className="form-label" htmlFor="po-pick-cat">
-                      Category
-                    </label>
-                    <select
-                      id="po-pick-cat"
-                      className="form-input"
-                      value={pickCategory}
-                      onChange={(e) => {
-                        // The item is not cleared here. It is dropped by the
-                        // effect above, and only if it does not belong under
-                        // the category just chosen — so narrowing to the
-                        // category an item is already in keeps it.
-                        setPickCategory(e.target.value)
-                        setPickSubcategory('')
-                        setError(null)
-                      }}
-                    >
-                      <option value="">All</option>
-                      {topCategories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="md:col-span-2">
-                    <label className="form-label" htmlFor="po-pick-sub">
-                      Subcategory
-                    </label>
-                    <select
-                      id="po-pick-sub"
-                      className="form-input"
-                      value={pickSubcategory}
-                      disabled={subCategories.length === 0}
-                      onChange={(e) => {
-                        setPickSubcategory(e.target.value)
-                        setError(null)
-                      }}
-                    >
-                      <option value="">
-                        {subCategories.length === 0 ? 'None' : 'All'}
+            <div className="rounded-lg border border-border bg-background/40 p-3">
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-2">
+                <div>
+                  <label className="form-label" htmlFor="po-pick-cat">
+                    Category
+                  </label>
+                  <select
+                    id="po-pick-cat"
+                    className="form-input"
+                    value={pickCategory}
+                    onChange={(e) => {
+                      // The item is not cleared here. It is dropped by the
+                      // effect above, and only if it does not belong under the
+                      // category just chosen — so narrowing to the category an
+                      // item is already in keeps it.
+                      setPickCategory(e.target.value)
+                      setPickSubcategory('')
+                      setError(null)
+                    }}
+                  >
+                    <option value="">All</option>
+                    {topCategories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
                       </option>
-                      {subCategories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                    ))}
+                  </select>
+                </div>
 
-                  <div className="md:col-span-3">
-                    <label className="form-label" htmlFor="po-pick-item">
-                      Item
-                    </label>
-                    <select
-                      id="po-pick-item"
-                      className="form-input"
-                      value={pickItem}
-                      onChange={(e) => selectItem(e.target.value)}
-                    >
-                      <option value="">
-                        {visibleItems.length === 0 ? 'Nothing matches' : 'Select...'}
+                <div>
+                  <label className="form-label" htmlFor="po-pick-sub">
+                    Subcategory
+                  </label>
+                  <select
+                    id="po-pick-sub"
+                    className="form-input"
+                    value={pickSubcategory}
+                    disabled={subCategories.length === 0}
+                    onChange={(e) => {
+                      setPickSubcategory(e.target.value)
+                      setError(null)
+                    }}
+                  >
+                    <option value="">{subCategories.length === 0 ? 'None' : 'All'}</option>
+                    {subCategories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
                       </option>
-                      {/* The name alone. The code sits in the box to the left
-                          and again in the table below, and repeating it here
-                          only made the option too long to read — "FAB-COT-002
-                          — Cotton Po…" told you the code twice and the item
-                          not at all. */}
-                      {visibleItems.map((it) => (
-                        <option key={it.id} value={it.id}>
-                          {it.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                    ))}
+                  </select>
+                </div>
 
-                  <div className="md:col-span-1">
-                    <label className="form-label" htmlFor="po-pick-qty">
-                      Qty
-                    </label>
+                <div>
+                  <label className="form-label" htmlFor="po-pick-search">
+                    Items code
+                  </label>
+                  {/* form-input on the wrapper rather than a hand-set height:
+                      it is the same box as every other field and lines up with
+                      them without a magic number. */}
+                  <div className="form-input flex items-center gap-2">
+                    <Search size={14} className="text-muted-foreground shrink-0" />
                     <input
-                      id="po-pick-qty"
-                      ref={qtyRef}
-                      type="number"
-                      step="0.001"
-                      min={0}
-                      className="form-input text-right"
-                      value={pickQty}
-                      onChange={(e) => setPickQty(e.target.value)}
+                      id="po-pick-search"
+                      className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
+                      placeholder="Code"
+                      value={pickSearch}
+                      onChange={(e) => onCodeTyped(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           e.preventDefault()
-                          addLine()
+                          onCodeEnter()
                         }
                       }}
                     />
                   </div>
-
-                  <div className="md:col-span-1">
-                    <button
-                      type="button"
-                      className="btn-primary w-full justify-center"
-                      onClick={addLine}
-                      disabled={!pickItem || alreadyOnOrder}
-                    >
-                      <Plus size={15} /> Add
-                    </button>
-                  </div>
                 </div>
 
-                {pickHint ? (
-                  <p className="text-xs text-amber-400 mt-2.5">{pickHint}</p>
-                ) : (
-                  <p className="text-xs text-muted-foreground mt-2.5 flex items-start gap-1.5">
-                    <Lock size={13} className="mt-0.5 shrink-0" />
-                    Purchase indents are not built yet, so items are chosen from the item list
-                    rather than pulled from an indent.
-                  </p>
-                )}
+                <div>
+                  <label className="form-label" htmlFor="po-pick-item">
+                    Items
+                  </label>
+                  <select
+                    id="po-pick-item"
+                    className="form-input"
+                    value={pickItem}
+                    onChange={(e) => selectItem(e.target.value)}
+                  >
+                    <option value="">
+                      {visibleItems.length === 0 ? 'Nothing matches' : 'Select...'}
+                    </option>
+                    {/* The name alone. The code sits in the box to the left and
+                        again in the table below, and repeating it here only
+                        made the option too long to read. */}
+                    {visibleItems.map((it) => (
+                      <option key={it.id} value={it.id}>
+                        {it.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-pick-style">
+                    Style no.
+                  </label>
+                  {/* The style master, not a typed box. "SH-1042" and
+                      "SH1042" typed into different orders would stop the
+                      material ever reconciling against what was produced. */}
+                  <select
+                    id="po-pick-style"
+                    className="form-input"
+                    value={pickStyleId}
+                    onChange={(e) => setPickStyleId(e.target.value)}
+                  >
+                    <option value="">None</option>
+                    {styles.map((st) => (
+                      <option key={st.id} value={st.id}>
+                        {st.code ? `${st.code} — ${st.name}` : st.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
-              {lines.length === 0 ? (
-                <p className="text-sm text-muted-foreground px-1 py-3">
-                  Nothing on this order yet. Find an item above, type how much you want, and press
-                  Add.
-                </p>
-              ) : (
-                <div className="overflow-x-auto border border-border rounded-lg">
-                  <table className="w-full text-sm min-w-[880px]">
-                    <thead>
-                      <tr className="border-b border-border bg-secondary/40">
-                        {['Code', 'Item', 'Category', 'Qty', 'Rate', 'Disc %', 'GST %', 'Amount', ''].map(
-                          (h, i) => (
-                            <th
-                              key={h || i}
-                              className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-3 ${
-                                ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount'].includes(h)
-                                  ? 'text-right'
-                                  : 'text-left'
-                              }`}
-                            >
-                              {h}
-                            </th>
-                          ),
-                        )}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {lines.map((line, i) => {
-                        const item = itemById.get(line.itemId)
-                        return (
-                          <tr key={`${line.itemId}-${i}`} className="border-b border-border/50 last:border-0">
-                            <td className="py-2 px-3 font-mono text-xs text-teal-400 whitespace-nowrap">
-                              {item?.code ?? '—'}
-                            </td>
-                            <td className="py-2 px-3 min-w-[180px]">
-                              <div className="font-medium text-foreground">{item?.name ?? 'Item'}</div>
-                              <input
-                                className="form-input h-8 mt-1"
-                                placeholder="Describe it in your own words (optional)"
-                                value={(line.description as string) ?? ''}
-                                onChange={(e) => setLine(i, { description: e.target.value })}
-                                aria-label={`Line ${i + 1} description`}
-                              />
-                              {item?.hsnCode && (
-                                <p className="text-[10px] text-muted-foreground mt-0.5 font-mono">
-                                  HSN {item.hsnCode}
-                                </p>
-                              )}
-                            </td>
-                            <td className="py-2 px-3 text-xs text-muted-foreground whitespace-nowrap">
-                              {item?.category?.name ?? '—'}
-                            </td>
-                            <td className="py-2 px-3 w-24">
-                              <input
-                                type="number"
-                                step="0.001"
-                                min={0}
-                                className="form-input h-9 text-right"
-                                value={String(line.qty)}
-                                onChange={(e) => setLine(i, { qty: e.target.value })}
-                                aria-label={`Line ${i + 1} quantity`}
-                              />
-                              {item?.uom?.symbol && (
-                                <p className="text-[10px] text-muted-foreground mt-0.5 text-right">
-                                  {item.uom.symbol}
-                                </p>
-                              )}
-                            </td>
-                            <td className="py-2 px-3 w-24">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min={0}
-                                className="form-input h-9 text-right"
-                                value={String(line.unitRate)}
-                                onChange={(e) => setLine(i, { unitRate: e.target.value })}
-                                aria-label={`Line ${i + 1} rate`}
-                              />
-                            </td>
-                            <td className="py-2 px-3 w-20">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min={0}
-                                max={100}
-                                className="form-input h-9 text-right"
-                                value={String(line.discount)}
-                                onChange={(e) => setLine(i, { discount: e.target.value })}
-                                aria-label={`Line ${i + 1} discount`}
-                              />
-                            </td>
-                            <td className="py-2 px-3 w-20">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min={0}
-                                max={100}
-                                className="form-input h-9 text-right"
-                                disabled={taxMode === 'NONE'}
-                                value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                                onChange={(e) => setLine(i, { gstRate: e.target.value })}
-                                aria-label={`Line ${i + 1} GST rate`}
-                              />
-                            </td>
-                            <td className="py-2 px-3 text-right font-medium tabular-nums w-28">
-                              {inr(totals.lineAmounts[i] ?? 0)}
-                            </td>
-                            <td className="py-2 px-3 w-12">
-                              <button
-                                type="button"
-                                onClick={() => setLines((p) => p.filter((_, x) => x !== i))}
-                                className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                                aria-label={`Remove ${item?.name ?? 'line'}`}
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mt-2">
+                <div>
+                  <label className="form-label" htmlFor="po-pick-qty">
+                    Quantity
+                  </label>
+                  <input
+                    id="po-pick-qty"
+                    ref={qtyRef}
+                    type="number"
+                    step="0.001"
+                    min={0}
+                    className="form-input text-right"
+                    placeholder="0"
+                    value={pickQty}
+                    onChange={(e) => setPickQty(e.target.value)}
+                  />
                 </div>
-              )}
 
-              {lines.length > 0 && (
-                <div className="flex justify-end">
-                  <div className="w-full sm:w-80 rounded-lg border border-border bg-background/40 p-4 space-y-2 text-sm">
-                    <Row label="Subtotal" value={totals.subtotal} />
-                    <div className="flex items-center justify-between gap-4">
-                      <label htmlFor="po-discount" className="text-muted-foreground">
-                        Discount on the order
-                      </label>
-                      <input
-                        id="po-discount"
-                        type="number"
-                        step="0.01"
-                        min={0}
-                        className="form-input h-8 w-28 text-right"
-                        value={discountAmount}
-                        onChange={(e) => setDiscountAmount(e.target.value)}
-                      />
-                    </div>
-                    <Row label="Taxable value" value={totals.taxable} />
-                    {taxMode === 'CGST_SGST' && (
-                      <>
-                        <Row label="CGST" value={totals.tax / 2} />
-                        <Row label="SGST" value={totals.tax / 2} />
-                      </>
-                    )}
-                    {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                    {taxMode === 'NONE' && (
-                      <p className="text-xs text-muted-foreground py-1">
-                        No GST — this supplier is not registered.
-                      </p>
-                    )}
-                    {taxMode === null && (
-                      <>
-                        <Row label="GST" value={totals.tax} />
-                        <p className="text-xs text-muted-foreground py-1">
-                          Choose a supplier to see whether this splits into CGST + SGST or is IGST.
-                        </p>
-                      </>
-                    )}
-                    <Row label="Rounding" value={totals.roundOff} />
-                    <div className="flex items-center justify-between pt-2 border-t border-border">
-                      <span className="font-semibold text-foreground">Total</span>
-                      <span className="font-semibold text-foreground tabular-nums text-lg">
-                        ₹{inr(totals.total)}
-                      </span>
-                    </div>
+                <div>
+                  <label className="form-label" htmlFor="po-pick-rate">
+                    Rate
+                  </label>
+                  <input
+                    id="po-pick-rate"
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    className="form-input text-right"
+                    placeholder="0.00"
+                    value={pickRate}
+                    onChange={(e) => setPickRate(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-pick-disc">
+                    Discount
+                  </label>
+                  {/* Percent or rupees, as the old form allowed. A rupee
+                      figure is converted to the equivalent percentage when the
+                      line is added, because that is the only shape the line
+                      can be stored in — the arithmetic is identical either
+                      way, so nothing is lost. */}
+                  <div className="flex gap-1.5">
+                    <input
+                      id="po-pick-disc"
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      className="form-input text-right flex-1 min-w-0"
+                      placeholder="0"
+                      disabled={poType !== 'ITEM_LEVEL'}
+                      value={poType === 'ITEM_LEVEL' ? pickDiscount : ''}
+                      onChange={(e) => setPickDiscount(e.target.value)}
+                    />
+                    <select
+                      className="form-input w-16 shrink-0"
+                      aria-label="Discount in percent or rupees"
+                      disabled={poType !== 'ITEM_LEVEL'}
+                      value={pickDiscountUnit}
+                      onChange={(e) => setPickDiscountUnit(e.target.value as '%' | 'INR')}
+                    >
+                      <option value="%">%</option>
+                      <option value="INR">₹</option>
+                    </select>
                   </div>
                 </div>
-              )}
+
+                <div>
+                  <label className="form-label" htmlFor="po-pick-tax">
+                    Tax value
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      id="po-pick-tax"
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      max={100}
+                      className="form-input text-right flex-1 min-w-0"
+                      placeholder="0"
+                      disabled={pickTaxExempt || taxMode === 'NONE'}
+                      value={pickTaxExempt || taxMode === 'NONE' ? '' : pickTaxPct}
+                      onChange={(e) => setPickTaxPct(e.target.value)}
+                    />
+                    <span className="text-sm text-muted-foreground">%</span>
+                  </div>
+                  <label className="flex items-center gap-2 mt-1.5 text-xs text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={pickTaxExempt}
+                      disabled={taxMode === 'NONE'}
+                      onChange={(e) => setPickTaxExempt(e.target.checked)}
+                    />
+                    Is tax exempt
+                  </label>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end mt-2">
+                <div className="md:col-span-6">
+                  <label className="form-label" htmlFor="po-pick-desc">
+                    Description
+                  </label>
+                  <input
+                    id="po-pick-desc"
+                    className="form-input"
+                    placeholder="Printed under the item on the order"
+                    value={pickDescription}
+                    onChange={(e) => setPickDescription(e.target.value)}
+                  />
+                </div>
+
+                {/* Worked out, not typed. Shown because the buyer checks these
+                    two against the quotation before pressing Add. */}
+                <div className="md:col-span-2">
+                  <span className="form-label block">Net price</span>
+                  <p className="text-sm tabular-nums text-foreground py-2">{inr(draft.netPrice)}</p>
+                </div>
+
+                <div className="md:col-span-2">
+                  <span className="form-label block">Amount</span>
+                  <p className="text-sm font-medium tabular-nums text-foreground py-2">
+                    {inr(draft.amount)}
+                  </p>
+                </div>
+
+                <div className="md:col-span-2">
+                  <button
+                    type="button"
+                    className="btn-primary w-full justify-center"
+                    onClick={addLine}
+                    disabled={!pickItem || alreadyOnOrder}
+                  >
+                    <Plus size={15} /> Add
+                  </button>
+                </div>
+              </div>
+
+              {pickHint && <p className="text-xs text-amber-400 mt-2.5">{pickHint}</p>}
+              <div className="mt-2.5">
+                <NotBuiltNote>
+                  Purchase indents are not built yet, so items come from the item list rather than
+                  from an indent.
+                </NotBuiltNote>
+              </div>
             </div>
           </Section>
 
-          {/* 4 — Delivery and attachments. The dropzone became a single row:
-              it cannot accept a file yet, so three lines and a dashed border
-              were spending height to advertise something switched off. */}
-          <Section icon={Truck} title="Delivery and attachments">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <h4 className="text-xs font-semibold text-foreground">Attachments</h4>
-
-                {/* One box whether or not the order exists yet. On a new
-                    order the files are held and go up the moment it is saved,
-                    so nobody has to save, reopen and come back for them. */}
-                <div className="space-y-2">
-                  <label
-                    className={`flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2 ${
-                      uploading || fileCount >= MAX_FILES
-                        ? 'opacity-70 cursor-not-allowed'
-                        : 'cursor-pointer hover:border-teal-500/40'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2 text-sm text-foreground">
-                      {uploading ? (
-                        <Loader2 size={14} className="animate-spin" />
-                      ) : (
-                        <Paperclip size={14} />
+          {/* 3 — What is on the order so far. Every figure stays editable, so
+              a slip is corrected in place rather than by removing the line and
+              entering it again. */}
+          <Section
+            icon={ListChecks}
+            title="Items added"
+            hint={lines.length ? `${lines.length} on this order` : undefined}
+          >
+            {lines.length === 0 ? (
+              <p className="text-sm text-muted-foreground px-1 py-2">
+                Nothing on this order yet. Pick an item above, enter a quantity and rate, and press
+                Add.
+              </p>
+            ) : (
+              <div className="overflow-x-auto border border-border rounded-lg">
+                <table className="w-full text-sm min-w-[1040px]">
+                  <thead>
+                    <tr className="border-b border-border bg-secondary/40">
+                      {['Item code', 'Item', 'Description', 'Style no.', 'Qty', 'Rate', 'Disc %', 'Tax %', 'Amount', ''].map(
+                        (h, i) => (
+                          <th
+                            key={h || i}
+                            className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-3 ${
+                              ['Qty', 'Rate', 'Disc %', 'Tax %', 'Amount'].includes(h)
+                                ? 'text-right'
+                                : 'text-left'
+                            }`}
+                          >
+                            {h}
+                          </th>
+                        ),
                       )}
-                      {uploading ? 'Sending...' : 'Choose files'}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
-                    </span>
-                    <input
-                      type="file"
-                      multiple
-                      className="hidden"
-                      disabled={uploading || fileCount >= MAX_FILES}
-                      onChange={(e) => {
-                        chooseFiles(e.target.files)
-                        e.target.value = ''
-                      }}
-                    />
-                  </label>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lines.map((line, i) => {
+                      const item = itemById.get(line.itemId)
+                      return (
+                        <tr
+                          key={`${line.itemId}-${i}`}
+                          className="border-b border-border/50 last:border-0"
+                        >
+                          <td className="py-2 px-3 font-mono text-xs text-teal-400 whitespace-nowrap">
+                            {item?.code ?? '—'}
+                          </td>
+                          <td className="py-2 px-3 min-w-[160px]">
+                            <div className="font-medium text-foreground">{item?.name ?? 'Item'}</div>
+                            {item?.hsnCode && (
+                              <p className="text-[10px] text-muted-foreground mt-0.5 font-mono">
+                                HSN {item.hsnCode}
+                              </p>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 min-w-[160px]">
+                            <input
+                              className="form-input h-8"
+                              placeholder="Optional"
+                              value={(line.description as string) ?? ''}
+                              onChange={(e) => setLine(i, { description: e.target.value })}
+                              aria-label={`Line ${i + 1} description`}
+                            />
+                          </td>
+                          <td className="py-2 px-3 w-40">
+                            <select
+                              className="form-input h-9"
+                              value={(line.styleId as string) ?? ''}
+                              onChange={(e) => setLine(i, { styleId: e.target.value })}
+                              aria-label={`Line ${i + 1} style`}
+                            >
+                              <option value="">None</option>
+                              {styles.map((st) => (
+                                <option key={st.id} value={st.id}>
+                                  {st.code ?? st.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="py-2 px-3 w-24">
+                            <input
+                              type="number"
+                              step="0.001"
+                              min={0}
+                              className="form-input h-9 text-right"
+                              value={String(line.qty)}
+                              onChange={(e) => setLine(i, { qty: e.target.value })}
+                              aria-label={`Line ${i + 1} quantity`}
+                            />
+                            {item?.uom?.symbol && (
+                              <p className="text-[10px] text-muted-foreground mt-0.5 text-right">
+                                {item.uom.symbol}
+                              </p>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 w-24">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              className="form-input h-9 text-right"
+                              value={String(line.unitRate)}
+                              onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                              aria-label={`Line ${i + 1} rate`}
+                            />
+                          </td>
+                          <td className="py-2 px-3 w-20">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              max={100}
+                              className="form-input h-9 text-right"
+                              disabled={poType !== 'ITEM_LEVEL'}
+                              value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
+                              onChange={(e) => setLine(i, { discount: e.target.value })}
+                              aria-label={`Line ${i + 1} discount percent`}
+                            />
+                          </td>
+                          <td className="py-2 px-3 w-20">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              max={100}
+                              className="form-input h-9 text-right"
+                              disabled={taxMode === 'NONE'}
+                              value={taxMode === 'NONE' ? '' : String(line.gstRate)}
+                              onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                              aria-label={`Line ${i + 1} tax percent`}
+                            />
+                          </td>
+                          <td className="py-2 px-3 text-right font-medium tabular-nums w-28">
+                            {inr(totals.lineAmounts[i] ?? 0)}
+                          </td>
+                          <td className="py-2 px-3 w-12">
+                            <button
+                              type="button"
+                              onClick={() => setLines((p) => p.filter((_, x) => x !== i))}
+                              className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
+                              aria-label={`Remove ${item?.name ?? 'line'}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Section>
 
-                  {fileCount === 0 ? (
-                    <p className="text-xs text-muted-foreground">Nothing attached yet.</p>
+          {/* 4 — Where it goes, what is attached, and what it comes to.
+
+              One row, two boxes: the delivery and its files on the left, the
+              calculation on the right — the arrangement the form has always
+              had, and the one the clerk checks left to right before saving. */}
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_460px] gap-3 items-start">
+            <Section icon={Truck} title="Attachments and deliver to">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <h4 className="text-xs font-semibold text-foreground">Attachments</h4>
+
+                  {/* One box whether or not the order exists yet. On a new
+                      order the files are held and go up the moment it is saved,
+                      so nobody has to save, reopen and come back for them. */}
+                  <div className="space-y-2">
+                    <label
+                      className={`flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2 ${
+                        uploading || fileCount >= MAX_FILES
+                          ? 'opacity-70 cursor-not-allowed'
+                          : 'cursor-pointer hover:border-teal-500/40'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2 text-sm text-foreground">
+                        {uploading ? (
+                          <Loader2 size={14} className="animate-spin" />
+                        ) : (
+                          <Paperclip size={14} />
+                        )}
+                        {uploading ? 'Sending...' : 'Choose files'}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
+                      </span>
+                      <input
+                        type="file"
+                        multiple
+                        className="hidden"
+                        disabled={uploading || fileCount >= MAX_FILES}
+                        onChange={(e) => {
+                          chooseFiles(e.target.files)
+                          e.target.value = ''
+                        }}
+                      />
+                    </label>
+
+                    {fileCount === 0 ? (
+                      <p className="text-xs text-muted-foreground">Nothing attached yet.</p>
+                    ) : (
+                      <ul className="space-y-1">
+                        {attachments.map((f) => (
+                          <li
+                            key={f.id}
+                            className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-1.5"
+                          >
+                            <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                            <button
+                              type="button"
+                              className="text-sm text-primary underline truncate text-left flex-1 min-w-0"
+                              onClick={() => void openFile(f.id)}
+                              title={`Open ${f.fileName}`}
+                            >
+                              {f.fileName}
+                            </button>
+                            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                              {(f.sizeBytes / 1024).toFixed(0)} KB
+                            </span>
+                            <button
+                              type="button"
+                              className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
+                              onClick={() => void removeFile(f)}
+                              aria-label={`Remove ${f.fileName}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </li>
+                        ))}
+
+                        {/* Chosen but not yet sent. Marked so nobody believes a
+                            file is safely filed before the order is saved. */}
+                        {pendingFiles.map((f, i) => (
+                          <li
+                            key={`pending-${f.name}-${i}`}
+                            className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/40 px-3 py-1.5"
+                          >
+                            <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                            <span className="text-sm text-foreground truncate flex-1 min-w-0">
+                              {f.name}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                              {(f.size / 1024).toFixed(0)} KB · on save
+                            </span>
+                            <button
+                              type="button"
+                              className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
+                              onClick={() =>
+                                setPendingFiles((prev) => prev.filter((_, x) => x !== i))
+                              }
+                              aria-label={`Remove ${f.name}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <h4 className="text-xs font-semibold text-foreground">Deliver to</h4>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                      <input
+                        type="radio"
+                        name="po-deliver-to"
+                        checked={deliverTo === 'ORGANIZATION'}
+                        onChange={() => setDeliverTo('ORGANIZATION')}
+                      />
+                      Organization
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                      <input
+                        type="radio"
+                        name="po-deliver-to"
+                        checked={deliverTo === 'CUSTOMER'}
+                        onChange={() => setDeliverTo('CUSTOMER')}
+                      />
+                      Customer
+                    </label>
+                  </div>
+
+                  {deliverTo === 'CUSTOMER' ? (
+                    <>
+                      <select
+                        className="form-input"
+                        value={deliveryCustomerId}
+                        onChange={(e) => setDeliveryCustomerId(e.target.value)}
+                        aria-label="Deliver to customer"
+                      >
+                        <option value="">Choose customer</option>
+                        {customers.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.code ? `${c.code} — ${c.name}` : c.name}
+                          </option>
+                        ))}
+                      </select>
+
+                      {deliveryCustomer && (
+                        <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
+                          <p className="text-sm font-medium text-foreground">
+                            {deliveryCustomer.name}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {customerAddress || 'No address on this customer.'}
+                          </p>
+                          {/* The tax follows the goods, so a customer in another
+                              state changes what the supplier may charge. Said
+                              here rather than discovered on their bill. */}
+                          {customerStateCode && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Delivered in state {customerStateCode} —{' '}
+                              {supplier
+                                ? taxMode === 'CGST_SGST'
+                                  ? 'same state as the supplier, so CGST + SGST'
+                                  : 'a different state from the supplier, so IGST'
+                                : 'choose a supplier to see the tax split'}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </>
                   ) : (
-                    <ul className="space-y-1">
-                      {attachments.map((f) => (
-                        <li
-                          key={f.id}
-                          className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-1.5"
+                    /* Shown, not repeated. An order has one destination, so a
+                       second dropdown for it here would only mirror the Location
+                       field above — change one and the other moves, which reads
+                       as two settings that disagree. */
+                    <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
+                      <p className="text-sm font-medium text-foreground">
+                        {destination?.name ?? company?.name ?? 'Your company'}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {destination?.address ||
+                          orgAddress ||
+                          'Address not set — add it in Settings → Company.'}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Somewhere else? Change{' '}
+                        <button
+                          type="button"
+                          className="text-primary underline"
+                          onClick={() => document.getElementById('po-location')?.focus()}
                         >
-                          <Paperclip size={13} className="text-muted-foreground shrink-0" />
-                          <button
-                            type="button"
-                            className="text-sm text-primary underline truncate text-left flex-1 min-w-0"
-                            onClick={() => void openFile(f.id)}
-                            title={`Open ${f.fileName}`}
-                          >
-                            {f.fileName}
-                          </button>
-                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                            {(f.sizeBytes / 1024).toFixed(0)} KB
-                          </span>
-                          <button
-                            type="button"
-                            className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                            onClick={() => void removeFile(f)}
-                            aria-label={`Remove ${f.fileName}`}
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </li>
-                      ))}
-
-                      {/* Chosen but not yet sent. Marked so nobody believes a
-                          file is safely filed before the order is saved. */}
-                      {pendingFiles.map((f, i) => (
-                        <li
-                          key={`pending-${f.name}-${i}`}
-                          className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/40 px-3 py-1.5"
-                        >
-                          <Paperclip size={13} className="text-muted-foreground shrink-0" />
-                          <span className="text-sm text-foreground truncate flex-1 min-w-0">
-                            {f.name}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                            {(f.size / 1024).toFixed(0)} KB · on save
-                          </span>
-                          <button
-                            type="button"
-                            className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                            onClick={() =>
-                              setPendingFiles((prev) => prev.filter((_, x) => x !== i))
-                            }
-                            aria-label={`Remove ${f.name}`}
-                          >
-                            <Trash2 size={13} />
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
+                          Location
+                        </button>{' '}
+                        above.
+                      </p>
+                    </div>
                   )}
                 </div>
               </div>
+            </Section>
 
-              <div className="space-y-2">
-                <h4 className="text-xs font-semibold text-foreground">Deliver to</h4>
-                <div className="flex flex-wrap items-center gap-4">
-                  <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+
+            {/* The calculation, beside the delivery box as the old ERP had it.
+
+                Every row it had, in its order. The five named charge rows and
+                Other charges are switched off, and that is not a design
+                choice: a purchase *order* has no columns to keep them in. In
+                this database charges hang off the *bill*
+                (`PurchaseInvoiceCharge` against a `ChargeType`), so a box here
+                that accepted a figure would show it in the Total and then drop
+                it on save — the clerk would send a supplier an order for one
+                amount and find another on the system. Putting them on the
+                order needs a migration; see the note under the box. */}
+            <Section icon={Calculator} title="Totals">
+              <div className="space-y-1.5 text-sm">
+                {/* Where the discount sits follows the dropdown at the top of
+                    the items box. On an item-level order this is the sum of
+                    the per-line discounts and cannot be typed into; on an
+                    order-level order it is the one figure taken off the whole
+                    order, and the per-line boxes are the ones switched off. */}
+                {poType === 'ORDER_LEVEL' ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <label htmlFor="po-discount" className="text-muted-foreground">
+                      Total discount
+                    </label>
                     <input
-                      type="radio"
-                      name="po-deliver-to"
-                      checked={deliverTo === 'ORGANIZATION'}
-                      onChange={() => setDeliverTo('ORGANIZATION')}
+                      id="po-discount"
+                      type="number"
+                      step="0.01"
+                      min={0}
+                      className="form-input h-8 w-28 text-right"
+                      placeholder="0.00"
+                      value={discountAmount}
+                      onChange={(e) => setDiscountAmount(e.target.value)}
                     />
-                    Our own address
-                  </label>
-                  <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-                    <input
-                      type="radio"
-                      name="po-deliver-to"
-                      checked={deliverTo === 'CUSTOMER'}
-                      onChange={() => setDeliverTo('CUSTOMER')}
-                    />
-                    A customer
-                  </label>
-                </div>
-
-                {deliverTo === 'CUSTOMER' ? (
-                  <>
-                    <select
-                      className="form-input"
-                      value={deliveryCustomerId}
-                      onChange={(e) => setDeliveryCustomerId(e.target.value)}
-                      aria-label="Deliver to customer"
-                    >
-                      <option value="">Choose customer</option>
-                      {customers.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.code ? `${c.code} — ${c.name}` : c.name}
-                        </option>
-                      ))}
-                    </select>
-
-                    {deliveryCustomer && (
-                      <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
-                        <p className="text-sm font-medium text-foreground">
-                          {deliveryCustomer.name}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {customerAddress || 'No address on this customer.'}
-                        </p>
-                        {/* The tax follows the goods, so a customer in another
-                            state changes what the supplier may charge. Said
-                            here rather than discovered on their bill. */}
-                        {customerStateCode && (
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Delivered in state {customerStateCode} —{' '}
-                            {supplier
-                              ? taxMode === 'CGST_SGST'
-                                ? 'same state as the supplier, so CGST + SGST'
-                                : 'a different state from the supplier, so IGST'
-                              : 'choose a supplier to see the tax split'}
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </>
+                  </div>
                 ) : (
-                  /* Shown, not repeated. An order has one destination, so a
-                     second dropdown for it here would only mirror the Location
-                     field above — change one and the other moves, which reads
-                     as two settings that disagree. */
-                  <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
-                    <p className="text-sm font-medium text-foreground">
-                      {destination?.name ?? company?.name ?? 'Your company'}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {destination?.address ||
-                        orgAddress ||
-                        'Address not set — add it in Settings → Company.'}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Somewhere else? Change{' '}
-                      <button
-                        type="button"
-                        className="text-primary underline"
-                        onClick={() => document.getElementById('po-location')?.focus()}
-                      >
-                        Location
-                      </button>{' '}
-                      above.
-                    </p>
+                  <Row label="Total discount" value={totals.totalDiscount} />
+                )}
+
+                <Row label="Gross total" value={totals.grossTotal} />
+
+                {/* One row per charge the mill uses on purchases, taken from
+                    the charge master rather than written into this form. Add a
+                    charge there and a row appears here; change its GST rate
+                    there and this follows. */}
+                {chargeTypes.length === 0 ? (
+                  <p className="text-xs text-muted-foreground py-1">
+                    No purchase charges are set up yet — add them under{' '}
+                    <a
+                      href="/masters/charges"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary underline"
+                    >
+                      Masters → Charges
+                    </a>
+                    .
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 pt-0.5">
+                    {totals.chargeRows.map((c) => (
+                      <div key={c.chargeTypeId} className="flex items-center justify-between gap-3">
+                        <span className="text-muted-foreground">
+                          {c.name} @{c.gstRate}%
+                        </span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          className="form-input h-8 w-28 text-right"
+                          placeholder="0.00"
+                          value={charges[c.chargeTypeId] ?? ''}
+                          onChange={(e) =>
+                            setCharges((prev) => ({ ...prev, [c.chargeTypeId]: e.target.value }))
+                          }
+                          aria-label={`${c.name} amount`}
+                        />
+                      </div>
+                    ))}
                   </div>
                 )}
-              </div>
-            </div>
 
-          </Section>
+                {taxMode === 'CGST_SGST' && (
+                  <>
+                    <Row label="SGST" value={totals.tax / 2} />
+                    <Row label="CGST" value={totals.tax / 2} />
+                  </>
+                )}
+                {/* Not SGST + CGST when the goods cross a state line. The
+                    split follows the place of supply, and showing two halves
+                    of a tax the supplier cannot charge would misstate the
+                    order, so this row says what it really is. */}
+                {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                {taxMode === 'NONE' && (
+                  <p className="text-xs text-muted-foreground py-1">
+                    No GST — this supplier is not registered.
+                  </p>
+                )}
+                {taxMode === null && (
+                  <>
+                    <Row label="SGST" value={0} />
+                    <Row label="CGST" value={0} />
+                  </>
+                )}
+
+                <Row label="Total tax" value={totals.tax} />
+
+                {/* Carries no GST of its own and is added after tax, which is
+                    how the mill's old system had it. */}
+                <div className="flex items-center justify-between gap-3">
+                  <label htmlFor="po-other-charges" className="text-muted-foreground">
+                    Other charges
+                  </label>
+                  <input
+                    id="po-other-charges"
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    className="form-input h-8 w-28 text-right"
+                    placeholder="0.00"
+                    value={otherCharges}
+                    onChange={(e) => setOtherCharges(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between pt-2 border-t border-border">
+                  <span className="font-semibold text-foreground">Total</span>
+                  <span className="font-semibold text-foreground tabular-nums text-lg">
+                    ₹{inr(totals.total)}
+                  </span>
+                </div>
+
+                {taxMode === null && (
+                  <p className="text-xs text-muted-foreground pt-1">
+                    Choose a supplier to see whether the tax splits into SGST + CGST or is IGST.
+                  </p>
+                )}
+              </div>
+            </Section>
+          </div>
 
           {/* 5 — What the order says, and how it goes out. Template and email
               share one row: neither does anything yet, so a column each was
@@ -1644,12 +2180,25 @@ export function PurchaseOrderDialog({
           </button>
           <button
             type="button"
+            onClick={() => void save('print')}
+            className="btn-secondary"
+            disabled={busy || incomplete}
+          >
+            {saving === 'print' ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <Printer size={15} />
+            )}
+            Save and print
+          </button>
+          <button
+            type="button"
             onClick={() => void save('send')}
             className="btn-primary"
             disabled={busy || incomplete}
           >
             {saving === 'send' && <Loader2 size={15} className="animate-spin" />}
-            {isEdit ? 'Save and send' : 'Save order'}
+            Save
           </button>
         </div>
       </div>
