@@ -7,6 +7,69 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 16 Sep 2026 — the bill of materials gains sizes, a routing and a status
+
+**Migration:** `20260916104500_bom_size_routing_and_status`
+**Branch:** `feat/masters-bom-size-routing-status`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+One new table and seven new columns. Nothing was renamed, dropped or emptied.
+
+| Table | Change |
+|---|---|
+| `bom_line_sizes` | New. One row per size whose consumption differs from the line |
+| `bom` | `routingId`, `baseSizeId`, `status`, `approvedById`, `approvedAt`, `copiedFromId`, `labourCost` |
+| `bom_lines` | `component` — which part of the garment, "Body", "Collar" |
+
+Plus an index on `bom.status` and the two foreign-key indexes `bom_lines` never
+had, so a BOM read stops being a sequential scan.
+
+### The backfill, and what it deliberately left alone
+
+`status` defaults to `DRAFT`. Left at that, every BOM already being costed
+against would read as a draft nobody had agreed to, so the migration promotes
+the settled ones:
+
+```sql
+UPDATE "bom" b SET "status" = 'APPROVED'
+WHERE b."isActive"
+  AND (SELECT count(*) FROM "bom" x
+       WHERE x."styleId" = b."styleId" AND x."isActive") = 1;
+```
+
+Only where a style has **exactly one** active BOM. Where two are active there is
+no way to tell which one the floor is working to, and those stay `DRAFT` for a
+person to decide — guessing would be the very ambiguity the column exists to
+end. All four BOMs on the database were unambiguous and are now `APPROVED`.
+
+### Why this migration was written by hand
+
+`prisma migrate dev` could not be used. The live database carries leftovers that
+no branch defines any more — `purchase_order_attachments`, and
+`enquiryNo` / `enquiryDate` / `reference` / `remark` / `deliveryCustomerId` on
+`purchase_orders`, plus `grnLineId` on `purchase_invoice_lines` and a couple of
+`createdById` columns. They date from the init migration that went in through
+the Supabase connector. Prisma wants to drop all of them.
+
+**They are all empty** — checked before this went in — so clearing them up is
+safe whenever somebody wants to. It just is not a bill-of-materials job, and
+burying it inside this migration would have been a nasty surprise in the pull
+request. Until then, expect `migrate dev` to keep proposing those drops. Say no.
+
+### One thing that nearly went wrong
+
+Before this, `main` did not have the stock-documents models, but the database
+did. Running `migrate dev` from `main` would have dropped `stock_transfers` and
+`stock_adjustments` with their lines — real rows, and 61 `stock_ledger` entries
+beside them. `feat/inventory-stock-documents` has now been merged into `main`,
+which is what closed that gap. Worth remembering that `prisma migrate status`
+says "up to date" in exactly that situation: it checks which migrations ran, not
+whether the schema still matches.
+
+---
+
 ## 8 Sep 2026 — stock transfers and stock adjustments become documents
 
 **Migration:** `20260908102141_add_stock_transfer_and_adjustment_documents`
