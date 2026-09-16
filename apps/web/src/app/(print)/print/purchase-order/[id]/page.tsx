@@ -94,6 +94,15 @@ interface PrintPayload {
     sgst: string
     igst: string
     roundOff: string
+    otherCharges: string
+    /// Transport, freight, dyeing. Printed because the supplier is being asked
+    /// to invoice them, and a total that included charges the sheet did not
+    /// name would be queried on every order.
+    charges: {
+      amount: string
+      gstRate: string
+      chargeType: { name: string }
+    }[]
     totalAmount: string
     supplier: Record<string, string | null> & { creditDays?: number | null }
     deliveryWarehouse: { name: string; address: string | null } | null
@@ -169,6 +178,22 @@ const MONO = '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace'
 function categoryPath(c?: { name: string; parent?: { name: string } | null } | null): string | null {
   if (!c) return null
   return c.parent ? `${c.parent.name} › ${c.name}` : c.name
+}
+
+/**
+ * The order type in words.
+ *
+ * `poType` holds a code the buyer picks on the form, and a code is not
+ * something to put in front of a supplier — the sheet used to print
+ * "STANDARD" and would otherwise now print "ITEM_LEVEL". Item-level discount
+ * is the ordinary way the mill orders, so it keeps reading "Standard" and the
+ * printed sheet does not change for the vast majority of orders.
+ */
+const ORDER_TYPES: Record<string, string> = {
+  ITEM_LEVEL: 'Standard',
+  STANDARD: 'Standard',
+  ORDER_LEVEL: 'Discount on the order',
+  NONE: 'No discount',
 }
 
 /** Every figure on the sheet goes through here, so columns align. */
@@ -712,6 +737,18 @@ export default function PrintPurchaseOrder() {
       <div style={{ background: PANEL, border: `1px solid ${RULE}`, padding: '5px 0' }}>
         <TotalRow label="Total Discount" value={money(order.discountAmount)} />
         <TotalRow label="Sub Total" value={money(order.taxableAmount)} />
+        {/* Only the charges this order actually carries. Printing every kind
+            the mill uses, at zero, would have the supplier hunting for which
+            of five freight lines applied to them. */}
+        {(order.charges ?? [])
+          .filter((c) => Number(c.amount) !== 0)
+          .map((c, i) => (
+            <TotalRow
+              key={`${c.chargeType.name}-${i}`}
+              label={`${c.chargeType.name} @${Number(c.gstRate)}%`}
+              value={money(c.amount)}
+            />
+          ))}
         {taxMode === 'CGST_SGST' && (
           <>
             <TotalRow label="SGST" value={money(order.sgst)} />
@@ -719,6 +756,9 @@ export default function PrintPurchaseOrder() {
           </>
         )}
         {taxMode === 'IGST' && <TotalRow label="IGST" value={money(order.igst)} />}
+        {Number(order.otherCharges) !== 0 && (
+          <TotalRow label="Other Charges" value={money(order.otherCharges)} />
+        )}
         {Number(order.roundOff) !== 0 && (
           <TotalRow label="Rounding" value={money(order.roundOff)} />
         )}
@@ -992,7 +1032,10 @@ export default function PrintPurchaseOrder() {
               >
                 <Eyebrow>Order Details</Eyebrow>
                 <div style={{ marginTop: '4px' }}>
-                  <DetailRow label="Order type" value={order.poType || null} />
+                  <DetailRow
+                    label="Order type"
+                    value={order.poType ? (ORDER_TYPES[order.poType] ?? order.poType) : null}
+                  />
                   {/* Their quotation number goes above our own reference: it is
                       the supplier's way in, and this is the supplier's copy. */}
                   <DetailRow label="Enquiry No" value={sheetOrder.enquiryNo} mono />
