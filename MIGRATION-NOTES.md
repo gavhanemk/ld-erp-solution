@@ -288,3 +288,73 @@ The service role key never leaves the server.
 
 Nothing to the database. Same three commands as the entry above, plus the two
 environment variables in `apps/api/.env` if you want uploads working locally.
+
+---
+
+## 16 Sep 2026 — charges, a style number, and the order type on a purchase order
+
+**Migration:** `20260916152235_purchase_order_charges_and_style`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+| Change | Where |
+|---|---|
+| New table `purchase_order_charges` | transport, freight and dyeing on an order |
+| `otherCharges` | `purchase_orders` — a catch-all that carries no GST |
+| `styleId` | `purchase_order_lines` — the garment style the material is bought for |
+
+Additive only: two `ADD COLUMN`, one `CREATE TABLE`, and their keys. Nothing
+renamed, nothing dropped. Every order already on the system keeps its figures
+and simply has no charges and no style.
+
+`poType` was **not** part of this migration. That column has existed since the
+first migration; nothing had ever set it, so every order carried the default.
+The form writes it now — no schema change was needed.
+
+### Why a table rather than six columns
+
+The old ERP had five fixed charge rows — transport at 5%, freight at 12% and
+18%, dyeing at 18% and 5%. Six named columns would have been quicker and would
+have baked today's GST rates into column names; the mill has re-rated these
+before. `PurchaseOrderCharge` is deliberately the same shape as
+`PurchaseInvoiceCharge`, so a charge agreed on the order and the charge that
+turns up on the bill can be compared row for row by the three-way match.
+
+The rows on the form are the rows in **Masters → Charges** where "apply on
+purchase" is ticked. Add one there and a row appears on the order; change its
+GST rate there and the order follows. Two charge types were added to make up
+the old form's five: *Freight / Courier (Transporter)* at 12% and *Dyeing
+Charges (Processing)* at 18%. Rename them there if the mill words them
+differently — nothing in the code matches on the name.
+
+A charge's GST rate is **copied onto the order row** when it is raised, not
+read live. A rate corrected in the master next week must not silently change
+what an order already sent to a supplier was taxed at.
+
+### How this one was applied, and why it matters
+
+Not with `pnpm db:migrate`. The shared database still had a migration this repo
+does not (`20260916104500_bom_size_routing_and_status`), so `prisma migrate
+dev` would have compared our schema to the database, found the BOM tables
+unexplained, and offered to drop them — 4 BOMs, 39 BOM lines, 5 routings and 46
+routing steps of real data.
+
+Instead the SQL was hand-written, checked for destructive statements, applied
+with `prisma db execute` — which runs the file and never diffs the schema — and
+then recorded with `prisma migrate resolve --applied`. Row counts were taken
+before and after and every existing table was unchanged.
+
+**The same warning still stands: do not run `pnpm db:migrate`** until the BOM
+migration is in this repo. It sits on `origin/feat/masters-bom-size-routing-status`.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
