@@ -34,10 +34,24 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
   description: z.string().max(300).optional().nullable(),
+  // The garment style this material is bought for. A relation, not typed text.
+  styleId: z.string().optional().nullable(),
   qty: z.number().positive('Quantity must be more than zero'),
   unitRate: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
   gstRate: z.number().min(0).max(100).optional(),
+})
+
+/**
+ * One charge on the order — transport, freight, dyeing.
+ *
+ * Only the kind and the amount come from the browser. The GST rate is read
+ * from the charge type on the server and frozen onto the row, so a rate the
+ * form was holding from an hour ago cannot change what the order is taxed at.
+ */
+const chargeSchema = z.object({
+  chargeTypeId: z.string().min(1, 'Pick a charge'),
+  amount: z.number().min(0, 'A charge cannot be negative'),
 })
 
 const createSchema = z.object({
@@ -45,6 +59,20 @@ const createSchema = z.object({
   poDate: z.coerce.date().optional(),
   deliveryDate: z.coerce.date().optional().nullable(),
   deliveryWarehouseId: z.string().optional().nullable(),
+  /*
+   * Which of the mill's three ways of ordering this is. It decides where a
+   * discount is allowed to sit, which is why the buyer picks it before typing
+   * any figures:
+   *
+   *   ITEM_LEVEL   a discount per line, the usual case
+   *   ORDER_LEVEL  one discount off the whole order
+   *   NONE         no discount at all
+   *
+   * An open string on the model, so the list is held here rather than in an
+   * enum — the mill has renamed these before and a rename should not need a
+   * migration.
+   */
+  poType: z.enum(['ITEM_LEVEL', 'ORDER_LEVEL', 'NONE']).optional(),
   // Ship straight to a customer instead of to one of our warehouses.
   deliveryCustomerId: z.string().optional().nullable(),
   // Which quotation this order answers, and whatever the mill quotes back.
@@ -55,6 +83,10 @@ const createSchema = z.object({
   // Internal. `notes` is printed on the supplier's copy; this is not.
   remark: z.string().max(1000).optional().nullable(),
   discountAmount: z.number().min(0).optional(),
+  charges: z.array(chargeSchema).max(20).optional(),
+  // Carries no GST of its own and is added after tax, which is how the mill's
+  // old system treated it.
+  otherCharges: z.number().min(0).optional(),
   notes: z.string().max(1000).optional().nullable(),
   terms: z.string().max(4000).optional().nullable(),
   lines: z.array(lineSchema).min(1, 'An order needs at least one line'),
@@ -72,6 +104,9 @@ const poInclude = {
       paymentTerms: true, creditDays: true,
     },
   },
+  charges: {
+    include: { chargeType: { select: { id: true, name: true, defaultGstRate: true } } },
+  },
   deliveryWarehouse: { select: { id: true, name: true, address: true } },
   deliveryCustomer: { select: { id: true, name: true, code: true, gstin: true } },
   createdBy: { select: { id: true, name: true } },
@@ -79,6 +114,7 @@ const poInclude = {
   lines: {
     orderBy: { sortOrder: 'asc' as const },
     include: {
+      style: { select: { id: true, code: true, name: true } },
       item: {
         select: {
           id: true, code: true, name: true, hsnCode: true,
@@ -202,11 +238,21 @@ async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: s
   return { stateCode, address, name: customer.name }
 }
 
+/**
+ * `charges` arrive with their GST rate already read off the charge type — see
+ * `resolveCharges`. They are taxed like a line but are not discountable: the
+ * mill's discount is negotiated on the goods, not on the transporter's bill.
+ *
+ * `otherCharges` carries no GST and is added after tax, which is how the old
+ * system treated it and how the printed sheet reads.
+ */
 function priceOrder(
   lines: z.infer<typeof lineSchema>[],
   discountAmount: number,
   isIntraState: boolean,
   chargeTax: boolean,
+  charges: { chargeTypeId: string; amount: number; gstRate: number }[] = [],
+  otherCharges = 0,
 ) {
   const lineTotals = lines.map((l) => l.qty * l.unitRate * (1 - (l.discount ?? 0) / 100))
   const subtotal = round2(lineTotals.reduce((s, n) => s + n, 0))
@@ -219,25 +265,97 @@ function priceOrder(
   let sgst = 0
   let igst = 0
 
+  const split = (tax: number) => {
+    if (isIntraState) {
+      cgst += tax / 2
+      sgst += tax / 2
+    } else {
+      igst += tax
+    }
+  }
+
   if (chargeTax) {
     lines.forEach((line, i) => {
-      const tax = lineTotals[i] * factor * ((line.gstRate ?? 0) / 100)
-      if (isIntraState) {
-        cgst += tax / 2
-        sgst += tax / 2
-      } else {
-        igst += tax
-      }
+      split(lineTotals[i] * factor * ((line.gstRate ?? 0) / 100))
     })
   }
+
+  // Each charge's own tax, kept per charge so the row can be compared against
+  // the same row on the bill when it arrives.
+  const chargeRows = charges.map((c) => {
+    const tax = chargeTax ? round2(c.amount * (c.gstRate / 100)) : 0
+    split(tax)
+    return {
+      chargeTypeId: c.chargeTypeId,
+      amount: round2(c.amount),
+      gstRate: c.gstRate,
+      cgst: isIntraState ? round2(tax / 2) : 0,
+      sgst: isIntraState ? round2(tax / 2) : 0,
+      igst: isIntraState ? 0 : round2(tax),
+    }
+  })
+
+  const chargeTotal = round2(chargeRows.reduce((t, c) => t + c.amount, 0))
 
   cgst = round2(cgst)
   sgst = round2(sgst)
   igst = round2(igst)
 
-  const { rounded, roundOff } = applyRoundOff(taxable + cgst + sgst + igst)
+  const { rounded, roundOff } = applyRoundOff(
+    taxable + chargeTotal + cgst + sgst + igst + round2(otherCharges),
+  )
 
-  return { lineTotals, subtotal, discount, taxable, cgst, sgst, igst, roundOff, total: rounded }
+  return {
+    lineTotals,
+    subtotal,
+    discount,
+    taxable,
+    chargeRows,
+    chargeTotal,
+    otherCharges: round2(otherCharges),
+    cgst,
+    sgst,
+    igst,
+    roundOff,
+    total: rounded,
+  }
+}
+
+/**
+ * Reads each charge's GST rate off the charge type, and refuses a kind of
+ * charge the mill does not use on purchases.
+ *
+ * The rate is not taken from the browser on purpose: it is the difference
+ * between an order taxed at 12% and one taxed at 18%, and the form could be
+ * holding a rate that was corrected in the master since it loaded.
+ */
+async function resolveCharges(
+  tx: Prisma.TransactionClient,
+  charges: z.infer<typeof chargeSchema>[],
+) {
+  const wanted = charges.filter((c) => c.amount > 0)
+  if (!wanted.length) return []
+
+  const types = await tx.chargeType.findMany({
+    where: { id: { in: wanted.map((c) => c.chargeTypeId) }, applyOnPurchase: true, isActive: true },
+    select: { id: true, defaultGstRate: true },
+  })
+  const rateById = new Map(types.map((t) => [t.id, Number(t.defaultGstRate)]))
+
+  const unknown = wanted.find((c) => !rateById.has(c.chargeTypeId))
+  if (unknown) {
+    throw new AppError(
+      'One of those charges is not a charge the mill uses on purchases.',
+      400,
+      'INVALID_CHARGE',
+    )
+  }
+
+  return wanted.map((c) => ({
+    chargeTypeId: c.chargeTypeId,
+    amount: c.amount,
+    gstRate: rateById.get(c.chargeTypeId)!,
+  }))
 }
 
 // ── Purchase orders ─────────────────────────────────────────────────────────
@@ -330,17 +448,22 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
       throw new AppError('One of those items no longer exists', 400, 'INVALID_ITEM')
     }
 
+    const charges = await resolveCharges(tx, data.charges ?? [])
+
     const priced = priceOrder(
       data.lines,
       data.discountAmount ?? 0,
       tax.isIntraState,
       !tax.supplierIsUnregistered,
+      charges,
+      data.otherCharges ?? 0,
     )
 
     return tx.purchaseOrder.create({
       data: {
         poNumber,
         supplierId: data.supplierId,
+        poType: data.poType ?? 'ITEM_LEVEL',
         poDate: data.poDate ?? new Date(),
         deliveryDate: data.deliveryDate ?? undefined,
         deliveryWarehouseId: data.deliveryWarehouseId || null,
@@ -358,14 +481,17 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         sgst: priced.sgst,
         igst: priced.igst,
         roundOff: priced.roundOff,
+        otherCharges: priced.otherCharges,
         totalAmount: priced.total,
         notes: data.notes ?? null,
         terms: data.terms ?? null,
         createdById: req.user!.id,
+        charges: { create: priced.chargeRows },
         lines: {
           create: data.lines.map((l, i) => ({
             itemId: l.itemId,
             description: l.description ?? null,
+            styleId: l.styleId || null,
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
             unitRate: l.unitRate,
@@ -413,6 +539,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
   // without. Kept in one place so a field added to one cannot be forgotten in
   // the other, which is how an edit ends up saving on some screens only.
   const headerPatch = {
+    ...(data.poType !== undefined ? { poType: data.poType } : {}),
     ...(data.poDate ? { poDate: data.poDate } : {}),
     ...(data.deliveryDate !== undefined ? { deliveryDate: data.deliveryDate ?? null } : {}),
     ...(data.deliveryWarehouseId !== undefined
@@ -449,12 +576,36 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       })
       const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
 
+      /*
+       * Charges are replaced wholesale, like the lines, and only when the edit
+       * mentions them. An edit that sends no `charges` key leaves the ones the
+       * order already carries alone rather than clearing them — the same rule
+       * the header fields follow.
+       */
+      const charges =
+        data.charges !== undefined
+          ? await resolveCharges(tx, data.charges)
+          : before.charges.map((c) => ({
+              chargeTypeId: c.chargeTypeId,
+              amount: Number(c.amount),
+              gstRate: Number(c.gstRate),
+            }))
+
       const priced = priceOrder(
         data.lines,
         data.discountAmount ?? Number(before.discountAmount),
         tax.isIntraState,
         !tax.supplierIsUnregistered,
+        charges,
+        data.otherCharges ?? Number(before.otherCharges),
       )
+
+      await tx.purchaseOrderCharge.deleteMany({ where: { poId: before.id } })
+      if (priced.chargeRows.length) {
+        await tx.purchaseOrderCharge.createMany({
+          data: priced.chargeRows.map((c) => ({ poId: before.id, ...c })),
+        })
+      }
 
       await tx.purchaseOrderLine.deleteMany({ where: { poId: before.id } })
       await tx.purchaseOrderLine.createMany({
@@ -462,6 +613,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           poId: before.id,
           itemId: l.itemId,
           description: l.description ?? null,
+          styleId: l.styleId || null,
           hsnCode: hsnById.get(l.itemId) ?? null,
           qty: l.qty,
           unitRate: l.unitRate,
@@ -487,6 +639,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           sgst: priced.sgst,
           igst: priced.igst,
           roundOff: priced.roundOff,
+          otherCharges: priced.otherCharges,
           totalAmount: priced.total,
         },
         include: poInclude,
