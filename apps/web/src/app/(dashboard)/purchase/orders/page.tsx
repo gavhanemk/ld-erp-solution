@@ -1,8 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Send, Ban } from 'lucide-react'
+import {
+  Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Send, Ban,
+  ChevronDown, ChevronRight,
+} from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
@@ -31,6 +34,8 @@ export default function PurchaseOrdersPage() {
   const [status, setStatus] = useState('')
   const [page, setPage] = useState(1)
   const [busy, setBusy] = useState(false)
+  // Which order has its items open. One at a time, as on the receipt screen.
+  const [open, setOpen] = useState<string | null>(null)
   const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseOrder | null }>({
     open: false,
     record: null,
@@ -162,13 +167,16 @@ export default function PurchaseOrdersPage() {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="data-table w-full">
+            <table className="data-table w-full min-w-[1100px]">
               <thead>
                 <tr>
+                  <th style={{ width: 32 }} />
                   <th>Order</th>
                   <th>Supplier</th>
                   <th>Date</th>
-                  <th>Wanted by</th>
+                  <th>Enquiry</th>
+                  <th>Reference</th>
+                  <th>Items</th>
                   <th style={{ textAlign: 'right' }}>Total</th>
                   <th>Status</th>
                   <th />
@@ -177,8 +185,27 @@ export default function PurchaseOrdersPage() {
               <tbody>
                 {rows.map((po) => {
                   const s = STATUS[po.status] ?? { label: po.status, cls: 'badge-neutral' }
+                  const lines = po.lines ?? []
+                  const expanded = open === po.id
                   return (
-                    <tr key={po.id}>
+                    <Fragment key={po.id}>
+                    <tr>
+                      <td>
+                        {/* Item code, category and quantity belong to a line, not
+                            to the order — a four-item order has four of each — so
+                            they open underneath rather than being flattened into
+                            a column that could only ever show the first one. */}
+                        <button
+                          className="btn-ghost p-1"
+                          onClick={() => setOpen(expanded ? null : po.id)}
+                          disabled={lines.length === 0}
+                          title={expanded ? 'Hide items' : 'Show items'}
+                          aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
+                          aria-expanded={expanded}
+                        >
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                      </td>
                       <td className="font-mono text-xs text-teal-400">{po.poNumber}</td>
                       <td>
                         <div className="font-medium text-foreground">{po.supplier?.name}</div>
@@ -188,12 +215,41 @@ export default function PurchaseOrdersPage() {
                           </div>
                         )}
                       </td>
-                      <td className="text-xs">{formatDate(po.poDate)}</td>
+                      <td className="text-xs whitespace-nowrap">{formatDate(po.poDate)}</td>
                       <td className="text-xs">
-                        {po.deliveryDate ? (
-                          formatDate(po.deliveryDate)
+                        {po.enquiryNo ? (
+                          <>
+                            <div className="font-mono text-foreground">{po.enquiryNo}</div>
+                            {po.enquiryDate && (
+                              <div className="text-[10px] text-muted-foreground">
+                                {formatDate(po.enquiryDate)}
+                              </div>
+                            )}
+                          </>
                         ) : (
                           <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="text-xs">
+                        {po.reference ? (
+                          po.reference
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="text-xs whitespace-nowrap">
+                        {lines.length === 0 ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <>
+                            <div className="text-foreground">
+                              {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                            </div>
+                            <div className="text-[10px] text-muted-foreground truncate max-w-[160px]">
+                              {lines[0].item?.name}
+                              {lines.length > 1 ? ` +${lines.length - 1} more` : ''}
+                            </div>
+                          </>
                         )}
                       </td>
                       <td className="text-right font-semibold tabular-nums">₹{money(po.totalAmount)}</td>
@@ -246,6 +302,84 @@ export default function PurchaseOrdersPage() {
                         </div>
                       </td>
                     </tr>
+
+                    {expanded && lines.length > 0 && (
+                      <tr>
+                        <td colSpan={10} className="bg-secondary/30 p-0">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-border">
+                                {['Item code', 'Item', 'Category', 'Subcategory', 'Qty', 'Rate', 'Amount'].map(
+                                  (h) => (
+                                    <th
+                                      key={h}
+                                      className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-4 ${
+                                        ['Qty', 'Rate', 'Amount'].includes(h) ? 'text-right' : 'text-left'
+                                      }`}
+                                    >
+                                      {h}
+                                    </th>
+                                  ),
+                                )}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {lines.map((line, i) => {
+                                // An item is filed under one category, which may
+                                // itself sit under a parent. Where it does, the
+                                // parent is the category and the item's own is the
+                                // subcategory; where it does not, there is no
+                                // subcategory to show.
+                                const cat = line.item?.category
+                                const parent = cat?.parent
+                                return (
+                                  <tr key={line.itemId + i} className="border-b border-border/40 last:border-0">
+                                    <td className="py-2 px-4 font-mono text-xs text-teal-400 whitespace-nowrap">
+                                      {line.item?.code ?? '—'}
+                                    </td>
+                                    <td className="py-2 px-4">
+                                      <div className="text-foreground">{line.item?.name ?? '—'}</div>
+                                      {line.description && (
+                                        <div className="text-[10px] text-muted-foreground">
+                                          {line.description}
+                                        </div>
+                                      )}
+                                      {line.item?.hsnCode && (
+                                        <div className="text-[10px] text-muted-foreground font-mono">
+                                          HSN {line.item.hsnCode}
+                                        </div>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-4 text-xs">
+                                      {parent?.name ?? cat?.name ?? (
+                                        <span className="text-muted-foreground">—</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-4 text-xs">
+                                      {parent ? (
+                                        cat?.name
+                                      ) : (
+                                        <span className="text-muted-foreground">—</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-4 text-right tabular-nums whitespace-nowrap">
+                                      {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                    </td>
+                                    <td className="py-2 px-4 text-right tabular-nums">
+                                      ₹{money(line.unitRate)}
+                                    </td>
+                                    <td className="py-2 px-4 text-right tabular-nums font-medium">
+                                      ₹{money(line.amount ?? 0)}
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   )
                 })}
               </tbody>

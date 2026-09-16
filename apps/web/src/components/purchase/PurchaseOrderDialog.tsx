@@ -12,7 +12,6 @@ import {
   FileText,
   Package,
   Truck,
-  Building2,
   Paperclip,
   ScrollText,
   Search,
@@ -40,12 +39,15 @@ export interface PoLine {
   unitRate: number | string
   discount: number | string
   gstRate: number | string
+  /** Priced by the API. Absent on a line the form is still building. */
+  amount?: number | string
   item?: {
     id: string
     code: string
     name: string
     hsnCode: string | null
     uom?: { symbol: string } | null
+    category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
   }
 }
 
@@ -56,6 +58,7 @@ export interface PurchaseOrder {
   poDate: string
   deliveryDate: string | null
   deliveryWarehouseId: string | null
+  deliveryCustomerId: string | null
   enquiryNo: string | null
   enquiryDate: string | null
   reference: string | null
@@ -89,6 +92,26 @@ interface Option {
   category?: { id: string; name: string } | null
   parentId?: string | null
   address?: string | null
+  // A customer keeps two addresses. Goods are taxed where they land, so the
+  // shipping one wins wherever both are set.
+  shippingStateCode?: string | null
+  billingStateCode?: string | null
+  shippingGstin?: string | null
+  shippingAddress?: string | null
+  shippingCity?: string | null
+  shippingPincode?: string | null
+  billingAddress?: string | null
+  billingCity?: string | null
+  billingPincode?: string | null
+}
+
+interface Attachment {
+  id: string
+  fileName: string
+  sizeBytes: number
+  mimeType: string | null
+  uploadedBy?: { id: string; name: string } | null
+  createdAt: string
 }
 
 interface CompanyLite {
@@ -100,6 +123,16 @@ interface CompanyLite {
   stateCode?: string | null
   email?: string | null
 }
+
+/**
+ * The biggest file that may be attached, and the most files on one order.
+ *
+ * Kept the same as the API and the storage bucket. This copy only exists so
+ * the form can say no immediately rather than after the file has been sent;
+ * the server and the bucket are what actually enforce it.
+ */
+const MAX_FILE_MB = 50
+const MAX_FILES = 5
 
 const num = (v: unknown) => {
   const n = Number(v)
@@ -192,18 +225,18 @@ export function PurchaseOrderDialog({
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<Option[]>([])
   const [warehouses, setWarehouses] = useState<Option[]>([])
+  const [customers, setCustomers] = useState<Option[]>([])
   const [categories, setCategories] = useState<Option[]>([])
   const [company, setCompany] = useState<CompanyLite | null>(null)
 
   // Header
   const [supplierId, setSupplierId] = useState('')
-  const [supplierFilter, setSupplierFilter] = useState('')
   const [warehouseId, setWarehouseId] = useState('')
   const [enquiryNo, setEnquiryNo] = useState('')
   const [enquiryDate, setEnquiryDate] = useState('')
   const [reference, setReference] = useState('')
-  const [remark, setRemark] = useState('')
   const [deliverTo, setDeliverTo] = useState<'ORGANIZATION' | 'CUSTOMER'>('ORGANIZATION')
+  const [deliveryCustomerId, setDeliveryCustomerId] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
   const [terms, setTerms] = useState('')
@@ -216,10 +249,17 @@ export function PurchaseOrderDialog({
   const [pickItem, setPickItem] = useState('')
   const [pickQty, setPickQty] = useState('')
 
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  // Files chosen on a new order, held here until it has a number to hang them
+  // on. They go up the moment it is saved.
+  const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  const [uploading, setUploading] = useState(false)
+
   const [saving, setSaving] = useState<'draft' | 'send' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
   const firstFieldRef = useRef<HTMLSelectElement | null>(null)
+  const qtyRef = useRef<HTMLInputElement | null>(null)
 
   // document does not exist while this page is rendered on the server, so the
   // portal can only be opened once the browser has it.
@@ -228,13 +268,12 @@ export function PurchaseOrderDialog({
   useEffect(() => {
     if (!open) return
     setSupplierId(record?.supplierId ?? '')
-    setSupplierFilter('')
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setEnquiryNo(record?.enquiryNo ?? '')
     setEnquiryDate(record?.enquiryDate?.slice(0, 10) ?? '')
     setReference(record?.reference ?? '')
-    setRemark(record?.remark ?? '')
-    setDeliverTo('ORGANIZATION')
+    setDeliveryCustomerId(record?.deliveryCustomerId ?? '')
+    setDeliverTo(record?.deliveryCustomerId ? 'CUSTOMER' : 'ORGANIZATION')
     // An order saved with no discount reopens with the box empty, not with a
     // zero in it — a zero sitting there is not a figure anyone typed.
     setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
@@ -255,6 +294,8 @@ export function PurchaseOrderDialog({
     setPickSubcategory('')
     setPickItem('')
     setPickQty('')
+    setAttachments([])
+    setPendingFiles([])
     setError(null)
     setSaving(null)
   }, [open, record])
@@ -267,16 +308,18 @@ export function PurchaseOrderDialog({
       masterResource<Option>('suppliers').list({ limit: 500, active: true }),
       masterResource<Option>('items').list({ limit: 500, active: true }),
       masterResource<Option>('warehouses').list({ limit: 100, active: true }),
+      masterResource<Option>('customers').list({ limit: 500, active: true }),
       masterResource<Option>('item-categories').list({ limit: 200, active: true }).catch(() => null),
       // The company block under "deliver to" is our own address. Settings is
       // the only place that serves it and a purchase clerk may not be allowed
       // in there, so the address is treated as a nicety, not a requirement.
       api.get<{ success: boolean; data: CompanyLite }>('/settings/company').catch(() => null),
-    ]).then(([s, i, w, c, co]) => {
+    ]).then(([s, i, w, cust, c, co]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
       setWarehouses((w as Paginated<Option>).data)
+      setCustomers((cust as Paginated<Option>).data)
       setCategories(c ? (c as Paginated<Option>).data : [])
       setCompany(co?.data ?? null)
     })
@@ -285,6 +328,25 @@ export function PurchaseOrderDialog({
       cancelled = true
     }
   }, [open])
+
+  // Only an order that exists can have files against it.
+  useEffect(() => {
+    if (!open || !record?.id) return
+    let cancelled = false
+    void api
+      .get<{ success: boolean; data: Attachment[] }>(`/purchase/orders/${record.id}/attachments`)
+      .then((res) => {
+        if (!cancelled) setAttachments(res.data)
+      })
+      .catch(() => {
+        // An order with no files and a server that would not answer look the
+        // same here. The list stays empty; uploading will report the real
+        // problem if there is one.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, record?.id])
 
   useEffect(() => {
     if (!open) return
@@ -313,14 +375,6 @@ export function PurchaseOrderDialog({
     [categories, pickCategory],
   )
 
-  const visibleSuppliers = useMemo(() => {
-    const q = supplierFilter.trim().toLowerCase()
-    if (!q) return suppliers
-    return suppliers.filter(
-      (s) => s.name.toLowerCase().includes(q) || (s.code ?? '').toLowerCase().includes(q),
-    )
-  }, [suppliers, supplierFilter])
-
   /** Items narrowed by the code search and whichever category level is chosen. */
   const visibleItems = useMemo(() => {
     const q = pickSearch.trim().toLowerCase()
@@ -340,11 +394,35 @@ export function PurchaseOrderDialog({
     })
   }, [items, pickSearch, pickCategory, pickSubcategory, subCategories])
 
+  const deliveryCustomer =
+    deliverTo === 'CUSTOMER' ? (customers.find((c) => c.id === deliveryCustomerId) ?? null) : null
+
+  const customerStateCode =
+    deliveryCustomer?.shippingStateCode ||
+    deliveryCustomer?.billingStateCode ||
+    deliveryCustomer?.shippingGstin?.slice(0, 2) ||
+    deliveryCustomer?.gstin?.slice(0, 2) ||
+    null
+
+  const customerAddress =
+    [deliveryCustomer?.shippingAddress, deliveryCustomer?.shippingCity, deliveryCustomer?.shippingPincode]
+      .filter(Boolean)
+      .join(', ') ||
+    [deliveryCustomer?.billingAddress, deliveryCustomer?.billingCity, deliveryCustomer?.billingPincode]
+      .filter(Boolean)
+      .join(', ') ||
+    null
+
+  // Where the goods land. Our own address unless the order says a customer,
+  // and it is this — not our state — that the supplier's state is compared
+  // against, because goods are taxed where they are delivered.
+  const placeOfSupply = customerStateCode || company?.stateCode
+
   const taxMode = !supplier
     ? null
     : !supplier.gstin
       ? 'NONE'
-      : (supplier.stateCode ?? supplier.gstin?.slice(0, 2)) === company?.stateCode
+      : (supplier.stateCode ?? supplier.gstin?.slice(0, 2)) === placeOfSupply
         ? 'CGST_SGST'
         : 'IGST'
 
@@ -366,6 +444,40 @@ export function PurchaseOrderDialog({
     return { lineAmounts, subtotal, discount, taxable, tax, roundOff: total - beforeRound, total }
   }, [lines, discountAmount, taxMode])
 
+  /**
+   * A selection that no longer matches the filters is dropped.
+   *
+   * A `<select>` whose value is not among its options renders blank while the
+   * state still holds the old id — so the box looked empty and Add would have
+   * put an item on the order that matched neither the code typed nor the
+   * category chosen. Clearing it here covers every cause at once rather than
+   * being remembered in three separate handlers.
+   */
+  useEffect(() => {
+    if (pickItem && !visibleItems.some((i) => i.id === pickItem)) setPickItem('')
+  }, [visibleItems, pickItem])
+
+  /**
+   * What the picker is still waiting for.
+   *
+   * The Add button used to be disabled with nothing to say why, which is the
+   * same as being broken from where the clerk is sitting.
+   */
+  const pickedItem = pickItem ? (itemById.get(pickItem) ?? null) : null
+  const alreadyOnOrder = Boolean(pickedItem && lines.some((l) => l.itemId === pickedItem.id))
+  const typedCode = pickSearch.trim()
+  const pickHint = !pickItem
+    ? visibleItems.length === 0
+      ? typedCode
+        ? `No item matches “${typedCode}”. Check the code, or clear the box and choose a category.`
+        : 'Nothing matches those filters. Choose a different category.'
+      : null
+    : alreadyOnOrder
+      ? `${pickedItem?.name} is already on this order — change its quantity in the table below.`
+      : num(pickQty) <= 0
+        ? `Enter how much ${pickedItem?.name} you want, then press Add.`
+        : null
+
   if (!open || !mounted) return null
 
   const setLine = (index: number, patch: Partial<PoLine>) =>
@@ -378,9 +490,78 @@ export function PurchaseOrderDialog({
    * a rate typed from memory is the mistake the business rules exist to stop.
    * Both stay editable, because a quoted price is often not the standard one.
    */
+  /**
+   * Picking an item sets the category boxes to where that item is actually
+   * filed.
+   *
+   * Otherwise the four fields sit there contradicting each other — a screen
+   * reading "Category: All, Subcategory: None, Item: BOPP Tape" when the tape
+   * is plainly filed under Packing Material. The boxes are one statement
+   * about one item, so they are kept saying the same thing.
+   */
+  const selectItem = (itemId: string) => {
+    setPickItem(itemId)
+    setError(null)
+    if (!itemId) return
+
+    const cat = categories.find((c) => c.id === itemById.get(itemId)?.categoryId)
+    if (!cat) return
+
+    if (cat.parentId) {
+      setPickCategory(cat.parentId)
+      setPickSubcategory(cat.id)
+    } else {
+      setPickCategory(cat.id)
+      setPickSubcategory('')
+    }
+  }
+
+  /**
+   * The code box resolves an item rather than merely narrowing the list.
+   *
+   * Every item has one unique code and that code is its identity — it is what
+   * is quoted on the phone and written on the rack. So typing one in full
+   * picks that item outright, and the category boxes follow. Anything shorter
+   * still narrows the dropdown, which is what you want while you are only
+   * part way through remembering it.
+   */
+  const onCodeTyped = (raw: string) => {
+    setPickSearch(raw)
+    setError(null)
+
+    const typed = raw.trim().toLowerCase()
+    if (!typed) return
+
+    const exact = items.find((i) => (i.code ?? '').toLowerCase() === typed)
+    if (exact) selectItem(exact.id)
+  }
+
+  /** Enter on the code box takes the only match and moves to the quantity. */
+  const onCodeEnter = () => {
+    if (visibleItems.length === 1) selectItem(visibleItems[0].id)
+    if (visibleItems.length <= 1) qtyRef.current?.focus()
+  }
+
   const addLine = () => {
     const item = itemById.get(pickItem)
-    if (!item || num(pickQty) <= 0) return
+    if (!item) {
+      setError('Choose an item before adding it.')
+      return
+    }
+    if (num(pickQty) <= 0) {
+      setError(`How much ${item.name} do you want? Enter a quantity above zero.`)
+      return
+    }
+
+    // The same item twice is nearly always a slip, and two lines for it make
+    // the order hard to check against the bill that follows. Say so and point
+    // at the line that already exists rather than quietly making a second.
+    if (lines.some((l) => l.itemId === item.id)) {
+      setError(
+        `${item.name} is already on this order. Change its quantity in the table below instead of adding it twice.`,
+      )
+      return
+    }
 
     setLines((prev) => [
       ...prev,
@@ -405,13 +586,174 @@ export function PurchaseOrderDialog({
   // for either, and omitting them rather than sending a value means a new
   // order takes today's date from the API, while editing an existing draft
   // leaves the date it already carries alone instead of overwriting it.
+  /**
+   * Sends files to storage, then tells the API they landed.
+   *
+   * The bytes go straight from this browser to the bucket on a one-use link
+   * the API signs — they never pass through our server. One file at a time on
+   * purpose: a mill connection that drops halfway should cost one file, and
+   * the message should name it.
+   */
+  /** The three steps for one file against one order. */
+  const uploadOne = async (file: File, orderId: string): Promise<Attachment> => {
+    const signed = await api.post<{
+      success: boolean
+      data: { uploadUrl: string; storagePath: string }
+    }>(`/purchase/orders/${orderId}/attachments/upload-url`, {
+      fileName: file.name,
+      sizeBytes: file.size,
+    })
+
+    // The token is in the URL's query string, which is the whole
+    // authorisation. No header, and deliberately not our own API token.
+    const put = await fetch(signed.data.uploadUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    })
+    if (!put.ok) {
+      throw new Error(`${file.name} could not be sent. Check your connection and try again.`)
+    }
+
+    const saved = await api.post<{ success: boolean; data: Attachment }>(
+      `/purchase/orders/${orderId}/attachments`,
+      { fileName: file.name, storagePath: signed.data.storagePath },
+    )
+    return saved.data
+  }
+
+  /**
+   * What the file box does.
+   *
+   * On an order that exists the file goes up straight away. On one being
+   * written it is held instead, because a file needs something to belong to
+   * and the order has no number yet — see `save`, which sends them the moment
+   * it does.
+   */
+  const chooseFiles = (fileList: FileList | null) => {
+    if (!fileList?.length) return
+    const chosen = Array.from(fileList)
+
+    const room = MAX_FILES - attachments.length - pendingFiles.length
+    if (chosen.length > room) {
+      setError(
+        room === 0
+          ? `This order already has ${MAX_FILES} files. Remove one before adding another.`
+          : `Only ${room} more file${room === 1 ? '' : 's'} can be attached to this order.`,
+      )
+      return
+    }
+
+    const tooBig = chosen.find((f) => f.size > MAX_FILE_MB * 1024 * 1024)
+    if (tooBig) {
+      setError(
+        `${tooBig.name} is ${(tooBig.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_MB}MB.`,
+      )
+      return
+    }
+
+    setError(null)
+    if (record?.id) void uploadFiles(fileList)
+    else setPendingFiles((prev) => [...prev, ...chosen])
+  }
+
+  const uploadFiles = async (fileList: FileList | null) => {
+    if (!fileList?.length || !record?.id) return
+
+    const chosen = Array.from(fileList)
+    const room = MAX_FILES - attachments.length
+    if (chosen.length > room) {
+      setError(
+        room === 0
+          ? `This order already has ${MAX_FILES} files. Remove one before adding another.`
+          : `Only ${room} more file${room === 1 ? '' : 's'} can be attached to this order.`,
+      )
+      return
+    }
+
+    setUploading(true)
+    setError(null)
+
+    try {
+      for (const file of chosen) {
+        if (file.size > MAX_FILE_MB * 1024 * 1024) {
+          throw new Error(
+            `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_MB}MB.`,
+          )
+        }
+
+        const signed = await api.post<{
+          success: boolean
+          data: { uploadUrl: string; storagePath: string }
+        }>(`/purchase/orders/${record.id}/attachments/upload-url`, {
+          fileName: file.name,
+          sizeBytes: file.size,
+        })
+
+        // Straight to storage. Not through lib/api, because this is not our
+        // API and it must not carry our token.
+        // The token is in the URL's query string, which is the whole
+        // authorisation. No header, and deliberately not our own API token.
+        const put = await fetch(signed.data.uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        })
+        if (!put.ok) {
+          throw new Error(`${file.name} could not be sent. Check your connection and try again.`)
+        }
+
+        const saved = await api.post<{ success: boolean; data: Attachment }>(
+          `/purchase/orders/${record.id}/attachments`,
+          { fileName: file.name, storagePath: signed.data.storagePath },
+        )
+        setAttachments((prev) => [...prev, saved.data])
+      }
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Could not attach that file.',
+      )
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  /** Links are signed on demand and expire, so one is fetched per click. */
+  const openFile = async (id: string) => {
+    try {
+      const res = await api.get<{ success: boolean; data: { url: string } }>(
+        `/purchase/attachments/${id}/link`,
+      )
+      window.open(res.data.url, '_blank', 'noopener')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not open that file.')
+    }
+  }
+
+  const removeFile = async (file: Attachment) => {
+    if (!confirm(`Remove ${file.fileName}?`)) return
+    try {
+      await api.delete(`/purchase/attachments/${file.id}`)
+      setAttachments((prev) => prev.filter((f) => f.id !== file.id))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not remove that file.')
+    }
+  }
+
   const payload = () => ({
     supplierId,
-    deliveryWarehouseId: warehouseId || null,
+    deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
+    deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     enquiryNo: enquiryNo.trim() || null,
     enquiryDate: enquiryDate || null,
     reference: reference.trim() || null,
-    remark: remark.trim() || null,
+    // `remark` is deliberately not sent. The form no longer asks for it, and
+    // omitting it leaves whatever an older order already carries untouched
+    // rather than wiping it with a blank.
     discountAmount: num(discountAmount),
     notes: notes.trim() || null,
     terms: terms.trim() || null,
@@ -448,6 +790,34 @@ export function PurchaseOrderDialog({
         id = res.data.id
       }
 
+      // Files chosen before the order existed. It has a number now, so they
+      // have something to belong to.
+      //
+      // A failure here does not fail the save — the order is already written
+      // and throwing it away over an attachment would be the worse outcome.
+      // The names of whatever did not make it are reported instead, and they
+      // can be added by reopening the order.
+      if (pendingFiles.length && id) {
+        const failed: string[] = []
+        for (const file of pendingFiles) {
+          try {
+            await uploadOne(file, id)
+          } catch {
+            failed.push(file.name)
+          }
+        }
+        setPendingFiles([])
+
+        if (failed.length) {
+          onSaved()
+          setError(
+            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach: ${failed.join(', ')}. Reopen the order to try again.`,
+          )
+          setSaving(null)
+          return
+        }
+      }
+
       if (mode === 'send' && id) {
         try {
           await api.patch(`/purchase/orders/${id}/send`, {})
@@ -471,6 +841,10 @@ export function PurchaseOrderDialog({
       setSaving(null)
     }
   }
+
+  // Sent and still-to-send together: the limit is five files on the order,
+  // not five of each.
+  const fileCount = attachments.length + pendingFiles.length
 
   const incomplete = !supplierId || lines.length === 0
   const busy = saving !== null
@@ -612,17 +986,40 @@ export function PurchaseOrderDialog({
                 />
               </div>
 
+              {/* The supplier sits here rather than in a section of its own.
+                  It is one field, and it belongs with the rest of what the
+                  order is. */}
               <div className="md:col-span-2">
-                <label className="form-label" htmlFor="po-remark">
-                  Remark
+                <label className="form-label" htmlFor="po-supplier">
+                  Supplier<span className="text-red-400 ml-0.5">*</span>
                 </label>
-                <input
-                  id="po-remark"
+                <select
+                  id="po-supplier"
                   className="form-input"
-                  placeholder="Kept in our books — not printed on the supplier's copy"
-                  value={remark}
-                  onChange={(e) => setRemark(e.target.value)}
-                />
+                  value={supplierId}
+                  onChange={(e) => setSupplierId(e.target.value)}
+                >
+                  <option value="">Choose supplier</option>
+                  {suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.code ? `${s.code} — ${s.name}` : s.name}
+                    </option>
+                  ))}
+                </select>
+                {supplier && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {supplier.gstin ? (
+                      <>
+                        GSTIN {supplier.gstin} ·{' '}
+                        {taxMode === 'CGST_SGST'
+                          ? 'within the state, CGST + SGST'
+                          : 'other state, IGST'}
+                      </>
+                    ) : (
+                      'No GSTIN on file — this order will carry no GST'
+                    )}
+                  </p>
+                )}
               </div>
             </div>
           </Section>
@@ -650,7 +1047,13 @@ export function PurchaseOrderDialog({
                         className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
                         placeholder="Code or name"
                         value={pickSearch}
-                        onChange={(e) => setPickSearch(e.target.value)}
+                        onChange={(e) => onCodeTyped(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            onCodeEnter()
+                          }
+                        }}
                       />
                     </div>
                   </div>
@@ -664,9 +1067,13 @@ export function PurchaseOrderDialog({
                       className="form-input"
                       value={pickCategory}
                       onChange={(e) => {
+                        // The item is not cleared here. It is dropped by the
+                        // effect above, and only if it does not belong under
+                        // the category just chosen — so narrowing to the
+                        // category an item is already in keeps it.
                         setPickCategory(e.target.value)
                         setPickSubcategory('')
-                        setPickItem('')
+                        setError(null)
                       }}
                     >
                       <option value="">All</option>
@@ -689,7 +1096,7 @@ export function PurchaseOrderDialog({
                       disabled={subCategories.length === 0}
                       onChange={(e) => {
                         setPickSubcategory(e.target.value)
-                        setPickItem('')
+                        setError(null)
                       }}
                     >
                       <option value="">
@@ -711,14 +1118,19 @@ export function PurchaseOrderDialog({
                       id="po-pick-item"
                       className="form-input"
                       value={pickItem}
-                      onChange={(e) => setPickItem(e.target.value)}
+                      onChange={(e) => selectItem(e.target.value)}
                     >
                       <option value="">
                         {visibleItems.length === 0 ? 'Nothing matches' : 'Select...'}
                       </option>
+                      {/* The name alone. The code sits in the box to the left
+                          and again in the table below, and repeating it here
+                          only made the option too long to read — "FAB-COT-002
+                          — Cotton Po…" told you the code twice and the item
+                          not at all. */}
                       {visibleItems.map((it) => (
                         <option key={it.id} value={it.id}>
-                          {it.code ? `${it.code} — ${it.name}` : it.name}
+                          {it.name}
                         </option>
                       ))}
                     </select>
@@ -730,6 +1142,7 @@ export function PurchaseOrderDialog({
                     </label>
                     <input
                       id="po-pick-qty"
+                      ref={qtyRef}
                       type="number"
                       step="0.001"
                       min={0}
@@ -750,18 +1163,22 @@ export function PurchaseOrderDialog({
                       type="button"
                       className="btn-primary w-full justify-center"
                       onClick={addLine}
-                      disabled={!pickItem || num(pickQty) <= 0}
+                      disabled={!pickItem || alreadyOnOrder}
                     >
                       <Plus size={15} /> Add
                     </button>
                   </div>
                 </div>
 
-                <p className="text-xs text-muted-foreground mt-2.5 flex items-start gap-1.5">
-                  <Lock size={13} className="mt-0.5 shrink-0" />
-                  Purchase indents are not built yet, so items are chosen from the item list rather
-                  than pulled from an indent.
-                </p>
+                {pickHint ? (
+                  <p className="text-xs text-amber-400 mt-2.5">{pickHint}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground mt-2.5 flex items-start gap-1.5">
+                    <Lock size={13} className="mt-0.5 shrink-0" />
+                    Purchase indents are not built yet, so items are chosen from the item list
+                    rather than pulled from an indent.
+                  </p>
+                )}
               </div>
 
               {lines.length === 0 ? (
@@ -941,55 +1358,6 @@ export function PurchaseOrderDialog({
             </div>
           </Section>
 
-          {/* 3 — Supplier */}
-          <Section icon={Building2} title="Supplier">
-            <div className="space-y-2">
-              {/* Search beside the list rather than above it. Stacked, one
-                  field cost two rows of height on a form already too tall. */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                <div className="form-input flex items-center gap-2">
-                  <Search size={14} className="text-muted-foreground shrink-0" />
-                  <input
-                    className="bg-transparent border-0 outline-none text-sm flex-1 min-w-0 text-foreground placeholder:text-muted-foreground"
-                    placeholder="Search name or code"
-                    value={supplierFilter}
-                    onChange={(e) => setSupplierFilter(e.target.value)}
-                    aria-label="Search suppliers"
-                  />
-                </div>
-                <select
-                  className="form-input md:col-span-2"
-                  value={supplierId}
-                  onChange={(e) => setSupplierId(e.target.value)}
-                  aria-label="Supplier"
-                >
-                  <option value="">
-                    {visibleSuppliers.length === 0 ? 'No supplier matches that' : 'Choose supplier'}
-                  </option>
-                  {visibleSuppliers.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.code ? `${s.code} — ${s.name}` : s.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {supplier && (
-                <p className="text-xs text-muted-foreground">
-                  {supplier.gstin ? (
-                    <>
-                      GSTIN {supplier.gstin} ·{' '}
-                      {taxMode === 'CGST_SGST'
-                        ? 'within the state, CGST + SGST'
-                        : 'other state, IGST'}
-                    </>
-                  ) : (
-                    'No GSTIN on file — this order will carry no GST'
-                  )}
-                </p>
-              )}
-            </div>
-          </Section>
-
           {/* 4 — Delivery and attachments. The dropzone became a single row:
               it cannot accept a file yet, so three lines and a dashed border
               were spending height to advertise something switched off. */}
@@ -997,14 +1365,102 @@ export function PurchaseOrderDialog({
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               <div className="space-y-2">
                 <h4 className="text-xs font-semibold text-foreground">Attachments</h4>
-                <Faded>
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
+
+                {/* One box whether or not the order exists yet. On a new
+                    order the files are held and go up the moment it is saved,
+                    so nobody has to save, reopen and come back for them. */}
+                <div className="space-y-2">
+                  <label
+                    className={`flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2 ${
+                      uploading || fileCount >= MAX_FILES
+                        ? 'opacity-70 cursor-not-allowed'
+                        : 'cursor-pointer hover:border-teal-500/40'
+                    }`}
+                  >
                     <span className="flex items-center gap-2 text-sm text-foreground">
-                      <Paperclip size={14} /> Choose files
+                      {uploading ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <Paperclip size={14} />
+                      )}
+                      {uploading ? 'Sending...' : 'Choose files'}
                     </span>
-                    <span className="text-xs text-muted-foreground">5 files, 5MB each</span>
-                  </div>
-                </Faded>
+                    <span className="text-xs text-muted-foreground">
+                      {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
+                    </span>
+                    <input
+                      type="file"
+                      multiple
+                      className="hidden"
+                      disabled={uploading || fileCount >= MAX_FILES}
+                      onChange={(e) => {
+                        chooseFiles(e.target.files)
+                        e.target.value = ''
+                      }}
+                    />
+                  </label>
+
+                  {fileCount === 0 ? (
+                    <p className="text-xs text-muted-foreground">Nothing attached yet.</p>
+                  ) : (
+                    <ul className="space-y-1">
+                      {attachments.map((f) => (
+                        <li
+                          key={f.id}
+                          className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-1.5"
+                        >
+                          <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                          <button
+                            type="button"
+                            className="text-sm text-primary underline truncate text-left flex-1 min-w-0"
+                            onClick={() => void openFile(f.id)}
+                            title={`Open ${f.fileName}`}
+                          >
+                            {f.fileName}
+                          </button>
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                            {(f.sizeBytes / 1024).toFixed(0)} KB
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
+                            onClick={() => void removeFile(f)}
+                            aria-label={`Remove ${f.fileName}`}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </li>
+                      ))}
+
+                      {/* Chosen but not yet sent. Marked so nobody believes a
+                          file is safely filed before the order is saved. */}
+                      {pendingFiles.map((f, i) => (
+                        <li
+                          key={`pending-${f.name}-${i}`}
+                          className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/40 px-3 py-1.5"
+                        >
+                          <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                          <span className="text-sm text-foreground truncate flex-1 min-w-0">
+                            {f.name}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                            {(f.size / 1024).toFixed(0)} KB · on save
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
+                            onClick={() =>
+                              setPendingFiles((prev) => prev.filter((_, x) => x !== i))
+                            }
+                            aria-label={`Remove ${f.name}`}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -1019,44 +1475,87 @@ export function PurchaseOrderDialog({
                     />
                     Our own address
                   </label>
-                  <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-not-allowed">
-                    <input type="radio" name="po-deliver-to" disabled />
+                  <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                    <input
+                      type="radio"
+                      name="po-deliver-to"
+                      checked={deliverTo === 'CUSTOMER'}
+                      onChange={() => setDeliverTo('CUSTOMER')}
+                    />
                     A customer
                   </label>
                 </div>
 
-                {/* Shown, not repeated. An order has one destination, so a
-                    second dropdown for it here would only mirror the Location
-                    field above — change one and the other moves, which reads
-                    as two settings that disagree. */}
-                <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
-                  <p className="text-sm font-medium text-foreground">
-                    {destination?.name ?? company?.name ?? 'Your company'}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {destination?.address ||
-                      orgAddress ||
-                      'Address not set — add it in Settings → Company.'}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Somewhere else? Change{' '}
-                    <button
-                      type="button"
-                      className="text-primary underline"
-                      onClick={() => document.getElementById('po-location')?.focus()}
+                {deliverTo === 'CUSTOMER' ? (
+                  <>
+                    <select
+                      className="form-input"
+                      value={deliveryCustomerId}
+                      onChange={(e) => setDeliveryCustomerId(e.target.value)}
+                      aria-label="Deliver to customer"
                     >
-                      Location
-                    </button>{' '}
-                    above.
-                  </p>
-                </div>
+                      <option value="">Choose customer</option>
+                      {customers.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.code ? `${c.code} — ${c.name}` : c.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    {deliveryCustomer && (
+                      <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
+                        <p className="text-sm font-medium text-foreground">
+                          {deliveryCustomer.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {customerAddress || 'No address on this customer.'}
+                        </p>
+                        {/* The tax follows the goods, so a customer in another
+                            state changes what the supplier may charge. Said
+                            here rather than discovered on their bill. */}
+                        {customerStateCode && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Delivered in state {customerStateCode} —{' '}
+                            {supplier
+                              ? taxMode === 'CGST_SGST'
+                                ? 'same state as the supplier, so CGST + SGST'
+                                : 'a different state from the supplier, so IGST'
+                              : 'choose a supplier to see the tax split'}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  /* Shown, not repeated. An order has one destination, so a
+                     second dropdown for it here would only mirror the Location
+                     field above — change one and the other moves, which reads
+                     as two settings that disagree. */
+                  <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
+                    <p className="text-sm font-medium text-foreground">
+                      {destination?.name ?? company?.name ?? 'Your company'}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {destination?.address ||
+                        orgAddress ||
+                        'Address not set — add it in Settings → Company.'}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Somewhere else? Change{' '}
+                      <button
+                        type="button"
+                        className="text-primary underline"
+                        onClick={() => document.getElementById('po-location')?.focus()}
+                      >
+                        Location
+                      </button>{' '}
+                      above.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
 
-            <NotBuiltNote>
-              Attaching files and delivering straight to a customer are not built yet — nothing can
-              store a file, and an order has nowhere to keep a customer&rsquo;s address.
-            </NotBuiltNote>
           </Section>
 
           {/* 5 — What the order says, and how it goes out. Template and email
@@ -1090,23 +1589,35 @@ export function PurchaseOrderDialog({
             </div>
 
             <div className="mt-3 space-y-2">
-              <Faded>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
-                    <span className="text-sm text-foreground">Template: Standard</span>
-                    <span className="text-xs text-muted-foreground">Edit</span>
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* A real link, not a greyed box. The wording, the title and
+                    which blocks print are all editable — under Settings →
+                    Documents, per document type. Showing this as "not built"
+                    was wrong: it is built, it just does not live here. */}
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
+                  <span className="text-sm text-foreground">Template: Standard</span>
+                  <a
+                    href="/settings/documents"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-primary underline"
+                  >
+                    Edit
+                  </a>
+                </div>
+                <Faded>
                   <div className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
                     <input type="checkbox" checked readOnly />
                     <span className="text-sm text-foreground truncate">
                       {company?.email ?? 'accounts@example.com'}
                     </span>
                   </div>
-                </div>
-              </Faded>
+                </Faded>
+              </div>
               <NotBuiltNote>
-                Choosing a template and emailing the order are not built yet. Orders print on the
-                standard sheet — print it and send it yourself.
+                Emailing the order is not built yet — print it and send it yourself. There is one
+                template per document type, so there is nothing to choose here; Edit opens the
+                wording and the printed blocks in Settings.
               </NotBuiltNote>
             </div>
           </Section>
