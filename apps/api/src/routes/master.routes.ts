@@ -540,7 +540,9 @@ router.patch('/company/:id', requirePermission(MODULE, 'edit'), async (req: Auth
 // ─────────────────────────────────────────────────────────────
 
 const bomInclude = {
-  style: { select: { id: true, code: true, name: true, brandType: true, sizeGroupId: true } },
+  style: {
+    select: { id: true, code: true, name: true, brandType: true, sizeGroupId: true, colors: true },
+  },
   baseSize: { select: { id: true, code: true, label: true } },
   approvedBy: { select: { id: true, name: true } },
   routing: {
@@ -568,6 +570,7 @@ const bomInclude = {
       componentItem: {
         select: { id: true, code: true, name: true, standardRate: true, uom: true },
       },
+      department: { select: { id: true, code: true, name: true } },
       sizes: {
         orderBy: { size: { sequence: 'asc' as const } },
         include: { size: { select: { id: true, code: true, label: true, sequence: true } } },
@@ -576,7 +579,7 @@ const bomInclude = {
   },
 }
 
-const BOM_SORT_FIELDS = ['createdAt', 'version', 'totalCost', 'status']
+const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status']
 const BOM_STATUSES = ['DRAFT', 'APPROVED', 'OBSOLETE']
 
 /**
@@ -591,6 +594,7 @@ type IncomingBomLineSize = { sizeId: string; qtyPerUnit: number | string }
 type IncomingBomLine = {
   componentItemId: string
   component?: string | null
+  departmentId?: string | null
   qtyPerUnit: number | string
   wastagePercent?: number
   unitCost?: number | string | null
@@ -663,6 +667,7 @@ async function priceBomLines(lines: IncomingBomLine[], routingId?: string | null
     return {
       componentItemId: line.componentItemId,
       component: line.component ?? null,
+      departmentId: line.departmentId || null,
       qtyPerUnit: qty,
       wastagePercent: wastage,
       effectiveQty,
@@ -733,22 +738,67 @@ function toLineCreate(line: PricedLine) {
 }
 
 /**
- * Checks the things a foreign key cannot: that the routing and the sizes named
- * on the lines belong to the same style as the BOM. Postgres would accept a
- * trouser routing on a shirt BOM quite happily, and nobody would find out until
- * the floor did.
+ * Checks the things a foreign key cannot: that the colour, the routing and the
+ * sizes named on the lines all belong to the same style as the BOM. Postgres
+ * would accept a trouser routing on a shirt BOM quite happily, and nobody would
+ * find out until the floor did.
+ *
+ * `colour.required` is set when a BOM is being made: every new BOM for a style
+ * that has colours must say which one. Edits leave it off, so a BOM made before
+ * colour was recorded can still be corrected instead of being locked out.
  */
 async function assertBomRefsExist(
   styleId: string,
   routingId: string | null | undefined,
   lines: IncomingBomLine[] | undefined,
   baseSizeId: string | null | undefined,
-): Promise<void> {
+  colour?: { value: string | null | undefined; required: boolean },
+): Promise<{ code: string }> {
   const style = await prisma.style.findUnique({
     where: { id: styleId },
-    select: { id: true, code: true, sizeGroupId: true },
+    select: { id: true, code: true, sizeGroupId: true, colors: true },
   })
   if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+
+  if (colour) {
+    const value = colour.value?.trim() || null
+    const offered = style.colors.join(', ')
+    if (style.colors.length > 0) {
+      if (!value && colour.required) {
+        throw new AppError(
+          `${style.code} comes in ${offered}. Pick the colour this BOM is for — each colour has its own BOM.`,
+          400,
+          'BOM_COLOUR_REQUIRED',
+        )
+      }
+      if (value && !style.colors.includes(value)) {
+        throw new AppError(
+          `${style.code} does not come in ${value}. Pick one of ${offered}, or add the colour on the style first.`,
+          400,
+          'BOM_COLOUR_NOT_ON_STYLE',
+        )
+      }
+    } else if (value) {
+      throw new AppError(
+        `${style.code} has no colours listed yet, so a BOM cannot be made for ${value}. Add the colour on the style first.`,
+        400,
+        'BOM_COLOUR_NOT_ON_STYLE',
+      )
+    }
+  }
+
+  const departmentIds = [
+    ...new Set((lines ?? []).map((l) => l.departmentId).filter((d): d is string => Boolean(d))),
+  ]
+  if (departmentIds.length > 0) {
+    const found = await prisma.department.findMany({
+      where: { id: { in: departmentIds } },
+      select: { id: true },
+    })
+    if (found.length !== departmentIds.length) {
+      throw new AppError('One of those departments no longer exists', 400, 'INVALID_DEPARTMENT')
+    }
+  }
 
   if (routingId) {
     const routing = await prisma.routing.findUnique({
@@ -771,7 +821,7 @@ async function assertBomRefsExist(
       ...(baseSizeId ? [baseSizeId] : []),
     ]),
   ]
-  if (sizeIds.length === 0) return
+  if (sizeIds.length === 0) return { code: style.code }
 
   if (!style.sizeGroupId) {
     throw new AppError(
@@ -797,27 +847,64 @@ async function assertBomRefsExist(
       'BOM_SIZE_NOT_IN_GROUP',
     )
   }
+
+  return { code: style.code }
 }
 
+/** "LD-SH-2601 in Dusty Blue", or just the code for a BOM with no colour. */
+const bomName = (styleCode: string, color: string | null | undefined) =>
+  color ? `${styleCode} in ${color}` : styleCode
+
+const versionClash = (styleCode: string, color: string | null | undefined, version: string) =>
+  new AppError(
+    `${bomName(styleCode, color)} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`,
+    409,
+    'BOM_VERSION_EXISTS',
+  )
+
 /**
- * Prisma's own message for a repeated version is "styleId,version already
+ * Prisma's own message for a repeated version is "styleId,color,version already
  * exists", which is the database talking to itself. This says what to do.
  */
-function rethrowVersionClash(err: unknown, styleCode: string, version: string): never {
+function rethrowVersionClash(
+  err: unknown,
+  styleCode: string,
+  color: string | null | undefined,
+  version: string,
+): never {
   const code = (err as { code?: string }).code
   const target = (err as { meta?: { target?: unknown } }).meta?.target
   const hitVersion = Array.isArray(target)
     ? target.includes('version')
     : String(target ?? '').includes('version')
 
-  if (code === 'P2002' && hitVersion) {
-    throw new AppError(
-      `${styleCode} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`,
-      409,
-      'BOM_VERSION_EXISTS',
-    )
-  }
+  if (code === 'P2002' && hitVersion) throw versionClash(styleCode, color, version)
   throw err
+}
+
+/**
+ * The unique constraint catches a repeated colour and version, but Postgres
+ * counts two blank colours as different, so two colourless BOMs at one version
+ * would both save. Checking first closes that gap, and gives the plain message
+ * every time rather than only when the database happens to be the one to catch it.
+ */
+async function assertVersionFree(
+  styleId: string,
+  color: string | null | undefined,
+  version: string,
+  styleCode: string,
+  excludeId?: string,
+): Promise<void> {
+  const clash = await prisma.bOM.findFirst({
+    where: {
+      styleId,
+      color: color || null,
+      version,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true },
+  })
+  if (clash) throw versionClash(styleCode, color, version)
 }
 
 router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -839,6 +926,7 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
   if (req.query.active === 'true') where.isActive = true
   else if (req.query.active === 'false') where.isActive = false
   if (typeof req.query.styleId === 'string' && req.query.styleId) where.styleId = req.query.styleId
+  if (typeof req.query.color === 'string' && req.query.color) where.color = req.query.color
 
   if (typeof req.query.status === 'string' && req.query.status) {
     const status = req.query.status.toUpperCase()
@@ -855,6 +943,7 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
   if (q) {
     where.OR = [
       { version: { contains: q, mode: 'insensitive' } },
+      { color: { contains: q, mode: 'insensitive' } },
       { style: { name: { contains: q, mode: 'insensitive' } } },
       { style: { code: { contains: q, mode: 'insensitive' } } },
     ]
@@ -885,25 +974,26 @@ router.get('/bom/:id', requirePermission(MODULE, 'view'), async (req, res) => {
 })
 
 router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { lines, styleId, version, notes, isActive, routingId, baseSizeId } = createBomSchema.parse(
-    req.body,
-  )
+  const { lines, styleId, color, version, notes, isActive, routingId, baseSizeId } =
+    createBomSchema.parse(req.body)
 
-  await assertBomRefsExist(styleId, routingId, lines, baseSizeId)
-
-  const style = await prisma.style.findUnique({
-    where: { id: styleId },
-    select: { code: true },
+  const colour = color?.trim() || null
+  const style = await assertBomRefsExist(styleId, routingId, lines, baseSizeId, {
+    value: colour,
+    required: true,
   })
 
-  const { priced, totalCost, labourCost, warnings } = await priceBomLines(lines, routingId)
   const useVersion = version ?? '1.0'
+  await assertVersionFree(styleId, colour, useVersion, style.code)
+
+  const { priced, totalCost, labourCost, warnings } = await priceBomLines(lines, routingId)
 
   let created
   try {
     created = await prisma.bOM.create({
       data: {
         styleId,
+        color: colour,
         version: useVersion,
         routingId: routingId ?? null,
         baseSizeId: baseSizeId ?? null,
@@ -916,7 +1006,7 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
       include: bomInclude,
     })
   } catch (err) {
-    rethrowVersionClash(err, style?.code ?? 'This style', useVersion)
+    rethrowVersionClash(err, style.code, colour, useVersion)
   }
 
   await writeAuditLog(req, {
@@ -961,6 +1051,12 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   const nextBaseSizeId = baseSizeId !== undefined ? baseSizeId : before.baseSizeId
   if (changesCosting) {
     await assertBomRefsExist(before.styleId, nextRoutingId, lines, nextBaseSizeId)
+  }
+  // A draft renamed to a version its colour already has. Colour itself cannot be
+  // changed here — that is what copying to another colour is for — so the check
+  // is against the colour the BOM was made for.
+  if (version !== undefined && version !== before.version) {
+    await assertVersionFree(before.styleId, before.color, version, before.style.code, before.id)
   }
 
   // Lines are replaced wholesale rather than diffed: the header total must stay
@@ -1034,9 +1130,12 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 
 /**
  * Approving is what makes a BOM the one an order is costed against. Only one
- * per style holds that place, so approving a new version retires the old one in
- * the same transaction — otherwise two approved versions sit side by side with
- * nothing choosing between them, which is the bug this replaces.
+ * per style and colour holds that place, so approving a new version retires the
+ * old one of the same colour in the same transaction — otherwise two approved
+ * versions sit side by side with nothing choosing between them.
+ *
+ * Per colour, not per style: approving the white shirt's BOM must leave the
+ * dusty blue one alone. Each colour is its own costing.
  *
  * No self-approval bar here, unlike a requisition. Business rule 7 scopes that
  * to documents that need a second person; a BOM is a master, and in a mill this
@@ -1080,7 +1179,14 @@ router.patch(
 
     const after = await prisma.$transaction(async (tx) => {
       await tx.bOM.updateMany({
-        where: { styleId: before.styleId, status: 'APPROVED', id: { not: before.id } },
+        where: {
+          styleId: before.styleId,
+          // null matches null, so BOMs made before colour was recorded form
+          // their own group and are not swept up by approving a coloured one.
+          color: before.color,
+          status: 'APPROVED',
+          id: { not: before.id },
+        },
         data: { status: 'OBSOLETE' },
       })
       return tx.bOM.update({
@@ -1101,7 +1207,7 @@ router.patch(
 
     res.json({
       success: true,
-      message: `${after.style.code} v${after.version} is now the approved BOM.`,
+      message: `${bomName(after.style.code, after.color)} v${after.version} is now the approved BOM.`,
       data: after,
     })
   },
@@ -1112,21 +1218,47 @@ router.patch(
  * an approved costing would mean re-typing a dozen component lines, and what
  * would happen instead is that somebody edits the approved one.
  *
+ * It is also how a new colour's BOM is made. The buttons, labels, thread and
+ * packing carry over from the white shirt to the dusty blue one; only the
+ * fabric line needs changing, so nobody types the other eleven again.
+ *
  * Rates are copied, not re-read from the item master: a copy is a starting
  * point, not a re-quote.
  */
 router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { version } = copyBomSchema.parse(req.body)
+  const { version, color } = copyBomSchema.parse(req.body)
 
   const source = await prisma.bOM.findUnique({ where: { id: req.params.id }, include: bomInclude })
   if (!source) throw new AppError('BOM not found', 404, 'NOT_FOUND')
+
+  // The same colour unless another is given, and the same version when only the
+  // colour changes — White v1.0 copied to Dusty Blue is naturally Dusty Blue v1.0.
+  const targetColour = color !== undefined ? color?.trim() || null : source.color
+  const targetVersion = version ?? source.version
+
+  if (targetColour === source.color && targetVersion === source.version) {
+    throw new AppError(
+      'A copy needs a new version or a different colour, otherwise it is the same BOM twice.',
+      400,
+      'BOM_COPY_UNCHANGED',
+    )
+  }
+
+  // The copy is a new BOM, so a style with colours must have one named. This is
+  // also the way a BOM made before colour was recorded gets its colours.
+  await assertBomRefsExist(source.styleId, null, undefined, null, {
+    value: targetColour,
+    required: true,
+  })
+  await assertVersionFree(source.styleId, targetColour, targetVersion, source.style.code)
 
   let created
   try {
     created = await prisma.bOM.create({
       data: {
         styleId: source.styleId,
-        version,
+        color: targetColour,
+        version: targetVersion,
         routingId: source.routingId,
         baseSizeId: source.baseSizeId,
         notes: source.notes,
@@ -1139,6 +1271,7 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
           create: source.lines.map((l) => ({
             componentItemId: l.componentItemId,
             component: l.component,
+            departmentId: l.departmentId,
             qtyPerUnit: l.qtyPerUnit,
             wastagePercent: l.wastagePercent,
             effectiveQty: l.effectiveQty,
@@ -1164,7 +1297,7 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
       include: bomInclude,
     })
   } catch (err) {
-    rethrowVersionClash(err, source.style.code, version)
+    rethrowVersionClash(err, source.style.code, targetColour, targetVersion)
   }
 
   await writeAuditLog(req, {
@@ -1177,7 +1310,7 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
 
   res.status(201).json({
     success: true,
-    message: `Copied to ${created!.style.code} v${version}. It is a draft until you approve it.`,
+    message: `Copied to ${bomName(created!.style.code, targetColour)} v${targetVersion}. It is a draft until you approve it.`,
     data: created,
   })
 })
@@ -1207,7 +1340,7 @@ router.delete('/bom/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
 
   res.json({
     success: true,
-    message: `${before.style.code} v${before.version} is no longer offered.`,
+    message: `${bomName(before.style.code, before.color)} v${before.version} is no longer offered.`,
   })
 })
 

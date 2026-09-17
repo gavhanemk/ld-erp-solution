@@ -295,6 +295,8 @@ export const bomLineSchema = z.object({
    * second line looks like somebody added it by mistake.
    */
   component: z.string().max(60).optional().nullable(),
+  /** The department that draws this from the store — Cutting, Stitching, Packing. */
+  departmentId: z.string().optional().nullable(),
   qtyPerUnit: decimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
@@ -310,6 +312,11 @@ export const bomLineSchema = z.object({
 
 export const createBomSchema = z.object({
   styleId: z.string().min(1, 'Style is required'),
+  /**
+   * One BOM per colour. Whether it is required depends on the style — one with
+   * colours listed needs it — so that check lives in the route, not here.
+   */
+  color: z.string().trim().max(60).optional().nullable(),
   version: z.string().max(20).optional(),
   /** The routing that supplies the labour half of the cost. Optional. */
   routingId: z.string().optional().nullable(),
@@ -334,9 +341,18 @@ export const updateBomSchema = z.object({
  * did not, the only way to change an approved costing would be to edit it in
  * place, which is exactly what the freeze exists to stop.
  */
-export const copyBomSchema = z.object({
-  version: z.string().min(1, 'Give the new version a number, such as 1.1').max(20),
-})
+export const copyBomSchema = z
+  .object({
+    version: z.string().trim().min(1, 'Give the copy a version, such as 1.1').max(20).optional(),
+    /**
+     * Copying to another colour is the usual way a new colourway's BOM is made:
+     * the buttons, labels and packing carry over, and only the fabric changes.
+     */
+    color: z.string().trim().max(60).optional().nullable(),
+  })
+  .refine((v) => v.version !== undefined || v.color !== undefined, {
+    message: 'Give the copy a new version, a different colour, or both',
+  })
 
 // ─────────────────────────────────────────────────────────────
 // Warehouse / Department / Operation / Machine / UOM / Category

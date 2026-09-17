@@ -575,13 +575,34 @@ async function main() {
   // an S, which is why most lines below carry no size rows at all.
   const SIZE_STEP = 0.04
 
+  // Which department draws each kind of material from the store. Fabric goes to
+  // Cutting and interlining to Fusing; thread, labels and zips are sewn in at
+  // Stitching; buttons go on at Kaj Button; tags and collar stays at Finishing;
+  // poly bags, clips and tissue at Packing. Keyed on the item-code prefix,
+  // because that is how the demo items happen to be grouped.
+  const processByPrefix: Array<[string, string]> = [
+    ['FAB-', 'CUT'],
+    ['TRM-INT-', 'FUS'],
+    ['TRM-COL-', 'FIN'],
+    ['TRM-ZIP-', 'STI'],
+    ['THR-', 'STI'],
+    ['LBL-', 'STI'],
+    ['BTN-', 'KAJ'],
+    ['TAG-', 'FIN'],
+    ['PKG-', 'PKG'],
+  ]
+  const processFor = (itemCode: string) => {
+    const hit = processByPrefix.find(([prefix]) => itemCode.startsWith(prefix))
+    return hit ? dept(hit[1]) : null
+  }
+
   for (const b of bomData) {
     const styleId = styles.get(b.style)!
     await prisma.bOM.deleteMany({ where: { styleId } })
 
     const style = await prisma.style.findUnique({
       where: { id: styleId },
-      select: { sizeGroupId: true },
+      select: { sizeGroupId: true, colors: true },
     })
     const runSizes = style?.sizeGroupId
       ? await prisma.size.findMany({
@@ -615,6 +636,7 @@ async function main() {
 
       return {
         componentItemId: items.get(itemCode)!,
+        departmentId: processFor(itemCode),
         qtyPerUnit: qty,
         wastagePercent: wastage,
         effectiveQty,
@@ -629,21 +651,28 @@ async function main() {
 
     const totalCost = Number(lines.reduce((sum, l) => sum + Number(l.totalCost), 0).toFixed(2))
 
-    await prisma.bOM.create({
-      data: {
-        styleId,
-        version: '1.0',
-        // Demo BOMs are the ones orders get costed against, so they are
-        // approved rather than left as drafts nothing can use.
-        status: 'APPROVED',
-        approvedAt: new Date(),
-        baseSizeId,
-        isActive: true,
-        notes: b.notes,
-        totalCost,
-        lines: { create: lines },
-      },
-    })
+    // One BOM per colour, the way the production team makes them. The demo
+    // keeps one fabric item for every colour, which a real mill would not —
+    // a dusty blue shirt's BOM names the dusty blue cloth.
+    const colours = style?.colors?.length ? style.colors : [null]
+    for (const color of colours) {
+      await prisma.bOM.create({
+        data: {
+          styleId,
+          color,
+          version: '1.0',
+          // Demo BOMs are the ones orders get costed against, so they are
+          // approved rather than left as drafts nothing can use.
+          status: 'APPROVED',
+          approvedAt: new Date(),
+          baseSizeId,
+          isActive: true,
+          notes: b.notes,
+          totalCost,
+          lines: { create: lines },
+        },
+      })
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────

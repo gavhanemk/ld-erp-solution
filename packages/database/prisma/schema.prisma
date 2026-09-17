@@ -561,6 +561,11 @@ model BOM {
   styleId      String
   style        Style     @relation(fields: [styleId], references: [id])
   version      String    @default("1.0")
+  /// The colourway this BOM is for. A white shirt and a dusty blue one take
+  /// different fabric, so the production team makes one BOM per colour — the
+  /// same way the old system made one item per colourway. Always one of the
+  /// style's own colours. Blank only on BOMs made before colour was recorded.
+  color        String?
   /// The operations this garment goes through, for the labour half of its
   /// cost. It points at the routing rather than repeating the steps, so a rate
   /// is changed in one place and every BOM built on it moves with it.
@@ -598,7 +603,10 @@ model BOM {
   lines  BOMLine[]
   copies BOM[]    @relation("BOMCopy")
 
-  @@unique([styleId, version])
+  // White v1.0 and Dusty Blue v1.0 of the same style are two different BOMs.
+  // Postgres counts two blank colours as different, so two colourless BOMs at
+  // one version would slip past this; the route checks that case itself.
+  @@unique([styleId, color, version])
   @@index([status])
   @@map("bom")
 }
@@ -615,6 +623,12 @@ model BOMLine {
   /// the second line reads as a typo, and it is why there is no unique
   /// constraint on bomId plus componentItemId.
   component       String?
+  /// The department that draws this material from the store: Cutting takes the
+  /// fabric, Stitching the thread and labels, Packing the cartons. A material
+  /// requisition is always raised by one department, so this is what lets an
+  /// order's materials be asked for stage by stage rather than all at once.
+  departmentId    String?
+  department      Department? @relation(fields: [departmentId], references: [id])
   /// Consumption for one garment at the BOM base size. Sizes that differ carry
   /// their own row in BOMLineSize; every other size falls back to this.
   qtyPerUnit      Decimal  @db.Decimal(10, 4)
@@ -788,6 +802,7 @@ model Department {
   requisitions      MaterialRequisition[]
   productionEntries ProductionEntry[]
   routingSteps      RoutingStep[]
+  bomLines          BOMLine[]
 
   @@map("departments")
 }

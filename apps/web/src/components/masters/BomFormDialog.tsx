@@ -18,6 +18,8 @@ export interface BomLine {
   id?: string
   componentItemId: string
   component?: string | null
+  departmentId?: string | null
+  department?: { id: string; code: string; name: string } | null
   qtyPerUnit: number | string
   wastagePercent: number | string
   effectiveQty?: number | string
@@ -46,6 +48,8 @@ export interface RoutingStepBrief {
 export interface Bom {
   id: string
   styleId: string
+  /** One BOM per colour. Blank only on BOMs made before colour was recorded. */
+  color: string | null
   version: string
   status: string
   isActive: boolean
@@ -54,7 +58,14 @@ export interface Bom {
   notes: string | null
   routingId: string | null
   baseSizeId: string | null
-  style?: { id: string; code: string; name: string; brandType: string; sizeGroupId: string | null }
+  style?: {
+    id: string
+    code: string
+    name: string
+    brandType: string
+    sizeGroupId: string | null
+    colors: string[]
+  }
   baseSize?: { id: string; code: string; label: string } | null
   approvedBy?: { id: string; name: string } | null
   routing?: { id: string; code: string; name: string; steps?: RoutingStepBrief[] } | null
@@ -74,6 +85,13 @@ interface StyleOption {
   code: string
   name: string
   sizeGroupId: string | null
+  colors: string[]
+}
+
+interface DepartmentOption {
+  id: string
+  code: string
+  name: string
 }
 
 interface SizeOption {
@@ -101,6 +119,8 @@ interface Props {
 interface EditLine {
   componentItemId: string
   component: string
+  /** The department that draws it from the store. Blank is allowed but warned. */
+  departmentId: string
   qtyPerUnit: string
   wastagePercent: string
   unitCost: string
@@ -116,6 +136,7 @@ interface EditLine {
 const emptyLine = (): EditLine => ({
   componentItemId: '',
   component: '',
+  departmentId: '',
   qtyPerUnit: '',
   wastagePercent: '0',
   unitCost: '',
@@ -135,8 +156,10 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
   const [items, setItems] = useState<ItemOption[]>([])
   const [sizes, setSizes] = useState<SizeOption[]>([])
   const [routings, setRoutings] = useState<RoutingOption[]>([])
+  const [departments, setDepartments] = useState<DepartmentOption[]>([])
 
   const [styleId, setStyleId] = useState('')
+  const [color, setColor] = useState('')
   const [version, setVersion] = useState('1.0')
   const [routingId, setRoutingId] = useState('')
   const [baseSizeId, setBaseSizeId] = useState('')
@@ -152,6 +175,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     if (!open) return
 
     setStyleId(record?.styleId ?? '')
+    setColor(record?.color ?? '')
     setVersion(record?.version ?? '1.0')
     setRoutingId(record?.routingId ?? '')
     setBaseSizeId(record?.baseSizeId ?? '')
@@ -162,6 +186,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
         ? record.lines.map((l) => ({
             componentItemId: l.componentItemId,
             component: l.component ?? '',
+            departmentId: l.departmentId ?? '',
             qtyPerUnit: String(l.qtyPerUnit),
             wastagePercent: String(l.wastagePercent ?? 0),
             unitCost: l.unitCost != null ? String(l.unitCost) : '',
@@ -181,13 +206,15 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
       masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
       masterResource<ItemOption>('items').list({ limit: 200, active: true }),
       masterResource<SizeOption>('sizes').list({ limit: 200 }),
+      masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
     ])
-      .then(([s, i, z]) => {
+      .then(([s, i, z, d]) => {
         setStyles((s as Paginated<StyleOption>).data)
         setItems((i as Paginated<ItemOption>).data)
         setSizes((z as Paginated<SizeOption>).data)
+        setDepartments((d as Paginated<DepartmentOption>).data)
       })
-      .catch(() => setError('Could not load styles, items and sizes.'))
+      .catch(() => setError('Could not load styles, items, sizes and departments.'))
   }, [open, record])
 
   // Routings belong to a style, so the list is refetched when the style changes.
@@ -247,6 +274,11 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
   )
 
   const style = styles.find((s) => s.id === styleId) ?? record?.style
+  const styleColours = style?.colors ?? []
+  // A BOM whose colour has since been taken off the style still shows it,
+  // rather than rendering as an empty choice.
+  const colourOptions =
+    color && !styleColours.includes(color) ? [...styleColours, color] : styleColours
   const groupSizes = useMemo(
     () =>
       style?.sizeGroupId
@@ -342,6 +374,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
         return {
           componentItemId: l.componentItemId,
           ...(l.component ? { component: l.component } : {}),
+          ...(l.departmentId ? { departmentId: l.departmentId } : {}),
           qtyPerUnit: Number(l.qtyPerUnit),
           wastagePercent: Number(l.wastagePercent) || 0,
           ...(l.unitCost !== '' ? { unitCost: Number(l.unitCost) } : {}),
@@ -353,6 +386,16 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
     if (payloadLines.length === 0) {
       setError('Add at least one component with a quantity.')
+      setSaving(false)
+      return
+    }
+
+    // Caught here as well as on the server, so the person is told before a
+    // round trip rather than after it.
+    if (!isEdit && styleColours.length > 0 && !color) {
+      setError(
+        `${style?.code ?? 'This style'} comes in ${styleColours.join(', ')}. Pick the colour this BOM is for — each colour has its own BOM.`,
+      )
       setSaving(false)
       return
     }
@@ -369,7 +412,11 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     try {
       const res = isEdit
         ? await api.patch<{ message?: string }>(`/masters/bom/${record!.id}`, body)
-        : await api.post<{ message?: string }>('/masters/bom', { ...body, styleId })
+        : await api.post<{ message?: string }>('/masters/bom', {
+            ...body,
+            styleId,
+            color: color || null,
+          })
       onSaved(res?.message)
       onClose()
     } catch (err) {
@@ -408,8 +455,8 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             <div className="flex items-start gap-3 p-3 rounded-lg border border-amber-500/40 bg-amber-500/5">
               <AlertCircle size={16} className="text-amber-400 mt-0.5 shrink-0" />
               <p className="text-sm text-foreground">
-                This BOM is approved, so its components cannot be changed. Copy it to a new version
-                instead.
+                This BOM is approved, so its components cannot be changed. Copy it to a new version,
+                or to another colour, instead.
               </p>
             </div>
           )}
@@ -423,7 +470,11 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 id="bom-style"
                 className="form-input"
                 value={styleId}
-                onChange={(e) => setStyleId(e.target.value)}
+                onChange={(e) => {
+                  setStyleId(e.target.value)
+                  // Another style has its own colours, so the pick no longer applies.
+                  setColor('')
+                }}
                 // A BOM belongs to the style it was created against; moving it
                 // would silently rewrite another style's costing.
                 disabled={isEdit}
@@ -441,6 +492,42 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
               {isEdit && (
                 <p className="text-xs text-muted-foreground mt-1">
                   Create a new BOM to cost a different style.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="form-label" htmlFor="bom-colour">
+                Colour
+                {styleColours.length > 0 && <span className="text-red-400 ml-0.5">*</span>}
+              </label>
+              <select
+                id="bom-colour"
+                className="form-input"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                // Like the style, the colour is what this BOM is. Another colour
+                // is made by copying, so each keeps its own history.
+                disabled={isEdit || colourOptions.length === 0}
+              >
+                <option value="">
+                  {colourOptions.length === 0 ? 'No colours on this style' : 'Select a colour...'}
+                </option>
+                {colourOptions.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              {fieldErrors.color ? (
+                <p className="text-xs text-red-400 mt-1">{fieldErrors.color}</p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {isEdit
+                    ? 'Copy this BOM to make one for another colour.'
+                    : styleColours.length === 0
+                      ? 'Add colours on the style to make a BOM for each one.'
+                      : 'Each colour has its own BOM, because the fabric differs.'}
                 </p>
               )}
             </div>
@@ -484,7 +571,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
               </p>
             </div>
 
-            <div className="md:col-span-2">
+            <div>
               <label className="form-label" htmlFor="bom-routing">
                 Routing
               </label>
@@ -526,11 +613,12 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="data-table min-w-[820px]">
+              <table className="data-table min-w-[980px]">
                 <thead>
                   <tr>
                     <th className="min-w-56">Item</th>
                     <th className="w-28">Part</th>
+                    <th className="w-40">Process</th>
                     <th className="w-28 text-right">Qty / pc</th>
                     <th className="w-24 text-right">Wastage %</th>
                     <th className="w-28 text-right">Rate</th>
@@ -568,6 +656,28 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                               placeholder="Body"
                               onChange={(e) => setLine(index, { component: e.target.value })}
                             />
+                          </td>
+                          <td>
+                            <select
+                              className="form-input"
+                              value={line.departmentId}
+                              disabled={frozen}
+                              aria-label="Department that draws this from the store"
+                              onChange={(e) => setLine(index, { departmentId: e.target.value })}
+                            >
+                              <option value="">Select...</option>
+                              {departments.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                  {d.name}
+                                </option>
+                              ))}
+                            </select>
+                            {line.componentItemId && !line.departmentId && (
+                              // Not refused: a BOM can be costed before anyone decides
+                              // this. But an order cannot ask the store for it until
+                              // somebody does, so it is flagged where it is missing.
+                              <p className="text-xs text-accent mt-1">Which department uses this?</p>
+                            )}
                           </td>
                           <td>
                             <input
@@ -658,7 +768,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
                         {line.sizeWise && groupSizes.length > 0 && (
                           <tr>
-                            <td colSpan={7} className="bg-secondary/40">
+                            <td colSpan={8} className="bg-secondary/40">
                               <div className="flex flex-wrap items-end gap-3 py-2">
                                 {groupSizes.map((s) => (
                                   <div key={s.id} className="w-20">
@@ -716,7 +826,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                     )
                   })}
                   <tr>
-                    <td colSpan={5} className="text-right font-semibold">
+                    <td colSpan={6} className="text-right font-semibold">
                       Total material cost per piece
                     </td>
                     <td className="text-right font-bold text-teal-400">

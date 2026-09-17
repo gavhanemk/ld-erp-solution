@@ -7,6 +7,65 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 17 Sep 2026 — one bill of materials per colour, and a department on each line
+
+**Migration:** `20260917100000_bom_colour_and_process`
+**Branch:** `feat/masters-bom-colour-and-process` (stacked on `feat/masters-bom-size-routing-status`)
+**Status: NOT applied.** Held on purpose — see below.
+
+### Why it has not been applied
+
+On 16 Sep the team agreed nobody runs a migration until `main` catches up with the
+database. That has not happened yet, so this one is written, checked and committed,
+and waits. **Do not apply it until the hold is lifted.**
+
+Until it is applied, this branch's BOM screen will not work against the shared
+database: the code expects a `color` column the database does not have yet. Switch
+back to another branch and run `pnpm db:generate` to carry on with other work.
+
+When the hold lifts, apply it with `prisma migrate deploy`, never `migrate dev` —
+see why below.
+
+### What changed
+
+| Table | Change |
+|---|---|
+| `bom` | New `color` column. The unique key becomes style + colour + version, so White v1.0 and Dusty Blue v1.0 of one style are two BOMs |
+| `bom_lines` | New `departmentId` — the department that draws the component from the store |
+
+The old `bom_styleId_version_key` index is dropped only so the wider one can replace
+it. No rows are added, changed or removed.
+
+### Why one BOM per colour
+
+The production team, accounts, and the people who use the old ERP asked for it: a
+white shirt and a dusty blue one take different cloth, and the old system made one
+BOM per colourway. Approving a BOM now retires the previous approved one **of the
+same colour only** — approving White must leave Dusty Blue alone.
+
+### The four BOMs already in the database
+
+All four keep a blank colour. Each belongs to a style offered in two or three
+colours, so there is no single right colour to fill in, and guessing would be worse
+than a blank. The screen marks them **Colour not set**. To give one its colours,
+copy it to each colour, change the fabric line, approve each copy, and retire the
+original.
+
+### Why the department
+
+A material requisition is always raised by one department. With the department on
+each BOM line, an order's materials can be asked for stage by stage — Cutting takes
+the fabric, Stitching the thread and labels, Packing the cartons — instead of all
+at once. It is optional; the screen flags lines where it is missing.
+
+### Written by hand, like the one before
+
+`migrate dev` would also drop columns belonging to the unmerged `feat/purchase`
+branch, which are live in the database. This migration holds only its own five
+statements.
+
+---
+
 ## 16 Sep 2026 — the bill of materials gains sizes, a routing and a status
 
 **Migration:** `20260916104500_bom_size_routing_and_status`

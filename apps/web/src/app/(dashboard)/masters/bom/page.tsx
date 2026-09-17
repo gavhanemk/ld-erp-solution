@@ -14,6 +14,8 @@ import {
   Copy,
   CheckCircle2,
   Pencil,
+  X,
+  Loader2,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
@@ -28,6 +30,10 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 }
 
 const num = (v: unknown) => Number(v ?? 0)
+
+/** "LD-SH-2601 in Dusty Blue v1.0" — the colour is part of which BOM it is. */
+const bomLabel = (bom: Bom) =>
+  `${bom.style?.code}${bom.color ? ` in ${bom.color}` : ''} v${bom.version}`
 
 export default function BomPage() {
   const { rowsPerPage } = useAppSettings()
@@ -48,6 +54,7 @@ export default function BomPage() {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Bom | null>(null)
+  const [copying, setCopying] = useState<Bom | null>(null)
 
   // The same 350ms the master screens use, so typing does not fire a request
   // per keystroke.
@@ -102,27 +109,19 @@ export default function BomPage() {
   }
 
   const approve = (bom: Bom) => {
-    const label = `${bom.style?.code} v${bom.version}`
     if (
       !confirm(
-        `Approve ${label}?\n\nThe components and rates are frozen after this. To change them, copy it to a new version.`,
+        `Approve ${bomLabel(bom)}?\n\nThe components and rates are frozen after this, and it becomes the BOM orders for this colour are costed against. To change it, copy it to a new version.`,
       )
     )
       return
     void act(() => api.patch(`/masters/bom/${bom.id}/approve`, {}))
   }
 
-  const copy = (bom: Bom) => {
-    const next = prompt(
-      `Copy ${bom.style?.code} v${bom.version} to a new version.\n\nWhat is the new version called?`,
-      '',
-    )
-    if (!next) return
-    void act(() => api.post(`/masters/bom/${bom.id}/copy`, { version: next.trim() }))
-  }
+  const copy = (bom: Bom) => setCopying(bom)
 
   const retire = (bom: Bom) => {
-    const label = `${bom.style?.code} v${bom.version}`
+    const label = bomLabel(bom)
     if (
       !confirm(
         `Stop offering ${label}?\n\nIt stays on past orders and costings. It will not be offered on new ones. You can bring it back by editing it.`,
@@ -283,6 +282,15 @@ export default function BomPage() {
         }}
         record={editing}
       />
+
+      <CopyBomDialog
+        source={copying}
+        onClose={() => setCopying(null)}
+        onCopied={(message) => {
+          if (message) setNotice(message)
+          void load()
+        }}
+      />
     </div>
   )
 }
@@ -346,6 +354,15 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-teal-400">{bom.style?.code}</span>
             <span className="text-sm font-medium text-foreground truncate">{bom.style?.name}</span>
+            {bom.color ? (
+              <span className="text-sm text-foreground">· {bom.color}</span>
+            ) : (
+              (bom.style?.colors?.length ?? 0) > 0 && (
+                // Made before BOMs were per colour. Copying it to each colour is
+                // how it gets one, so it is flagged rather than left to look normal.
+                <span className="badge-warning">Colour not set</span>
+              )
+            )}
             <span className="badge-neutral">v{bom.version}</span>
             <span className={status.cls}>{status.label}</span>
             {!bom.isActive && <span className="badge-danger">Not offered</span>}
@@ -384,7 +401,7 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
             className="btn-ghost p-1.5"
             onClick={onCopy}
             disabled={busy}
-            title="Copy to new version"
+            title="Copy to a new version or another colour"
           >
             <Copy size={14} />
           </button>
@@ -407,6 +424,7 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
                 <tr>
                   <th>Component</th>
                   <th>Part</th>
+                  <th>Process</th>
                   <th className="text-right">Qty / pc</th>
                   <th className="text-right">Wastage</th>
                   <th className="text-right">Effective</th>
@@ -435,6 +453,13 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
                         )}
                       </td>
                       <td className="text-xs text-muted-foreground">{line.component || '—'}</td>
+                      <td className="text-xs">
+                        {line.department ? (
+                          line.department.name
+                        ) : (
+                          <span className="text-accent">Not set</span>
+                        )}
+                      </td>
                       <td className="text-right">
                         {num(line.qtyPerUnit)} {unit}
                       </td>
@@ -512,6 +537,142 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+interface CopyProps {
+  source: Bom | null
+  onClose: () => void
+  onCopied: (message?: string) => void
+}
+
+/**
+ * Copying makes both a new version and a new colour's BOM, so one dialog asks
+ * for both. Picking another colour keeps the version, because White v1.0 copied
+ * to Dusty Blue is naturally Dusty Blue v1.0 — the version only needs typing
+ * when the colour stays the same.
+ */
+function CopyBomDialog({ source, onClose, onCopied }: CopyProps) {
+  const [colour, setColour] = useState('')
+  const [version, setVersion] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!source) return
+    setColour(source.color ?? '')
+    setVersion('')
+    setError(null)
+  }, [source])
+
+  useEffect(() => {
+    if (!source) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [source, onClose])
+
+  if (!source) return null
+
+  const colours = source.style?.colors ?? []
+  const sameColour = (colour || null) === (source.color ?? null)
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+
+    if (sameColour && !version.trim()) {
+      setError('Pick another colour, or give the copy a new version.')
+      return
+    }
+
+    setSaving(true)
+    try {
+      const res = await api.post<{ message?: string }>(`/masters/bom/${source.id}/copy`, {
+        ...(sameColour ? {} : { color: colour || null }),
+        ...(version.trim() ? { version: version.trim() } : {}),
+      })
+      onCopied(res?.message)
+      onClose()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not copy. Is the API running?')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
+      <div className="glass-card w-full max-w-md my-auto" role="dialog" aria-modal="true">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+          <h2 className="text-lg font-semibold text-foreground">Copy BOM</h2>
+          <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <form onSubmit={submit} className="px-6 py-5 space-y-4">
+          <p className="text-sm text-muted-foreground">
+            From {bomLabel(source)}. Every component, rate and size quantity is carried over, and
+            the copy starts as a draft.
+          </p>
+
+          {error && (
+            <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
+              <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+              <p className="text-sm text-red-400">{error}</p>
+            </div>
+          )}
+
+          <div>
+            <label className="form-label" htmlFor="copy-colour">
+              Colour
+            </label>
+            <select
+              id="copy-colour"
+              className="form-input"
+              value={colour}
+              onChange={(e) => setColour(e.target.value)}
+            >
+              {!source.color && <option value="">Colour not set</option>}
+              {colours.map((c) => (
+                <option key={c} value={c}>
+                  {c === source.color ? `${c} (same colour)` : c}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground mt-1">
+              {colours.length === 0
+                ? 'This style has no colours listed, so the copy can only be a new version.'
+                : 'For another colour, usually only the fabric needs changing afterwards.'}
+            </p>
+          </div>
+
+          <div>
+            <label className="form-label" htmlFor="copy-version">
+              Version
+            </label>
+            <input
+              id="copy-version"
+              className="form-input"
+              value={version}
+              onChange={(e) => setVersion(e.target.value)}
+              placeholder={sameColour ? 'For example 1.1' : `Blank keeps v${source.version}`}
+            />
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
+            <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
+              Cancel
+            </button>
+            <button type="submit" className="btn-primary" disabled={saving}>
+              {saving && <Loader2 size={15} className="animate-spin" />}
+              Copy BOM
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   )
 }

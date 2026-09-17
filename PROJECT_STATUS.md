@@ -1,9 +1,40 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Wed 16 Sep 2026 — Bill of Materials extended_
+_Last updated: Thu 17 Sep 2026 — BOM per colour, and a department per line_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Bill of Materials — per colour, with a department per line (Thu 17 Sep)
+
+Checked against a manufacturing order exported from the old ERP (MO00089). What
+it showed, and what the production team, accounts and the old ERP's users decided:
+
+- **One BOM per colour, quantities by size inside it.** A white shirt and a dusty
+  blue one take different cloth. `BOM.color`; the unique key is now style +
+  colour + version. Approving retires the old approved BOM of the **same colour
+  only**. Copying is how a colour's BOM is made — copy White to Dusty Blue and
+  change the fabric line.
+- **A department on each BOM line.** The old ERP ties every component to a
+  process. A material requisition is raised by one department, so this is what
+  lets the Production module ask the store for materials stage by stage.
+- **Wastage stays as it is** — its own column on each line.
+- The assistant now reports material cost **per colour**; taking the first
+  approved BOM would have quoted one colour's cost as the whole style's.
+
+**The migration is written but NOT applied** — the team's hold on migrations is
+still on. Until it is applied, the BOM screen on this branch will not load against
+the shared database. See `MIGRATION-NOTES.md`.
+
+The four existing BOMs have no colour, because every one belongs to a style in two
+or three colours and guessing is worse than a blank. They show **Colour not set**.
+
+**Before the Production module starts, one question is still open:** is a sellable
+shirt one item per style and colour, or per style, colour *and* size? A sales order
+names an item, a manufacturing order names a style, and nothing links the two —
+that link has to be decided before an order can find its BOM.
 
 ---
 
