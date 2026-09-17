@@ -159,7 +159,7 @@ pnpm db:generate
 | Part | Runs on | Address |
 |---|---|---|
 | Web app | Vercel | https://ld-erp.vercel.app |
-| API | Render | not created yet |
+| API | Render, auto-deploys from `main` | https://ld-erp-api.onrender.com |
 | Database | Supabase | project `cpogaadkcefpeanxbqkb`, schema `ld_erp` |
 | Code | GitHub | `gavhanemk/ld-erp-solution` (private) |
 
@@ -178,8 +178,11 @@ npx vercel --prod
 
 ### Deploying the API
 
-[render.yaml](../render.yaml) in the repository root describes the service. To
-create it the first time:
+Automatic, the same as the web app: the service is created and its branch is
+`main`, so a merge rebuilds it. Nothing to do.
+
+[render.yaml](../render.yaml) in the repository root describes it. These are
+the steps that created it, kept only in case it has to be rebuilt:
 
 1. render.com → **New** → **Blueprint**
 2. Pick the `ld-erp-solution` repository
@@ -197,12 +200,15 @@ npx vercel env add NEXT_PUBLIC_API_URL production
 npx vercel --prod
 ```
 
-**Until this is done, https://ld-erp.vercel.app loads but sign-in fails.** There
-is no API behind it.
+This was done on the first deploy and does not need repeating. Checked again
+on 17 Sep 2026: the live build points at `https://ld-erp-api.onrender.com/api`
+and `/health` there answers `"database":"ok"`.
 
 Note on the free plan: Render puts a free service to sleep after 15 minutes of
-quiet, and the next request takes about 30 seconds to wake it. Fine for testing.
-Not fine for the mill. Move to the paid plan before staff use it.
+quiet. Waking it was measured at 33 seconds on 17 Sep 2026. Fine for testing.
+Not fine for the mill — the first person to sign in each morning waits half a
+minute at a screen that gives no reason. Move to the paid plan before staff
+use it.
 
 ### Database changes going live
 
