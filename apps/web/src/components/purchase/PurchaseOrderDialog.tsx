@@ -9,8 +9,6 @@ import {
   Plus,
   Trash2,
   ShoppingCart,
-  Building2,
-  ListChecks,
   Printer,
   Calculator,
   FileText,
@@ -18,8 +16,17 @@ import {
   Truck,
   Paperclip,
   ScrollText,
-  Search,
   Lock,
+  MapPin,
+  User,
+  MessageSquare,
+  UploadCloud,
+  Save as SaveIcon,
+  Mail,
+  History,
+  Pencil,
+  MapPinned,
+  Check,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 
@@ -100,6 +107,8 @@ export interface PurchaseOrder {
   enquiryNo: string | null
   enquiryDate: string | null
   reference: string | null
+  /** What this order was billed to, as it read the day it was raised. */
+  supplierAddress?: string | null
   remark: string | null
   status: string
   subtotal: string | number
@@ -118,14 +127,54 @@ export interface PurchaseOrder {
   }[]
   notes: string | null
   terms: string | null
-  supplier?: { id: string; name: string; code: string; gstin: string | null; stateCode: string | null }
+  supplier?: {
+    id: string
+    name: string
+    code: string
+    gstin: string | null
+    stateCode: string | null
+  }
   lines?: PoLine[]
 }
 
 /** One kind of charge the mill puts on a purchase — transport, freight, dyeing. */
+/** One of the places a supplier bills from. */
+export interface SupplierAddressRow {
+  id: string
+  label: string | null
+  address: string
+  city: string | null
+  state: string | null
+  stateCode: string | null
+  pincode: string | null
+  country: string | null
+  gstin: string | null
+  isDefault: boolean
+}
+
+/** One line of a supplier address, as the panel and the order both read it. */
+export const addressLine = (a: SupplierAddressRow) =>
+  [a.address, a.city, a.state, a.pincode, a.country]
+    .map((p) => p?.trim())
+    .filter(Boolean)
+    .join(', ')
+
+/** One time this item was bought, for the hint under Rate and the panel behind it. */
+interface RateHistoryRow {
+  id: string
+  poNumber: string
+  poDate: string | null
+  status: string
+  supplierName: string
+  qty: string | number
+  unitRate: string | number
+  amount: string | number
+}
+
 interface ChargeTypeOption {
   id: string
   name: string
+  /** The GST charged on this charge. The amount itself is always typed in. */
   defaultGstRate: string | number
 }
 
@@ -143,6 +192,13 @@ interface Option {
   category?: { id: string; name: string } | null
   parentId?: string | null
   address?: string | null
+  city?: string | null
+  state?: string | null
+  pincode?: string | null
+  phone?: string | null
+  email?: string | null
+  paymentTerms?: string | null
+  creditDays?: number | null
   // A customer keeps two addresses. Goods are taxed where they land, so the
   // shipping one wins wherever both are set.
   shippingStateCode?: string | null
@@ -182,6 +238,8 @@ interface CompanyLite {
  * the form can say no immediately rather than after the file has been sent;
  * the server and the bucket are what actually enforce it.
  */
+const TERMS_MAX = 4000
+const NOTES_MAX = 1000
 const MAX_FILE_MB = 50
 const MAX_FILES = 5
 
@@ -214,42 +272,60 @@ const inr = (v: number) =>
  * crushing thirteen columns into whatever it has.
  */
 const COL = {
-  code: 'w-32',
+  num: 'w-10',
+  remove: 'w-10',
+  code: 'w-28',
   item: '',
-  category: 'w-36',
-  subcategory: 'w-36',
-  style: 'w-32',
+  category: 'w-32',
+  subcategory: 'w-32',
+  style: 'w-28',
   description: '',
   qty: 'w-20',
   rate: 'w-24',
   discount: 'w-32',
   tax: 'w-20',
-  netPrice: 'w-28',
-  amount: 'w-36',
-  remove: 'w-10',
+  netPrice: 'w-24',
+  amount: 'w-28',
 } as const
 
+/**
+ * One titled panel of the form.
+ *
+ * White (or the card colour in the dark theme) on the page's grey, rather
+ * than grey on grey. The sections used to be tinted a shade off the page and
+ * held white fields, which put three greys on top of each other and gave the
+ * form no order at all — every box the same weight as the one above it. A
+ * panel that sits above the ground reads as a panel; the eye finds five of
+ * them instead of scanning one long sheet.
+ *
+ * `actions` is the right-hand side of the title bar, for the one control that
+ * governs the whole section — the order type over the item table. It belongs
+ * up here: a control that decides which cells below are live is read before
+ * them, and in its own row it was a third size of text in a row of its own.
+ */
 function Section({
   icon: Icon,
   title,
-  hint,
+  actions,
   children,
 }: {
   icon: React.ElementType
   title: string
-  hint?: string
+  actions?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
-    <section className="rounded-lg border border-border bg-secondary/20">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
-        <Icon size={14} className="text-muted-foreground shrink-0" />
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+    <section className="border-border bg-card rounded-xl border">
+      <div className="border-border/70 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b px-3.5 py-2">
+        <h3 className="text-foreground flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
+          <Icon size={14} className="text-primary shrink-0" />
           {title}
         </h3>
-        {hint && <span className="text-xs text-muted-foreground ml-auto">{hint}</span>}
+        {actions && (
+          <div className="ml-auto flex shrink-0 items-center gap-2 [&>*]:ml-0">{actions}</div>
+        )}
       </div>
-      <div className="p-3">{children}</div>
+      <div className="p-3.5">{children}</div>
     </section>
   )
 }
@@ -279,7 +355,7 @@ function Faded({ children }: { children: React.ReactNode }) {
  */
 function NotBuiltNote({ children }: { children: React.ReactNode }) {
   return (
-    <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+    <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
       <Lock size={13} className="mt-0.5 shrink-0" />
       {children}
     </p>
@@ -290,7 +366,7 @@ function Row({ label, value }: { label: string; value: number }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-muted-foreground">{label}</span>
-      <span className="tabular-nums text-foreground">{inr(value)}</span>
+      <span className="text-foreground tabular-nums">{inr(value)}</span>
     </div>
   )
 }
@@ -346,6 +422,46 @@ export function PurchaseOrderDialog({
    */
   const [charges, setCharges] = useState<Record<string, string>>({})
   const [otherCharges, setOtherCharges] = useState('')
+  /*
+   * What each item on the form has been bought at before, keyed by item.
+   *
+   * Fetched once per item and kept, because the same history feeds two things:
+   * the "Last" figure under the Rate cell, and the panel behind View history.
+   * Asking twice for the same item would be two round trips for one answer.
+   */
+  const [rateHistory, setRateHistory] = useState<Record<string, RateHistoryRow[]>>({})
+  /* Which item's history is open in the panel, if any. */
+  const [historyFor, setHistoryFor] = useState<string | null>(null)
+  /*
+   * The chosen supplier's addresses, and which one this order is billed to.
+   *
+   * Held separately from `suppliers` because they arrive per supplier: loading
+   * every address of every supplier to fill one panel would be most of the
+   * master for one line of text.
+   */
+  const [supplierAddresses, setSupplierAddresses] = useState<SupplierAddressRow[]>([])
+  const [supplierAddressId, setSupplierAddressId] = useState('')
+  const [addressPickerOpen, setAddressPickerOpen] = useState(false)
+  const [addressFormFor, setAddressFormFor] = useState<'new' | string | null>(null)
+  const [savingAddress, setSavingAddress] = useState(false)
+  const [addressError, setAddressError] = useState<string | null>(null)
+  const BLANK_ADDRESS = {
+    label: '',
+    address: '',
+    city: '',
+    state: '',
+    stateCode: '',
+    pincode: '',
+    gstin: '',
+    isDefault: false,
+  }
+  const [newAddress, setNewAddress] = useState(BLANK_ADDRESS)
+  /*
+   * Items already asked about. A ref rather than state so that the effect
+   * below does not have to depend on it — depending on the answers while also
+   * writing them is how a fetch loop starts.
+   */
+  const askedFor = useRef<Set<string>>(new Set())
 
   /*
    * The order's lines. Each carries its own item, its own category narrowing
@@ -359,6 +475,12 @@ export function PurchaseOrderDialog({
   // on. They go up the moment it is saved.
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
+  /* "or drag and drop" is printed on the drop zone, so it has to work, and a
+     dragged file does not trigger :hover. Declared up here with the rest:
+     below the `return null` that closes this form it would be called on an
+     open form and skipped on a closed one, and React matches hooks up by the
+     order they are called in. */
+  const [dragOver, setDragOver] = useState(false)
 
   const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -375,7 +497,7 @@ export function PurchaseOrderDialog({
     // Orders raised before this form asked carry the old default, which meant
     // a discount per line — so they reopen as that rather than as a blank.
     setPoType(
-      record?.poType === 'ORDER_LEVEL' || record?.poType === 'NONE' ? record.poType : 'ITEM_LEVEL',
+      record?.poType === 'ORDER_LEVEL' || record?.poType === 'NONE' ? record.poType : 'ITEM_LEVEL'
     )
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
@@ -414,17 +536,109 @@ export function PurchaseOrderDialog({
             }
           })
         : // Always one row to type into. An empty table has nowhere to start.
-          [blankLine()],
+          [blankLine()]
     )
     setCharges(
-      Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)])),
+      Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)]))
     )
     setOtherCharges(num(record?.otherCharges) > 0 ? String(record?.otherCharges) : '')
     setAttachments([])
     setPendingFiles([])
+    setRateHistory({})
+    setHistoryFor(null)
+    setSupplierAddresses([])
+    setSupplierAddressId('')
+    setAddressPickerOpen(false)
+    setAddressFormFor(null)
+    setAddressError(null)
+    setNewAddress(BLANK_ADDRESS)
+    askedFor.current = new Set()
     setError(null)
     setSaving(null)
   }, [open, record])
+
+  /*
+   * The chosen supplier's addresses.
+   *
+   * Reloaded whenever the supplier changes, and the default is selected unless
+   * the order already names one — an order being edited keeps what it was
+   * billed to, which is the whole reason the order stores it.
+   *
+   * A failure leaves the panel on the supplier's own fields, which is what it
+   * showed before any of this existed.
+   */
+  useEffect(() => {
+    if (!open || !supplierId) {
+      setSupplierAddresses([])
+      setSupplierAddressId('')
+      return
+    }
+    let cancelled = false
+    void api
+      .get<{ data: SupplierAddressRow[] }>(`/masters/suppliers/${supplierId}/addresses`)
+      .then((res) => {
+        if (cancelled) return
+        setSupplierAddresses(res.data)
+        setSupplierAddressId((cur) => {
+          if (cur && res.data.some((a) => a.id === cur)) return cur
+          /*
+           * An order being edited keeps what it was billed to.
+           *
+           * Matched back by its text, because the order stores the address as
+           * words rather than as a link — deliberately, so that editing the
+           * master cannot rewrite a document already sent. If nothing matches
+           * the snapshot the supplier has since been changed, and the default
+           * is the honest thing to offer.
+           */
+          const snapshot = record?.supplierAddress?.trim()
+          if (snapshot) {
+            const same = res.data.find((a) => addressLine(a) === snapshot)
+            if (same) return same.id
+          }
+          return (res.data.find((a) => a.isDefault) ?? res.data[0])?.id ?? ''
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setSupplierAddresses([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, supplierId])
+
+  /*
+   * Fetches the buying history of every item on the form, once each.
+   *
+   * Keyed on a sorted, joined list of item ids rather than on `lines`, which
+   * changes on every keystroke in a quantity box. `askedFor` is a ref, so
+   * writing the answers into state cannot re-trigger this.
+   *
+   * A failure costs the hint and nothing else: the Rate box is typed either
+   * way, so there is no reason to stop the buyer over it.
+   */
+  useEffect(() => {
+    if (!open) return
+    const ids = [...new Set(lines.map((l) => l.itemId).filter(Boolean))]
+    const missing = ids.filter((id) => !askedFor.current.has(id))
+    if (missing.length === 0) return
+
+    for (const id of missing) askedFor.current.add(id)
+
+    for (const id of missing) {
+      void api
+        .get<{ data: RateHistoryRow[] }>(`/purchase/rate-history/${id}`)
+        .then((res) => setRateHistory((prev) => ({ ...prev, [id]: res.data })))
+        .catch(() => setRateHistory((prev) => ({ ...prev, [id]: [] })))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    open,
+    lines
+      .map((l) => l.itemId)
+      .filter(Boolean)
+      .sort()
+      .join(','),
+  ])
 
   useEffect(() => {
     if (!open) return
@@ -435,8 +649,12 @@ export function PurchaseOrderDialog({
       masterResource<Option>('items').list({ limit: 500, active: true }),
       masterResource<Option>('warehouses').list({ limit: 100, active: true }),
       masterResource<Option>('customers').list({ limit: 500, active: true }),
-      masterResource<Option>('item-categories').list({ limit: 200, active: true }).catch(() => null),
-      masterResource<Option>('styles').list({ limit: 500, active: true }).catch(() => null),
+      masterResource<Option>('item-categories')
+        .list({ limit: 200, active: true })
+        .catch(() => null),
+      masterResource<Option>('styles')
+        .list({ limit: 500, active: true })
+        .catch(() => null),
       // The charge rows in the totals are these, one row each. Failing to load
       // them costs the charge boxes, not the form.
       masterResource<ChargeTypeOption>('charge-types')
@@ -455,10 +673,21 @@ export function PurchaseOrderDialog({
        */
       api
         .get<{ success: boolean; data: { docType: string; nextNumber: string }[] }>(
-          '/settings/number-series',
+          '/settings/number-series'
         )
         .catch(() => null),
-    ]).then(([s, i, w, cust, c, st, ct, co, ns]) => {
+      /*
+       * The mill's standard terms, so the box shows what the order will carry
+       * instead of leaving the buyer to trust a placeholder. Read from the
+       * purchase module rather than from settings, which a buyer may not be
+       * allowed into. If it fails the box is simply left empty, and the server
+       * still falls back to the same template when the sheet is printed — so
+       * the terms reach the supplier either way.
+       */
+      api
+        .get<{ success: boolean; data: { terms: string | null } }>('/purchase/order-defaults')
+        .catch(() => null),
+    ]).then(([s, i, w, cust, c, st, ct, co, ns, dflt]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -471,12 +700,22 @@ export function PurchaseOrderDialog({
       setChargeTypes(
         ct
           ? (ct as Paginated<ChargeTypeOption & { applyOnPurchase?: boolean }>).data.filter(
-              (t) => t.applyOnPurchase !== false,
+              (t) => t.applyOnPurchase !== false
             )
-          : [],
+          : []
       )
       setCompany(co?.data ?? null)
       setNextPoNumber(ns?.data.find((x) => x.docType === 'PO')?.nextNumber ?? '')
+      /*
+       * Only on a new order, and only into a box still empty.
+       *
+       * Not on an edit: an order already saved carries whatever terms it was
+       * agreed on, and filling those in from today's template would rewrite
+       * the agreement behind the buyer's back. Not over typed text either —
+       * this arrives after the form has opened, and a buyer who started
+       * typing in the meantime should not lose it.
+       */
+      if (!record) setTerms((cur) => cur || (dflt?.data.terms ?? ''))
     })
 
     return () => {
@@ -565,8 +804,7 @@ export function PurchaseOrderDialog({
     if (line.itemId || !typed) return inCategory
 
     return inCategory.filter(
-      (it) =>
-        (it.code ?? '').toLowerCase().includes(typed) || it.name.toLowerCase().includes(typed),
+      (it) => (it.code ?? '').toLowerCase().includes(typed) || it.name.toLowerCase().includes(typed)
     )
   }
 
@@ -600,10 +838,18 @@ export function PurchaseOrderDialog({
     null
 
   const customerAddress =
-    [deliveryCustomer?.shippingAddress, deliveryCustomer?.shippingCity, deliveryCustomer?.shippingPincode]
+    [
+      deliveryCustomer?.shippingAddress,
+      deliveryCustomer?.shippingCity,
+      deliveryCustomer?.shippingPincode,
+    ]
       .filter(Boolean)
       .join(', ') ||
-    [deliveryCustomer?.billingAddress, deliveryCustomer?.billingCity, deliveryCustomer?.billingPincode]
+    [
+      deliveryCustomer?.billingAddress,
+      deliveryCustomer?.billingCity,
+      deliveryCustomer?.billingPincode,
+    ]
       .filter(Boolean)
       .join(', ') ||
     null
@@ -720,6 +966,51 @@ export function PurchaseOrderDialog({
    * quotation is read. Each row is named and its empty cell is outlined, so on
    * a long order "which one" is never a hunt.
    */
+  const supplierMissing = !supplierId
+
+  /*
+   * What the panel shows, in the order it can be trusted.
+   *
+   * The address chosen from the master first. Then, on an order being edited,
+   * whatever that order was actually billed to — it may name a place the
+   * supplier has since retired, and the order still says what it says. The
+   * supplier's own fields last, for a supplier nobody has given addresses to.
+   */
+  const chosenAddress = supplierAddresses.find((a) => a.id === supplierAddressId)
+  const billingLine =
+    (chosenAddress && addressLine(chosenAddress)) ||
+    record?.supplierAddress?.trim() ||
+    [supplier?.address, supplier?.city, supplier?.state, supplier?.pincode]
+      .map((p) => p?.trim())
+      .filter(Boolean)
+      .join(', ')
+
+  /*
+   * What the order is billed against, as label-and-value pairs.
+   *
+   * These four used to be a right-aligned stack of grey sentences — "GSTIN
+   * 27...", "Phone 98...", "Terms 30 days" — each a different length, ragged
+   * down the right edge of the box, with the label and the value in one
+   * run of text. Laid out as pairs on a grid they line up, and the figure a
+   * clerk is checking can be found without reading the words in front of it.
+   *
+   * Built here rather than in the markup so the empties can be dropped before
+   * anything is laid out: three facts on a four-column grid leave one empty
+   * cell, which is quieter than a cell reading "Phone —".
+   */
+  const supplierFacts: Array<{ label: string; value: string; mono?: boolean }> = supplier
+    ? [
+        { label: 'GSTIN', value: supplier.gstin ?? '', mono: true },
+        { label: 'Phone', value: supplier.phone ?? '' },
+        { label: 'Email', value: supplier.email ?? '' },
+        {
+          label: 'Payment terms',
+          value:
+            supplier.paymentTerms || (supplier.creditDays ? `${supplier.creditDays} days` : ''),
+        },
+      ].filter((f) => f.value.trim() !== '')
+    : []
+
   const unfinished = activeLines
     .map((l) => ({
       name: itemById.get(l.itemId)?.name ?? 'A line',
@@ -759,7 +1050,7 @@ export function PurchaseOrderDialog({
     if (lines.some((l, i) => i !== index && l.itemId === itemId)) {
       const clash = itemById.get(itemId)
       setError(
-        `${clash?.name ?? 'That item'} is already on another row. Change the quantity there instead of adding it twice.`,
+        `${clash?.name ?? 'That item'} is already on another row. Change the quantity there instead of adding it twice.`
       )
       return
     }
@@ -776,9 +1067,22 @@ export function PurchaseOrderDialog({
           ? { categoryId: cat.parentId, subcategoryId: cat.id }
           : { categoryId: cat.id, subcategoryId: '' }
         : {}),
-      ...(item?.standardRate != null && String(line.unitRate).trim() === ''
-        ? { unitRate: String(item.standardRate) }
-        : {}),
+      /*
+       * The rate is left empty on purpose, and is not taken from the item
+       * master.
+       *
+       * It used to be filled in from the master's standard rate when the cell
+       * was blank, on the reasoning that the rate on file is usually right. It
+       * is the wrong risk to take: a rate nobody looked at is a rate nobody
+       * checked, and an order can go to a supplier at last year's price
+       * without anybody noticing it was never typed. What the supplier quoted
+       * is the only rate a purchase order should carry, so it is typed every
+       * time. An order cannot be saved with the cell empty.
+       *
+       * The GST rate is still filled in, and that is not the same thing: the
+       * tax on an item is a fact about the item and its HSN code, not
+       * something negotiated with this supplier on this order.
+       */
       ...(item?.taxRate && String(line.gstRate).trim() === ''
         ? { gstRate: String(item.taxRate.rate) }
         : {}),
@@ -816,6 +1120,78 @@ export function PurchaseOrderDialog({
     const typed = raw.trim().toLowerCase()
     const match = typed ? styles.find((st) => (st.code ?? '').toLowerCase() === typed) : undefined
     setLine(index, { styleNo: raw, styleId: match?.id ?? '' })
+  }
+
+  /** Opens the form on one existing address, filled in from it. */
+  const startEditAddress = (a: SupplierAddressRow) => {
+    setNewAddress({
+      label: a.label ?? '',
+      address: a.address,
+      city: a.city ?? '',
+      state: a.state ?? '',
+      stateCode: a.stateCode ?? '',
+      pincode: a.pincode ?? '',
+      gstin: a.gstin ?? '',
+      isDefault: a.isDefault,
+    })
+    setAddressFormFor(a.id)
+    setAddressError(null)
+  }
+
+  /**
+   * Saves the form — a new address, or a correction to one that exists.
+   *
+   * Either way it goes to the supplier, not onto this order. That is the whole
+   * point: an address kept on one order would be typed again on the next, and
+   * a correction made here would leave the master still wrong.
+   *
+   * The list is re-read from the server rather than patched by hand, because
+   * marking one as the usual address demotes another and only the server knows
+   * which that was.
+   */
+  const saveAddress = async () => {
+    if (!addressFormFor || !supplierId) return
+    setSavingAddress(true)
+    setAddressError(null)
+    const body = {
+      label: newAddress.label.trim() || null,
+      address: newAddress.address.trim(),
+      city: newAddress.city.trim() || null,
+      state: newAddress.state.trim() || null,
+      stateCode: newAddress.stateCode.trim() || null,
+      pincode: newAddress.pincode.trim() || null,
+      gstin: newAddress.gstin.trim() || null,
+      isDefault: newAddress.isDefault,
+    }
+    try {
+      const saved =
+        addressFormFor === 'new'
+          ? await api.post<{ data: SupplierAddressRow }>(
+              `/masters/suppliers/${supplierId}/addresses`,
+              body
+            )
+          : await api.patch<{ data: SupplierAddressRow }>(
+              `/masters/suppliers/${supplierId}/addresses/${addressFormFor}`,
+              body
+            )
+
+      const list = await api
+        .get<{ data: SupplierAddressRow[] }>(`/masters/suppliers/${supplierId}/addresses`)
+        .catch(() => ({ data: [saved.data] }))
+
+      setSupplierAddresses(list.data)
+      setSupplierAddressId(saved.data.id)
+      setAddressFormFor(null)
+      setNewAddress(BLANK_ADDRESS)
+    } catch (err) {
+      setAddressError(
+        err instanceof ApiError
+          ? err.message
+          : 'Could not save the address. It may need someone with rights to change masters.'
+      )
+    } finally {
+      setSavingAddress(false)
+    }
   }
 
   const addRow = () => {
@@ -869,7 +1245,7 @@ export function PurchaseOrderDialog({
 
     const saved = await api.post<{ success: boolean; data: Attachment }>(
       `/purchase/orders/${orderId}/attachments`,
-      { fileName: file.name, storagePath: signed.data.storagePath },
+      { fileName: file.name, storagePath: signed.data.storagePath }
     )
     return saved.data
   }
@@ -891,7 +1267,7 @@ export function PurchaseOrderDialog({
       setError(
         room === 0
           ? `This order already has ${MAX_FILES} files. Remove one before adding another.`
-          : `Only ${room} more file${room === 1 ? '' : 's'} can be attached to this order.`,
+          : `Only ${room} more file${room === 1 ? '' : 's'} can be attached to this order.`
       )
       return
     }
@@ -899,7 +1275,7 @@ export function PurchaseOrderDialog({
     const tooBig = chosen.find((f) => f.size > MAX_FILE_MB * 1024 * 1024)
     if (tooBig) {
       setError(
-        `${tooBig.name} is ${(tooBig.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_MB}MB.`,
+        `${tooBig.name} is ${(tooBig.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_MB}MB.`
       )
       return
     }
@@ -918,7 +1294,7 @@ export function PurchaseOrderDialog({
       setError(
         room === 0
           ? `This order already has ${MAX_FILES} files. Remove one before adding another.`
-          : `Only ${room} more file${room === 1 ? '' : 's'} can be attached to this order.`,
+          : `Only ${room} more file${room === 1 ? '' : 's'} can be attached to this order.`
       )
       return
     }
@@ -930,7 +1306,7 @@ export function PurchaseOrderDialog({
       for (const file of chosen) {
         if (file.size > MAX_FILE_MB * 1024 * 1024) {
           throw new Error(
-            `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_MB}MB.`,
+            `${file.name} is ${(file.size / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_MB}MB.`
           )
         }
 
@@ -957,7 +1333,7 @@ export function PurchaseOrderDialog({
 
         const saved = await api.post<{ success: boolean; data: Attachment }>(
           `/purchase/orders/${record.id}/attachments`,
-          { fileName: file.name, storagePath: signed.data.storagePath },
+          { fileName: file.name, storagePath: signed.data.storagePath }
         )
         setAttachments((prev) => [...prev, saved.data])
       }
@@ -967,7 +1343,7 @@ export function PurchaseOrderDialog({
           ? err.message
           : err instanceof Error
             ? err.message
-            : 'Could not attach that file.',
+            : 'Could not attach that file.'
       )
     } finally {
       setUploading(false)
@@ -978,7 +1354,7 @@ export function PurchaseOrderDialog({
   const openFile = async (id: string) => {
     try {
       const res = await api.get<{ success: boolean; data: { url: string } }>(
-        `/purchase/attachments/${id}/link`,
+        `/purchase/attachments/${id}/link`
       )
       window.open(res.data.url, '_blank', 'noopener')
     } catch (err) {
@@ -1002,6 +1378,9 @@ export function PurchaseOrderDialog({
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     poDate: poDate || undefined,
+    // Which of the supplier's addresses. The server renders the text from the
+    // row and keeps it on the order, so the words cannot come from here.
+    supplierAddressId: supplierAddressId || null,
     reference: reference.trim() || null,
     remark: remark.trim() || null,
     // Only an order-level order has one. Sending whatever is in the box on an
@@ -1052,7 +1431,7 @@ export function PurchaseOrderDialog({
       } else {
         const res = await api.post<{ success: boolean; data: { id: string } }>(
           '/purchase/orders',
-          payload(),
+          payload()
         )
         id = res.data.id
       }
@@ -1078,7 +1457,7 @@ export function PurchaseOrderDialog({
         if (failed.length) {
           onSaved()
           setError(
-            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach: ${failed.join(', ')}. Reopen the order to try again.`,
+            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach: ${failed.join(', ')}. Reopen the order to try again.`
           )
           setSaving(null)
           return
@@ -1093,7 +1472,7 @@ export function PurchaseOrderDialog({
           setError(
             err instanceof ApiError
               ? `The order was saved, but marking it sent failed: ${err.message} It is waiting as a draft.`
-              : 'The order was saved as a draft, but marking it sent failed.',
+              : 'The order was saved as a draft, but marking it sent failed.'
           )
           setSaving(null)
           return
@@ -1149,15 +1528,74 @@ export function PurchaseOrderDialog({
    *
    * From the body there is nothing above it to get in the way.
    */
+  /*
+   * Save, written once and shown twice.
+   *
+   * The form is long enough to scroll, so there is one at the top as well as
+   * at the bottom and finishing an order never means scrolling back to look
+   * for it. Written once because the disabled state is the part that must
+   * never disagree: a Save that looks live at the top and dead at the bottom
+   * is worse than either.
+   *
+   * Only this one is repeated. All three sat in the header and all four in the
+   * footer, which is seven buttons for four actions — and the two at the top
+   * that were not Save had no reason to be there, since choosing between
+   * draft, print and send is the last decision made about an order, not the
+   * first. The header keeps Save; the footer keeps the choice.
+   */
+  const primarySave = (
+    <button
+      type="button"
+      onClick={() => void save('send')}
+      className="btn-primary"
+      disabled={busy || incomplete}
+    >
+      {saving === 'send' ? <Loader2 size={15} className="animate-spin" /> : <SaveIcon size={15} />}
+      Save
+    </button>
+  )
+
+  const saveActions = (
+    <>
+      <button
+        type="button"
+        onClick={() => void save('draft')}
+        className="btn-secondary"
+        disabled={busy || incomplete}
+      >
+        {saving === 'draft' ? (
+          <Loader2 size={15} className="animate-spin" />
+        ) : (
+          <SaveIcon size={15} />
+        )}
+        Save as draft
+      </button>
+      <button
+        type="button"
+        onClick={() => void save('print')}
+        className="btn-secondary"
+        disabled={busy || incomplete}
+      >
+        {saving === 'print' ? (
+          <Loader2 size={15} className="animate-spin" />
+        ) : (
+          <Printer size={15} />
+        )}
+        Save and print
+      </button>
+      {primarySave}
+    </>
+  )
+
   return createPortal(
-    /* The overlay stops where the sidebar ends, so the menu is neither dimmed
-       nor covered and the app can still be navigated with the form open.
-       Stopping short of it beats raising the sidebar above the overlay: on a
-       narrower screen a sidebar sitting on top would clip the left edge of a
-       centred form. On a phone the sidebar already takes most of the width, so
-       there the overlay covers everything as before. */
-    <div className="fixed inset-0 sm:left-[var(--sidebar-current-width)] z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-3">
-      {/* `h-full`, not `max-h-full` and not a vh figure.
+    <>
+      {/* The overlay stops where the sidebar ends, so the menu is neither dimmed nor covered and
+          the app can still be navigated with the form open. Stopping short of it beats raising the
+          sidebar above the overlay: on a narrower screen a sidebar sitting on top would clip the
+          left edge of a centred form. On a phone the sidebar already takes most of the width, so
+          there the overlay covers everything as before. */}
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+        {/* `h-full`, not `max-h-full` and not a vh figure.
 
           A cap only says how tall the card may not be. This form's content
           came out a little shorter than the screen, so the card hugged it and
@@ -1169,174 +1607,309 @@ export function PurchaseOrderDialog({
           else, top and bottom, by construction rather than by arithmetic:
           8px on a phone, 12px on a desktop. The body scrolls inside, which it
           did already. */}
-      <div
-        className="glass-card w-full h-full max-h-full flex flex-col overflow-hidden"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="po-dialog-title"
-      >
-        {/* Header — stays put while the body scrolls, so it is always clear what is being filled in */}
-        <div className="shrink-0 flex items-start justify-between gap-4 px-4 py-3 border-b border-border">
-          <div className="flex items-start gap-3">
-            <div className="w-9 h-9 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
-              <ShoppingCart size={18} className="text-primary" />
-            </div>
-            <div>
-              <h2 id="po-dialog-title" className="text-lg font-semibold text-foreground">
-                Purchase Order
-              </h2>
-              {/* The number moves down here rather than into the heading. The
+        <div
+          className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="po-dialog-title"
+        >
+          {/* Header — stays put while the body scrolls, so it is always clear what is being filled in */}
+          <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
+            <div className="flex items-center gap-2.5">
+              <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
+                <ShoppingCart size={16} className="text-primary" />
+              </div>
+              <div>
+                <h2 id="po-dialog-title" className="text-foreground text-base font-semibold">
+                  Purchase Order
+                </h2>
+                {/* The number moves down here rather than into the heading. The
                   heading says what the form is; the line under it says which
                   one and what may be done to it. */}
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {isEdit
-                  ? `${record?.poNumber} — only a draft order can be changed`
-                  : 'New order to a supplier'}
-              </p>
+                <p className="text-muted-foreground mt-0.5 text-xs">
+                  {isEdit
+                    ? `${record?.poNumber} — only a draft order can be changed`
+                    : 'New order to a supplier'}
+                </p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <div className="hidden md:block">{primarySave}</div>
+              <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
+                <X size={18} />
+              </button>
             </div>
           </div>
-          <button onClick={onClose} className="btn-ghost p-2 shrink-0" aria-label="Close">
-            <X size={18} />
-          </button>
-        </div>
 
-        {/* Body — the only thing that scrolls */}
-        <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-          {error && (
-            <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-              <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-              <p className="text-sm text-red-400">{error}</p>
-            </div>
-          )}
+          {/* Body — the only thing that scrolls */}
+          <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+            {error && (
+              <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+                <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+                <p className="text-sm text-red-400">{error}</p>
+              </div>
+            )}
 
-          {/* 1 — What the order is and who it is to.
+            {/* 1 — What the order is and who it is to.
 
               Six fields, two rows of three, in the order the mill reads them:
               where it is going and which order this is, then who it is from
               and what to quote back. The supplier sits in here rather than in
               a box of its own — it is one dropdown, and a box to itself left a
               column of empty space beside it. */}
-          <Section icon={FileText} title="Basic details">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div>
-                <label className="form-label" htmlFor="po-location">
-                  Location
-                </label>
-                <select
-                  id="po-location"
-                  ref={firstFieldRef}
-                  className="form-input"
-                  value={warehouseId}
-                  onChange={(e) => setWarehouseId(e.target.value)}
-                >
-                  <option value="">Head office</option>
-                  {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <Section icon={FileText} title="Basic Details">
+              <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-3">
+                <div>
+                  <label className="form-label" htmlFor="po-location">
+                    Location
+                  </label>
+                  {/* The icon is drawn over the control and the control padded to
+                    clear it, rather than set beside it in a flex row. Outside
+                    the border it would push each control a different distance
+                    from its label and break the line the six fields make. */}
+                  <div className="relative">
+                    <MapPin
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <select
+                      id="po-location"
+                      ref={firstFieldRef}
+                      className="form-input pl-9"
+                      value={warehouseId}
+                      onChange={(e) => setWarehouseId(e.target.value)}
+                    >
+                      <option value="">Head office</option>
+                      {warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
 
-              <div>
-                <label className="form-label" htmlFor="po-number">
-                  Purchase order
-                </label>
-                {/* Read-only on purpose. The number comes from the counter in
+                <div>
+                  <label className="form-label" htmlFor="po-number">
+                    Purchase order<span className="ml-0.5 text-red-500">*</span>
+                  </label>
+                  {/* Read-only on purpose. The number comes from the counter in
                     Settings → Company when the order is written, so that two
                     clerks filling this form at the same moment cannot both be
                     handed the same one. What is shown on a new order is a
                     preview of what is next, not a reservation. */}
-                <input
-                  id="po-number"
-                  className="form-input font-mono"
-                  value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
-                  readOnly
-                  placeholder="Allocated on save"
-                  aria-describedby={isEdit ? undefined : 'po-number-note'}
-                />
-                {!isEdit && (
-                  <p id="po-number-note" className="text-xs text-muted-foreground mt-1">
-                    Allocated when you save.
-                  </p>
-                )}
+                  <input
+                    id="po-number"
+                    className="form-input font-mono"
+                    value={isEdit ? (record?.poNumber ?? '') : nextPoNumber}
+                    readOnly
+                    placeholder="Allocated on save"
+                    aria-describedby={isEdit ? undefined : 'po-number-note'}
+                  />
+                  {!isEdit && (
+                    <p id="po-number-note" className="text-muted-foreground mt-1 text-xs">
+                      Allocated when you save.
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-date">
+                    Date
+                  </label>
+                  {/* No calendar glyph of our own on this one. A date input
+                    already draws the browser's picker button at its right end,
+                    and that is the one that opens the calendar — ours sat on
+                    the left doing nothing, so the field carried two calendars
+                    and only one of them worked. */}
+                  <input
+                    id="po-date"
+                    type="date"
+                    className="form-input"
+                    value={poDate}
+                    onChange={(e) => setPoDate(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-supplier">
+                    Supplier<span className="ml-0.5 text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <User
+                      size={14}
+                      className={`pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 ${
+                        supplierMissing ? 'text-red-500' : 'text-muted-foreground'
+                      }`}
+                    />
+                    <select
+                      id="po-supplier"
+                      className={`form-input pl-9 ${supplierMissing ? 'border-red-500' : ''}`}
+                      value={supplierId}
+                      onChange={(e) => setSupplierId(e.target.value)}
+                      aria-invalid={supplierMissing}
+                      aria-describedby={supplierMissing ? 'po-supplier-error' : undefined}
+                    >
+                      <option value="">Choose supplier</option>
+                      {suppliers.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.code ? `${s.code} — ${s.name}` : s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {/* Marked at the field from the start, not held back until a
+                    save is attempted. Every Save on this form is disabled while
+                    the supplier is empty, so waiting for a click that cannot
+                    happen would leave the buttons greyed out with nothing on
+                    screen saying which field is holding them. */}
+                  {supplierMissing ? (
+                    <p
+                      id="po-supplier-error"
+                      className="mt-1 flex items-center gap-1.5 text-xs text-red-500"
+                    >
+                      <AlertCircle size={13} className="shrink-0" />
+                      Supplier is required
+                    </p>
+                  ) : null}
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-reference">
+                    Reference
+                  </label>
+                  <div className="relative">
+                    <FileText
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <input
+                      id="po-reference"
+                      className="form-input pl-9"
+                      placeholder="Job number, indent slip, anything to quote back"
+                      value={reference}
+                      onChange={(e) => setReference(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="form-label" htmlFor="po-remark">
+                    Remark
+                  </label>
+                  <div className="relative">
+                    <MessageSquare
+                      size={14}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                    />
+                    <input
+                      id="po-remark"
+                      className="form-input pl-9"
+                      placeholder="Internal note, not printed on the order"
+                      value={remark}
+                      onChange={(e) => setRemark(e.target.value)}
+                    />
+                  </div>
+                </div>
               </div>
 
-              <div>
-                <label className="form-label" htmlFor="po-date">
-                  Date
-                </label>
-                <input
-                  id="po-date"
-                  type="date"
-                  className="form-input"
-                  value={poDate}
-                  onChange={(e) => setPoDate(e.target.value)}
-                />
-              </div>
+              {/* Who the order is to, filled in from the supplier master.
 
-              <div>
-                <label className="form-label" htmlFor="po-supplier">
-                  Supplier<span className="text-red-400 ml-0.5">*</span>
-                </label>
-                <select
-                  id="po-supplier"
-                  className="form-input"
-                  value={supplierId}
-                  onChange={(e) => setSupplierId(e.target.value)}
-                >
-                  <option value="">Choose supplier</option>
-                  {suppliers.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.code ? `${s.code} — ${s.name}` : s.name}
-                    </option>
-                  ))}
-                </select>
-                {supplier && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {supplier.gstin ? (
-                      <>
-                        GSTIN {supplier.gstin} ·{' '}
-                        {taxMode === 'CGST_SGST'
-                          ? 'within the state, CGST + SGST'
-                          : 'other state, IGST'}
-                      </>
-                    ) : (
-                      'No GSTIN on file — this order will carry no GST'
+                Full width under the six fields rather than tucked into the
+                Supplier cell: an address is four lines and a dropdown is one,
+                so inside the cell it would have stretched that row and left
+                Reference and Remark sitting above a column of empty space.
+
+                Not typed into. The master is the one place a supplier's
+                address is kept, and a box here that could be edited would be a
+                second version of it that nothing keeps in step — Change edits
+                the master itself. */}
+              {supplier && (
+                <div className="border-border bg-secondary mt-3 rounded-lg border">
+                  <div className="border-border/70 flex flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-1.5">
+                    <h4 className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+                      Billing address
+                    </h4>
+                    {chosenAddress?.label && (
+                      <span className="text-muted-foreground text-[10px]">
+                        · {chosenAddress.label}
+                      </span>
                     )}
-                  </p>
-                )}
-              </div>
+                    {/* The tax split follows the two GSTINs, and it decides what
+                        the supplier may charge — so it is said here, beside the
+                        number it is worked out from, rather than discovered on
+                        the bill. A chip rather than a fifth grey sentence: it
+                        is a conclusion, not a field off the master. */}
+                    {supplier.gstin && taxMode && taxMode !== 'NONE' && (
+                      <span className="border-primary/25 bg-primary/10 text-primary ml-1 rounded-full border px-2 py-0.5 text-[10px] font-medium">
+                        {taxMode === 'CGST_SGST'
+                          ? 'Within the state · CGST + SGST'
+                          : 'Other state · IGST'}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setAddressPickerOpen(true)}
+                      className="text-primary ml-auto flex shrink-0 items-center gap-1 text-xs hover:underline"
+                    >
+                      <Pencil size={11} />
+                      Change
+                      {supplierAddresses.length > 1 && (
+                        <span className="text-muted-foreground">({supplierAddresses.length})</span>
+                      )}
+                    </button>
+                  </div>
 
-              <div>
-                <label className="form-label" htmlFor="po-reference">
-                  Reference
-                </label>
-                <input
-                  id="po-reference"
-                  className="form-input"
-                  placeholder="Job number, indent slip, anything to quote back"
-                  value={reference}
-                  onChange={(e) => setReference(e.target.value)}
-                />
-              </div>
+                  <div className="px-3 py-2.5">
+                    <p className="text-foreground text-sm font-semibold">{supplier.name}</p>
+                    {billingLine ? (
+                      <p className="text-muted-foreground mt-0.5 text-sm leading-relaxed">
+                        {billingLine}
+                      </p>
+                    ) : (
+                      <p className="text-muted-foreground mt-0.5 text-sm">
+                        No address on this supplier — add it under{' '}
+                        <a
+                          href="/masters/suppliers"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-primary underline"
+                        >
+                          Masters → Suppliers
+                        </a>
+                        .
+                      </p>
+                    )}
 
-              <div>
-                <label className="form-label" htmlFor="po-remark">
-                  Remark
-                </label>
-                <input
-                  id="po-remark"
-                  className="form-input"
-                  placeholder="Internal note, not printed on the order"
-                  value={remark}
-                  onChange={(e) => setRemark(e.target.value)}
-                />
-              </div>
-            </div>
-          </Section>
+                    {supplierFacts.length > 0 && (
+                      <div className="border-border/70 mt-2.5 grid grid-cols-2 gap-x-4 gap-y-2 border-t pt-2.5 sm:grid-cols-4">
+                        {supplierFacts.map((f) => (
+                          <div key={f.label} className="min-w-0">
+                            <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+                              {f.label}
+                            </p>
+                            <p
+                              className={`text-foreground truncate text-xs ${f.mono ? 'font-mono' : ''}`}
+                              title={f.value}
+                            >
+                              {f.value}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
-          {/* 2 — The order's lines, entered where they are shown.
+                    {!supplier.gstin && (
+                      <p className="warn-text mt-2 text-xs">
+                        No GSTIN on file — this order will carry no GST.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </Section>
+
+            {/* 2 — The order's lines, entered where they are shown.
 
               One table, not a form above a table. Every field a line has is a
               column in it, and a row is typed left to right; "+ Add item row"
@@ -1348,116 +1921,139 @@ export function PurchaseOrderDialog({
               two that say *which* line this is stay pinned to the left edge.
               Scrolled to the far right you can still see you are on the poplin
               and not the buttons. */}
-          <Section icon={Package} title="Items" hint={`${activeLines.length} on this order`}>
-            {/* Lost when this section was rebuilt as one table, which left the
+            <Section
+              icon={Package}
+              title="Items"
+              actions={
+                <>
+                  <label htmlFor="po-type" className="text-muted-foreground text-xs">
+                    Order type
+                  </label>
+                  <select
+                    id="po-type"
+                    className="form-input h-7 w-auto px-2 py-0 text-xs"
+                    value={poType}
+                    onChange={(e) => setPoType(e.target.value as PoType)}
+                  >
+                    <option value="ITEM_LEVEL">With discount at item level</option>
+                    <option value="ORDER_LEVEL">With discount at order level</option>
+                    <option value="NONE">Without discount</option>
+                  </select>
+                </>
+              }
+            >
+              {/* Lost when this section was rebuilt as one table, which left the
                 discount mode stuck on whatever the order opened with and no
-                way to change it. It belongs above the grid: it decides which
-                discount cells are live, so it is chosen before any figure is
-                typed into them. */}
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
-              <p className="text-xs text-muted-foreground">
+                way to change it. It sits in the title bar above: it decides
+                which discount cells are live, so it is read before any figure
+                is typed into them, and in a row of its own it was a third size
+                of text on a line nobody needed. This sentence stays down here,
+                over the cells it is about. */}
+              <p className="text-muted-foreground mb-2 text-xs">
                 {poType === 'ITEM_LEVEL'
                   ? 'A discount per line, in the Discount column — percent or rupees.'
                   : poType === 'ORDER_LEVEL'
                     ? 'One discount off the whole order, entered as Total discount on the right. The per-line Discount cells are switched off.'
                     : 'No discount on this order. Both the per-line cells and the order-level box are switched off.'}
               </p>
-              <div className="flex items-center gap-2 shrink-0">
-                <label
-                  htmlFor="po-type"
-                  className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground"
-                >
-                  Purchase order type
-                </label>
-                <select
-                  id="po-type"
-                  className="form-input h-8 w-auto px-2 text-xs"
-                  value={poType}
-                  onChange={(e) => setPoType(e.target.value as PoType)}
-                >
-                  <option value="ITEM_LEVEL">With discount at item level</option>
-                  <option value="ORDER_LEVEL">With discount at order level</option>
-                  <option value="NONE">Without discount</option>
-                </select>
-              </div>
-            </div>
 
-            {/* One list for every row — unlike items, styles are not narrowed
-                by anything, so there is no reason to repeat it per row. */}
-            <datalist id="po-style-codes">
-              {styles.map((st) => (
-                <option key={st.id} value={st.code ?? st.name} label={st.name} />
-              ))}
-            </datalist>
+              <div className="border-border bg-card overflow-x-auto rounded-lg border">
+                <table className="w-full min-w-[1500px] table-fixed border-collapse text-sm">
+                  <thead>
+                    <tr className="bg-secondary">
+                      {[
+                        ['#', `${COL.num} sticky left-0 z-20 bg-secondary`, 'left'],
+                        ['', `${COL.remove} sticky left-10 z-20 bg-secondary`, 'left'],
+                        ['Item code', `${COL.code} sticky left-20 z-20 bg-secondary`, 'left'],
+                        ['Item', `${COL.item} sticky left-48 z-20 bg-secondary`, 'left'],
+                        ['Category', COL.category, 'left'],
+                        ['Subcategory', COL.subcategory, 'left'],
+                        ['Style no.', COL.style, 'left'],
+                        ['Description', COL.description, 'left'],
+                        ['Qty', COL.qty, 'right'],
+                        ['Rate', COL.rate, 'right'],
+                        ['Discount', COL.discount, 'right'],
+                        ['Tax %', COL.tax, 'right'],
+                        ['Net price', COL.netPrice, 'right'],
+                        ['Amount', COL.amount, 'right'],
+                      ].map(([label, width, align], i) => (
+                        <th
+                          key={`${label}-${i}`}
+                          className={`${width} border-border text-muted-foreground border-b px-2 py-1.5 align-bottom text-[10px] font-semibold uppercase tracking-wider ${
+                            align === 'right' ? 'text-right' : 'text-left'
+                          }`}
+                        >
+                          {label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {lines.map((line, i) => {
+                      const item = itemById.get(line.itemId)
 
-            <div className="overflow-x-auto border border-border rounded-lg bg-card">
-              <table className="w-full table-fixed min-w-[1590px] text-sm border-collapse">
-                <thead>
-                  <tr className="bg-secondary">
-                    {[
-                      ['Item code', `${COL.code} sticky left-0 z-20 bg-secondary`, 'left'],
-                      ['Item', `${COL.item} sticky left-32 z-20 bg-secondary`, 'left'],
-                      ['Category', COL.category, 'left'],
-                      ['Subcategory', COL.subcategory, 'left'],
-                      ['Style no.', COL.style, 'left'],
-                      ['Description', COL.description, 'left'],
-                      ['Qty', COL.qty, 'right'],
-                      ['Rate', COL.rate, 'right'],
-                      ['Discount', COL.discount, 'right'],
-                      ['Tax %', COL.tax, 'right'],
-                      ['Net price', COL.netPrice, 'right'],
-                      ['Amount', COL.amount, 'right'],
-                      ['', COL.remove, 'left'],
-                    ].map(([label, width, align], i) => (
-                      <th
-                        key={label || i}
-                        className={`${width} border-b border-border px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground align-bottom ${
-                          align === 'right' ? 'text-right' : 'text-left'
-                        }`}
-                      >
-                        {label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {lines.map((line, i) => {
-                    const item = itemById.get(line.itemId)
+                      /*
+                       * Where this row's item is actually filed, used when the
+                       * row has not narrowed anything itself.
+                       *
+                       * Worked out here rather than stored on the line, because
+                       * the category list arrives from the server after the form
+                       * has already been filled from the record — an order
+                       * opened for editing in that first moment would have shown
+                       * "All / None" beside an item that is plainly under Fabric.
+                       * Derived, it is right whenever the list arrives.
+                       */
+                      const filed = categories.find((c) => c.id === item?.categoryId)
+                      const view = {
+                        ...line,
+                        categoryId: line.categoryId || filed?.parentId || filed?.id || '',
+                        subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
+                      }
 
-                    /*
-                     * Where this row's item is actually filed, used when the
-                     * row has not narrowed anything itself.
-                     *
-                     * Worked out here rather than stored on the line, because
-                     * the category list arrives from the server after the form
-                     * has already been filled from the record — an order
-                     * opened for editing in that first moment would have shown
-                     * "All / None" beside an item that is plainly under Fabric.
-                     * Derived, it is right whenever the list arrives.
-                     */
-                    const filed = categories.find((c) => c.id === item?.categoryId)
-                    const view = {
-                      ...line,
-                      categoryId: line.categoryId || filed?.parentId || filed?.id || '',
-                      subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
-                    }
+                      const subs = subCategoriesOf(view.categoryId)
+                      const choices = itemsFor(view)
+                      const money = priceOf(line)
+                      // Outlined only once the row has an item — a blank row is
+                      // not unfinished, it is just empty.
+                      const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
+                      const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
+                      const cell = 'form-input h-8 px-2 text-xs'
+                      // Newest first from the server, so the first row is the
+                      // last time this item was bought.
+                      const lastRate = line.itemId ? rateHistory[line.itemId]?.[0] : undefined
 
-                    const subs = subCategoriesOf(view.categoryId)
-                    const choices = itemsFor(view)
-                    const money = priceOf(line)
-                    // Outlined only once the row has an item — a blank row is
-                    // not unfinished, it is just empty.
-                    const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
-                    const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
-                    const cell = 'form-input h-8 px-2 text-xs'
+                      return (
+                        <tr
+                          key={i}
+                          className={`${
+                            i % 2 === 1 ? 'zebra-row' : 'bg-card'
+                          } border-border/50 border-b last:border-0 [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}
+                        >
+                          {/* Which row this is, and the one control that acts on
+                            the whole of it. Both pinned at the left edge with
+                            the item, so on a scrolled table you can still tell
+                            row four from row five and still delete it. */}
+                          <td className={`${COL.num} sticky left-0 z-10 bg-inherit`}>
+                            <div className="text-muted-foreground flex h-8 items-center justify-center text-xs tabular-nums">
+                              {i + 1}
+                            </div>
+                          </td>
 
-                    return (
-                      <tr
-                        key={i}
-                        className="bg-card border-b border-border/50 last:border-0 [&>td]:align-top [&>td]:px-2 [&>td]:py-1.5"
-                      >
-                        <td className={`${COL.code} sticky left-0 z-10 bg-card`}>
-                          {/* A real combobox, using the browser's own: type a
+                          <td className={`${COL.remove} sticky left-10 z-10 bg-inherit`}>
+                            <div className="flex h-8 items-center">
+                              <button
+                                type="button"
+                                onClick={() => removeRow(i)}
+                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                aria-label={`Remove row ${i + 1}`}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+
+                          <td className={`${COL.code} sticky left-20 z-10 bg-inherit`}>
+                            {/* A real combobox, using the browser's own: type a
                               code and the list narrows, or open it and pick
                               one. `datalist` rather than a hand-built dropdown
                               because it needs no package, it keeps the cell a
@@ -1468,729 +2064,1300 @@ export function PurchaseOrderDialog({
 
                               One list per row, because each row narrows its
                               items by its own category. */}
-                          <input
-                            className={`${cell} font-mono`}
-                            list={`po-codes-${i}`}
-                            placeholder="Code"
-                            value={line.codeText ?? ''}
-                            onChange={(e) => typeCodeFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={`po-codes-${i}`}>
-                            {choices.map((it) => (
-                              <option key={it.id} value={it.code ?? ''} label={it.name} />
-                            ))}
-                          </datalist>
-                        </td>
+                            <input
+                              className={`${cell} font-mono`}
+                              list={`po-codes-${i}`}
+                              placeholder="Code"
+                              value={line.codeText ?? ''}
+                              onChange={(e) => typeCodeFor(i, e.target.value)}
+                              aria-label={`Row ${i + 1} item code`}
+                            />
+                            <datalist id={`po-codes-${i}`}>
+                              {choices.map((it) => (
+                                <option key={it.id} value={it.code ?? ''} label={it.name} />
+                              ))}
+                            </datalist>
+                          </td>
 
-                        <td className={`${COL.item} sticky left-32 z-10 bg-card border-r border-border`}>
-                          <select
-                            className={cell}
-                            value={line.itemId}
-                            onChange={(e) => pickItemFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} item`}
+                          <td
+                            className={`${COL.item} border-border sticky left-48 z-10 border-r bg-inherit`}
                           >
-                            <option value="">
-                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
-                            </option>
-                            {choices.map((it) => (
-                              <option key={it.id} value={it.id}>
-                                {it.name}
+                            <select
+                              className={cell}
+                              value={line.itemId}
+                              onChange={(e) => pickItemFor(i, e.target.value)}
+                              aria-label={`Row ${i + 1} item`}
+                            >
+                              <option value="">
+                                {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                               </option>
-                            ))}
-                          </select>
-                          {item?.hsnCode && (
-                            <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                              HSN {item.hsnCode}
-                            </p>
-                          )}
-                        </td>
+                              {choices.map((it) => (
+                                <option key={it.id} value={it.id}>
+                                  {it.name}
+                                </option>
+                              ))}
+                            </select>
+                            {item?.hsnCode && (
+                              <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
+                                HSN {item.hsnCode}
+                              </p>
+                            )}
+                          </td>
 
-                        <td className={COL.category}>
-                          <select
-                            className={cell}
-                            value={view.categoryId}
-                            onChange={(e) =>
-                              // Clearing the subcategory with it: the one
-                              // chosen a moment ago belongs to the category
-                              // just replaced.
-                              setLine(i, { categoryId: e.target.value, subcategoryId: '' })
-                            }
-                            aria-label={`Row ${i + 1} category`}
-                          >
-                            <option value="">All</option>
-                            {topCategories.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
+                          <td className={COL.category}>
+                            <select
+                              className={cell}
+                              value={view.categoryId}
+                              onChange={(e) =>
+                                // Clearing the subcategory with it: the one
+                                // chosen a moment ago belongs to the category
+                                // just replaced.
+                                setLine(i, { categoryId: e.target.value, subcategoryId: '' })
+                              }
+                              aria-label={`Row ${i + 1} category`}
+                            >
+                              <option value="">All</option>
+                              {topCategories.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
 
-                        <td className={COL.subcategory}>
-                          <select
-                            className={cell}
-                            value={view.subcategoryId}
-                            disabled={subs.length === 0}
-                            onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
-                            aria-label={`Row ${i + 1} subcategory`}
-                          >
-                            <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
-                            {subs.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
+                          <td className={COL.subcategory}>
+                            <select
+                              className={cell}
+                              value={view.subcategoryId}
+                              disabled={subs.length === 0}
+                              onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                              aria-label={`Row ${i + 1} subcategory`}
+                            >
+                              <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
+                              {subs.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
 
-                        <td className={COL.style}>
-                          {/* Typed, not chosen from a list — material is often
-                              bought before the style has been set up, so a
-                              dropdown of existing styles could not hold what
-                              the buyer needs to write.
+                          <td className={COL.style}>
+                            {/* A plain box. Material is often bought before the
+                              style has been set up, so nothing this cell could
+                              offer would hold what the buyer needs to write,
+                              and a list dropping over the row while they typed
+                              was in the way more often than it helped.
 
-                              The master's codes are still offered as
-                              suggestions, and picking one links the line to
-                              that style so it reconciles against production.
-                              Type something the master has never heard of and
-                              the text is kept anyway. */}
-                          <input
-                            className={cell}
-                            list="po-style-codes"
-                            placeholder="Style"
-                            value={(line.styleNo as string) ?? ''}
-                            onChange={(e) => typeStyleFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} style number`}
-                          />
-                          {/* Shown only when the text matched nothing, so the
+                              What is typed is still matched against the style
+                              master behind the box: an exact code links the
+                              line to that style so it reconciles against
+                              production, and anything else is simply kept as
+                              written. Nothing is lost by not showing the list.
+                              */}
+                            <input
+                              className={cell}
+                              placeholder="Style"
+                              value={(line.styleNo as string) ?? ''}
+                              onChange={(e) => typeStyleFor(i, e.target.value)}
+                              aria-label={`Row ${i + 1} style number`}
+                            />
+                            {/* Shown only when the text matched nothing, so the
                               buyer knows this order will not tie back to a
                               style — not an error, just a fact about it. */}
-                          {line.styleNo && !line.styleId && (
-                            <p className="text-[10px] text-muted-foreground mt-0.5">Not in master</p>
-                          )}
-                        </td>
+                            {line.styleNo && !line.styleId && (
+                              <p className="text-muted-foreground mt-0.5 text-[10px]">
+                                Not in master
+                              </p>
+                            )}
+                          </td>
 
-                        <td className={COL.description}>
-                          <input
-                            className={cell}
-                            placeholder="Optional"
-                            value={(line.description as string) ?? ''}
-                            onChange={(e) => setLine(i, { description: e.target.value })}
-                            aria-label={`Row ${i + 1} description`}
-                          />
-                        </td>
+                          <td className={COL.description}>
+                            <input
+                              className={cell}
+                              placeholder="Optional"
+                              value={(line.description as string) ?? ''}
+                              onChange={(e) => setLine(i, { description: e.target.value })}
+                              aria-label={`Row ${i + 1} description`}
+                            />
+                          </td>
 
-                        <td className={COL.qty}>
-                          <input
-                            type="number"
-                            step="0.001"
-                            min={0}
-                            className={`${cell} text-right ${needsQty ? 'border-amber-500/70' : ''}`}
-                            placeholder="0"
-                            value={String(line.qty)}
-                            onChange={(e) => setLine(i, { qty: e.target.value })}
-                            aria-label={`Row ${i + 1} quantity`}
-                          />
-                          {item?.uom?.symbol && (
-                            <p className="text-[10px] text-muted-foreground text-right mt-0.5">
-                              {item.uom.symbol}
-                            </p>
-                          )}
-                        </td>
+                          <td className={COL.qty}>
+                            <input
+                              type="number"
+                              step="0.001"
+                              min={0}
+                              className={`${cell} text-right ${needsQty ? 'border-amber-500/70' : ''}`}
+                              placeholder="0"
+                              value={String(line.qty)}
+                              onChange={(e) => setLine(i, { qty: e.target.value })}
+                              aria-label={`Row ${i + 1} quantity`}
+                            />
+                            {item?.uom?.symbol && (
+                              <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
+                                {item.uom.symbol}
+                              </p>
+                            )}
+                          </td>
 
-                        <td className={COL.rate}>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            className={`${cell} text-right ${needsRate ? 'border-amber-500/70' : ''}`}
-                            placeholder="0.00"
-                            value={String(line.unitRate)}
-                            onChange={(e) => setLine(i, { unitRate: e.target.value })}
-                            aria-label={`Row ${i + 1} rate`}
-                          />
-                        </td>
-
-                        <td className={COL.discount}>
-                          {/* Percent or rupees, as the mill's old form
-                              allowed. Both sit in the cell, so which one this
-                              figure is can never be in doubt. */}
-                          <div className="flex items-stretch gap-1">
+                          <td className={COL.rate}>
                             <input
                               type="number"
                               step="0.01"
                               min={0}
-                              max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
-                              className={`${cell} text-right flex-1 min-w-0`}
-                              placeholder="0"
-                              disabled={poType !== 'ITEM_LEVEL'}
-                              value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
-                              onChange={(e) => setLine(i, { discount: e.target.value })}
-                              aria-label={`Row ${i + 1} discount`}
+                              className={`${cell} text-right ${needsRate ? 'border-amber-500/70' : ''}`}
+                              placeholder="0.00"
+                              value={String(line.unitRate)}
+                              onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                              aria-label={`Row ${i + 1} rate`}
                             />
-                            <select
-                              className={`${cell} w-11 shrink-0 px-1`}
-                              disabled={poType !== 'ITEM_LEVEL'}
-                              value={line.discountUnit ?? '%'}
-                              onChange={(e) =>
-                                setLine(i, { discountUnit: e.target.value as '%' | 'INR' })
-                              }
-                              aria-label={`Row ${i + 1} discount in percent or rupees`}
-                            >
-                              <option value="%">%</option>
-                              <option value="INR">₹</option>
-                            </select>
-                          </div>
-                        </td>
+                            {/* The last rate this item was bought at, shown but
+                              never typed into the box. That is the whole point
+                              of it: the buyer sees what it went for last time
+                              and decides, rather than sending an order at a
+                              price nobody looked at.
 
-                        <td className={COL.tax}>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            max={100}
-                            className={`${cell} text-right`}
-                            placeholder="0"
-                            disabled={taxMode === 'NONE'}
-                            value={taxMode === 'NONE' ? '' : String(line.gstRate)}
-                            onChange={(e) => setLine(i, { gstRate: e.target.value })}
-                            aria-label={`Row ${i + 1} tax percent`}
-                          />
-                          {/* The old form's "Is tax exempt". It is the same
+                              Only when there is a history. A first-time
+                              purchase has nothing to say here, and "Last —"
+                              would just be a row of noise. */}
+                            {lastRate && (
+                              <div className="mt-0.5 text-right">
+                                <p className="text-muted-foreground whitespace-nowrap text-[10px]">
+                                  Last {inr(num(lastRate.unitRate))}
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => setHistoryFor(line.itemId)}
+                                  className="text-primary whitespace-nowrap text-[10px] hover:underline"
+                                >
+                                  View history
+                                </button>
+                              </div>
+                            )}
+                          </td>
+
+                          <td className={COL.discount}>
+                            {/* Percent or rupees, as the mill's old form
+                              allowed. Both sit in the cell, so which one this
+                              figure is can never be in doubt. */}
+                            <div className="flex items-stretch gap-1">
+                              <input
+                                type="number"
+                                step="0.01"
+                                min={0}
+                                max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
+                                className={`${cell} min-w-0 flex-1 text-right`}
+                                placeholder="0"
+                                disabled={poType !== 'ITEM_LEVEL'}
+                                value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
+                                onChange={(e) => setLine(i, { discount: e.target.value })}
+                                aria-label={`Row ${i + 1} discount`}
+                              />
+                              <select
+                                className={`${cell} w-14 shrink-0 px-1`}
+                                disabled={poType !== 'ITEM_LEVEL'}
+                                value={line.discountUnit ?? '%'}
+                                onChange={(e) =>
+                                  setLine(i, { discountUnit: e.target.value as '%' | 'INR' })
+                                }
+                                aria-label={`Row ${i + 1} discount in percent or rupees`}
+                              >
+                                <option value="%">%</option>
+                                <option value="INR">₹</option>
+                              </select>
+                            </div>
+                          </td>
+
+                          <td className={COL.tax}>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              max={100}
+                              className={`${cell} text-right`}
+                              placeholder="0"
+                              disabled={taxMode === 'NONE'}
+                              value={taxMode === 'NONE' ? '' : String(line.gstRate)}
+                              onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                              aria-label={`Row ${i + 1} tax percent`}
+                            />
+                            {/* The old form's "Is tax exempt". It is the same
                               thing as a rate of nothing, so it sets the box
                               above rather than being a second field that can
-                              disagree with it. */}
-                          <label className="flex items-center justify-end gap-1 mt-0.5 text-[10px] text-muted-foreground cursor-pointer">
-                            <input
-                              type="checkbox"
-                              className="scale-75"
-                              disabled={taxMode === 'NONE'}
-                              checked={num(line.gstRate) === 0}
-                              onChange={(e) =>
-                                setLine(i, {
-                                  gstRate: e.target.checked
-                                    ? '0'
-                                    : item?.taxRate
-                                      ? String(item.taxRate.rate)
-                                      : '',
-                                })
-                              }
-                            />
-                            Exempt
-                          </label>
-                        </td>
+                              disagree with it.
 
-                        <td className={COL.netPrice}>
-                          <div className="h-8 flex items-center justify-end tabular-nums text-xs text-muted-foreground whitespace-nowrap">
-                            {inr(money.netPrice)}
-                          </div>
-                        </td>
+                              Shown once the row has an item, like the unit
+                              under Qty and the HSN under Item. Rendered on
+                              every row it put a second line under all of them,
+                              including the blank one every new order opens
+                              with — a whole form of rows made taller for a tick
+                              that cannot mean anything until there is
+                              something on the line to exempt. */}
+                            {line.itemId && (
+                              <label className="text-muted-foreground mt-0.5 flex cursor-pointer items-center justify-end gap-1 text-[10px]">
+                                <input
+                                  type="checkbox"
+                                  className="scale-75"
+                                  disabled={taxMode === 'NONE'}
+                                  checked={num(line.gstRate) === 0}
+                                  onChange={(e) =>
+                                    setLine(i, {
+                                      gstRate: e.target.checked
+                                        ? '0'
+                                        : item?.taxRate
+                                          ? String(item.taxRate.rate)
+                                          : '',
+                                    })
+                                  }
+                                />
+                                Exempt
+                              </label>
+                            )}
+                          </td>
 
-                        <td className={COL.amount}>
-                          <div className="h-8 flex items-center justify-end tabular-nums font-medium whitespace-nowrap">
-                            {inr(totals.lineAmounts[i] ?? 0)}
-                          </div>
-                        </td>
+                          <td className={COL.netPrice}>
+                            <div className="text-muted-foreground flex h-8 items-center justify-end whitespace-nowrap text-xs tabular-nums">
+                              {inr(money.netPrice)}
+                            </div>
+                          </td>
 
-                        <td className={COL.remove}>
-                          <div className="h-8 flex items-center">
-                            <button
-                              type="button"
-                              onClick={() => removeRow(i)}
-                              className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                              aria-label={`Remove row ${i + 1}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          <td className={COL.amount}>
+                            <div className="flex h-8 items-center justify-end whitespace-nowrap font-medium tabular-nums">
+                              {inr(totals.lineAmounts[i] ?? 0)}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-3 mt-2">
-              <button type="button" onClick={addRow} className="btn-secondary">
-                <Plus size={15} /> Add item row
-              </button>
-              <NotBuiltNote>
-                Purchase indents are not built yet, so items come from the item list rather than
-                from an indent.
-              </NotBuiltNote>
-            </div>
-          </Section>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={addRow}
+                  className="text-primary border-primary/40 hover:bg-primary/10 focus:ring-ring inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors duration-200 focus:outline-none focus:ring-2"
+                >
+                  <Plus size={14} /> Add item row
+                </button>
+                <NotBuiltNote>
+                  Purchase indents are not built yet, so items come from the item list rather than
+                  from an indent.
+                </NotBuiltNote>
+              </div>
+            </Section>
 
-          {/* 4 — Where it goes, what is attached, and what it comes to.
+            {/* 4 — Where it goes, what is attached, and what it comes to.
 
               One row, two boxes: the delivery and its files on the left, the
               calculation on the right — the arrangement the form has always
               had, and the one the clerk checks left to right before saving. */}
-          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_460px] gap-3 items-start">
-            <Section icon={Truck} title="Attachments and deliver to">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <h4 className="text-xs font-semibold text-foreground">Attachments</h4>
+            <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_460px]">
+              {/* The left column is stacked rather than left half-empty.
 
-                  {/* One box whether or not the order exists yet. On a new
-                      order the files are held and go up the moment it is saved,
-                      so nobody has to save, reopen and come back for them. */}
-                  <div className="space-y-2">
-                    <label
-                      className={`flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2 ${
-                        uploading || fileCount >= MAX_FILES
-                          ? 'opacity-70 cursor-not-allowed'
-                          : 'cursor-pointer hover:border-teal-500/40'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2 text-sm text-foreground">
-                        {uploading ? (
-                          <Loader2 size={14} className="animate-spin" />
+                The calculation beside it runs to a dozen rows once the charge
+                master has anything in it, while the delivery box is four
+                lines. Side by side on their own that left roughly 350px of
+                nothing under the delivery box, the terms pushed below the
+                whole row, and the form scrolling for no reason. The terms and
+                the note move up into that space instead. */}
+              <div className="min-w-0 space-y-3">
+                <Section icon={Truck} title="Attachments and Deliver To">
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                    <div className="space-y-2">
+                      <h4 className="text-foreground text-xs font-semibold">Attachments</h4>
+
+                      {/* One box whether or not the order exists yet. On a new
+                        order the files are held and go up the moment it is saved,
+                        so nobody has to save, reopen and come back for them. */}
+                      <div className="space-y-2">
+                        <label
+                          onDragOver={(e) => {
+                            e.preventDefault()
+                            if (!uploading && fileCount < MAX_FILES) setDragOver(true)
+                          }}
+                          onDragLeave={() => setDragOver(false)}
+                          onDrop={(e) => {
+                            e.preventDefault()
+                            setDragOver(false)
+                            if (!uploading && fileCount < MAX_FILES)
+                              chooseFiles(e.dataTransfer.files)
+                          }}
+                          className={`flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-3 ${
+                            uploading || fileCount >= MAX_FILES
+                              ? 'border-border bg-secondary cursor-not-allowed opacity-70'
+                              : dragOver
+                                ? 'border-primary bg-primary/10 cursor-pointer'
+                                : 'border-border bg-secondary cursor-pointer hover:border-teal-500/40'
+                          }`}
+                        >
+                          <span className="flex min-w-0 items-center gap-2.5">
+                            {uploading ? (
+                              <Loader2
+                                size={18}
+                                className="text-muted-foreground shrink-0 animate-spin"
+                              />
+                            ) : (
+                              <UploadCloud size={18} className="text-muted-foreground shrink-0" />
+                            )}
+                            <span className="min-w-0">
+                              <span className="text-foreground block truncate text-sm">
+                                {uploading ? 'Sending...' : 'Choose files'}
+                              </span>
+                              <span className="text-muted-foreground block text-xs">
+                                or drag and drop
+                              </span>
+                            </span>
+                          </span>
+                          <span className="text-muted-foreground shrink-0 text-xs">
+                            {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
+                          </span>
+                          <input
+                            type="file"
+                            multiple
+                            className="hidden"
+                            disabled={uploading || fileCount >= MAX_FILES}
+                            onChange={(e) => {
+                              chooseFiles(e.target.files)
+                              e.target.value = ''
+                            }}
+                          />
+                        </label>
+
+                        {fileCount === 0 ? (
+                          <p className="text-muted-foreground text-xs">Nothing attached yet.</p>
                         ) : (
-                          <Paperclip size={14} />
+                          <ul className="space-y-1">
+                            {attachments.map((f) => (
+                              <li
+                                key={f.id}
+                                className="border-border bg-secondary flex items-center gap-2 rounded-lg border px-3 py-1.5"
+                              >
+                                <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                                <button
+                                  type="button"
+                                  className="text-primary min-w-0 flex-1 truncate text-left text-sm underline"
+                                  onClick={() => void openFile(f.id)}
+                                  title={`Open ${f.fileName}`}
+                                >
+                                  {f.fileName}
+                                </button>
+                                <span className="text-muted-foreground whitespace-nowrap text-[10px]">
+                                  {(f.sizeBytes / 1024).toFixed(0)} KB
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                  onClick={() => void removeFile(f)}
+                                  aria-label={`Remove ${f.fileName}`}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </li>
+                            ))}
+
+                            {/* Chosen but not yet sent. Marked so nobody believes a
+                              file is safely filed before the order is saved. */}
+                            {pendingFiles.map((f, i) => (
+                              <li
+                                key={`pending-${f.name}-${i}`}
+                                className="border-border bg-secondary flex items-center gap-2 rounded-lg border border-dashed px-3 py-1.5"
+                              >
+                                <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                                <span className="text-foreground min-w-0 flex-1 truncate text-sm">
+                                  {f.name}
+                                </span>
+                                <span className="text-muted-foreground whitespace-nowrap text-[10px]">
+                                  {(f.size / 1024).toFixed(0)} KB · on save
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                  onClick={() =>
+                                    setPendingFiles((prev) => prev.filter((_, x) => x !== i))
+                                  }
+                                  aria-label={`Remove ${f.name}`}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
                         )}
-                        {uploading ? 'Sending...' : 'Choose files'}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
-                      </span>
-                      <input
-                        type="file"
-                        multiple
-                        className="hidden"
-                        disabled={uploading || fileCount >= MAX_FILES}
-                        onChange={(e) => {
-                          chooseFiles(e.target.files)
-                          e.target.value = ''
-                        }}
-                      />
-                    </label>
+                      </div>
+                    </div>
 
-                    {fileCount === 0 ? (
-                      <p className="text-xs text-muted-foreground">Nothing attached yet.</p>
-                    ) : (
-                      <ul className="space-y-1">
-                        {attachments.map((f) => (
-                          <li
-                            key={f.id}
-                            className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-1.5"
+                    <div className="space-y-2">
+                      <h4 className="text-foreground text-xs font-semibold">Deliver to</h4>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="po-deliver-to"
+                            checked={deliverTo === 'ORGANIZATION'}
+                            onChange={() => setDeliverTo('ORGANIZATION')}
+                          />
+                          Organization
+                        </label>
+                        <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            name="po-deliver-to"
+                            checked={deliverTo === 'CUSTOMER'}
+                            onChange={() => setDeliverTo('CUSTOMER')}
+                          />
+                          Customer
+                        </label>
+                      </div>
+
+                      {deliverTo === 'CUSTOMER' ? (
+                        <>
+                          <select
+                            className="form-input"
+                            value={deliveryCustomerId}
+                            onChange={(e) => setDeliveryCustomerId(e.target.value)}
+                            aria-label="Deliver to customer"
                           >
-                            <Paperclip size={13} className="text-muted-foreground shrink-0" />
-                            <button
-                              type="button"
-                              className="text-sm text-primary underline truncate text-left flex-1 min-w-0"
-                              onClick={() => void openFile(f.id)}
-                              title={`Open ${f.fileName}`}
-                            >
-                              {f.fileName}
-                            </button>
-                            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                              {(f.sizeBytes / 1024).toFixed(0)} KB
-                            </span>
-                            <button
-                              type="button"
-                              className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                              onClick={() => void removeFile(f)}
-                              aria-label={`Remove ${f.fileName}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </li>
-                        ))}
+                            <option value="">Choose customer</option>
+                            {customers.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.code ? `${c.code} — ${c.name}` : c.name}
+                              </option>
+                            ))}
+                          </select>
 
-                        {/* Chosen but not yet sent. Marked so nobody believes a
-                            file is safely filed before the order is saved. */}
-                        {pendingFiles.map((f, i) => (
-                          <li
-                            key={`pending-${f.name}-${i}`}
-                            className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-background/40 px-3 py-1.5"
-                          >
-                            <Paperclip size={13} className="text-muted-foreground shrink-0" />
-                            <span className="text-sm text-foreground truncate flex-1 min-w-0">
-                              {f.name}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                              {(f.size / 1024).toFixed(0)} KB · on save
-                            </span>
-                            <button
-                              type="button"
-                              className="btn-ghost p-1 text-muted-foreground hover:text-red-400"
-                              onClick={() =>
-                                setPendingFiles((prev) => prev.filter((_, x) => x !== i))
-                              }
-                              aria-label={`Remove ${f.name}`}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <h4 className="text-xs font-semibold text-foreground">Deliver to</h4>
-                  <div className="flex flex-wrap items-center gap-4">
-                    <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-                      <input
-                        type="radio"
-                        name="po-deliver-to"
-                        checked={deliverTo === 'ORGANIZATION'}
-                        onChange={() => setDeliverTo('ORGANIZATION')}
-                      />
-                      Organization
-                    </label>
-                    <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-                      <input
-                        type="radio"
-                        name="po-deliver-to"
-                        checked={deliverTo === 'CUSTOMER'}
-                        onChange={() => setDeliverTo('CUSTOMER')}
-                      />
-                      Customer
-                    </label>
-                  </div>
-
-                  {deliverTo === 'CUSTOMER' ? (
-                    <>
-                      <select
-                        className="form-input"
-                        value={deliveryCustomerId}
-                        onChange={(e) => setDeliveryCustomerId(e.target.value)}
-                        aria-label="Deliver to customer"
-                      >
-                        <option value="">Choose customer</option>
-                        {customers.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.code ? `${c.code} — ${c.name}` : c.name}
-                          </option>
-                        ))}
-                      </select>
-
-                      {deliveryCustomer && (
-                        <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
-                          <p className="text-sm font-medium text-foreground">
-                            {deliveryCustomer.name}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {customerAddress || 'No address on this customer.'}
-                          </p>
-                          {/* The tax follows the goods, so a customer in another
-                              state changes what the supplier may charge. Said
-                              here rather than discovered on their bill. */}
-                          {customerStateCode && (
-                            <p className="text-xs text-muted-foreground mt-1">
-                              Delivered in state {customerStateCode} —{' '}
-                              {supplier
-                                ? taxMode === 'CGST_SGST'
-                                  ? 'same state as the supplier, so CGST + SGST'
-                                  : 'a different state from the supplier, so IGST'
-                                : 'choose a supplier to see the tax split'}
-                            </p>
+                          {deliveryCustomer && (
+                            <div className="border-border bg-secondary rounded-lg border px-3 py-2">
+                              <p className="text-foreground text-sm font-medium">
+                                {deliveryCustomer.name}
+                              </p>
+                              <p className="text-muted-foreground text-xs">
+                                {customerAddress || 'No address on this customer.'}
+                              </p>
+                              {/* The tax follows the goods, so a customer in another
+                                state changes what the supplier may charge. Said
+                                here rather than discovered on their bill. */}
+                              {customerStateCode && (
+                                <p className="text-muted-foreground mt-1 text-xs">
+                                  Delivered in state {customerStateCode} —{' '}
+                                  {supplier
+                                    ? taxMode === 'CGST_SGST'
+                                      ? 'same state as the supplier, so CGST + SGST'
+                                      : 'a different state from the supplier, so IGST'
+                                    : 'choose a supplier to see the tax split'}
+                                </p>
+                              )}
+                            </div>
                           )}
+                        </>
+                      ) : (
+                        /* Shown, not repeated. An order has one destination, so a
+                         second dropdown for it here would only mirror the Location
+                         field above — change one and the other moves, which reads
+                         as two settings that disagree. */
+                        <div className="border-border bg-secondary rounded-lg border px-3 py-2">
+                          <p className="text-foreground text-sm font-medium">
+                            {destination?.name ?? company?.name ?? 'Your company'}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {destination?.address ||
+                              orgAddress ||
+                              'Address not set — add it in Settings → Company.'}
+                          </p>
+                          <button
+                            type="button"
+                            className="text-primary mt-1.5 flex items-center gap-1.5 text-xs hover:underline"
+                            onClick={() => document.getElementById('po-location')?.focus()}
+                            title="Delivering somewhere else? Change the Location field above."
+                          >
+                            <MapPin size={12} className="shrink-0" />
+                            Location
+                          </button>
                         </div>
                       )}
-                    </>
-                  ) : (
-                    /* Shown, not repeated. An order has one destination, so a
-                       second dropdown for it here would only mirror the Location
-                       field above — change one and the other moves, which reads
-                       as two settings that disagree. */
-                    <div className="rounded-lg border border-border bg-background/40 px-3 py-2">
-                      <p className="text-sm font-medium text-foreground">
-                        {destination?.name ?? company?.name ?? 'Your company'}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {destination?.address ||
-                          orgAddress ||
-                          'Address not set — add it in Settings → Company.'}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Somewhere else? Change{' '}
-                        <button
-                          type="button"
-                          className="text-primary underline"
-                          onClick={() => document.getElementById('po-location')?.focus()}
-                        >
-                          Location
-                        </button>{' '}
-                        above.
-                      </p>
                     </div>
-                  )}
+                  </div>
+                </Section>
+
+                {/* 5 — What the order says. Two boxes side by side, as the mockup
+                has them: the terms the supplier is held to, and the note printed
+                under them. A counter on each, because both are capped by the
+                server and finding that out on save costs you the typing. */}
+                <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
+                  <Section icon={ScrollText} title="Terms and conditions">
+                    <textarea
+                      rows={3}
+                      maxLength={TERMS_MAX}
+                      className="form-input"
+                      placeholder="Leave blank to use the terms set in Settings → Documents"
+                      value={terms}
+                      onChange={(e) => setTerms(e.target.value)}
+                      aria-label="Terms and conditions"
+                    />
+                    <p className="text-muted-foreground mt-1 text-right text-[11px] tabular-nums">
+                      {terms.length}/{TERMS_MAX}
+                    </p>
+                  </Section>
+
+                  <Section icon={FileText} title="Notes">
+                    <textarea
+                      rows={3}
+                      maxLength={NOTES_MAX}
+                      className="form-input"
+                      placeholder="Printed on the order the supplier receives"
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      aria-label="Notes"
+                    />
+                    <p className="text-muted-foreground mt-1 text-right text-[11px] tabular-nums">
+                      {notes.length}/{NOTES_MAX}
+                    </p>
+                  </Section>
                 </div>
+
+                {/* How it goes out, tucked under the terms rather than given a row
+                of its own across the bottom of the form.
+
+                Neither control does anything yet, so a box each would be height
+                spent on two switched-off things. And the calculation beside this
+                column is taller than everything stacked against it, so this is
+                space the form was already paying for either way. */}
+                <Section icon={Mail} title="Template and email">
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-1 items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
+                      {/* A real link, not a greyed box. The wording, the title and
+                    which blocks print are all editable — under Settings →
+                    Documents, per document type. Showing this as "not built"
+                    was wrong: it is built, it just does not live here. */}
+                      <div className="border-border bg-secondary flex items-center justify-between gap-2 rounded-lg border px-3 py-2">
+                        <span className="text-foreground flex min-w-0 items-center gap-2 text-sm">
+                          <FileText size={14} className="text-muted-foreground shrink-0" />
+                          <span className="truncate">Template: Standard</span>
+                        </span>
+                        <a
+                          href="/settings/documents"
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-primary shrink-0 text-xs underline"
+                        >
+                          Edit
+                        </a>
+                      </div>
+
+                      {/* The supplier, not us. This showed `company.email` — our
+                      own accounts address — which is the wrong way round for a
+                      purchase order: the order goes to the supplier, so they
+                      are the recipient. The address comes off the supplier
+                      master, which the form already has loaded for the billing
+                      block above. */}
+                      <Faded>
+                        {/* Both addresses, because once emailing is built both
+                          are wanted: the order goes to the supplier, and
+                          accounts needs to know an order was raised.
+
+                          The mill's old form showed only the second of these
+                          and labelled it "Email To", which is what nobody
+                          could explain — an address that looks like the
+                          recipient but is your own office. Naming the two
+                          separately is the whole fix.
+
+                          Switched off until emailing exists, and then these
+                          are the two lines it sends to. */}
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Mail size={14} className="text-muted-foreground shrink-0" />
+                            <span className="text-muted-foreground w-14 shrink-0 text-xs">To</span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(supplier?.email)}
+                              readOnly
+                              className="shrink-0"
+                            />
+                            {supplier?.email ? (
+                              <span className="text-foreground truncate text-sm">
+                                {supplier.email}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground truncate text-sm">
+                                {supplier
+                                  ? `No email on ${supplier.name}`
+                                  : 'Choose a supplier to see where it would go'}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex min-w-0 items-center gap-2">
+                            {/* Kept clear rather than given an icon of its own,
+                              so the two addresses line up under one heading
+                              instead of reading as two unrelated rows. */}
+                            <span className="w-[14px] shrink-0" aria-hidden />
+                            <span className="text-muted-foreground w-14 shrink-0 text-xs">
+                              Copy to
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(company?.email)}
+                              readOnly
+                              className="shrink-0"
+                            />
+                            {company?.email ? (
+                              <span className="text-foreground truncate text-sm">
+                                {company.email}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground truncate text-sm">
+                                No company email in Settings
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </Faded>
+                    </div>
+
+                    <NotBuiltNote>
+                      Emailing the order is not built yet — print it and send it yourself. There is
+                      one template per document type, so there is nothing to choose here; Edit opens
+                      the wording and the printed blocks in Settings.
+                    </NotBuiltNote>
+                  </div>
+                </Section>
               </div>
-            </Section>
 
+              {/* The calculation, beside the delivery box as the old ERP had it.
 
-            {/* The calculation, beside the delivery box as the old ERP had it.
-
-                Every row it had, in its order. The five named charge rows and
-                Other charges are switched off, and that is not a design
-                choice: a purchase *order* has no columns to keep them in. In
-                this database charges hang off the *bill*
-                (`PurchaseInvoiceCharge` against a `ChargeType`), so a box here
-                that accepted a figure would show it in the Total and then drop
-                it on save — the clerk would send a supplier an order for one
-                amount and find another on the system. Putting them on the
-                order needs a migration; see the note under the box. */}
-            <Section icon={Calculator} title="Totals">
-              <div className="space-y-1.5 text-sm">
-                {/* Where the discount sits follows the dropdown at the top of
+                Every row it had, in its order: the discount, the gross, one
+                row per charge the mill uses on purchases, the tax split, other
+                charges, and what the order comes to. The charge rows are read
+                from the charge master rather than written into this form, so
+                adding one there adds a row here. */}
+              <Section icon={Calculator} title="Totals">
+                <div className="space-y-1.5 text-sm">
+                  {/* Where the discount sits follows the dropdown at the top of
                     the items box. On an item-level order this is the sum of
                     the per-line discounts and cannot be typed into; on an
                     order-level order it is the one figure taken off the whole
                     order, and the per-line boxes are the ones switched off. */}
-                {poType === 'ORDER_LEVEL' ? (
+                  {poType === 'ORDER_LEVEL' ? (
+                    <div className="flex items-center justify-between gap-3">
+                      <label htmlFor="po-discount" className="text-muted-foreground">
+                        Total discount
+                      </label>
+                      <input
+                        id="po-discount"
+                        type="number"
+                        step="0.01"
+                        min={0}
+                        className="form-input h-8 w-28 text-right"
+                        placeholder="0.00"
+                        value={discountAmount}
+                        onChange={(e) => setDiscountAmount(e.target.value)}
+                      />
+                    </div>
+                  ) : (
+                    <Row label="Total discount" value={totals.totalDiscount} />
+                  )}
+
+                  <Row label="Gross total" value={totals.grossTotal} />
+
+                  {/* One row per charge the mill uses on purchases, taken from
+                    the charge master rather than written into this form. Add a
+                    charge there and a row appears here; change its GST rate
+                    there and this follows. */}
+                  {chargeTypes.length === 0 ? (
+                    <p className="text-muted-foreground py-1 text-xs">
+                      No purchase charges are set up yet — add them under{' '}
+                      <a
+                        href="/masters/charges"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary underline"
+                      >
+                        Masters → Charges
+                      </a>
+                      .
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5 pt-0.5">
+                      {totals.chargeRows.map((c) => (
+                        <div
+                          key={c.chargeTypeId}
+                          className="flex items-center justify-between gap-3"
+                        >
+                          <span className="text-muted-foreground">
+                            {c.name} @{c.gstRate}%
+                          </span>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            className="form-input h-8 w-28 text-right"
+                            placeholder="0.00"
+                            value={charges[c.chargeTypeId] ?? ''}
+                            onChange={(e) =>
+                              setCharges((prev) => ({ ...prev, [c.chargeTypeId]: e.target.value }))
+                            }
+                            aria-label={`${c.name} amount`}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {taxMode === 'CGST_SGST' && (
+                    <>
+                      <Row label="SGST" value={totals.tax / 2} />
+                      <Row label="CGST" value={totals.tax / 2} />
+                    </>
+                  )}
+                  {/* Not SGST + CGST when the goods cross a state line. The
+                    split follows the place of supply, and showing two halves
+                    of a tax the supplier cannot charge would misstate the
+                    order, so this row says what it really is. */}
+                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                  {taxMode === 'NONE' && (
+                    <p className="text-muted-foreground py-1 text-xs">
+                      No GST — this supplier is not registered.
+                    </p>
+                  )}
+                  {taxMode === null && (
+                    <>
+                      <Row label="SGST" value={0} />
+                      <Row label="CGST" value={0} />
+                    </>
+                  )}
+
+                  <Row label="Total tax" value={totals.tax} />
+
+                  {/* Carries no GST of its own and is added after tax, which is
+                    how the mill's old system had it. */}
                   <div className="flex items-center justify-between gap-3">
-                    <label htmlFor="po-discount" className="text-muted-foreground">
-                      Total discount
+                    <label htmlFor="po-other-charges" className="text-muted-foreground">
+                      Other charges
                     </label>
                     <input
-                      id="po-discount"
+                      id="po-other-charges"
                       type="number"
                       step="0.01"
                       min={0}
                       className="form-input h-8 w-28 text-right"
                       placeholder="0.00"
-                      value={discountAmount}
-                      onChange={(e) => setDiscountAmount(e.target.value)}
+                      value={otherCharges}
+                      onChange={(e) => setOtherCharges(e.target.value)}
                     />
                   </div>
-                ) : (
-                  <Row label="Total discount" value={totals.totalDiscount} />
-                )}
 
-                <Row label="Gross total" value={totals.grossTotal} />
+                  {/* Shown whenever the total was rounded, and only then.
+                    The grand total is taken to the nearest rupee, which is how
+                    an Indian document is normally settled — but without this
+                    row the figures above it add up to something else and
+                    nothing on the screen says why. The printed sheet has
+                    carried this line all along; the form had not. */}
+                  {Math.abs(totals.roundOff) >= 0.005 && (
+                    <Row label="Rounding" value={totals.roundOff} />
+                  )}
 
-                {/* One row per charge the mill uses on purchases, taken from
-                    the charge master rather than written into this form. Add a
-                    charge there and a row appears here; change its GST rate
-                    there and this follows. */}
-                {chargeTypes.length === 0 ? (
-                  <p className="text-xs text-muted-foreground py-1">
-                    No purchase charges are set up yet — add them under{' '}
-                    <a
-                      href="/masters/charges"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-primary underline"
-                    >
-                      Masters → Charges
-                    </a>
-                    .
-                  </p>
-                ) : (
-                  <div className="space-y-1.5 pt-0.5">
-                    {totals.chargeRows.map((c) => (
-                      <div key={c.chargeTypeId} className="flex items-center justify-between gap-3">
-                        <span className="text-muted-foreground">
-                          {c.name} @{c.gstRate}%
-                        </span>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min={0}
-                          className="form-input h-8 w-28 text-right"
-                          placeholder="0.00"
-                          value={charges[c.chargeTypeId] ?? ''}
-                          onChange={(e) =>
-                            setCharges((prev) => ({ ...prev, [c.chargeTypeId]: e.target.value }))
-                          }
-                          aria-label={`${c.name} amount`}
-                        />
+                  <div className="border-primary/20 bg-primary/5 mt-2 flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5">
+                    <span className="text-foreground font-semibold">Grand total</span>
+                    <span className="text-foreground whitespace-nowrap text-lg font-semibold tabular-nums">
+                      ₹{inr(totals.total)}
+                    </span>
+                  </div>
+
+                  {taxMode === null && (
+                    <p className="text-muted-foreground pt-1 text-xs">
+                      Choose a supplier to see whether the tax splits into SGST + CGST or is IGST.
+                    </p>
+                  )}
+                </div>
+              </Section>
+            </div>
+          </div>
+
+          {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
+            {incomplete && (
+              <p className="warn-text mr-auto flex max-w-xl items-start gap-1.5 text-xs">
+                <AlertCircle size={13} className="mt-px shrink-0" />
+                <span>
+                  {!supplierId
+                    ? 'Choose a supplier to save this order.'
+                    : activeLines.length === 0
+                      ? 'Add at least one item to save this order.'
+                      : /* Named, with the empty cell outlined in the table, so a
+                       long order does not have to be read twice to find it. */
+                        `Still to fill in: ${unfinished
+                          .slice(0, 3)
+                          .map(
+                            (r) =>
+                              `${r.name} (${[r.noQty && 'quantity', r.noRate && 'rate']
+                                .filter(Boolean)
+                                .join(' and ')})`
+                          )
+                          .join(', ')}${
+                          unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ''
+                        }.`}
+                </span>
+              </p>
+            )}
+            <button type="button" onClick={onClose} className="btn-secondary" disabled={busy}>
+              Cancel
+            </button>
+            {saveActions}
+          </div>
+        </div>
+      </div>
+      {/* Which of the supplier's places this order is billed to — and keeping
+          that list right.
+
+          A panel rather than a menu hanging off the Change link: the form
+          scrolls and its sections clip, so a menu cut off by the edge of a box
+          is worse than no menu. It also has room for the form, which a menu
+          would not.
+
+          Everything saved here is saved on the supplier. An address kept
+          against one order would be typed again on the next one, and a
+          correction made here would leave the master still wrong. */}
+      {addressPickerOpen && supplier && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="po-address-title"
+          onClick={() => setAddressPickerOpen(false)}
+        >
+          <div
+            className="glass-card flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="border-border flex shrink-0 items-start justify-between gap-3 border-b px-4 py-3">
+              <div className="min-w-0">
+                <h3 id="po-address-title" className="text-foreground text-sm font-semibold">
+                  {addressFormFor === 'new'
+                    ? 'New address'
+                    : addressFormFor
+                      ? 'Edit address'
+                      : 'Billing address'}
+                </h3>
+                <p className="text-muted-foreground mt-0.5 truncate text-xs">{supplier.name}</p>
+              </div>
+              <button
+                onClick={() => setAddressPickerOpen(false)}
+                className="btn-ghost shrink-0 p-1.5"
+                aria-label="Close"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              {addressError && (
+                <div className="m-3 mb-0 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/5 p-2.5">
+                  <AlertCircle size={14} className="mt-0.5 shrink-0 text-red-400" />
+                  <p className="text-xs text-red-400">{addressError}</p>
+                </div>
+              )}
+
+              {/* The form replaces the list rather than appearing under it. On
+                  a panel this size, a list and a form together is a scroll in
+                  a box, and you cannot see what you are editing anyway. */}
+              {addressFormFor ? (
+                <div className="space-y-3 p-4">
+                  <div>
+                    <label className="form-label" htmlFor="po-new-addr-line">
+                      Address<span className="ml-0.5 text-red-500">*</span>
+                    </label>
+                    <textarea
+                      id="po-new-addr-line"
+                      rows={2}
+                      className="form-input"
+                      placeholder="Building, street, area"
+                      value={newAddress.address}
+                      onChange={(e) => setNewAddress((p) => ({ ...p, address: e.target.value }))}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label" htmlFor="po-new-addr-city">
+                        City
+                      </label>
+                      <input
+                        id="po-new-addr-city"
+                        className="form-input h-9"
+                        value={newAddress.city}
+                        onChange={(e) => setNewAddress((p) => ({ ...p, city: e.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label" htmlFor="po-new-addr-pincode">
+                        Pincode
+                      </label>
+                      <input
+                        id="po-new-addr-pincode"
+                        className="form-input h-9"
+                        value={newAddress.pincode}
+                        onChange={(e) => setNewAddress((p) => ({ ...p, pincode: e.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label" htmlFor="po-new-addr-state">
+                        State
+                      </label>
+                      <input
+                        id="po-new-addr-state"
+                        className="form-input h-9"
+                        value={newAddress.state}
+                        onChange={(e) => setNewAddress((p) => ({ ...p, state: e.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label" htmlFor="po-new-addr-statecode">
+                        State code
+                      </label>
+                      {/* Two digits, and it decides the tax split — 27 is
+                          Maharashtra, 07 is Delhi. A wrong one means the
+                          supplier charges the wrong kind of GST, so it is
+                          asked for rather than guessed from the state name. */}
+                      <input
+                        id="po-new-addr-statecode"
+                        className="form-input h-9"
+                        maxLength={2}
+                        placeholder="27"
+                        value={newAddress.stateCode}
+                        onChange={(e) =>
+                          setNewAddress((p) => ({ ...p, stateCode: e.target.value }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label" htmlFor="po-new-addr-label">
+                        Name it
+                      </label>
+                      <input
+                        id="po-new-addr-label"
+                        className="form-input h-9"
+                        placeholder="Works, godown"
+                        value={newAddress.label}
+                        onChange={(e) => setNewAddress((p) => ({ ...p, label: e.target.value }))}
+                      />
+                    </div>
+                    <div>
+                      <label className="form-label" htmlFor="po-new-addr-gstin">
+                        GSTIN here
+                      </label>
+                      <input
+                        id="po-new-addr-gstin"
+                        className="form-input h-9 font-mono"
+                        maxLength={15}
+                        placeholder="Optional"
+                        value={newAddress.gstin}
+                        onChange={(e) => setNewAddress((p) => ({ ...p, gstin: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+
+                  <label className="border-border bg-secondary flex cursor-pointer items-center gap-2 rounded-lg border p-2.5">
+                    <input
+                      type="checkbox"
+                      checked={newAddress.isDefault}
+                      onChange={(e) =>
+                        setNewAddress((p) => ({ ...p, isDefault: e.target.checked }))
+                      }
+                    />
+                    <span className="text-foreground text-xs">
+                      Use this as {supplier.name}&apos;s usual address
+                    </span>
+                  </label>
+                </div>
+              ) : (
+                <div className="space-y-2 p-3">
+                  {supplierAddresses.length === 0 && (
+                    <p className="text-muted-foreground px-1 py-6 text-center text-sm">
+                      No addresses on this supplier yet.
+                    </p>
+                  )}
+
+                  {supplierAddresses.map((a) => {
+                    const picked = a.id === supplierAddressId
+                    return (
+                      <div
+                        key={a.id}
+                        className={`flex items-start gap-2.5 rounded-lg border p-2.5 ${
+                          picked ? 'border-primary/50 bg-primary/5' : 'border-border bg-card'
+                        }`}
+                      >
+                        {/* Choosing and editing are separate targets. One row
+                            that both billed the order to an address and opened
+                            it for editing would do the wrong one half the
+                            time. */}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSupplierAddressId(a.id)
+                            setAddressPickerOpen(false)
+                          }}
+                          className="flex min-w-0 flex-1 items-start gap-2.5 text-left"
+                          aria-label={`Bill this order to ${a.label || a.address}`}
+                        >
+                          <span
+                            className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                              picked ? 'border-primary bg-primary text-white' : 'border-border'
+                            }`}
+                          >
+                            {picked && <Check size={11} />}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-foreground text-sm font-medium">
+                                {a.label || 'Address'}
+                              </span>
+                              {a.isDefault && (
+                                <span className="text-muted-foreground text-[10px]">usual</span>
+                              )}
+                            </span>
+                            <span className="text-muted-foreground mt-0.5 block text-xs leading-relaxed">
+                              {addressLine(a)}
+                            </span>
+                            {a.gstin && (
+                              <span className="text-muted-foreground mt-0.5 block font-mono text-[10px]">
+                                GSTIN {a.gstin}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => startEditAddress(a)}
+                          className="btn-ghost shrink-0 p-1.5"
+                          title="Edit this address on the supplier"
+                          aria-label={`Edit ${a.label || a.address}`}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                      </div>
+                    )
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewAddress(BLANK_ADDRESS)
+                      setAddressFormFor('new')
+                      setAddressError(null)
+                    }}
+                    className="text-primary border-primary/40 hover:bg-primary/10 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed py-2 text-xs font-medium"
+                  >
+                    <Plus size={13} />
+                    Add new address
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {addressFormFor ? (
+              <div className="border-border flex shrink-0 items-center justify-end gap-2 border-t px-4 py-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddressFormFor(null)
+                    setAddressError(null)
+                  }}
+                  className="btn-secondary"
+                  disabled={savingAddress}
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveAddress()}
+                  className="btn-primary"
+                  disabled={savingAddress || !newAddress.address.trim()}
+                >
+                  {savingAddress && <Loader2 size={15} className="animate-spin" />}
+                  Save on supplier
+                </button>
+              </div>
+            ) : (
+              <div className="border-border text-muted-foreground shrink-0 border-t px-4 py-2.5 text-xs">
+                Anything added or changed here is saved on the supplier.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {/* Everything this item has been bought at.
+
+          Inside the same portal as the form and centred over it, because this
+          is a lookup the buyer opens, reads and closes — nothing about the
+          order is changed from here. Clicking the backdrop closes it: there is
+          nothing to lose, and a panel you can only leave by finding the X is a
+          panel people stop opening.
+
+          Narrower than the form on purpose. Seven short columns spread across
+          the full width read as a strip of scattered figures rather than a
+          table, and with one past purchase in it there is very little to
+          spread. */}
+      {historyFor &&
+        (() => {
+          const rows = rateHistory[historyFor] ?? []
+          const rates = rows.map((r) => num(r.unitRate))
+          return (
+            <div
+              className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="po-history-title"
+              onClick={() => setHistoryFor(null)}
+            >
+              <div
+                className="glass-card flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-border flex shrink-0 items-start justify-between gap-4 border-b px-4 py-3">
+                  <div className="flex items-start gap-3">
+                    <div className="bg-primary/10 border-primary/20 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                      <History size={17} className="text-primary" />
+                    </div>
+                    <div>
+                      <h3 id="po-history-title" className="text-foreground text-base font-semibold">
+                        Previous purchases
+                      </h3>
+                      <p className="text-muted-foreground mt-0.5 text-xs">
+                        {itemById.get(historyFor)?.name ?? 'This item'}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setHistoryFor(null)}
+                    className="btn-ghost shrink-0 p-2"
+                    aria-label="Close the history"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+
+                {/* Only once there is a spread to describe. With a single past
+                    purchase, last, lowest and highest are all the same figure,
+                    and three boxes repeating it is padding. */}
+                {rows.length > 1 && (
+                  <div className="border-border grid shrink-0 grid-cols-3 border-b">
+                    {[
+                      ['Last rate', rates[0]],
+                      ['Lowest', Math.min(...rates)],
+                      ['Highest', Math.max(...rates)],
+                    ].map(([label, value], n) => (
+                      <div
+                        key={String(label)}
+                        className={`px-4 py-2.5 ${n > 0 ? 'border-border border-l' : ''}`}
+                      >
+                        <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+                          {label}
+                        </p>
+                        <p className="text-foreground mt-0.5 text-base font-semibold tabular-nums">
+                          {inr(value as number)}
+                        </p>
                       </div>
                     ))}
                   </div>
                 )}
 
-                {taxMode === 'CGST_SGST' && (
-                  <>
-                    <Row label="SGST" value={totals.tax / 2} />
-                    <Row label="CGST" value={totals.tax / 2} />
-                  </>
-                )}
-                {/* Not SGST + CGST when the goods cross a state line. The
-                    split follows the place of supply, and showing two halves
-                    of a tax the supplier cannot charge would misstate the
-                    order, so this row says what it really is. */}
-                {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                {taxMode === 'NONE' && (
-                  <p className="text-xs text-muted-foreground py-1">
-                    No GST — this supplier is not registered.
-                  </p>
-                )}
-                {taxMode === null && (
-                  <>
-                    <Row label="SGST" value={0} />
-                    <Row label="CGST" value={0} />
-                  </>
-                )}
-
-                <Row label="Total tax" value={totals.tax} />
-
-                {/* Carries no GST of its own and is added after tax, which is
-                    how the mill's old system had it. */}
-                <div className="flex items-center justify-between gap-3">
-                  <label htmlFor="po-other-charges" className="text-muted-foreground">
-                    Other charges
-                  </label>
-                  <input
-                    id="po-other-charges"
-                    type="number"
-                    step="0.01"
-                    min={0}
-                    className="form-input h-8 w-28 text-right"
-                    placeholder="0.00"
-                    value={otherCharges}
-                    onChange={(e) => setOtherCharges(e.target.value)}
-                  />
+                <div className="flex-1 overflow-y-auto p-3">
+                  {rows.length === 0 ? (
+                    <p className="text-muted-foreground py-10 text-center text-sm">
+                      This item has not been bought before.
+                    </p>
+                  ) : (
+                    <div className="border-border overflow-hidden rounded-lg border">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="bg-secondary border-border border-b">
+                            {[
+                              ['#', 'left'],
+                              ['Purchase order', 'left'],
+                              ['Supplier', 'left'],
+                              ['Rate', 'right'],
+                              ['Qty', 'right'],
+                              ['Amount', 'right'],
+                              ['Date', 'right'],
+                            ].map(([h, align]) => (
+                              <th
+                                key={h}
+                                className={`text-muted-foreground px-3 py-2 text-[10px] font-semibold uppercase tracking-wider ${
+                                  align === 'right' ? 'text-right' : 'text-left'
+                                }`}
+                              >
+                                {h}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.map((h, n) => (
+                            <tr
+                              key={h.id}
+                              className={`border-border/50 border-b last:border-0 ${
+                                n % 2 === 1 ? 'zebra-row' : 'bg-card'
+                              }`}
+                            >
+                              <td className="text-muted-foreground px-3 py-2 tabular-nums">
+                                {n + 1}
+                              </td>
+                              <td className="px-3 py-2">
+                                <span className="font-mono text-xs">{h.poNumber}</span>
+                                {/* Said, not hidden. A cancelled order's rate
+                                    was still quoted and is worth seeing, but
+                                    presenting it as though the order stood
+                                    would mislead. */}
+                                {h.status === 'CANCELLED' && (
+                                  <span className="text-muted-foreground ml-1.5 text-[10px]">
+                                    cancelled
+                                  </span>
+                                )}
+                              </td>
+                              <td className="text-foreground truncate px-3 py-2">
+                                {h.supplierName}
+                              </td>
+                              <td className="px-3 py-2 text-right font-medium tabular-nums">
+                                {inr(num(h.unitRate))}
+                              </td>
+                              <td className="text-muted-foreground px-3 py-2 text-right tabular-nums">
+                                {num(h.qty)}
+                              </td>
+                              <td className="px-3 py-2 text-right tabular-nums">
+                                {inr(num(h.amount))}
+                              </td>
+                              <td className="text-muted-foreground whitespace-nowrap px-3 py-2 text-right text-xs">
+                                {h.poDate
+                                  ? new Date(h.poDate).toLocaleDateString('en-IN', {
+                                      day: '2-digit',
+                                      month: 'short',
+                                      year: 'numeric',
+                                    })
+                                  : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
 
-                <div className="flex items-center justify-between pt-2 border-t border-border">
-                  <span className="font-semibold text-foreground">Total</span>
-                  <span className="font-semibold text-foreground tabular-nums text-lg">
-                    ₹{inr(totals.total)}
-                  </span>
+                <div className="border-border text-muted-foreground shrink-0 border-t px-4 py-2.5 text-xs">
+                  {rows.length === 1
+                    ? 'One previous purchase.'
+                    : `${rows.length} previous purchases, newest first.`}{' '}
+                  Nothing here changes the order — the rate is always typed in.
                 </div>
-
-                {taxMode === null && (
-                  <p className="text-xs text-muted-foreground pt-1">
-                    Choose a supplier to see whether the tax splits into SGST + CGST or is IGST.
-                  </p>
-                )}
-              </div>
-            </Section>
-          </div>
-
-          {/* 5 — What the order says, and how it goes out. Template and email
-              share one row: neither does anything yet, so a column each was
-              height spent on two switched-off controls. */}
-          <Section icon={ScrollText} title="Terms, notes and sending">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <h4 className="text-xs font-semibold text-foreground">Terms and conditions</h4>
-                <textarea
-                  rows={3}
-                  className="form-input"
-                  placeholder="Leave blank to use the terms set in Settings → Documents"
-                  value={terms}
-                  onChange={(e) => setTerms(e.target.value)}
-                  aria-label="Terms and conditions"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <h4 className="text-xs font-semibold text-foreground">Notes</h4>
-                <textarea
-                  rows={3}
-                  className="form-input"
-                  placeholder="Printed on the order the supplier receives"
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  aria-label="Notes"
-                />
               </div>
             </div>
-
-            <div className="mt-3 space-y-2">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* A real link, not a greyed box. The wording, the title and
-                    which blocks print are all editable — under Settings →
-                    Documents, per document type. Showing this as "not built"
-                    was wrong: it is built, it just does not live here. */}
-                <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
-                  <span className="text-sm text-foreground">Template: Standard</span>
-                  <a
-                    href="/settings/documents"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-primary underline"
-                  >
-                    Edit
-                  </a>
-                </div>
-                <Faded>
-                  <div className="flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2">
-                    <input type="checkbox" checked readOnly />
-                    <span className="text-sm text-foreground truncate">
-                      {company?.email ?? 'accounts@example.com'}
-                    </span>
-                  </div>
-                </Faded>
-              </div>
-              <NotBuiltNote>
-                Emailing the order is not built yet — print it and send it yourself. There is one
-                template per document type, so there is nothing to choose here; Edit opens the
-                wording and the printed blocks in Settings.
-              </NotBuiltNote>
-            </div>
-          </Section>
-        </div>
-
-        {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
-        <div className="shrink-0 flex flex-wrap items-center justify-end gap-3 px-4 py-3 border-t border-border">
-          {incomplete && (
-            <p className="text-xs text-amber-400 mr-auto max-w-xl">
-              {!supplierId
-                ? 'Choose a supplier to save this order.'
-                : activeLines.length === 0
-                  ? 'Add at least one item to save this order.'
-                  : /* Named, with the empty cell outlined in the table, so a
-                       long order does not have to be read twice to find it. */
-                    `Still to fill in: ${unfinished
-                      .slice(0, 3)
-                      .map(
-                        (r) =>
-                          `${r.name} (${[r.noQty && 'quantity', r.noRate && 'rate']
-                            .filter(Boolean)
-                            .join(' and ')})`,
-                      )
-                      .join(', ')}${
-                      unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ''
-                    }.`}
-            </p>
-          )}
-          <button type="button" onClick={onClose} className="btn-secondary" disabled={busy}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void save('draft')}
-            className="btn-secondary"
-            disabled={busy || incomplete}
-          >
-            {saving === 'draft' && <Loader2 size={15} className="animate-spin" />}
-            Save as draft
-          </button>
-          <button
-            type="button"
-            onClick={() => void save('print')}
-            className="btn-secondary"
-            disabled={busy || incomplete}
-          >
-            {saving === 'print' ? (
-              <Loader2 size={15} className="animate-spin" />
-            ) : (
-              <Printer size={15} />
-            )}
-            Save and print
-          </button>
-          <button
-            type="button"
-            onClick={() => void save('send')}
-            className="btn-primary"
-            disabled={busy || incomplete}
-          >
-            {saving === 'send' && <Loader2 size={15} className="animate-spin" />}
-            Save
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
+          )
+        })()}
+    </>,
+    document.body
   )
 }

@@ -85,6 +85,8 @@ interface PrintPayload {
     enquiryNo: string | null
     enquiryDate: string | null
     reference: string | null
+    /// The supplier's address as it read when the order was raised.
+    supplierAddress: string | null
     notes: string | null
     terms: string | null
     subtotal: string
@@ -635,9 +637,17 @@ export default function PrintPurchaseOrder() {
   const companyAddress = [company.address, company.city, company.state, company.pincode]
     .filter(Boolean)
     .join(', ')
-  const supplierAddress = [supplier.address, supplier.city, supplier.state, supplier.pincode]
-    .filter(Boolean)
-    .join(', ')
+  /*
+   * What the order was billed to, taken from the order itself.
+   *
+   * The supplier master is only the fallback, for orders raised before the
+   * order started keeping this. A supplier moves, or bills a second order from
+   * a different works — and reading the master at print time would reprint an
+   * old order with an address it never carried.
+   */
+  const supplierAddress =
+    order.supplierAddress ||
+    [supplier.address, supplier.city, supplier.state, supplier.pincode].filter(Boolean).join(', ')
 
   // Counted off the lines being printed, so the summary can never disagree
   // with the table underneath it.

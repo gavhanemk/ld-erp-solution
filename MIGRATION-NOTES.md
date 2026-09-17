@@ -401,3 +401,174 @@ git pull
 pnpm install
 pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
 ```
+
+---
+
+## 17 Sep 2026 — charges that are a percentage of the order
+
+**Migration:** `20260917051240_charge_type_percent_of_value`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+One column, `percentOfValue`, on `charge_types`. `DECIMAL(5,2)`, `NOT NULL
+DEFAULT 0`. Additive: nothing renamed, nothing dropped, and every charge type
+already on the system reads 0, which means "typed in by hand" — exactly what
+they all did before.
+
+### Why it is not the existing rate
+
+`defaultGstRate` is the **tax charged on** a charge: 5% on dyeing, 18% on
+freight. It is not how big the charge is, though the totals box printed it as
+"Dyeing Charges @5%" and that reads like a share of the order.
+
+Used as a share it is badly wrong. On a ₹500 order the five purchase charges
+would have come to ₹290 — 58% of the order — because freight's 18% GST would
+have been read as 18% of the goods. So the size of a charge needed a column of
+its own.
+
+### How it behaves
+
+The charge box on a purchase order fills itself in at `percentOfValue` of the
+gross total, and the buyer can type over it. Once typed, that box is left alone
+for the rest of the order: a supplier quotes what a supplier quotes, and a
+figure that snapped back every time a line changed would be unusable. A saved
+order's charges are never recalculated — those figures are what was agreed.
+
+Zero means the charge is always typed, which is right for anything quoted per
+trip or per kilo rather than against the value of the goods. **Every charge
+type is at 0 after this migration**, so nothing changes until the mill sets its
+own percentages under Masters → Extra Charges.
+
+### Reversed, same day — the column is now unused
+
+The mill checked its old system: **only CGST and SGST are worked out there.**
+Every charge — transport, freight, dyeing — is typed in by hand on each order,
+and that is the behaviour it wants.
+
+So the percentage is gone from the form and from Masters → Extra Charges, and
+nothing reads `percentOfValue` any more. Every row is 0.
+
+**The column is left in the database.** Dropping it would mean another
+migration against the shared database to remove a column that holds nothing
+and breaks nothing, and the schema comment says plainly that it is unused. Say
+the word if you would rather it went.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+---
+
+## 17 Sep 2026 — a recycle bin for purchase orders
+
+**Migration:** `20260917053005_purchase_order_recycle_bin`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Two nullable columns on `purchase_orders`, `deletedAt` and `deletedById`,
+plus an index on `deletedAt`. Additive: nothing renamed, nothing dropped. Every
+order already on the system has a NULL `deletedAt`, which means "not deleted".
+
+### Why
+
+Deleting a purchase order used to remove the row. Two real orders were lost
+that way before this existed. Deleting now marks the row instead, and Settings
+→ Recycle Bin lists what is marked, with Restore and Destroy beside each.
+
+Restoring is one field going back to NULL. The lines, the charges and the
+attachment files never went anywhere, so nothing has to be rebuilt from a
+description of it — which is the whole reason for marking rather than copying
+the order somewhere else first.
+
+### The part that needed care
+
+A soft delete is only as good as the filtering. A marked order that still turns
+up in a report is worse than no bin at all, so every read was gone through:
+
+- nine list-style reads (`findMany`, `count`, `findFirst`) across the orders
+  list, the dashboard and the assistant now filter `deletedAt: null`
+- eleven by-id lookups — open, print, edit, send, cancel, approve, reject,
+  attachments, and both goods-receipt paths — treat a marked order as not found
+- the bin's own route is the only one that reads the other way
+
+Two of those lookups used `select` and did not fetch `deletedAt` at all; the
+typecheck caught both.
+
+Destroying from the bin is the only route left that really removes an order,
+and it re-checks for goods receipts and bills first — an order can sit in the
+bin while somebody who never opened it writes a receipt against the order.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+---
+
+## 17 Sep 2026 — a supplier can bill from more than one place
+
+**Migration:** `20260917063658_supplier_addresses`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+One new table, `supplier_addresses`, and one nullable column,
+`purchase_orders.supplierAddress`. Additive: nothing renamed, nothing
+dropped, no existing row rewritten.
+
+Every supplier's existing address was then copied in as their default by a
+separate script, so all **17 suppliers** have one and the Change list is never
+empty. That was done in Node rather than in the SQL because ids here are cuids,
+which Postgres cannot generate, and inventing a second id shape for these rows
+alone would be a wart for as long as the table lasts.
+
+### Why
+
+The supplier master held exactly one address, so a supplier with a head office
+and a works had the second one typed into a remark where nothing reconciled
+against it. The purchase order form now has Change and Add new address, as the
+mill's old system did, and an address added there is saved **on the supplier** —
+so the next order to them offers it too.
+
+### The two decisions worth knowing
+
+**`stateCode` and `gstin` sit on the address, not only on the supplier.** A
+business registers per place of business, and the state code decides the tax
+split — so an order billed from another state changes what the supplier may
+charge.
+
+**The order stores the address as text, not as a link.** Correcting a typo in
+the master, or retiring an address, must not change what an order already sent
+to a supplier says. The printed sheet reads the order's own copy and falls back
+to the master only for orders raised before this existed.
+
+The default address is also mirrored onto the supplier's flat `address`,
+`city`, `state`, `stateCode` and `pincode` columns. Those are read all over
+the ERP — the printed order, the bill, the supplier list — and rewriting every
+one of them to join an address table is a far larger change than this.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```

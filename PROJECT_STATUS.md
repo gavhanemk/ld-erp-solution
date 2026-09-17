@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Wed 16 Sep 2026 — the purchase module: orders, bills, attachments and the printed sheet_
+_Last updated: Thu 17 Sep 2026 — the purchase order form: recycle bin, supplier addresses, rate history, and a tidy-up_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -66,12 +66,36 @@ bypass (CVE-2025-29927). Do not pin it back.
 
 ---
 
-## Where we left off (Wed 16 Sep 2026) — READ THIS FIRST
+## Where we left off (Thu 17 Sep 2026) — READ THIS FIRST
 
 The purchase module is built: orders, goods receipt, bills with a three-way
-match, file attachments, and a printed order sheet. It is all on the
-`feat/purchase` branch and **not yet merged to `main`**, so none of it is on
-the live site.
+match, file attachments, a printed order sheet, a recycle bin, and the
+supplier's own addresses. It is all on the `feat/purchase` branch, which is
+**now open as a pull request into `main`** — 45 commits. It needs one other
+person to pull it, run it and approve it, and merging is what deploys the web
+app. Nothing of it is on the live site until then.
+
+**What went in on 17 Sep**, all on top of the form rebuild:
+- Delete a purchase order into **Settings → Recycle bin**, and restore it.
+  Cancel was the only way out before
+- A supplier's addresses live on the supplier master; the order picks one,
+  and adding or correcting one from the order form saves it on the supplier
+- The last rate an item was bought at, shown under the Rate cell, with a
+  panel listing every previous purchase of it
+- Terms and conditions pre-fill from Settings → Documents
+- The form's own layout: white panels on the grey page instead of grey on
+  grey, one Save at the top instead of three, the supplier's details as an
+  aligned grid instead of a ragged column, smaller labels
+
+**Two things the form deliberately does not do**, both because he checked the
+old ERP and said so:
+- **Charges are not calculated.** Only CGST and SGST work themselves out. He
+  asked for auto-calculated charges, then looked at the old system and
+  reversed it. The `ChargeType.percentOfValue` column exists from that hour
+  and is **not in use** — it is left in place rather than migrated away twice
+- **The rate does not pre-fill** from the item master. A rate nobody typed is
+  a rate nobody checked. The GST rate still pre-fills: that is a fact about
+  the item, not a negotiated price
 
 **The one thing to check on paper.** The printed purchase order paginates
 itself rather than letting the browser break it, because a browser will not
@@ -88,20 +112,30 @@ same file. **This file used to send people to `DocumentTable` in
 draws its own table now and only borrows `PrintToolbar` and `money` from
 `PrintSheet`. The purchase *bill* sheet still uses `PrintSheet` proper.
 
-**Two open decisions, both his:**
-1. Merge `feat/purchase` to `main` and deploy, or keep going on the branch.
-2. `pnpm reset` maps to `prisma migrate reset --force`. `--force` means no
-   confirmation at all, so one mistyped word wipes the ERP. Worth a guard, but
-   it is a shared script.
+**One open decision, his:** `pnpm reset` maps to `prisma migrate reset
+--force`. `--force` means no confirmation at all, so one mistyped word wipes
+the ERP. Worth a guard, but it is a shared script.
 
-**Not ours, still missing.** The shared database has 13 migrations applied and
-this repo has 12. The odd one out is
-`20260916104500_bom_size_routing_and_status`, applied from another machine on
-16 Sep. It is nobody's on this laptop — a migration cannot be applied from a
-folder you do not have. Until somebody pushes it, **nobody should run
-`pnpm db:migrate`**: our schema has no BOM models in it, so Prisma reads their
-tables as unexplained and offers to drop them. That offer is the "drift / reset"
-prompt, and the answer is always no.
+**Not ours, and now accounted for.** The shared database has 19 migrations
+applied; this repo has 17 folders, three of them new on this branch. The two
+we do not have are both BOM work from another machine:
+
+| Missing here | Sitting on |
+|---|---|
+| `20260916104500_bom_size_routing_and_status` | `origin/feat/masters-bom-size-routing-status` |
+| `20260917100000_bom_colour_and_process` | `origin/feat/masters-bom-colour-and-process` |
+
+Until those two branches merge, **nobody should run `pnpm db:migrate`**: our
+schema has no BOM models in it, so Prisma reads their tables as unexplained
+and offers to drop them. That offer is the "drift / reset" prompt, and the
+answer is always no. It deletes everything in the ERP.
+
+**Our own three migrations need nothing done to them.** They were written by
+hand and applied additively with `prisma db execute`, then marked applied with
+`prisma migrate resolve` — row counts taken before and after each one. So
+merging this branch does not need `migrate:deploy`, because there is one
+database and the changes are already in it. See
+[MIGRATION-NOTES.md](MIGRATION-NOTES.md).
 
 **Two print bugs from 24 Aug, both still worth knowing:**
 - The sidebar and top bar were on the print page and would have printed. Print
@@ -319,7 +353,7 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 - Customer-owned stock is held apart from ours and left out of the valuation
 - The phone app can read stock and one item's history
 
-**Purchase — orders, receipt and bills** (on `feat/purchase`, not yet merged)
+**Purchase — orders, receipt and bills** (on `feat/purchase`, in a pull request)
 - Purchase orders created from the UI: a five-section form with the enquiry it
   answers, the supplier, lines, delivery and terms
 - The item picker's four fields stay in agreement. Choosing an item fills its
@@ -340,13 +374,36 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   quotation, a sample approval, a signed copy that came back. The browser
   uploads straight to a private Supabase bucket and the API only handles the
   row; downloads go through a link the API signs, which dies after five minutes
+- **The supplier's own addresses.** A supplier can bill from more than one
+  place, so the addresses live on the supplier master and the order picks one.
+  Picking one fills the billing block with its GSTIN and contact details, and
+  the address is copied onto the order as text — the same reason the
+  deliver-to-customer address is copied, so editing a master cannot rewrite an
+  order already with a supplier. Adding or correcting an address from the order
+  form saves it on the supplier, and the default address is mirrored back onto
+  the supplier's own fields, which the printed sheet and the bill still read
+- **The last rate an item was bought at**, under the Rate cell, with a
+  "View history" panel listing every previous purchase of that item —
+  order, supplier, rate, quantity, amount and date, newest first. A cancelled
+  order is shown and labelled, not hidden: the rate was still quoted. Nothing
+  in the panel changes the order; the rate is always typed
+- **Delete an order, into a recycle bin.** Cancel was the only way out before,
+  which leaves a cancelled order in every list forever. Delete marks the order
+  instead of removing it, so it drops out of every list, report, search and the
+  assistant's reach, and Settings → Recycle bin puts it back exactly as it was,
+  number and lines included. Only a draft or a cancelled order can be deleted,
+  and never one with a receipt or a bill against it — those are somebody
+  else's documents. Destroying one permanently is a second, separate action on
+  that screen
+- Terms and conditions come pre-filled from Settings → Documents, so the mill's
+  four standard clauses are on the order without anybody retyping them
 - A printed order sheet that paginates itself so its page numbers are true.
   It prints the delivery destination, and calls out a direct-to-customer
   delivery, because a supplier reading a sheet without it would ship to the
   letterhead address
 - Item categories and subcategories have a masters screen
 
-**Settings — four tabs**
+**Settings — five tabs**
 - Company: profile and GSTIN, financial year, document numbering with a live
   preview of the next number, GST rates with one default
 - People: add and edit users, reset a password, deactivate; roles with a
@@ -355,6 +412,9 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   production, days before an approval is called urgent
 - System: connections checked live, change your own password, the full activity
   trail with filters and paging
+- Recycle bin: purchase orders that were deleted, with restore and a separate
+  destroy-permanently. Only purchase orders arrive there so far, and the page
+  says so rather than implying everything deleted in the ERP lands there
 - Guards that matter: you cannot deactivate yourself, change your own role, or
   remove the last administrator; built-in roles cannot be renamed or deleted;
   a role with people on it cannot be deleted; the Admin role cannot be narrowed

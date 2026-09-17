@@ -485,6 +485,12 @@ export const updateBrokerSchema = createBrokerSchema.partial()
 
 export const createChargeTypeSchema = z.object({
   name,
+  /*
+   * The GST charged on this charge — 5% on dyeing, 18% on freight.
+   *
+   * It is not how big the charge is. The amount is typed in on each order,
+   * the way the mill's old system worked: only the tax is worked out for you.
+   */
   defaultGstRate: z.number().min(0).max(100).default(0),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),

@@ -329,9 +329,67 @@
     height: 2.625rem;
   }
 
+  /* The zebra stripe on the item table.
+
+     Mixed from the palette rather than picked, so it follows the theme: five
+     parts of the teal already used for the primary colour into the card
+     colour behind it. Light mode gets a pale mint over white, dark mode a
+     faint teal over navy, and neither is a new colour.
+
+     Opaque on purpose, which is why this is not simply `bg-primary/5`. That
+     utility is a colour at five percent alpha — ninety-five percent
+     see-through. The first columns of that table are sticky, and a
+     see-through cell lets the row scroll visibly underneath it. Mixing
+     produces one solid colour instead, which the sticky cells can inherit. */
+  .zebra-row {
+    background-color: color-mix(in srgb, hsl(var(--primary)) 5%, hsl(var(--card)));
+  }
+
   .form-label {
     @apply block text-sm font-medium text-foreground mb-1.5;
   }
+
+  /* A denser field on the longest forms in the ERP.
+
+     The purchase order form asks for about forty things on one screen. At the
+     app's normal rhythm — a 14px label over a 42px control, 6px apart — that
+     is roughly 55px of height per field before anything is typed, and the
+     form scrolled past two screens with a third of it spent on labels.
+
+     So inside `.po-form` the label steps back and the control tightens: a
+     small capitalised label in the muted colour, which reads as a caption
+     rather than competing with the value beside it, and 38px of control
+     instead of 42px. Nothing about the hit area suffers — 38px is still well
+     above the floor for a pointer target.
+
+     Written as `:where(.po-form)` so the whole rule stays at one class of
+     specificity. Written plainly, `.po-form .form-input` would outrank every
+     `h-8` and `h-9` in the markup and quietly force all of them — including
+     the item table's rows — back to full height. At equal specificity
+     Tailwind's utilities come last and win, which is what a component class
+     should do. */
+  :where(.po-form) .form-label {
+    @apply mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground;
+  }
+
+  :where(.po-form) .form-input {
+    @apply py-2;
+  }
+
+  /* The select's height is set rather than padded, for the reason given
+     further up. Placed after that rule so it wins at the same specificity. */
+  :where(.po-form) :where(select).form-input {
+    height: 2.375rem;
+  }
+
+  /* Amber text that holds up in both themes.
+
+     `text-amber-400` was chosen against the dark background; on the light
+     theme's white card it comes out near 2.9:1, under the 4.5:1 floor for
+     small text. This is the line that says why Save is switched off, so it
+     is the last thing that should be hard to read. */
+  .warn-text { @apply text-amber-400; }
+  .light .warn-text { @apply text-amber-700; }
 
   /* Divider */
   .divider {

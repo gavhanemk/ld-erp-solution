@@ -3,8 +3,17 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import {
-  Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Send, Ban,
-  ChevronDown, ChevronRight,
+  Plus,
+  Pencil,
+  Printer,
+  Search,
+  RefreshCw,
+  AlertCircle,
+  Send,
+  Ban,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
@@ -62,7 +71,7 @@ export default function PurchaseOrdersPage() {
           ? err.status === 403
             ? 'Your role does not allow viewing purchase orders.'
             : err.message
-          : 'Could not reach the server. Is the API running?',
+          : 'Could not reach the server. Is the API running?'
       )
       setRows([])
     } finally {
@@ -95,6 +104,38 @@ export default function PurchaseOrdersPage() {
     }
   }
 
+  /*
+   * Deleting is not cancelling, and the wording says so.
+   *
+   * Cancelling keeps the order and records that it was called off, which is
+   * what the file should show for a real order that fell through. Deleting is
+   * for the ones that should never have been raised — a duplicate, a slip, the
+   * rows left over from setting the system up — and it takes the lines,
+   * charges and attachments with it.
+   *
+   * The number is spelled out in the prompt because it is the only thing that
+   * cannot be undone: the series counts up and will not hand that number out
+   * again.
+   */
+  const remove = async (po: PurchaseOrder) => {
+    const warning =
+      `Delete ${po.poNumber} for good? This removes the order, its lines and anything ` +
+      'attached to it, and is not the same as cancelling — nothing will be left saying ' +
+      `it was called off. The number ${po.poNumber} will not be reused.`
+    if (!confirm(warning)) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await api.delete<{ message?: string }>(`/purchase/orders/${po.id}`)
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const money = (v: string | number) =>
     Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -118,23 +159,23 @@ export default function PurchaseOrdersPage() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-          <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+        <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
           <p className="text-sm text-red-400">{error}</p>
         </div>
       )}
       {message && (
-        <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5">
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
         </div>
       )}
 
-      <div className="glass-card p-0 overflow-hidden">
-        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-border">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border flex-1 min-w-[220px] max-w-sm">
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
+          <div className="bg-secondary border-border flex min-w-[220px] max-w-sm flex-1 items-center gap-2 rounded-lg border px-3 py-2">
             <Search size={14} className="text-muted-foreground" />
             <input
-              className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
               placeholder="Search order number or supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -154,14 +195,14 @@ export default function PurchaseOrdersPage() {
               </option>
             ))}
           </select>
-          <span className="text-xs text-muted-foreground ml-auto">{total} orders</span>
+          <span className="text-muted-foreground ml-auto text-xs">{total} orders</span>
         </div>
 
         {loading && rows.length === 0 ? (
-          <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
+          <p className="text-muted-foreground px-4 py-8 text-sm">Loading...</p>
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-muted-foreground text-sm">
               No purchase orders yet. Create one to order fabric, buttons or trims.
             </p>
           </div>
@@ -189,196 +230,222 @@ export default function PurchaseOrdersPage() {
                   const expanded = open === po.id
                   return (
                     <Fragment key={po.id}>
-                    <tr>
-                      <td>
-                        {/* Item code, category and quantity belong to a line, not
+                      <tr>
+                        <td>
+                          {/* Item code, category and quantity belong to a line, not
                             to the order — a four-item order has four of each — so
                             they open underneath rather than being flattened into
                             a column that could only ever show the first one. */}
-                        <button
-                          className="btn-ghost p-1"
-                          onClick={() => setOpen(expanded ? null : po.id)}
-                          disabled={lines.length === 0}
-                          title={expanded ? 'Hide items' : 'Show items'}
-                          aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
-                          aria-expanded={expanded}
-                        >
-                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        </button>
-                      </td>
-                      <td className="font-mono text-xs text-teal-400">{po.poNumber}</td>
-                      <td>
-                        <div className="font-medium text-foreground">{po.supplier?.name}</div>
-                        {po.supplier?.gstin && (
-                          <div className="text-[10px] text-muted-foreground font-mono">
-                            {po.supplier.gstin}
-                          </div>
-                        )}
-                      </td>
-                      <td className="text-xs whitespace-nowrap">{formatDate(po.poDate)}</td>
-                      <td className="text-xs">
-                        {po.enquiryNo ? (
-                          <>
-                            <div className="font-mono text-foreground">{po.enquiryNo}</div>
-                            {po.enquiryDate && (
-                              <div className="text-[10px] text-muted-foreground">
-                                {formatDate(po.enquiryDate)}
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className="text-xs">
-                        {po.reference ? (
-                          po.reference
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className="text-xs whitespace-nowrap">
-                        {lines.length === 0 ? (
-                          <span className="text-muted-foreground">—</span>
-                        ) : (
-                          <>
-                            <div className="text-foreground">
-                              {lines.length} {lines.length === 1 ? 'item' : 'items'}
-                            </div>
-                            <div className="text-[10px] text-muted-foreground truncate max-w-[160px]">
-                              {lines[0].item?.name}
-                              {lines.length > 1 ? ` +${lines.length - 1} more` : ''}
-                            </div>
-                          </>
-                        )}
-                      </td>
-                      <td className="text-right font-semibold tabular-nums">₹{money(po.totalAmount)}</td>
-                      <td>
-                        <span className={s.cls}>{s.label}</span>
-                      </td>
-                      <td className="text-right whitespace-nowrap">
-                        <div className="flex justify-end gap-1">
-                          <Link
-                            href={`/print/purchase-order/${po.id}`}
-                            target="_blank"
-                            className="btn-ghost p-1.5"
-                            title="Print"
-                            aria-label={`Print ${po.poNumber}`}
+                          <button
+                            className="btn-ghost p-1"
+                            onClick={() => setOpen(expanded ? null : po.id)}
+                            disabled={lines.length === 0}
+                            title={expanded ? 'Hide items' : 'Show items'}
+                            aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
+                            aria-expanded={expanded}
                           >
-                            <Printer size={15} />
-                          </Link>
-                          {po.status === 'DRAFT' && (
+                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                          </button>
+                        </td>
+                        <td className="font-mono text-xs text-teal-400">{po.poNumber}</td>
+                        <td>
+                          <div className="text-foreground font-medium">{po.supplier?.name}</div>
+                          {po.supplier?.gstin && (
+                            <div className="text-muted-foreground font-mono text-[10px]">
+                              {po.supplier.gstin}
+                            </div>
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap text-xs">{formatDate(po.poDate)}</td>
+                        <td className="text-xs">
+                          {po.enquiryNo ? (
                             <>
-                              <button
-                                className="btn-ghost p-1.5"
-                                onClick={() => setDialog({ open: true, record: po })}
-                                title="Edit"
-                                aria-label={`Edit ${po.poNumber}`}
-                              >
-                                <Pencil size={15} />
-                              </button>
-                              <button
-                                className="btn-ghost p-1.5 hover:text-teal-400"
-                                onClick={() => void act(po, 'send')}
-                                disabled={busy}
-                                title="Mark as sent to the supplier"
-                                aria-label={`Mark ${po.poNumber} sent`}
-                              >
-                                <Send size={15} />
-                              </button>
+                              <div className="text-foreground font-mono">{po.enquiryNo}</div>
+                              {po.enquiryDate && (
+                                <div className="text-muted-foreground text-[10px]">
+                                  {formatDate(po.enquiryDate)}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="text-xs">
+                          {po.reference ? (
+                            po.reference
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap text-xs">
+                          {lines.length === 0 ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : (
+                            <>
+                              <div className="text-foreground">
+                                {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                              </div>
+                              <div className="text-muted-foreground max-w-[160px] truncate text-[10px]">
+                                {lines[0].item?.name}
+                                {lines.length > 1 ? ` +${lines.length - 1} more` : ''}
+                              </div>
                             </>
                           )}
-                          {po.status !== 'CANCELLED' && po.status !== 'COMPLETED' && (
-                            <button
-                              className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                              onClick={() => void act(po, 'cancel')}
-                              disabled={busy}
-                              title="Cancel"
-                              aria-label={`Cancel ${po.poNumber}`}
+                        </td>
+                        <td className="text-right font-semibold tabular-nums">
+                          ₹{money(po.totalAmount)}
+                        </td>
+                        <td>
+                          <span className={s.cls}>{s.label}</span>
+                        </td>
+                        <td className="whitespace-nowrap text-right">
+                          <div className="flex justify-end gap-1">
+                            <Link
+                              href={`/print/purchase-order/${po.id}`}
+                              target="_blank"
+                              className="btn-ghost p-1.5"
+                              title="Print"
+                              aria-label={`Print ${po.poNumber}`}
                             >
-                              <Ban size={15} />
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
+                              <Printer size={15} />
+                            </Link>
+                            {po.status === 'DRAFT' && (
+                              <>
+                                <button
+                                  className="btn-ghost p-1.5"
+                                  onClick={() => setDialog({ open: true, record: po })}
+                                  title="Edit"
+                                  aria-label={`Edit ${po.poNumber}`}
+                                >
+                                  <Pencil size={15} />
+                                </button>
+                                <button
+                                  className="btn-ghost p-1.5 hover:text-teal-400"
+                                  onClick={() => void act(po, 'send')}
+                                  disabled={busy}
+                                  title="Mark as sent to the supplier"
+                                  aria-label={`Mark ${po.poNumber} sent`}
+                                >
+                                  <Send size={15} />
+                                </button>
+                              </>
+                            )}
+                            {po.status !== 'CANCELLED' && po.status !== 'COMPLETED' && (
+                              <button
+                                className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                                onClick={() => void act(po, 'cancel')}
+                                disabled={busy}
+                                title="Cancel"
+                                aria-label={`Cancel ${po.poNumber}`}
+                              >
+                                <Ban size={15} />
+                              </button>
+                            )}
+                            {(po.status === 'DRAFT' || po.status === 'CANCELLED') && (
+                              <button
+                                className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                                onClick={() => void remove(po)}
+                                disabled={busy}
+                                title="Delete for good"
+                                aria-label={`Delete ${po.poNumber}`}
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
 
-                    {expanded && lines.length > 0 && (
-                      <tr>
-                        <td colSpan={10} className="bg-secondary/30 p-0">
-                          <table className="w-full text-sm">
-                            <thead>
-                              <tr className="border-b border-border">
-                                {['Item code', 'Item', 'Category', 'Subcategory', 'Qty', 'Rate', 'Amount'].map(
-                                  (h) => (
+                      {expanded && lines.length > 0 && (
+                        <tr>
+                          <td colSpan={10} className="bg-secondary/30 p-0">
+                            <table className="w-full text-sm">
+                              <thead>
+                                <tr className="border-border border-b">
+                                  {[
+                                    'Item code',
+                                    'Item',
+                                    'Category',
+                                    'Subcategory',
+                                    'Qty',
+                                    'Rate',
+                                    'Amount',
+                                  ].map((h) => (
                                     <th
                                       key={h}
-                                      className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-4 ${
-                                        ['Qty', 'Rate', 'Amount'].includes(h) ? 'text-right' : 'text-left'
+                                      className={`text-muted-foreground px-4 py-2 text-[10px] uppercase tracking-wider ${
+                                        ['Qty', 'Rate', 'Amount'].includes(h)
+                                          ? 'text-right'
+                                          : 'text-left'
                                       }`}
                                     >
                                       {h}
                                     </th>
-                                  ),
-                                )}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {lines.map((line, i) => {
-                                // An item is filed under one category, which may
-                                // itself sit under a parent. Where it does, the
-                                // parent is the category and the item's own is the
-                                // subcategory; where it does not, there is no
-                                // subcategory to show.
-                                const cat = line.item?.category
-                                const parent = cat?.parent
-                                return (
-                                  <tr key={line.itemId + i} className="border-b border-border/40 last:border-0">
-                                    <td className="py-2 px-4 font-mono text-xs text-teal-400 whitespace-nowrap">
-                                      {line.item?.code ?? '—'}
-                                    </td>
-                                    <td className="py-2 px-4">
-                                      <div className="text-foreground">{line.item?.name ?? '—'}</div>
-                                      {line.description && (
-                                        <div className="text-[10px] text-muted-foreground">
-                                          {line.description}
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {lines.map((line, i) => {
+                                  // An item is filed under one category, which may
+                                  // itself sit under a parent. Where it does, the
+                                  // parent is the category and the item's own is the
+                                  // subcategory; where it does not, there is no
+                                  // subcategory to show.
+                                  const cat = line.item?.category
+                                  const parent = cat?.parent
+                                  return (
+                                    <tr
+                                      key={line.itemId + i}
+                                      className="border-border/40 border-b last:border-0"
+                                    >
+                                      <td className="whitespace-nowrap px-4 py-2 font-mono text-xs text-teal-400">
+                                        {line.item?.code ?? '—'}
+                                      </td>
+                                      <td className="px-4 py-2">
+                                        <div className="text-foreground">
+                                          {line.item?.name ?? '—'}
                                         </div>
-                                      )}
-                                      {line.item?.hsnCode && (
-                                        <div className="text-[10px] text-muted-foreground font-mono">
-                                          HSN {line.item.hsnCode}
-                                        </div>
-                                      )}
-                                    </td>
-                                    <td className="py-2 px-4 text-xs">
-                                      {parent?.name ?? cat?.name ?? (
-                                        <span className="text-muted-foreground">—</span>
-                                      )}
-                                    </td>
-                                    <td className="py-2 px-4 text-xs">
-                                      {parent ? (
-                                        cat?.name
-                                      ) : (
-                                        <span className="text-muted-foreground">—</span>
-                                      )}
-                                    </td>
-                                    <td className="py-2 px-4 text-right tabular-nums whitespace-nowrap">
-                                      {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
-                                    </td>
-                                    <td className="py-2 px-4 text-right tabular-nums">
-                                      ₹{money(line.unitRate)}
-                                    </td>
-                                    <td className="py-2 px-4 text-right tabular-nums font-medium">
-                                      ₹{money(line.amount ?? 0)}
-                                    </td>
-                                  </tr>
-                                )
-                              })}
-                            </tbody>
-                          </table>
-                        </td>
-                      </tr>
-                    )}
+                                        {line.description && (
+                                          <div className="text-muted-foreground text-[10px]">
+                                            {line.description}
+                                          </div>
+                                        )}
+                                        {line.item?.hsnCode && (
+                                          <div className="text-muted-foreground font-mono text-[10px]">
+                                            HSN {line.item.hsnCode}
+                                          </div>
+                                        )}
+                                      </td>
+                                      <td className="px-4 py-2 text-xs">
+                                        {parent?.name ?? cat?.name ?? (
+                                          <span className="text-muted-foreground">—</span>
+                                        )}
+                                      </td>
+                                      <td className="px-4 py-2 text-xs">
+                                        {parent ? (
+                                          cat?.name
+                                        ) : (
+                                          <span className="text-muted-foreground">—</span>
+                                        )}
+                                      </td>
+                                      <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums">
+                                        {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                      </td>
+                                      <td className="px-4 py-2 text-right tabular-nums">
+                                        ₹{money(line.unitRate)}
+                                      </td>
+                                      <td className="px-4 py-2 text-right font-medium tabular-nums">
+                                        ₹{money(line.amount ?? 0)}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
                     </Fragment>
                   )
                 })}
@@ -390,9 +457,9 @@ export default function PurchaseOrdersPage() {
         <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        An order can be changed while it is a draft. Once it is marked sent, raise a new one instead —
-        the supplier is holding the old paper.
+      <p className="text-muted-foreground text-xs">
+        An order can be changed while it is a draft. Once it is marked sent, raise a new one instead
+        — the supplier is holding the old paper.
       </p>
 
       <PurchaseOrderDialog

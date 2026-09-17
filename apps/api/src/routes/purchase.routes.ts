@@ -86,6 +86,15 @@ const createSchema = z.object({
   // Free text on purpose: every mill numbers these its own way.
   enquiryNo: z.string().max(50).optional().nullable(),
   enquiryDate: z.coerce.date().optional().nullable(),
+  /*
+   * Which of the supplier's addresses this order is billed to.
+   *
+   * The id, not the text. The address that prints is rendered here from the
+   * row, so a browser cannot put words on an order that no address says —
+   * and the id is checked against this supplier, so one supplier's order
+   * cannot be billed to another's premises.
+   */
+  supplierAddressId: z.string().optional().nullable(),
   reference: z.string().max(100).optional().nullable(),
   // Internal. `notes` is printed on the supplier's copy; this is not.
   remark: z.string().max(1000).optional().nullable(),
@@ -104,11 +113,21 @@ const updateSchema = createSchema.partial()
 const poInclude = {
   supplier: {
     select: {
-      id: true, name: true, code: true, gstin: true, stateCode: true,
-      address: true, city: true, state: true, pincode: true, phone: true, email: true,
+      id: true,
+      name: true,
+      code: true,
+      gstin: true,
+      stateCode: true,
+      address: true,
+      city: true,
+      state: true,
+      pincode: true,
+      phone: true,
+      email: true,
       // Printed on the order, so the supplier is told the terms they are being
       // held to rather than being left to assume them.
-      paymentTerms: true, creditDays: true,
+      paymentTerms: true,
+      creditDays: true,
     },
   },
   charges: {
@@ -124,12 +143,17 @@ const poInclude = {
       style: { select: { id: true, code: true, name: true } },
       item: {
         select: {
-          id: true, code: true, name: true, hsnCode: true,
+          id: true,
+          code: true,
+          name: true,
+          hsnCode: true,
           uom: { select: { symbol: true } },
           // The category, and its parent where it has one. An item sits in
           // whichever level it was filed under, so the parent is what the list
           // shows as the category and the item's own becomes the subcategory.
-          category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+          category: {
+            select: { id: true, name: true, parent: { select: { id: true, name: true } } },
+          },
         },
       },
     },
@@ -154,11 +178,14 @@ async function purchaseTaxContext(
    * we are in Maharashtra with them. Comparing the supplier against *us* would
    * call that CGST+SGST and the credit would be refused.
    */
-  destinationStateCode?: string | null,
+  destinationStateCode?: string | null
 ) {
   const [company, supplier] = await Promise.all([
     tx.company.findFirst({ select: { stateCode: true, gstin: true } }),
-    tx.supplier.findUnique({ where: { id: supplierId }, select: { stateCode: true, gstin: true, name: true } }),
+    tx.supplier.findUnique({
+      where: { id: supplierId },
+      select: { stateCode: true, gstin: true, name: true },
+    }),
   ])
 
   if (!supplier) throw new AppError('Supplier not found', 404, 'NOT_FOUND')
@@ -168,7 +195,7 @@ async function purchaseTaxContext(
     throw new AppError(
       'Your company GST state code is not set. Add it in Settings → Company, or the tax on this order will be wrong.',
       409,
-      'NO_COMPANY_STATE',
+      'NO_COMPANY_STATE'
     )
   }
 
@@ -198,6 +225,60 @@ async function purchaseTaxContext(
  * wrong split means the credit cannot be claimed, and that surfaces months
  * later as somebody else's problem.
  */
+/**
+ * The supplier's billing address, as one block of text, for the order to keep.
+ *
+ * Written onto the order rather than looked up when it prints: a supplier
+ * moves, an address gets a typo corrected, one is retired — and none of that
+ * may change what an order already sent to them says.
+ *
+ * Falls back to the supplier's default address, and then to the flat fields on
+ * the supplier itself, so an order raised against a supplier nobody has given
+ * addresses to still carries one.
+ */
+async function supplierBillingAddress(
+  tx: Prisma.TransactionClient,
+  supplierId: string,
+  addressId?: string | null
+): Promise<string | null> {
+  const chosen = addressId
+    ? await tx.supplierAddress.findUnique({ where: { id: addressId } })
+    : null
+
+  // Belonging is checked, not assumed. An id from another supplier would
+  // otherwise print their premises on this order.
+  if (addressId && (!chosen || chosen.supplierId !== supplierId)) {
+    throw new AppError('That address does not belong to this supplier', 400, 'BAD_ADDRESS')
+  }
+
+  const row =
+    chosen ??
+    (await tx.supplierAddress.findFirst({
+      where: { supplierId, isActive: true },
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    }))
+
+  if (row) {
+    return (
+      [row.address, row.city, row.state, row.pincode, row.country]
+        .map((p) => p?.trim())
+        .filter(Boolean)
+        .join(', ') || null
+    )
+  }
+
+  const supplier = await tx.supplier.findUnique({
+    where: { id: supplierId },
+    select: { address: true, city: true, state: true, pincode: true },
+  })
+  return (
+    [supplier?.address, supplier?.city, supplier?.state, supplier?.pincode]
+      .map((p) => p?.trim())
+      .filter(Boolean)
+      .join(', ') || null
+  )
+}
+
 async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: string) {
   const customer = await tx.customer.findUnique({
     where: { id: customerId },
@@ -227,7 +308,7 @@ async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: s
     throw new AppError(
       `No GST state code on ${customer.name}. Add one on the customer, or the tax on this order cannot be worked out.`,
       409,
-      'NO_PLACE_OF_SUPPLY',
+      'NO_PLACE_OF_SUPPLY'
     )
   }
 
@@ -259,7 +340,7 @@ function priceOrder(
   isIntraState: boolean,
   chargeTax: boolean,
   charges: { chargeTypeId: string; amount: number; gstRate: number }[] = [],
-  otherCharges = 0,
+  otherCharges = 0
 ) {
   const lineTotals = lines.map((l) => l.qty * l.unitRate * (1 - (l.discount ?? 0) / 100))
   const subtotal = round2(lineTotals.reduce((s, n) => s + n, 0))
@@ -309,7 +390,7 @@ function priceOrder(
   igst = round2(igst)
 
   const { rounded, roundOff } = applyRoundOff(
-    taxable + chargeTotal + cgst + sgst + igst + round2(otherCharges),
+    taxable + chargeTotal + cgst + sgst + igst + round2(otherCharges)
   )
 
   return {
@@ -338,7 +419,7 @@ function priceOrder(
  */
 async function resolveCharges(
   tx: Prisma.TransactionClient,
-  charges: z.infer<typeof chargeSchema>[],
+  charges: z.infer<typeof chargeSchema>[]
 ) {
   const wanted = charges.filter((c) => c.amount > 0)
   if (!wanted.length) return []
@@ -354,7 +435,7 @@ async function resolveCharges(
     throw new AppError(
       'One of those charges is not a charge the mill uses on purchases.',
       400,
-      'INVALID_CHARGE',
+      'INVALID_CHARGE'
     )
   }
 
@@ -367,12 +448,92 @@ async function resolveCharges(
 
 // ── Purchase orders ─────────────────────────────────────────────────────────
 
+/**
+ * What a new purchase order starts out carrying.
+ *
+ * Only the standard terms so far. They are read from the PO document template
+ * — the same row the printed sheet reads — so the box on the form shows
+ * exactly what would be printed if nothing were typed over it, rather than a
+ * second copy of the wording kept somewhere else.
+ *
+ * Served from the purchase module rather than from settings on purpose. A
+ * buyer raising an order is entitled to see the terms that order will carry,
+ * and most buyers are not allowed into Settings at all — asking for it there
+ * would hand them an empty box and no way to know why.
+ *
+ * Declared above `/orders/:id` because Express takes the first route that
+ * matches and `defaults` would otherwise be read as an order id.
+ */
+router.get('/order-defaults', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const header = await getPrintHeader('PO')
+  res.json({ success: true, data: { terms: header.template.termsText } })
+})
+
+/**
+ * What this item has been bought at before.
+ *
+ * Newest first, one row per order line. The form shows the top one under the
+ * Rate cell as "Last 1.10" and the whole list in a panel behind View history,
+ * which is how the mill's old system did it and is the right shape for the
+ * job: a purchase order rate is negotiated, so the buyer wants the last one in
+ * front of them without it being typed into the box for them.
+ *
+ * Binned orders are left out. Cancelled ones are not — a rate that was
+ * actually quoted is a real data point even if the order came to nothing, and
+ * the status is returned so the panel can say which is which rather than
+ * quietly presenting them as equal.
+ *
+ * Declared above `/orders` for no reason other than keeping the purchase order
+ * routes together below it.
+ */
+router.get(
+  '/rate-history/:itemId',
+  requirePermission(MODULE, 'view'),
+  async (req: AuthRequest, res) => {
+    const rows = await prisma.purchaseOrderLine.findMany({
+      where: { itemId: req.params.itemId, po: { deletedAt: null } },
+      orderBy: [{ po: { poDate: 'desc' } }, { po: { createdAt: 'desc' } }],
+      take: 50,
+      select: {
+        id: true,
+        qty: true,
+        unitRate: true,
+        amount: true,
+        po: {
+          select: {
+            poNumber: true,
+            poDate: true,
+            status: true,
+            supplier: { select: { name: true } },
+          },
+        },
+      },
+    })
+
+    res.json({
+      success: true,
+      data: rows.map((r) => ({
+        id: r.id,
+        poNumber: r.po.poNumber,
+        poDate: r.po.poDate,
+        status: r.po.status,
+        supplierName: r.po.supplier.name,
+        qty: r.qty,
+        unitRate: r.unitRate,
+        amount: r.amount,
+      })),
+    })
+  }
+)
+
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
 
-  const where: Record<string, unknown> = {}
+  // Binned orders are not in any list. The recycle bin has a route of its
+  // own, so no screen can show them by forgetting to pass something.
+  const where: Record<string, unknown> = { deletedAt: null }
   if (typeof req.query.status === 'string' && req.query.status) where.status = req.query.status
   if (typeof req.query.supplierId === 'string' && req.query.supplierId) {
     where.supplierId = req.query.supplierId
@@ -403,15 +564,21 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
 })
 
 router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) => {
-  const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, include: poInclude })
-  if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { id: req.params.id },
+    include: poInclude,
+  })
+  if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
   res.json({ success: true, data: po })
 })
 
 /** Everything the printed sheet needs, in one call. */
 router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
-  const po = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, include: poInclude })
-  if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { id: req.params.id },
+    include: poInclude,
+  })
+  if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
   const header = await getPrintHeader('PO')
 
@@ -463,7 +630,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
       tax.isIntraState,
       !tax.supplierIsUnregistered,
       charges,
-      data.otherCharges ?? 0,
+      data.otherCharges ?? 0
     )
 
     return tx.purchaseOrder.create({
@@ -476,6 +643,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         deliveryWarehouseId: data.deliveryWarehouseId || null,
         deliveryCustomerId: data.deliveryCustomerId || null,
         deliveryAddress: destination?.address ?? null,
+        supplierAddress: await supplierBillingAddress(tx, data.supplierId, data.supplierAddressId),
         enquiryNo: data.enquiryNo ?? null,
         enquiryDate: data.enquiryDate ?? null,
         reference: data.reference ?? null,
@@ -529,8 +697,11 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateSchema.parse(req.body)
 
-  const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, include: poInclude })
-  if (!before) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  const before = await prisma.purchaseOrder.findUnique({
+    where: { id: req.params.id },
+    include: poInclude,
+  })
+  if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
   // Once an order is with the supplier, or goods have started arriving against
   // it, editing it silently would leave the paper they hold disagreeing with
@@ -539,7 +710,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     throw new AppError(
       `This order is ${before.status.toLowerCase().replace('_', ' ')} and can no longer be edited. Raise a new one.`,
       400,
-      'PO_NOT_DRAFT',
+      'PO_NOT_DRAFT'
     )
   }
 
@@ -569,14 +740,12 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       // Changing who it is delivered to changes the tax, so the destination is
       // resolved again rather than carried over from when it was first raised.
       const customerId =
-        data.deliveryCustomerId !== undefined
-          ? data.deliveryCustomerId
-          : before.deliveryCustomerId
+        data.deliveryCustomerId !== undefined ? data.deliveryCustomerId : before.deliveryCustomerId
       const destination = customerId ? await customerDeliveryState(tx, customerId) : null
       const tax = await purchaseTaxContext(
         tx,
         data.supplierId ?? before.supplierId,
-        destination?.stateCode,
+        destination?.stateCode
       )
       const items = await tx.item.findMany({
         where: { id: { in: data.lines.map((l) => l.itemId) } },
@@ -605,7 +774,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
         tax.isIntraState,
         !tax.supplierIsUnregistered,
         charges,
-        data.otherCharges ?? Number(before.otherCharges),
+        data.otherCharges ?? Number(before.otherCharges)
       )
 
       await tx.purchaseOrderCharge.deleteMany({ where: { poId: before.id } })
@@ -641,6 +810,11 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           ...(data.supplierId ? { supplierId: data.supplierId } : {}),
           placeOfSupplyCode: tax.placeOfSupply,
           deliveryAddress: destination?.address ?? null,
+          supplierAddress: await supplierBillingAddress(
+            tx,
+            before.supplierId,
+            data.supplierAddressId
+          ),
           subtotal: priced.subtotal,
           discountAmount: priced.discount,
           taxableAmount: priced.taxable,
@@ -675,60 +849,270 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 })
 
 /** Marks the order as sent to the supplier. From here it can no longer be edited. */
-router.patch('/orders/:id/send', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
-  if (!before) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
-  if (before.status !== 'DRAFT') {
-    throw new AppError('Only a draft order can be sent', 400, 'PO_NOT_DRAFT')
+router.patch(
+  '/orders/:id/send',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
+    if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (before.status !== 'DRAFT') {
+      throw new AppError('Only a draft order can be sent', 400, 'PO_NOT_DRAFT')
+    }
+
+    const after = await prisma.purchaseOrder.update({
+      where: { id: before.id },
+      data: { status: 'SENT' },
+      include: poInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseOrder',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({ success: true, data: after, message: `${after.poNumber} marked as sent.` })
+  }
+)
+
+router.patch(
+  '/orders/:id/cancel',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const reason = z.object({ reason: z.string().max(300).optional() }).parse(req.body ?? {})
+
+    const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
+    if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (before.status === 'COMPLETED') {
+      throw new AppError('A completed order cannot be cancelled', 400, 'PO_COMPLETED')
+    }
+
+    const after = await prisma.purchaseOrder.update({
+      where: { id: before.id },
+      data: {
+        status: 'CANCELLED',
+        notes: reason.reason
+          ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason.reason}`
+          : before.notes,
+      },
+      include: poInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseOrder',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({ success: true, data: after, message: `${after.poNumber} cancelled.` })
+  }
+)
+
+/**
+ * Puts a purchase order in the recycle bin.
+ *
+ * The row is marked, not removed. Every list, count and lookup outside the bin
+ * passes over a marked order, so as far as the mill is concerned it is gone —
+ * but the lines, the charges and the files are all still there, which is what
+ * makes putting it back a single field rather than a reconstruction.
+ *
+ * Cancelling is still the right end for a real order that fell through: a
+ * cancelled order goes on saying what was asked for and when it was called
+ * off. This is for the ones that should not exist — a duplicate, a mis-key,
+ * the rows left over from setting the system up.
+ *
+ * Two things are refused:
+ *
+ * - An order that has been sent. The supplier is holding paper for it, and
+ *   taking our copy out of every list leaves them quoting a number nobody here
+ *   can find. Cancel it, so both sides still have the same document.
+ * - An order with a goods receipt or a bill against it. Those are real
+ *   movements of stock and money pointing back at this order, and hiding what
+ *   they point at would leave them explaining themselves against nothing.
+ *
+ * The number is not given back either way. The series only counts up: handing
+ * 0001 out twice because the first was binned would put two different orders
+ * on one number in two people's records, and a restore would then collide with
+ * whatever had taken it.
+ */
+router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const order = await prisma.purchaseOrder.findUnique({
+    where: { id: req.params.id },
+    include: { _count: { select: { grns: true, invoices: true } } },
+  })
+  if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+  if (order.status !== 'DRAFT' && order.status !== 'CANCELLED') {
+    throw new AppError(
+      `${order.poNumber} has gone to the supplier. Cancel it instead — deleting it here would leave them holding paper for an order that no longer exists.`,
+      400,
+      'PO_SENT'
+    )
+  }
+
+  if (order._count.grns > 0 || order._count.invoices > 0) {
+    const against = [
+      order._count.grns > 0 &&
+        `${order._count.grns} goods receipt${order._count.grns > 1 ? 's' : ''}`,
+      order._count.invoices > 0 &&
+        `${order._count.invoices} bill${order._count.invoices > 1 ? 's' : ''}`,
+    ]
+      .filter(Boolean)
+      .join(' and ')
+    throw new AppError(
+      `${order.poNumber} has ${against} against it, so it cannot be deleted. Cancel it instead.`,
+      409,
+      'PO_HAS_DOCUMENTS'
+    )
   }
 
   const after = await prisma.purchaseOrder.update({
-    where: { id: before.id },
-    data: { status: 'SENT' },
-    include: poInclude,
+    where: { id: order.id },
+    data: { deletedAt: new Date(), deletedById: req.user?.id ?? null },
   })
 
   await writeAuditLog(req, {
     module: MODULE,
-    action: 'UPDATE',
+    action: 'DELETE',
     entityType: 'PurchaseOrder',
-    entityId: after.id,
-    before,
+    entityId: order.id,
+    before: order,
     after,
   })
 
-  res.json({ success: true, data: after, message: `${after.poNumber} marked as sent.` })
+  res.json({ success: true, message: `${order.poNumber} moved to the recycle bin.` })
 })
 
-router.patch('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const reason = z.object({ reason: z.string().max(300).optional() }).parse(req.body ?? {})
-
-  const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
-  if (!before) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
-  if (before.status === 'COMPLETED') {
-    throw new AppError('A completed order cannot be cancelled', 400, 'PO_COMPLETED')
-  }
-
-  const after = await prisma.purchaseOrder.update({
-    where: { id: before.id },
-    data: {
-      status: 'CANCELLED',
-      notes: reason.reason ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason.reason}` : before.notes,
+/**
+ * What is in the recycle bin.
+ *
+ * Its own route rather than a flag on the orders list, so that no screen can
+ * show binned orders by forgetting to pass something. Reading the bin is an
+ * act of its own and has to be asked for by name.
+ */
+router.get('/recycle-bin', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const rows = await prisma.purchaseOrder.findMany({
+    where: { deletedAt: { not: null } },
+    orderBy: { deletedAt: 'desc' },
+    take: 200,
+    include: {
+      supplier: { select: { id: true, name: true, code: true } },
+      lines: { select: { id: true } },
     },
-    include: poInclude,
   })
 
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'PurchaseOrder',
-    entityId: after.id,
-    before,
-    after,
+  // Resolved in one query rather than through a relation, which would have put
+  // a back-reference on User that nothing else wants.
+  const ids = [...new Set(rows.map((r) => r.deletedById).filter(Boolean))] as string[]
+  const users = await prisma.user.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, name: true },
   })
+  const nameById = new Map(users.map((u) => [u.id, u.name]))
 
-  res.json({ success: true, data: after, message: `${after.poNumber} cancelled.` })
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      id: r.id,
+      poNumber: r.poNumber,
+      poDate: r.poDate,
+      status: r.status,
+      totalAmount: r.totalAmount,
+      lineCount: r.lines.length,
+      supplier: r.supplier,
+      deletedAt: r.deletedAt,
+      deletedBy: r.deletedById ? (nameById.get(r.deletedById) ?? 'Someone since removed') : null,
+    })),
+  })
 })
+
+/** Puts one back, exactly as it was. */
+router.post(
+  '/recycle-bin/:id/restore',
+  requirePermission(MODULE, 'delete'),
+  async (req: AuthRequest, res) => {
+    const order = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
+    if (!order || !order.deletedAt) {
+      throw new AppError('That order is not in the recycle bin', 404, 'NOT_IN_BIN')
+    }
+
+    const after = await prisma.purchaseOrder.update({
+      where: { id: order.id },
+      data: { deletedAt: null, deletedById: null },
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseOrder',
+      entityId: order.id,
+      before: order,
+      after,
+    })
+
+    res.json({ success: true, message: `${order.poNumber} restored.` })
+  }
+)
+
+/**
+ * Empties one order out of the bin for good.
+ *
+ * This is the only route in the module that actually removes a purchase order.
+ * The lines, charges and attachment rows cascade; the attachment files are
+ * swept up after, best effort, because a file with no row is invisible and
+ * merely wastes space while a row pointing at a missing file is a broken
+ * download.
+ *
+ * The guards are checked again rather than trusted from when it was binned: an
+ * order can sit in the bin while a goods receipt is written against it by
+ * someone who never opened the bin, and there is no undoing this one.
+ */
+router.delete(
+  '/recycle-bin/:id',
+  requirePermission(MODULE, 'delete'),
+  async (req: AuthRequest, res) => {
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      include: {
+        ...poInclude,
+        attachments: true,
+        _count: { select: { grns: true, invoices: true } },
+      },
+    })
+    if (!order || !order.deletedAt) {
+      throw new AppError('That order is not in the recycle bin', 404, 'NOT_IN_BIN')
+    }
+    if (order._count.grns > 0 || order._count.invoices > 0) {
+      throw new AppError(
+        `${order.poNumber} has stock or bills against it now, so it cannot be destroyed. Restore it instead.`,
+        409,
+        'PO_HAS_DOCUMENTS'
+      )
+    }
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'DELETE',
+      entityType: 'PurchaseOrder',
+      entityId: order.id,
+      before: order,
+    })
+
+    await prisma.purchaseOrder.delete({ where: { id: order.id } })
+
+    for (const file of order.attachments ?? []) {
+      await removeObject(file.storagePath).catch(() => {})
+    }
+
+    res.json({ success: true, message: `${order.poNumber} destroyed.` })
+  }
+)
 
 // ── Files kept against an order ─────────────────────────────────────────────
 //
@@ -767,9 +1151,9 @@ router.post(
 
     const po = await prisma.purchaseOrder.findUnique({
       where: { id: req.params.id },
-      select: { id: true, poNumber: true, status: true },
+      select: { id: true, poNumber: true, status: true, deletedAt: true },
     })
-    if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
     // Checked before the link is handed out rather than after the file has
     // been sent, so nobody waits for an upload that was never going to count.
@@ -778,7 +1162,7 @@ router.post(
       throw new AppError(
         `${po.poNumber} already has ${MAX_FILES_PER_DOCUMENT} files. Remove one before adding another.`,
         409,
-        'TOO_MANY_FILES',
+        'TOO_MANY_FILES'
       )
     }
 
@@ -786,95 +1170,106 @@ router.post(
     const { uploadUrl } = await signedUploadUrl(path)
 
     res.json({ success: true, data: { uploadUrl, storagePath: path, fileName, sizeBytes } })
-  },
+  }
 )
 
 /** Step three: the file is in the bucket, so record it. */
-router.post('/orders/:id/attachments', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { fileName, storagePath } = z
-    .object({
-      fileName: z.string().min(1).max(255),
-      storagePath: z.string().min(1),
+router.post(
+  '/orders/:id/attachments',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { fileName, storagePath } = z
+      .object({
+        fileName: z.string().min(1).max(255),
+        storagePath: z.string().min(1),
+      })
+      .parse(req.body)
+
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, poNumber: true, deletedAt: true },
     })
-    .parse(req.body)
+    if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
-  const po = await prisma.purchaseOrder.findUnique({
-    where: { id: req.params.id },
-    select: { id: true, poNumber: true },
-  })
-  if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    // A path is only ever handed out for one order, and this is what stops a
+    // reply being replayed against another one.
+    if (!storagePath.startsWith(`purchase-orders/${po.id}/`)) {
+      throw new AppError('That file does not belong to this order', 400, 'WRONG_DOCUMENT')
+    }
 
-  // A path is only ever handed out for one order, and this is what stops a
-  // reply being replayed against another one.
-  if (!storagePath.startsWith(`purchase-orders/${po.id}/`)) {
-    throw new AppError('That file does not belong to this order', 400, 'WRONG_DOCUMENT')
+    // The browser told us the size. Ask storage instead — the row must describe
+    // a file that is really there, at the size it really is.
+    const { sizeBytes, mimeType } = await statObject(storagePath)
+    if (sizeBytes > MAX_FILE_BYTES) {
+      await removeObject(storagePath).catch(() => {})
+      throw new AppError(
+        `That file is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_BYTES / 1024 / 1024}MB.`,
+        400,
+        'FILE_TOO_LARGE'
+      )
+    }
+
+    const attachment = await prisma.purchaseOrderAttachment.create({
+      data: {
+        poId: po.id,
+        fileName,
+        storagePath,
+        mimeType,
+        sizeBytes,
+        uploadedById: req.user!.id,
+      },
+      include: attachmentInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'PurchaseOrderAttachment',
+      entityId: attachment.id,
+      after: attachment,
+    })
+
+    res.status(201).json({ success: true, data: attachment })
   }
-
-  // The browser told us the size. Ask storage instead — the row must describe
-  // a file that is really there, at the size it really is.
-  const { sizeBytes, mimeType } = await statObject(storagePath)
-  if (sizeBytes > MAX_FILE_BYTES) {
-    await removeObject(storagePath).catch(() => {})
-    throw new AppError(
-      `That file is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_BYTES / 1024 / 1024}MB.`,
-      400,
-      'FILE_TOO_LARGE',
-    )
-  }
-
-  const attachment = await prisma.purchaseOrderAttachment.create({
-    data: {
-      poId: po.id,
-      fileName,
-      storagePath,
-      mimeType,
-      sizeBytes,
-      uploadedById: req.user!.id,
-    },
-    include: attachmentInclude,
-  })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'CREATE',
-    entityType: 'PurchaseOrderAttachment',
-    entityId: attachment.id,
-    after: attachment,
-  })
-
-  res.status(201).json({ success: true, data: attachment })
-})
+)
 
 /** A link that works for a few minutes. The bucket itself stays private. */
 router.get('/attachments/:id/link', requirePermission(MODULE, 'view'), async (req, res) => {
   const file = await prisma.purchaseOrderAttachment.findUnique({ where: { id: req.params.id } })
   if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
 
-  res.json({ success: true, data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName } })
+  res.json({
+    success: true,
+    data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName },
+  })
 })
 
-router.delete('/attachments/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
-  const file = await prisma.purchaseOrderAttachment.findUnique({
-    where: { id: req.params.id },
-    include: attachmentInclude,
-  })
-  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+router.delete(
+  '/attachments/:id',
+  requirePermission(MODULE, 'delete'),
+  async (req: AuthRequest, res) => {
+    const file = await prisma.purchaseOrderAttachment.findUnique({
+      where: { id: req.params.id },
+      include: attachmentInclude,
+    })
+    if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
 
-  // The row goes first. A row pointing at a file that is gone is a broken
-  // download; a file with no row is invisible and merely wastes space.
-  await prisma.purchaseOrderAttachment.delete({ where: { id: file.id } })
-  await removeObject(file.storagePath).catch(() => {})
+    // The row goes first. A row pointing at a file that is gone is a broken
+    // download; a file with no row is invisible and merely wastes space.
+    await prisma.purchaseOrderAttachment.delete({ where: { id: file.id } })
+    await removeObject(file.storagePath).catch(() => {})
 
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'DELETE',
-    entityType: 'PurchaseOrderAttachment',
-    entityId: file.id,
-    before: file,
-  })
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'DELETE',
+      entityType: 'PurchaseOrderAttachment',
+      entityId: file.id,
+      before: file,
+    })
 
-  res.json({ success: true, message: `${file.fileName} removed.` })
-})
+    res.json({ success: true, message: `${file.fileName} removed.` })
+  }
+)
 
 // ── Goods receipt ───────────────────────────────────────────────────────────
 //
@@ -945,7 +1340,7 @@ async function acceptedByPoLine(
  */
 async function syncOrderFromReceipts(tx: Prisma.TransactionClient, poId: string) {
   const po = await tx.purchaseOrder.findUnique({ where: { id: poId }, include: { lines: true } })
-  if (!po) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+  if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
   const accepted = await acceptedByPoLine(
     tx,
@@ -1045,7 +1440,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       where: { id: data.poId },
       include: { lines: { include: { item: { select: { name: true } } } } },
     })
-    if (!po) throw new AppError('That purchase order does not exist', 404, 'NOT_FOUND')
+    if (!po || po.deletedAt) throw new AppError('That purchase order does not exist', 404, 'NOT_FOUND')
 
     if (po.status === 'DRAFT') {
       throw new AppError(
@@ -1294,9 +1689,19 @@ router.patch(
 const billInclude = {
   supplier: {
     select: {
-      id: true, name: true, code: true, gstin: true, stateCode: true,
-      address: true, city: true, state: true, pincode: true, phone: true, email: true,
-      isMsme: true, creditDays: true,
+      id: true,
+      name: true,
+      code: true,
+      gstin: true,
+      stateCode: true,
+      address: true,
+      city: true,
+      state: true,
+      pincode: true,
+      phone: true,
+      email: true,
+      isMsme: true,
+      creditDays: true,
     },
   },
   po: { select: { id: true, poNumber: true } },
@@ -1304,7 +1709,15 @@ const billInclude = {
   lines: {
     orderBy: { sortOrder: 'asc' as const },
     include: {
-      item: { select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } } },
+      item: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          hsnCode: true,
+          uom: { select: { symbol: true } },
+        },
+      },
       grnLine: {
         select: {
           id: true,
@@ -1377,7 +1790,7 @@ function priceBill(opts: {
 
   const sum = (key: 'cgst' | 'sgst' | 'igst') =>
     round2(
-      pricedLines.reduce((s, l) => s + l[key], 0) + pricedCharges.reduce((s, c) => s + c[key], 0),
+      pricedLines.reduce((s, l) => s + l[key], 0) + pricedCharges.reduce((s, c) => s + c[key], 0)
     )
 
   const cgst = sum('cgst')
@@ -1423,7 +1836,7 @@ async function checkAgainstReceipts(
   tx: Prisma.TransactionClient,
   lines: BillLineInput[],
   supplierId: string,
-  excludeBillId?: string,
+  excludeBillId?: string
 ) {
   const grnLineIds = lines
     .map((l) => l.grnLineId)
@@ -1476,7 +1889,7 @@ async function checkAgainstReceipts(
       throw new AppError(
         `${receipt.grn.grnNumber} was received against a different supplier. A bill can only cover this supplier's own receipts.`,
         409,
-        'GRN_SUPPLIER_MISMATCH',
+        'GRN_SUPPLIER_MISMATCH'
       )
     }
 
@@ -1484,7 +1897,7 @@ async function checkAgainstReceipts(
       throw new AppError(
         `${receipt.grn.grnNumber} was cancelled, so nothing on it can be billed.`,
         409,
-        'GRN_CANCELLED',
+        'GRN_CANCELLED'
       )
     }
 
@@ -1501,7 +1914,7 @@ async function checkAgainstReceipts(
           ? `The bill claims ${round3(wanted)} of ${name}, but only ${room} is left to bill on ${receipt.grn.grnNumber} — ${already} of the ${accepted} accepted has already been billed.`
           : `The bill claims ${round3(wanted)} of ${name}, but only ${accepted} was accepted on ${receipt.grn.grnNumber}. Check the bill against the receipt before booking it.`,
         409,
-        'BILLED_MORE_THAN_RECEIVED',
+        'BILLED_MORE_THAN_RECEIVED'
       )
     }
   }
@@ -1573,10 +1986,25 @@ router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req,
   const grn = await prisma.gRN.findUnique({
     where: { id: req.params.grnId },
     include: {
-      po: { select: { id: true, poNumber: true, supplierId: true, supplier: { select: { id: true, name: true, gstin: true } } } },
+      po: {
+        select: {
+          id: true,
+          poNumber: true,
+          supplierId: true,
+          supplier: { select: { id: true, name: true, gstin: true } },
+        },
+      },
       lines: {
         include: {
-          item: { select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } } },
+          item: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              hsnCode: true,
+              uom: { select: { symbol: true } },
+            },
+          },
           poLine: { select: { id: true, unitRate: true, gstRate: true, discount: true } },
         },
       },
@@ -1637,7 +2065,7 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
         throw new AppError(
           `Invoice ${data.supplierInvoiceNo} from this supplier is already booked as ${existing.billNumber}.`,
           409,
-          'DUPLICATE_SUPPLIER_INVOICE',
+          'DUPLICATE_SUPPLIER_INVOICE'
         )
       }
     }
@@ -1755,21 +2183,23 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
     throw new AppError(
       `${before.billNumber} has already been paid against and can no longer be edited. Raise a debit note instead.`,
       409,
-      'BILL_PAID',
+      'BILL_PAID'
     )
   }
 
   const updated = await prisma.$transaction(async (tx) => {
     const supplierId = data.supplierId ?? before.supplierId
-    const lines = data.lines ?? before.lines.map((l) => ({
-      itemId: l.itemId,
-      grnLineId: l.grnLineId,
-      description: l.description,
-      qty: Number(l.qty),
-      unitPrice: Number(l.unitPrice),
-      discount: Number(l.discount),
-      gstRate: Number(l.gstRate),
-    }))
+    const lines =
+      data.lines ??
+      before.lines.map((l) => ({
+        itemId: l.itemId,
+        grnLineId: l.grnLineId,
+        description: l.description,
+        qty: Number(l.qty),
+        unitPrice: Number(l.unitPrice),
+        discount: Number(l.discount),
+        gstRate: Number(l.gstRate),
+      }))
 
     const supplierInvoiceNo =
       data.supplierInvoiceNo !== undefined ? data.supplierInvoiceNo : before.supplierInvoiceNo
@@ -1787,7 +2217,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
         throw new AppError(
           `Invoice ${supplierInvoiceNo} from this supplier is already booked as ${clash.billNumber}.`,
           409,
-          'DUPLICATE_SUPPLIER_INVOICE',
+          'DUPLICATE_SUPPLIER_INVOICE'
         )
       }
     }
@@ -1836,24 +2266,24 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
         supplierInvoiceNo: supplierInvoiceNo ?? null,
         supplierInvoiceDate:
           data.supplierInvoiceDate !== undefined
-            ? data.supplierInvoiceDate ?? null
+            ? (data.supplierInvoiceDate ?? null)
             : before.supplierInvoiceDate,
         billDate: data.billDate ?? before.billDate,
-        dueDate: data.dueDate !== undefined ? data.dueDate ?? null : before.dueDate,
+        dueDate: data.dueDate !== undefined ? (data.dueDate ?? null) : before.dueDate,
         subtotal: priced.subtotal,
         discountAmount: priced.discount,
         taxableAmount: priced.taxable,
         cgst: priced.cgst,
         sgst: priced.sgst,
         igst: priced.igst,
-        tdsSection: data.tdsSection !== undefined ? data.tdsSection ?? null : before.tdsSection,
+        tdsSection: data.tdsSection !== undefined ? (data.tdsSection ?? null) : before.tdsSection,
         tdsRate: tdsRate || null,
         tdsAmount: priced.tdsAmount,
         isReverseCharge,
         roundOff: priced.roundOff,
         totalAmount: priced.total,
         balanceAmount: round2(priced.total - priced.tdsAmount - Number(before.paidAmount)),
-        notes: data.notes !== undefined ? data.notes ?? null : before.notes,
+        notes: data.notes !== undefined ? (data.notes ?? null) : before.notes,
         lines: {
           create: lines.map((l, i) => ({
             itemId: l.itemId,
@@ -1899,46 +2329,52 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
   res.json({ success: true, data: updated })
 })
 
-router.patch('/bills/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { reason } = z.object({ reason: z.string().max(300).optional() }).parse(req.body ?? {})
+router.patch(
+  '/bills/:id/cancel',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = z.object({ reason: z.string().max(300).optional() }).parse(req.body ?? {})
 
-  const before = await prisma.purchaseInvoice.findUnique({ where: { id: req.params.id } })
-  if (!before) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
-  if (before.status === 'CANCELLED') {
-    throw new AppError('That bill is already cancelled', 409, 'BILL_CANCELLED')
+    const before = await prisma.purchaseInvoice.findUnique({ where: { id: req.params.id } })
+    if (!before) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
+    if (before.status === 'CANCELLED') {
+      throw new AppError('That bill is already cancelled', 409, 'BILL_CANCELLED')
+    }
+    if (Number(before.paidAmount) > 0) {
+      throw new AppError(
+        `${before.billNumber} has payments against it. Reverse those first, or raise a debit note.`,
+        409,
+        'BILL_PAID'
+      )
+    }
+
+    // Cancelled, never deleted: the number stays spent and the record stays
+    // visible. The quantities it claimed are freed for another bill because the
+    // match counts only bills that are not cancelled.
+    const after = await prisma.purchaseInvoice.update({
+      where: { id: before.id },
+      data: {
+        status: 'CANCELLED',
+        balanceAmount: 0,
+        notes: reason
+          ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason}`
+          : before.notes,
+      },
+      include: billInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseInvoice',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({ success: true, data: after, message: `${after.billNumber} cancelled.` })
   }
-  if (Number(before.paidAmount) > 0) {
-    throw new AppError(
-      `${before.billNumber} has payments against it. Reverse those first, or raise a debit note.`,
-      409,
-      'BILL_PAID',
-    )
-  }
-
-  // Cancelled, never deleted: the number stays spent and the record stays
-  // visible. The quantities it claimed are freed for another bill because the
-  // match counts only bills that are not cancelled.
-  const after = await prisma.purchaseInvoice.update({
-    where: { id: before.id },
-    data: {
-      status: 'CANCELLED',
-      balanceAmount: 0,
-      notes: reason ? `${before.notes ? before.notes + '\n' : ''}Cancelled: ${reason}` : before.notes,
-    },
-    include: billInclude,
-  })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'PurchaseInvoice',
-    entityId: after.id,
-    before,
-    after,
-  })
-
-  res.json({ success: true, data: after, message: `${after.billNumber} cancelled.` })
-})
+)
 
 router.get('/bills/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
   const bill = await prisma.purchaseInvoice.findUnique({

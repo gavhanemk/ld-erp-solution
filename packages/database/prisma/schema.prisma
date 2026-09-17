@@ -253,20 +253,20 @@ model User {
   auditLogs       AuditLog[]
   notifications   Notification[]
   aiConversations AIConversation[]
-  createdSOs      SalesOrder[]         @relation("SOCreatedBy")
-  approvedSOs     SalesOrder[]         @relation("SOApprovedBy")
-  createdPOs      PurchaseOrder[]      @relation("POCreatedBy")
-  approvedPOs     PurchaseOrder[]      @relation("POApprovedBy")
-  createdMOs      ManufacturingOrder[] @relation("MOCreatedBy")
-  raisedMRs       MaterialRequisition[] @relation("MRRaisedBy")
-  approvedMRs     MaterialRequisition[] @relation("MRApprovedBy")
-  issuedMRs       MaterialRequisition[] @relation("MRIssuedBy")
-  createdBills    PurchaseInvoice[]     @relation("BillCreatedBy")
-  createdPayments SupplierPayment[]     @relation("PaymentCreatedBy")
+  createdSOs      SalesOrder[]              @relation("SOCreatedBy")
+  approvedSOs     SalesOrder[]              @relation("SOApprovedBy")
+  createdPOs      PurchaseOrder[]           @relation("POCreatedBy")
+  approvedPOs     PurchaseOrder[]           @relation("POApprovedBy")
+  createdMOs      ManufacturingOrder[]      @relation("MOCreatedBy")
+  raisedMRs       MaterialRequisition[]     @relation("MRRaisedBy")
+  approvedMRs     MaterialRequisition[]     @relation("MRApprovedBy")
+  issuedMRs       MaterialRequisition[]     @relation("MRIssuedBy")
+  createdBills    PurchaseInvoice[]         @relation("BillCreatedBy")
+  createdPayments SupplierPayment[]         @relation("PaymentCreatedBy")
   uploadedFiles   PurchaseOrderAttachment[] @relation("AttachmentUploadedBy")
-  movedStock      StockTransfer[]       @relation("TransferMovedBy")
-  cancelledStock  StockTransfer[]       @relation("TransferCancelledBy")
-  countedStock    StockAdjustment[]     @relation("AdjustmentMadeBy")
+  movedStock      StockTransfer[]           @relation("TransferMovedBy")
+  cancelledStock  StockTransfer[]           @relation("TransferCancelledBy")
+  countedStock    StockAdjustment[]         @relation("AdjustmentMadeBy")
 
   @@index([email])
   @@index([roleId])
@@ -333,42 +333,42 @@ model AuditLog {
 // ═══════════════════════════════════════════
 
 model Company {
-  id           String   @id @default(cuid())
-  name         String
-  legalName    String?
-  address      String?
-  city         String?
-  state        String?
-  pincode      String?
-  gstin        String?  @unique
+  id             String    @id @default(cuid())
+  name           String
+  legalName      String?
+  address        String?
+  city           String?
+  state          String?
+  pincode        String?
+  gstin          String?   @unique
   /// Two-digit GST state code, e.g. "27" for Maharashtra. Place of supply is
   /// decided by comparing this against the customer's, so it cannot be free text.
-  stateCode    String?
-  pan          String?
+  stateCode      String?
+  pan            String?
   /// Needed on every TDS challan and to issue Form 16A to contractors.
-  tan          String?
+  tan            String?
   /// Udyam registration. Drives the 45-day payment rule for MSME suppliers.
-  msmeNumber   String?
-  phone        String?
-  email        String?
-  website      String?
+  msmeNumber     String?
+  phone          String?
+  email          String?
+  website        String?
   /// Printed at the top of every document. Stored inline so a mill PC with no
   /// file server still prints a letterhead.
-  logoUrl      String?
+  logoUrl        String?
   /// Printed above the signature line.
-  signatureUrl String?
+  signatureUrl   String?
   /// The account a customer is asked to pay into, printed on the invoice.
-  bankName     String?
-  bankBranch   String?
-  bankAccount  String?
-  bankIFSC     String?
-  upiId        String?
-  currentFY    String?
-  fyStartMonth Int      @default(4)
+  bankName       String?
+  bankBranch     String?
+  bankAccount    String?
+  bankIFSC       String?
+  upiId          String?
+  currentFY      String?
+  fyStartMonth   Int       @default(4)
   /// Nothing may be dated before the books open.
   booksStartDate DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   brands       Brand[]
   warehouses   Warehouse[]
@@ -518,8 +518,8 @@ model Item {
 }
 
 model Style {
-  id          String    @id @default(cuid())
-  code        String    @unique
+  id          String     @id @default(cuid())
+  code        String     @unique
   name        String
   season      String?
   brandType   BrandType
@@ -536,9 +536,9 @@ model Style {
   colors      String[]
   techPackUrl String?
   imageUrl    String?
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 
   boms     BOM[]
   moLines  MOLine[]
@@ -584,94 +584,131 @@ model BOMLine {
 }
 
 model Customer {
-  id              String       @id @default(cuid())
-  code            String       @unique
-  name            String
-  type            CustomerType
-  gstin           String?
-  pan             String?
-  phone           String?
-  email           String?
-  billingAddress  String?
-  billingCity     String?
-  billingState    String?
+  id                String       @id @default(cuid())
+  code              String       @unique
+  name              String
+  type              CustomerType
+  gstin             String?
+  pan               String?
+  phone             String?
+  email             String?
+  billingAddress    String?
+  billingCity       String?
+  billingState      String?
   /// Two-digit GST state code. This, not the state name, decides CGST+SGST vs IGST.
-  billingStateCode String?
-  billingPincode  String?
-  shippingAddress String?
-  shippingCity    String?
-  shippingState   String?
+  billingStateCode  String?
+  billingPincode    String?
+  shippingAddress   String?
+  shippingCity      String?
+  shippingState     String?
   shippingStateCode String?
-  shippingPincode String?
+  shippingPincode   String?
   /// A buyer can take delivery in one state under a GSTIN registered in another.
-  shippingGstin   String?
-  creditLimit     Decimal?     @db.Decimal(12, 2)
-  creditDays      Int          @default(30)
-  paymentTerms    String?
-  bankName        String?
-  bankAccount     String?
-  bankIFSC        String?
+  shippingGstin     String?
+  creditLimit       Decimal?     @db.Decimal(12, 2)
+  creditDays        Int          @default(30)
+  paymentTerms      String?
+  bankName          String?
+  bankAccount       String?
+  bankIFSC          String?
   /// The agent who brings this buyer, and what they are paid on the sale.
-  brokerId        String?
-  broker          Broker?      @relation(fields: [brokerId], references: [id])
-  brokeragePercent Decimal?    @db.Decimal(5, 2)
+  brokerId          String?
+  broker            Broker?      @relation(fields: [brokerId], references: [id])
+  brokeragePercent  Decimal?     @db.Decimal(5, 2)
   /// Another company under the same owners — LD Silk Mills, for instance.
   /// Trades at arm's length with its own GSTIN, but is flagged so intercompany
   /// turnover can be identified and excluded from group figures.
-  isGroupCompany  Boolean      @default(false)
-  isActive        Boolean      @default(true)
-  isBlacklisted   Boolean      @default(false)
-  notes           String?
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  isGroupCompany    Boolean      @default(false)
+  isActive          Boolean      @default(true)
+  isBlacklisted     Boolean      @default(false)
+  notes             String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   salesOrders  SalesOrder[]
   /// Purchase orders the supplier was told to deliver straight to this customer.
-  poDeliveries PurchaseOrder[] @relation("PODeliveryCustomer")
+  poDeliveries PurchaseOrder[]  @relation("PODeliveryCustomer")
   invoices     SalesInvoice[]
   payments     PaymentReceipt[]
   creditNotes  CreditNote[]
-  ownedStock   StockLedger[]  @relation("CustomerOwnedStock")
+  ownedStock   StockLedger[]    @relation("CustomerOwnedStock")
 
   @@index([code])
   @@map("customers")
 }
 
+/// One of the places a supplier bills from.
+///
+/// A supplier can have more than one: a head office and a works, or a second
+/// registration in another state. The supplier master held exactly one address
+/// before this, so the second one went into a remark and never reconciled
+/// against anything.
+///
+/// `stateCode` sits on the address and not only on the supplier because it is
+/// what decides the tax split — a second address in another state changes what
+/// that supplier may charge on an order billed from there. Same reason `gstin`
+/// is here: a business registers per place of business.
+model SupplierAddress {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  /// What the mill calls it — "Head office", "Bhiwandi works". Optional,
+  /// because most suppliers have one place and naming it is busywork.
+  label      String?
+  address    String
+  city       String?
+  state      String?
+  /// Two-digit GST state code.
+  stateCode  String?
+  pincode    String?
+  country    String?  @default("India")
+  gstin      String?
+  /// The one a new order is offered first.
+  isDefault  Boolean  @default(false)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([supplierId])
+  @@map("supplier_addresses")
+}
+
 model Supplier {
-  id           String           @id @default(cuid())
-  code         String           @unique
-  name         String
-  category     SupplierCategory
-  gstin        String?
-  pan          String?
-  phone        String?
-  email        String?
-  address      String?
-  city         String?
-  state        String?
+  id             String           @id @default(cuid())
+  code           String           @unique
+  name           String
+  category       SupplierCategory
+  gstin          String?
+  pan            String?
+  phone          String?
+  email          String?
+  address        String?
+  city           String?
+  state          String?
   /// Two-digit GST state code — decides the tax split on a purchase.
-  stateCode    String?
-  pincode      String?
-  creditDays   Int              @default(30)
-  leadTimeDays Int              @default(7)
-  paymentTerms String?
-  bankName     String?
-  bankAccount  String?
-  bankIFSC     String?
-  rating       Int?             @db.SmallInt
-  isPreferred  Boolean          @default(false)
+  stateCode      String?
+  pincode        String?
+  creditDays     Int              @default(30)
+  leadTimeDays   Int              @default(7)
+  paymentTerms   String?
+  bankName       String?
+  bankAccount    String?
+  bankIFSC       String?
+  rating         Int?             @db.SmallInt
+  isPreferred    Boolean          @default(false)
   /// Registered under MSME/Udyam — payment falls due within 45 days by law.
-  isMsme       Boolean          @default(false)
-  msmeNumber   String?
+  isMsme         Boolean          @default(false)
+  msmeNumber     String?
   /// Another company under the same owners, trading at arm's length under its
   /// own GSTIN. LD Silk Mills supplies fabric to LD Cotton Mills this way, so
   /// the purchase is real and carries GST, but group figures must exclude it.
-  isGroupCompany Boolean        @default(false)
-  isActive     Boolean          @default(true)
-  notes        String?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  isGroupCompany Boolean          @default(false)
+  isActive       Boolean          @default(true)
+  notes          String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
 
+  addresses      SupplierAddress[]
   purchaseOrders PurchaseOrder[]
   invoices       PurchaseInvoice[]
   payments       SupplierPayment[]
@@ -734,29 +771,29 @@ model Operation {
   sortOrder    Int        @default(0)
   isActive     Boolean    @default(true)
 
-  routingSteps     RoutingStep[]
+  routingSteps      RoutingStep[]
   productionEntries ProductionEntry[]
 
   @@map("operations")
 }
 
 model Machine {
-  id             String     @id @default(cuid())
-  machineNo      String     @unique
+  id             String        @id @default(cuid())
+  machineNo      String        @unique
   name           String
   type           String
   brand          String?
   model          String?
   departmentId   String
-  department     Department @relation(fields: [departmentId], references: [id])
+  department     Department    @relation(fields: [departmentId], references: [id])
   purchaseDate   DateTime?
   warrantyExpiry DateTime?
   amcStart       DateTime?
   amcEnd         DateTime?
   status         MachineStatus @default(OPERATIONAL)
-  isActive       Boolean    @default(true)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   breakdowns   MachineBreakdown[]
   maintenances MaintenanceSchedule[]
@@ -769,48 +806,48 @@ model Machine {
 // ═══════════════════════════════════════════
 
 model SalesOrder {
-  id              String           @id @default(cuid())
-  soNumber        String           @unique
-  brandId         String
-  brand           Brand            @relation(fields: [brandId], references: [id])
-  customerId      String
-  customer        Customer         @relation(fields: [customerId], references: [id])
-  customerPORef   String?
-  customerPODate  DateTime?
-  orderDate       DateTime         @default(now())
-  deliveryDate    DateTime?
-  deliveryAddress String?
-  salesperson     String?
+  id                String           @id @default(cuid())
+  soNumber          String           @unique
+  brandId           String
+  brand             Brand            @relation(fields: [brandId], references: [id])
+  customerId        String
+  customer          Customer         @relation(fields: [customerId], references: [id])
+  customerPORef     String?
+  customerPODate    DateTime?
+  orderDate         DateTime         @default(now())
+  deliveryDate      DateTime?
+  deliveryAddress   String?
+  salesperson       String?
   /// The agent on this sale and what they earn. Brokerage is a real cost with
   /// TDS deducted against it, so it cannot live only in someone's notebook.
-  brokerId        String?
-  broker          Broker?          @relation(fields: [brokerId], references: [id])
-  brokeragePercent Decimal?        @db.Decimal(5, 2)
-  brokerageAmount Decimal          @default(0) @db.Decimal(12, 2)
+  brokerId          String?
+  broker            Broker?          @relation(fields: [brokerId], references: [id])
+  brokeragePercent  Decimal?         @db.Decimal(5, 2)
+  brokerageAmount   Decimal          @default(0) @db.Decimal(12, 2)
   /// Two-digit GST state code of the delivery. Compared against the company's
   /// to decide CGST+SGST or IGST — and it is compulsory on a tax invoice.
   placeOfSupplyCode String?
-  status          SalesOrderStatus @default(DRAFT)
-  subtotal        Decimal          @default(0) @db.Decimal(12, 2)
-  discountAmount  Decimal          @default(0) @db.Decimal(12, 2)
-  taxableAmount   Decimal          @default(0) @db.Decimal(12, 2)
-  cgst            Decimal          @default(0) @db.Decimal(12, 2)
-  sgst            Decimal          @default(0) @db.Decimal(12, 2)
-  igst            Decimal          @default(0) @db.Decimal(12, 2)
-  roundOff        Decimal          @default(0) @db.Decimal(6, 2)
-  totalAmount     Decimal          @default(0) @db.Decimal(12, 2)
-  currency        String           @default("INR")
-  isJobWork       Boolean          @default(false)
-  notes           String?
-  attachmentUrl   String?
-  version         Int              @default(1)
-  createdById     String
-  createdBy       User             @relation("SOCreatedBy", fields: [createdById], references: [id])
-  approvedById    String?
-  approvedBy      User?            @relation("SOApprovedBy", fields: [approvedById], references: [id])
-  approvedAt      DateTime?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  status            SalesOrderStatus @default(DRAFT)
+  subtotal          Decimal          @default(0) @db.Decimal(12, 2)
+  discountAmount    Decimal          @default(0) @db.Decimal(12, 2)
+  taxableAmount     Decimal          @default(0) @db.Decimal(12, 2)
+  cgst              Decimal          @default(0) @db.Decimal(12, 2)
+  sgst              Decimal          @default(0) @db.Decimal(12, 2)
+  igst              Decimal          @default(0) @db.Decimal(12, 2)
+  roundOff          Decimal          @default(0) @db.Decimal(6, 2)
+  totalAmount       Decimal          @default(0) @db.Decimal(12, 2)
+  currency          String           @default("INR")
+  isJobWork         Boolean          @default(false)
+  notes             String?
+  attachmentUrl     String?
+  version           Int              @default(1)
+  createdById       String
+  createdBy         User             @relation("SOCreatedBy", fields: [createdById], references: [id])
+  approvedById      String?
+  approvedBy        User?            @relation("SOApprovedBy", fields: [approvedById], references: [id])
+  approvedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
 
   lines               SalesOrderLine[]
   deliveryChallans    DeliveryChallan[]
@@ -848,42 +885,42 @@ model SalesOrderLine {
 }
 
 model SalesInvoice {
-  id            String      @id @default(cuid())
-  invoiceNumber String      @unique
-  soId          String?
-  so            SalesOrder? @relation(fields: [soId], references: [id])
-  customerId    String
-  customer      Customer    @relation(fields: [customerId], references: [id])
-  invoiceDate   DateTime    @default(now())
-  dueDate       DateTime?
+  id                String        @id @default(cuid())
+  invoiceNumber     String        @unique
+  soId              String?
+  so                SalesOrder?   @relation(fields: [soId], references: [id])
+  customerId        String
+  customer          Customer      @relation(fields: [customerId], references: [id])
+  invoiceDate       DateTime      @default(now())
+  dueDate           DateTime?
   /// Two-digit GST state code of the delivery — compulsory on a tax invoice.
   placeOfSupplyCode String?
-  brokerId      String?
-  broker        Broker?     @relation(fields: [brokerId], references: [id])
-  brokeragePercent Decimal? @db.Decimal(5, 2)
-  brokerageAmount Decimal   @default(0) @db.Decimal(12, 2)
-  subtotal      Decimal     @db.Decimal(12, 2)
+  brokerId          String?
+  broker            Broker?       @relation(fields: [brokerId], references: [id])
+  brokeragePercent  Decimal?      @db.Decimal(5, 2)
+  brokerageAmount   Decimal       @default(0) @db.Decimal(12, 2)
+  subtotal          Decimal       @db.Decimal(12, 2)
   /// A discount given on the whole bill rather than line by line, which is how
   /// LD actually prices. Without it the invoice total cannot be reproduced.
-  discountAmount Decimal    @default(0) @db.Decimal(12, 2)
-  taxableAmount Decimal     @default(0) @db.Decimal(12, 2)
-  cgst          Decimal     @default(0) @db.Decimal(12, 2)
-  sgst          Decimal     @default(0) @db.Decimal(12, 2)
-  igst          Decimal     @default(0) @db.Decimal(12, 2)
+  discountAmount    Decimal       @default(0) @db.Decimal(12, 2)
+  taxableAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  cgst              Decimal       @default(0) @db.Decimal(12, 2)
+  sgst              Decimal       @default(0) @db.Decimal(12, 2)
+  igst              Decimal       @default(0) @db.Decimal(12, 2)
   /// Rounds the bill to the nearest rupee. Without it every total carries paise
   /// and nothing ties out against the customer's ledger.
-  roundOff      Decimal     @default(0) @db.Decimal(6, 2)
-  totalAmount   Decimal     @db.Decimal(12, 2)
-  paidAmount    Decimal     @default(0) @db.Decimal(12, 2)
-  balanceAmount Decimal     @db.Decimal(12, 2)
-  status        InvoiceStatus @default(UNPAID)
-  irnNumber     String?
-  qrCodeData    String?
-  ackNumber     String?
-  ackDate       DateTime?
-  notes         String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  roundOff          Decimal       @default(0) @db.Decimal(6, 2)
+  totalAmount       Decimal       @db.Decimal(12, 2)
+  paidAmount        Decimal       @default(0) @db.Decimal(12, 2)
+  balanceAmount     Decimal       @db.Decimal(12, 2)
+  status            InvoiceStatus @default(UNPAID)
+  irnNumber         String?
+  qrCodeData        String?
+  ackNumber         String?
+  ackDate           DateTime?
+  notes             String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 
   payments    PaymentReceipt[]
   lines       SalesInvoiceLine[]
@@ -896,20 +933,20 @@ model SalesInvoice {
 }
 
 model DeliveryChallan {
-  id             String     @id @default(cuid())
-  dcNumber       String     @unique
+  id             String        @id @default(cuid())
+  dcNumber       String        @unique
   soId           String
-  so             SalesOrder @relation(fields: [soId], references: [id])
-  dcDate         DateTime   @default(now())
-  isReturnable   Boolean    @default(false)
+  so             SalesOrder    @relation(fields: [soId], references: [id])
+  dcDate         DateTime      @default(now())
+  isReturnable   Boolean       @default(false)
   vehicleNumber  String?
   transporter    String?
   lrNumber       String?
   eWayBillNumber String?
   status         ChallanStatus @default(DRAFT)
   notes          String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   lines DeliveryChallanLine[]
 
@@ -953,66 +990,85 @@ model PaymentReceipt {
 // ═══════════════════════════════════════════
 
 model PurchaseOrder {
-  id           String              @id @default(cuid())
-  poNumber     String              @unique
-  supplierId   String
-  supplier     Supplier            @relation(fields: [supplierId], references: [id])
-  poDate       DateTime            @default(now())
-  deliveryDate DateTime?
-  status       PurchaseOrderStatus @default(DRAFT)
-  poType       String              @default("STANDARD")
+  id                  String              @id @default(cuid())
+  poNumber            String              @unique
+  supplierId          String
+  supplier            Supplier            @relation(fields: [supplierId], references: [id])
+  poDate              DateTime            @default(now())
+  deliveryDate        DateTime?
+  status              PurchaseOrderStatus @default(DRAFT)
+  poType              String              @default("STANDARD")
   /// The supplier's quotation or our enquiry that this order answers. Carried
   /// on the order because the first thing asked when a price is questioned
   /// months later is which quote it came from, and that answer lived only in
   /// somebody's email before now.
-  enquiryNo    String?
-  enquiryDate  DateTime?
+  enquiryNo           String?
+  enquiryDate         DateTime?
   /// Whatever the mill needs to quote back — a job number, an indent slip, the
   /// buyer's own reference. Deliberately free text: every mill numbers these
   /// differently and a fixed format would fit none of them.
-  reference    String?
+  reference           String?
   /// An internal note. Separate from `notes`, which is printed on the order the
   /// supplier receives — a remark about a supplier is not always something to
   /// send them.
-  remark       String?
+  remark              String?
   /// Where the goods are delivered, as a two-digit GST state code. Compared
   /// against ours to decide whether the supplier should bill CGST+SGST or IGST.
-  placeOfSupplyCode String?
-  subtotal     Decimal             @default(0) @db.Decimal(12, 2)
-  discountAmount Decimal           @default(0) @db.Decimal(12, 2)
-  taxableAmount Decimal            @default(0) @db.Decimal(12, 2)
+  placeOfSupplyCode   String?
+  subtotal            Decimal             @default(0) @db.Decimal(12, 2)
+  discountAmount      Decimal             @default(0) @db.Decimal(12, 2)
+  taxableAmount       Decimal             @default(0) @db.Decimal(12, 2)
   /// Split rather than one lump, so the order can be checked against the bill
   /// the supplier eventually sends.
-  cgst         Decimal             @default(0) @db.Decimal(12, 2)
-  sgst         Decimal             @default(0) @db.Decimal(12, 2)
-  igst         Decimal             @default(0) @db.Decimal(12, 2)
-  roundOff     Decimal             @default(0) @db.Decimal(6, 2)
+  cgst                Decimal             @default(0) @db.Decimal(12, 2)
+  sgst                Decimal             @default(0) @db.Decimal(12, 2)
+  igst                Decimal             @default(0) @db.Decimal(12, 2)
+  roundOff            Decimal             @default(0) @db.Decimal(6, 2)
   /// Anything the mill agrees to pay that is not one of the named charges and
   /// carries no GST of its own — the old ERP's "Other charges" box. Added
   /// after tax, which is why it is not part of `taxableAmount`.
-  otherCharges Decimal             @default(0) @db.Decimal(12, 2)
-  totalAmount  Decimal             @default(0) @db.Decimal(12, 2)
+  otherCharges        Decimal             @default(0) @db.Decimal(12, 2)
+  totalAmount         Decimal             @default(0) @db.Decimal(12, 2)
   /// Where the supplier is told to deliver.
   deliveryWarehouseId String?
-  deliveryWarehouse   Warehouse?   @relation(fields: [deliveryWarehouseId], references: [id])
+  deliveryWarehouse   Warehouse?          @relation(fields: [deliveryWarehouseId], references: [id])
   /// Set when the supplier ships straight to a customer instead of to us.
   /// It changes the tax: goods are taxed where they are delivered, so a
   /// customer in another state makes the supplier's bill IGST even though we
   /// are in theirs.
   deliveryCustomerId  String?
-  deliveryCustomer    Customer?    @relation("PODeliveryCustomer", fields: [deliveryCustomerId], references: [id])
+  deliveryCustomer    Customer?           @relation("PODeliveryCustomer", fields: [deliveryCustomerId], references: [id])
   /// The address as it read the day the order was raised. A customer moves;
   /// an order already with a supplier must not.
   deliveryAddress     String?
-  notes        String?
-  terms        String?
-  createdById  String
-  createdBy    User                @relation("POCreatedBy", fields: [createdById], references: [id])
-  approvedById String?
-  approvedBy   User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
-  approvedAt   DateTime?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
+  /// The supplier's billing address, as it read the day the order was raised.
+  ///
+  /// Text, not a link to `SupplierAddress`, for the same reason
+  /// `deliveryAddress` is: this is what is printed on the order the supplier
+  /// is holding. Correcting a typo in the master, or retiring an address,
+  /// must not quietly change what an order already sent says.
+  supplierAddress     String?
+  notes               String?
+  terms               String?
+  createdById         String
+  createdBy           User                @relation("POCreatedBy", fields: [createdById], references: [id])
+  approvedById        String?
+  approvedBy          User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
+  approvedAt          DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  /// When this order was put in the recycle bin, and by whom.
+  ///
+  /// Deleting an order does not remove it. The row stays, marked, and every
+  /// list, count and lookup outside the bin itself passes over it — so as far
+  /// as the mill is concerned it is gone, but it can be put back whole.
+  ///
+  /// A `deletedById` rather than a relation: it is read once, on the one
+  /// screen that lists the bin, and a relation here would put a
+  /// `deletedPurchaseOrders` back-reference on User that nothing else wants.
+  deletedAt   DateTime?
+  deletedById String?
 
   lines       PurchaseOrderLine[]
   charges     PurchaseOrderCharge[]
@@ -1023,6 +1079,8 @@ model PurchaseOrder {
   @@index([poNumber])
   @@index([supplierId])
   @@index([status])
+  /// Every list of orders filters on this, so it earns an index of its own.
+  @@index([deletedAt])
   @@map("purchase_orders")
 }
 
@@ -1038,20 +1096,20 @@ model PurchaseOrder {
 /// expires — a purchase order is a commercial document and a guessable URL is
 /// how those end up indexed.
 model PurchaseOrderAttachment {
-  id          String        @id @default(cuid())
-  poId        String
-  po          PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  id           String        @id @default(cuid())
+  poId         String
+  po           PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
   /// What the person called it on their own machine. Shown in the list; never
   /// used to build the storage path, because two people upload "scan.pdf".
-  fileName    String
+  fileName     String
   /// Where it sits in the bucket. Unique so a row can never point at a file
   /// another row also claims.
-  storagePath String        @unique
-  mimeType    String?
-  sizeBytes   Int
+  storagePath  String        @unique
+  mimeType     String?
+  sizeBytes    Int
   uploadedById String
-  uploadedBy   User         @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id])
-  createdAt   DateTime      @default(now())
+  uploadedBy   User          @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime      @default(now())
 
   @@index([poId])
   @@map("purchase_order_attachments")
@@ -1266,30 +1324,30 @@ model StockLedger {
 /// because docs/04-business-rules.md forbids the person who raised a document
 /// from approving it, and that rule cannot be enforced against a single name.
 model MaterialRequisition {
-  id           String              @id @default(cuid())
-  mrNumber     String              @unique
-  moId         String?
-  mo           ManufacturingOrder? @relation(fields: [moId], references: [id])
-  departmentId String
-  department   Department          @relation(fields: [departmentId], references: [id])
-  requestDate  DateTime            @default(now())
-  requiredDate DateTime?
-  status       ApprovalStatus      @default(PENDING)
-  raisedById   String?
-  raisedBy     User?               @relation("MRRaisedBy", fields: [raisedById], references: [id])
-  approvedById String?
-  approvedBy   User?               @relation("MRApprovedBy", fields: [approvedById], references: [id])
-  approvedAt   DateTime?
+  id              String              @id @default(cuid())
+  mrNumber        String              @unique
+  moId            String?
+  mo              ManufacturingOrder? @relation(fields: [moId], references: [id])
+  departmentId    String
+  department      Department          @relation(fields: [departmentId], references: [id])
+  requestDate     DateTime            @default(now())
+  requiredDate    DateTime?
+  status          ApprovalStatus      @default(PENDING)
+  raisedById      String?
+  raisedBy        User?               @relation("MRRaisedBy", fields: [raisedById], references: [id])
+  approvedById    String?
+  approvedBy      User?               @relation("MRApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
   /// Set the moment stock actually moves. A requisition can be approved on
   /// Monday and issued on Wednesday, and the stock date is Wednesday.
-  issuedById   String?
-  issuedBy     User?               @relation("MRIssuedBy", fields: [issuedById], references: [id])
-  issuedAt     DateTime?
+  issuedById      String?
+  issuedBy        User?               @relation("MRIssuedBy", fields: [issuedById], references: [id])
+  issuedAt        DateTime?
   /// Why it was refused. A rejection with no reason just gets raised again.
   rejectionReason String?
-  notes        String?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
+  notes           String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
 
   lines MaterialRequisitionLine[]
 
@@ -1447,13 +1505,13 @@ model ManufacturingOrder {
 }
 
 model MOLine {
-  id          String             @id @default(cuid())
-  moId        String
-  mo          ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
-  styleId     String
-  style       Style              @relation(fields: [styleId], references: [id])
-  color       String
-  totalQty    Int
+  id       String             @id @default(cuid())
+  moId     String
+  mo       ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
+  styleId  String
+  style    Style              @relation(fields: [styleId], references: [id])
+  color    String
+  totalQty Int
 
   sizes MOLineSize[]
 
@@ -1485,27 +1543,27 @@ model CuttingOrder {
 }
 
 model ProductionEntry {
-  id          String             @id @default(cuid())
-  moId        String
-  mo          ManufacturingOrder @relation(fields: [moId], references: [id])
-  entryDate   DateTime           @default(now())
-  departmentId String
-  department  Department         @relation(fields: [departmentId], references: [id])
+  id            String             @id @default(cuid())
+  moId          String
+  mo            ManufacturingOrder @relation(fields: [moId], references: [id])
+  entryDate     DateTime           @default(now())
+  departmentId  String
+  department    Department         @relation(fields: [departmentId], references: [id])
   /// Which line or outside unit produced this. Without it, what is owed to a
   /// job-work unit can never be totalled.
   workstationId String?
-  workstation Workstation?       @relation(fields: [workstationId], references: [id])
-  shift       String?
-  target      Int
-  achieved    Int
-  rejection   Int                @default(0)
-  rework      Int                @default(0)
-  efficiency  Decimal?           @db.Decimal(5, 2)
-  operationId String?
-  operation   Operation?         @relation(fields: [operationId], references: [id])
-  notes       String?
-  enteredBy   String?
-  createdAt   DateTime           @default(now())
+  workstation   Workstation?       @relation(fields: [workstationId], references: [id])
+  shift         String?
+  target        Int
+  achieved      Int
+  rejection     Int                @default(0)
+  rework        Int                @default(0)
+  efficiency    Decimal?           @db.Decimal(5, 2)
+  operationId   String?
+  operation     Operation?         @relation(fields: [operationId], references: [id])
+  notes         String?
+  enteredBy     String?
+  createdAt     DateTime           @default(now())
 
   @@index([moId])
   @@index([entryDate])
@@ -1713,34 +1771,34 @@ model Attendance {
 }
 
 model PayrollRecord {
-  id               String    @id @default(cuid())
+  id               String       @id @default(cuid())
   employeeId       String
-  employee         Employee  @relation(fields: [employeeId], references: [id])
+  employee         Employee     @relation(fields: [employeeId], references: [id])
   month            Int
   year             Int
   workingDays      Int
-  presentDays      Decimal   @db.Decimal(5, 2)
-  lwpDays          Decimal   @default(0) @db.Decimal(5, 2)
-  basic            Decimal   @db.Decimal(10, 2)
-  hra              Decimal   @default(0) @db.Decimal(10, 2)
-  da               Decimal   @default(0) @db.Decimal(10, 2)
-  conveyance       Decimal   @default(0) @db.Decimal(10, 2)
-  specialAllowance Decimal   @default(0) @db.Decimal(10, 2)
-  otherEarnings    Decimal   @default(0) @db.Decimal(10, 2)
-  grossSalary      Decimal   @db.Decimal(10, 2)
-  pfDeduction      Decimal   @default(0) @db.Decimal(10, 2)
-  esicDeduction    Decimal   @default(0) @db.Decimal(10, 2)
-  tdsDeduction     Decimal   @default(0) @db.Decimal(10, 2)
-  advanceDeduction Decimal   @default(0) @db.Decimal(10, 2)
-  otherDeductions  Decimal   @default(0) @db.Decimal(10, 2)
-  totalDeductions  Decimal   @db.Decimal(10, 2)
-  netSalary        Decimal   @db.Decimal(10, 2)
-  isPaid           Boolean   @default(false)
+  presentDays      Decimal      @db.Decimal(5, 2)
+  lwpDays          Decimal      @default(0) @db.Decimal(5, 2)
+  basic            Decimal      @db.Decimal(10, 2)
+  hra              Decimal      @default(0) @db.Decimal(10, 2)
+  da               Decimal      @default(0) @db.Decimal(10, 2)
+  conveyance       Decimal      @default(0) @db.Decimal(10, 2)
+  specialAllowance Decimal      @default(0) @db.Decimal(10, 2)
+  otherEarnings    Decimal      @default(0) @db.Decimal(10, 2)
+  grossSalary      Decimal      @db.Decimal(10, 2)
+  pfDeduction      Decimal      @default(0) @db.Decimal(10, 2)
+  esicDeduction    Decimal      @default(0) @db.Decimal(10, 2)
+  tdsDeduction     Decimal      @default(0) @db.Decimal(10, 2)
+  advanceDeduction Decimal      @default(0) @db.Decimal(10, 2)
+  otherDeductions  Decimal      @default(0) @db.Decimal(10, 2)
+  totalDeductions  Decimal      @db.Decimal(10, 2)
+  netSalary        Decimal      @db.Decimal(10, 2)
+  isPaid           Boolean      @default(false)
   paidDate         DateTime?
   paymentMode      PaymentMode?
   payslipUrl       String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   @@unique([employeeId, month, year])
   @@map("payroll_records")
@@ -1751,28 +1809,28 @@ model PayrollRecord {
 // ═══════════════════════════════════════════
 
 model MachineBreakdown {
-  id             String    @id @default(cuid())
+  id             String          @id @default(cuid())
   machineId      String
-  machine        Machine   @relation(fields: [machineId], references: [id])
-  reportedAt     DateTime  @default(now())
+  machine        Machine         @relation(fields: [machineId], references: [id])
+  reportedAt     DateTime        @default(now())
   reportedBy     String?
   problemDesc    String
-  severity       String    @default("MEDIUM")
+  severity       String          @default("MEDIUM")
   assignedTo     String?
   resolvedAt     DateTime?
   resolutionDesc String?
-  downtimeHours  Decimal?  @db.Decimal(6, 2)
+  downtimeHours  Decimal?        @db.Decimal(6, 2)
   status         BreakdownStatus @default(OPEN)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 
   @@map("machine_breakdowns")
 }
 
 model MaintenanceSchedule {
-  id              String    @id @default(cuid())
+  id              String            @id @default(cuid())
   machineId       String
-  machine         Machine   @relation(fields: [machineId], references: [id])
+  machine         Machine           @relation(fields: [machineId], references: [id])
   maintenanceType String
   title           String
   checklistItems  Json?
@@ -1781,7 +1839,7 @@ model MaintenanceSchedule {
   completedBy     String?
   status          MaintenanceStatus @default(PENDING)
   notes           String?
-  createdAt       DateTime  @default(now())
+  createdAt       DateTime          @default(now())
 
   @@map("maintenance_schedules")
 }
@@ -1865,9 +1923,9 @@ model Broker {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  customers    Customer[]
-  salesOrders  SalesOrder[]
-  invoices     SalesInvoice[]
+  customers   Customer[]
+  salesOrders SalesOrder[]
+  invoices    SalesInvoice[]
 
   @@index([code])
   @@map("brokers")
@@ -1989,11 +2047,11 @@ model SalesOrderLineSize {
 }
 
 model MOLineSize {
-  id       String  @id @default(cuid())
+  id       String @id @default(cuid())
   moLineId String
-  moLine   MOLine  @relation(fields: [moLineId], references: [id], onDelete: Cascade)
+  moLine   MOLine @relation(fields: [moLineId], references: [id], onDelete: Cascade)
   sizeId   String
-  size     Size    @relation(fields: [sizeId], references: [id])
+  size     Size   @relation(fields: [sizeId], references: [id])
   qty      Int
 
   @@unique([moLineId, sizeId])
@@ -2005,25 +2063,25 @@ model MOLineSize {
 // ═══════════════════════════════════════════
 
 model SalesInvoiceLine {
-  id          String       @id @default(cuid())
-  invoiceId   String
-  invoice     SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  itemId      String
-  item        Item         @relation(fields: [itemId], references: [id])
-  description String?
+  id           String       @id @default(cuid())
+  invoiceId    String
+  invoice      SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item         @relation(fields: [itemId], references: [id])
+  description  String?
   /// Copied onto the line at the time of billing, because an item's HSN can be
   /// corrected later and an issued invoice must never change.
-  hsnCode     String?
-  qty         Decimal      @db.Decimal(10, 3)
-  unitPrice   Decimal      @db.Decimal(10, 2)
-  discount    Decimal      @default(0) @db.Decimal(5, 2)
-  taxableValue Decimal     @default(0) @db.Decimal(12, 2)
-  gstRate     Decimal      @default(0) @db.Decimal(5, 2)
-  cgst        Decimal      @default(0) @db.Decimal(12, 2)
-  sgst        Decimal      @default(0) @db.Decimal(12, 2)
-  igst        Decimal      @default(0) @db.Decimal(12, 2)
-  amount      Decimal      @default(0) @db.Decimal(12, 2)
-  sortOrder   Int          @default(0)
+  hsnCode      String?
+  qty          Decimal      @db.Decimal(10, 3)
+  unitPrice    Decimal      @db.Decimal(10, 2)
+  discount     Decimal      @default(0) @db.Decimal(5, 2)
+  taxableValue Decimal      @default(0) @db.Decimal(12, 2)
+  gstRate      Decimal      @default(0) @db.Decimal(5, 2)
+  cgst         Decimal      @default(0) @db.Decimal(12, 2)
+  sgst         Decimal      @default(0) @db.Decimal(12, 2)
+  igst         Decimal      @default(0) @db.Decimal(12, 2)
+  amount       Decimal      @default(0) @db.Decimal(12, 2)
+  sortOrder    Int          @default(0)
 
   @@index([invoiceId])
   @@map("sales_invoice_lines")
@@ -2064,7 +2122,18 @@ model PurchaseInvoiceLine {
 model ChargeType {
   id              String   @id @default(cuid())
   name            String   @unique
+  /// The GST charged ON this charge — 5% on dyeing, 18% on freight. Not a
+  /// share of the order: that is `percentOfValue` below, and confusing the two
+  /// puts 58% of an order's value into its charge rows.
   defaultGstRate  Decimal  @default(0) @db.Decimal(5, 2)
+  /// NOT IN USE. Every row is 0 and nothing reads it.
+  ///
+  /// Added to work a charge out as a percentage of the order, then dropped:
+  /// the mill's old system types every charge in by hand and works out only
+  /// the GST, and that is the behaviour it wants. The column is left in place
+  /// because removing it would mean another migration against the shared
+  /// database to delete a column that holds nothing.
+  percentOfValue  Decimal  @default(0) @db.Decimal(5, 2)
   applyOnSale     Boolean  @default(true)
   applyOnPurchase Boolean  @default(false)
   isActive        Boolean  @default(true)
@@ -2244,9 +2313,9 @@ model DocumentTemplate {
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   /// INV, PO, DC, JW — matches the document numbering series.
-  docType   String
+  docType String
   /// Printed as the heading, e.g. "TAX INVOICE" or "DELIVERY CHALLAN".
-  title     String
+  title   String
 
   /// Long-form terms printed at the foot.
   termsText   String?
@@ -2255,10 +2324,10 @@ model DocumentTemplate {
   /// A short line under everything else, such as jurisdiction.
   footerNote  String?
 
-  showHsn           Boolean @default(true)
-  showAmountInWords Boolean @default(true)
-  showBankDetails   Boolean @default(true)
-  showSignature     Boolean @default(true)
+  showHsn           Boolean  @default(true)
+  showAmountInWords Boolean  @default(true)
+  showBankDetails   Boolean  @default(true)
+  showSignature     Boolean  @default(true)
   /// Copy labels printed one per page, e.g. Original for Recipient.
   copies            String[]
 

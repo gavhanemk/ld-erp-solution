@@ -72,7 +72,12 @@ const formFields: FormField[] = [
     type: 'checkbox',
     placeholder: 'Offer on supplier bills',
   },
-  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available on new documents' },
+  {
+    name: 'isActive',
+    label: 'Active',
+    type: 'checkbox',
+    placeholder: 'Available on new documents',
+  },
 ]
 
 export default function ChargeTypesPage() {
