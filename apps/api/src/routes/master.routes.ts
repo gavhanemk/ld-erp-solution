@@ -560,6 +560,8 @@ const bomInclude = {
           isQcStep: true,
           operation: { select: { id: true, name: true, code: true } },
           department: { select: { id: true, name: true } },
+          // Who is paid the step's rate — an in-house line, or a job worker.
+          workstation: { select: { id: true, name: true, type: true } },
         },
       },
     },

@@ -44,6 +44,7 @@ export interface RoutingStepBrief {
   smv: number | string | null
   operation?: { id: string; name: string; code: string }
   department?: { id: string; name: string }
+  workstation?: { id: string; name: string; type: string } | null
 }
 
 export interface Bom {
