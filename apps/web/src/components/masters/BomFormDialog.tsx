@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { X, Loader2, AlertCircle, Plus, Trash2, Ruler, ExternalLink } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
-import { cn, formatCurrency } from '@/lib/utils'
+import { cn, formatRupees } from '@/lib/utils'
 
 export interface BomLineSize {
   id?: string
@@ -43,6 +43,7 @@ export interface RoutingStepBrief {
   ratePerPiece: number | string | null
   smv: number | string | null
   operation?: { id: string; name: string; code: string }
+  department?: { id: string; name: string }
 }
 
 export interface Bom {
@@ -68,6 +69,7 @@ export interface Bom {
   }
   baseSize?: { id: string; code: string; label: string } | null
   approvedBy?: { id: string; name: string } | null
+  approvedAt?: string | null
   routing?: { id: string; code: string; name: string; steps?: RoutingStepBrief[] } | null
   lines?: BomLine[]
 }
@@ -858,14 +860,14 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                                   p.needsRate
                                     ? 'This item has no standard rate. Type one.'
                                     : p.standardRate !== null
-                                      ? `Blank uses the standard rate, ${formatCurrency(p.standardRate)}`
+                                      ? `Blank uses the standard rate, ${formatRupees(p.standardRate)}`
                                       : undefined
                                 }
                                 onChange={(e) => setLine(index, { unitCost: e.target.value })}
                               />
                             </td>
                             <td className="whitespace-nowrap px-2 py-2 text-right align-middle font-mono text-sm font-semibold text-foreground">
-                              {p.hasItem && p.hasQty ? formatCurrency(p.cost) : '—'}
+                              {p.hasItem && p.hasQty ? formatRupees(p.cost) : '—'}
                             </td>
                             <td className="px-2 py-2 align-middle">
                               <div className="flex items-center justify-end gap-1">
@@ -981,7 +983,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                         {baseSizeLabel && ` (size ${baseSizeLabel})`}
                       </td>
                       <td className="whitespace-nowrap px-2 py-3 text-right font-mono text-sm font-bold text-primary">
-                        {formatCurrency(grandTotal)}
+                        {formatRupees(grandTotal)}
                       </td>
                       <td />
                     </tr>
@@ -991,7 +993,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                           <span className="inline-flex flex-wrap justify-end gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground">
                             {sizeTotals.map((s) => (
                               <span key={s.label}>
-                                {s.label} {formatCurrency(s.cost)}
+                                {s.label} {formatRupees(s.cost)}
                               </span>
                             ))}
                           </span>
@@ -1060,7 +1062,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 <div className="mr-2 text-right">
                   <p className="text-xs text-muted-foreground">Material per piece</p>
                   <p className="font-mono text-sm font-bold text-foreground">
-                    {formatCurrency(grandTotal)}
+                    {formatRupees(grandTotal)}
                   </p>
                 </div>
                 <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>

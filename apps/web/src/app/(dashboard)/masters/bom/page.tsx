@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Plus,
   RefreshCw,
@@ -18,7 +18,7 @@ import {
   Loader2,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
-import { formatCurrency } from '@/lib/utils'
+import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
 
@@ -34,6 +34,25 @@ const num = (v: unknown) => Number(v ?? 0)
 /** "LD-SH-2601 in Dusty Blue v1.0" — the colour is part of which BOM it is. */
 const bomLabel = (bom: Bom) =>
   `${bom.style?.code}${bom.color ? ` in ${bom.color}` : ''} v${bom.version}`
+
+/**
+ * Quantities to four places at most — the precision a BOM stores — and never
+ * fewer than two, so a column of them lines up on the decimal point.
+ */
+const qty = (v: unknown) =>
+  Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+
+const percent = (v: unknown) =>
+  `${Number(v ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}%`
+
+/*
+ * Cells for the tables in an expanded BOM. The same header type and row dividers
+ * as .data-table, with tighter cells: its reading-table padding does not leave
+ * ten columns room to line up.
+ */
+const th = 'px-3 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground'
+const td = 'px-3 py-2.5 align-middle'
+const sectionTitle = 'text-xs font-semibold uppercase tracking-wide text-muted-foreground'
 
 export default function BomPage() {
   const { rowsPerPage } = useAppSettings()
@@ -311,6 +330,9 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
   const material = num(bom.totalCost)
   const labour = num(bom.labourCost)
   const total = material + labour
+  const lines = bom.lines ?? []
+  const steps = bom.routing?.steps ?? []
+  const totalSmv = steps.reduce((sum, s) => sum + num(s.smv), 0)
 
   const sizeTotals = useMemo(() => {
     // A per-size cost only means something when at least one component varies.
@@ -379,7 +401,7 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
         </div>
 
         <div className="text-right">
-          <p className="text-sm font-bold text-foreground">{formatCurrency(total)}</p>
+          <p className="font-mono text-sm font-bold text-foreground">{formatRupees(total)}</p>
           <p className="text-xs text-muted-foreground">per piece</p>
         </div>
 
@@ -417,123 +439,260 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
       </div>
 
       {open && (
-        <div className="border-t border-border px-4 py-4 space-y-5">
-          <div className="overflow-x-auto">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Component</th>
-                  <th>Part</th>
-                  <th>Process</th>
-                  <th className="text-right">Qty / pc</th>
-                  <th className="text-right">Wastage</th>
-                  <th className="text-right">Effective</th>
-                  <th className="text-right">Rate</th>
-                  <th className="text-right">Cost</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(bom.lines ?? []).map((line) => {
-                  const unit = line.componentItem?.uom?.symbol ?? ''
-                  return (
-                    <tr key={line.id}>
-                      <td>
-                        <span className="font-mono text-xs text-muted-foreground mr-2">
-                          {line.componentItem?.code}
-                        </span>
-                        {line.componentItem?.name}
-                        {(line.sizes?.length ?? 0) > 0 && (
-                          <span className="flex flex-wrap gap-2 mt-1">
-                            {(line.sizes ?? []).map((s) => (
-                              <span key={s.id ?? s.sizeId} className="badge-neutral">
-                                {s.size?.label ?? s.size?.code} {num(s.effectiveQty)} {unit}
+        <div className="space-y-5 border-t border-border px-4 py-4">
+          <section className="space-y-2">
+            <h3 className={sectionTitle}>Components ({lines.length})</h3>
+
+            <div className="overflow-x-auto rounded-lg border border-border">
+              <table className="w-full min-w-[980px] table-fixed text-sm">
+                <colgroup>
+                  <col className="w-10" />
+                  <col />
+                  <col className="w-24" />
+                  <col className="w-32" />
+                  <col className="w-24" />
+                  <col className="w-24" />
+                  <col className="w-24" />
+                  <col className="w-16" />
+                  <col className="w-24" />
+                  <col className="w-28" />
+                </colgroup>
+                <thead className="bg-secondary/60">
+                  <tr className="border-b border-border">
+                    <th className={cn(th, 'text-center')}>#</th>
+                    <th className={cn(th, 'text-left')}>Component</th>
+                    <th className={cn(th, 'text-left')}>Part</th>
+                    <th className={cn(th, 'text-left')}>Process</th>
+                    <th className={cn(th, 'text-right')}>Qty / pc</th>
+                    <th className={cn(th, 'text-right')}>Wastage</th>
+                    <th className={cn(th, 'text-right')}>Effective</th>
+                    <th className={cn(th, 'text-left')}>Unit</th>
+                    <th className={cn(th, 'text-right')}>Rate</th>
+                    <th className={cn(th, 'text-right')}>Cost</th>
+                  </tr>
+                </thead>
+
+                <tbody>
+                  {lines.map((line, index) => {
+                    const bySize = line.sizes ?? []
+                    return (
+                      <Fragment key={line.id ?? index}>
+                        {/* A line with size quantities keeps its divider below the size row instead. */}
+                        <tr className={cn(bySize.length === 0 && 'border-b border-border/50')}>
+                          <td className={cn(td, 'text-center font-mono text-xs text-muted-foreground')}>
+                            {index + 1}
+                          </td>
+                          <td className={td}>
+                            <div className="flex min-w-0 items-baseline gap-2">
+                              <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                                {line.componentItem?.code}
                               </span>
-                            ))}
-                          </span>
-                        )}
-                      </td>
-                      <td className="text-xs text-muted-foreground">{line.component || '—'}</td>
-                      <td className="text-xs">
-                        {line.department ? (
-                          line.department.name
-                        ) : (
-                          <span className="text-accent">Not set</span>
-                        )}
-                      </td>
-                      <td className="text-right">
-                        {num(line.qtyPerUnit)} {unit}
-                      </td>
-                      <td className="text-right text-muted-foreground">
-                        {num(line.wastagePercent)}%
-                      </td>
-                      <td className="text-right font-medium">
-                        {num(line.effectiveQty)} {unit}
-                      </td>
-                      <td className="text-right text-muted-foreground">
-                        {formatCurrency(num(line.unitCost))}
-                      </td>
-                      <td className="text-right font-semibold">
-                        {formatCurrency(num(line.totalCost))}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+                              <span className="truncate text-foreground" title={line.componentItem?.name}>
+                                {line.componentItem?.name}
+                              </span>
+                            </div>
+                          </td>
+                          <td className={cn(td, 'truncate text-xs text-muted-foreground')}>
+                            {line.component || '—'}
+                          </td>
+                          <td className={cn(td, 'truncate text-xs')}>
+                            {line.department ? (
+                              <span className="text-foreground">{line.department.name}</span>
+                            ) : (
+                              <span className="text-accent">Not set</span>
+                            )}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono')}>{qty(line.qtyPerUnit)}</td>
+                          <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
+                            {percent(line.wastagePercent)}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono font-medium')}>{qty(line.effectiveQty)}</td>
+                          <td className={cn(td, 'text-xs text-muted-foreground')}>
+                            {line.componentItem?.uom?.symbol ?? '—'}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
+                            {formatRupees(line.unitCost)}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono font-semibold text-foreground')}>
+                            {formatRupees(line.totalCost)}
+                          </td>
+                        </tr>
 
-          {bom.routing && (
-            <div>
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-                Process — {bom.routing.name}
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {(bom.routing.steps ?? []).map((step) => (
-                  <span key={step.id} className={step.isQcStep ? 'badge-warning' : 'badge-info'}>
-                    {step.sequence}. {step.operation?.name}
-                    {step.ratePerPiece != null && ` · ${formatCurrency(num(step.ratePerPiece))}`}
+                        {bySize.length > 0 && (
+                          <tr className="border-b border-border/50">
+                            <td />
+                            <td colSpan={9} className="px-3 pb-2.5">
+                              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                                <span>Effective by size:</span>
+                                {bySize.map((s) => (
+                                  <span key={s.id ?? s.sizeId} className="font-mono">
+                                    {s.size?.label ?? s.size?.code}{' '}
+                                    <span className="text-foreground">{qty(s.effectiveQty)}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+
+                <tfoot>
+                  <tr className="bg-secondary/40">
+                    <td colSpan={9} className={cn(td, 'text-right font-semibold text-foreground')}>
+                      Material cost per piece
+                    </td>
+                    <td className={cn(td, 'text-right font-mono font-bold text-foreground')}>
+                      {formatRupees(material)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </section>
+
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+            <section className="space-y-2 lg:col-span-2">
+              <h3 className={sectionTitle}>
+                Process
+                {bom.routing && (
+                  <span className="font-normal normal-case tracking-normal">
+                    {' '}
+                    — {bom.routing.code} · {bom.routing.name}
                   </span>
-                ))}
-              </div>
-            </div>
-          )}
+                )}
+              </h3>
 
-          <div className="flex flex-wrap items-end justify-between gap-4 pt-3 border-t border-border">
-            <div className="text-xs text-muted-foreground space-y-1">
-              {sizeTotals.length > 0 && (
-                <p className="flex flex-wrap gap-2">
-                  {sizeTotals.map((s) => (
-                    <span key={s.label}>
-                      {s.label} {formatCurrency(s.cost + labour)}
-                    </span>
-                  ))}
-                </p>
+              {bom.routing ? (
+                <div className="overflow-x-auto rounded-lg border border-border">
+                  <table className="w-full min-w-[560px] table-fixed text-sm">
+                    <colgroup>
+                      <col className="w-10" />
+                      <col />
+                      <col className="w-36" />
+                      <col className="w-24" />
+                      <col className="w-28" />
+                    </colgroup>
+                    <thead className="bg-secondary/60">
+                      <tr className="border-b border-border">
+                        <th className={cn(th, 'text-center')}>#</th>
+                        <th className={cn(th, 'text-left')}>Operation</th>
+                        <th className={cn(th, 'text-left')}>Department</th>
+                        <th className={cn(th, 'text-right')}>SMV</th>
+                        <th className={cn(th, 'text-right')}>Rate / pc</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {steps.map((step) => (
+                        <tr key={step.id} className="border-b border-border/50">
+                          <td className={cn(td, 'text-center font-mono text-xs text-muted-foreground')}>
+                            {step.sequence}
+                          </td>
+                          <td className={td}>
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className="truncate text-foreground">{step.operation?.name}</span>
+                              {step.isQcStep && <span className="badge-warning">QC</span>}
+                            </div>
+                          </td>
+                          <td className={cn(td, 'truncate text-xs text-muted-foreground')}>
+                            {step.department?.name ?? '—'}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
+                            {step.smv != null ? qty(step.smv) : '—'}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono')}>
+                            {step.ratePerPiece != null ? formatRupees(step.ratePerPiece) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-secondary/40">
+                        <td colSpan={3} className={cn(td, 'text-right font-semibold text-foreground')}>
+                          Labour per piece
+                        </td>
+                        <td className={cn(td, 'text-right font-mono text-xs text-muted-foreground')}>
+                          {totalSmv > 0 ? `${qty(totalSmv)} min` : ''}
+                        </td>
+                        <td className={cn(td, 'text-right font-mono font-bold text-foreground')}>
+                          {formatRupees(labour)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-xs text-muted-foreground">
+                  No routing linked, so labour is not costed. Edit this BOM to link one.
+                </div>
               )}
-              {bom.approvedBy && <p>Approved by {bom.approvedBy.name}</p>}
-              {bom.notes && <p className="whitespace-pre-line">{bom.notes}</p>}
-            </div>
+            </section>
 
-            <table className="text-sm">
-              <tbody>
-                <tr>
-                  <td className="pr-6 text-muted-foreground">Material</td>
-                  <td className="text-right font-medium">{formatCurrency(material)}</td>
-                </tr>
-                <tr>
-                  <td className="pr-6 text-muted-foreground">Labour</td>
-                  <td className="text-right font-medium">
-                    {bom.routing ? formatCurrency(labour) : '—'}
-                  </td>
-                </tr>
-                <tr>
-                  <td className="pr-6 font-semibold">
-                    Total per piece
-                    {bom.baseSize && ` (${bom.baseSize.label})`}
-                  </td>
-                  <td className="text-right font-bold text-teal-400">{formatCurrency(total)}</td>
-                </tr>
-              </tbody>
-            </table>
+            <section className="space-y-2">
+              <h3 className={sectionTitle}>Cost per piece</h3>
+
+              <div className="overflow-hidden rounded-lg border border-border">
+                <dl className="divide-y divide-border/50 text-sm">
+                  <div className="flex items-center justify-between px-4 py-2.5">
+                    <dt className="text-muted-foreground">Material</dt>
+                    <dd className="font-mono text-foreground">{formatRupees(material)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between px-4 py-2.5">
+                    <dt className="text-muted-foreground">Labour</dt>
+                    <dd className="font-mono text-foreground">
+                      {bom.routing ? formatRupees(labour) : '—'}
+                    </dd>
+                  </div>
+                  <div className="flex items-center justify-between bg-secondary/40 px-4 py-3">
+                    <dt className="font-semibold text-foreground">
+                      Total{bom.baseSize && ` · size ${bom.baseSize.label}`}
+                    </dt>
+                    <dd className="font-mono font-bold text-primary">{formatRupees(total)}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              {sizeTotals.length > 0 && (
+                <div className="overflow-hidden rounded-lg border border-border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-secondary/60">
+                      <tr className="border-b border-border">
+                        <th className={cn(th, 'text-left')}>Size</th>
+                        <th className={cn(th, 'text-right')}>Material</th>
+                        <th className={cn(th, 'text-right')}>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sizeTotals.map((s) => (
+                        <tr key={s.label} className="border-b border-border/50 last:border-0">
+                          <td className={cn(td, 'text-xs text-foreground')}>{s.label}</td>
+                          <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
+                            {formatRupees(s.cost)}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono font-semibold text-foreground')}>
+                            {formatRupees(s.cost + labour)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {(bom.approvedBy || bom.notes) && (
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  {bom.approvedBy && (
+                    <p>
+                      Approved by <span className="text-foreground">{bom.approvedBy.name}</span>
+                      {bom.approvedAt && ` on ${formatDate(bom.approvedAt)}`}
+                    </p>
+                  )}
+                  {bom.notes && <p className="whitespace-pre-line">{bom.notes}</p>}
+                </div>
+              )}
+            </section>
           </div>
         </div>
       )}

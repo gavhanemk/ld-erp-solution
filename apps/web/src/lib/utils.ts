@@ -16,6 +16,19 @@ export function formatCurrency(amount: number, currency = 'INR'): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount)
 }
 
+/**
+ * An exact rupee amount: ₹1,540.50 — always two places, Indian grouping. For
+ * costing sheets and documents, where a figure gets checked with a calculator.
+ *
+ * formatCurrency above shortens to K, L and Cr, which suits a dashboard tile but
+ * would show a ₹1,540.50 fabric line as ₹1.5K, and prints ₹2.4 beside ₹0.65 below
+ * a thousand. This matches `money()` on the printed sheet, with the symbol added.
+ */
+export function formatRupees(amount: number | string | null | undefined): string {
+  const value = Number(amount ?? 0)
+  return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
 export function formatDate(date: Date | string, format: 'short' | 'long' | 'relative' = 'short'): string {
   const d = new Date(date)
 
