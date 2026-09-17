@@ -61,7 +61,7 @@ export default function PurchaseBillsPage() {
           ? err.status === 403
             ? 'Your role does not allow viewing purchase bills.'
             : err.message
-          : 'Could not reach the server. Is the API running?',
+          : 'Could not reach the server. Is the API running?'
       )
       setRows([])
     } finally {
@@ -81,7 +81,7 @@ export default function PurchaseBillsPage() {
 
   const cancel = async (bill: PurchaseBill) => {
     const reason = prompt(
-      `Cancel ${bill.billNumber}?\n\nThe bill and its number stay on the record. Say why:`,
+      `Cancel ${bill.billNumber}?\n\nThe bill and its number stay on the record. Say why:`
     )
     if (reason === null) return
     setBusy(true)
@@ -108,10 +108,12 @@ export default function PurchaseBillsPage() {
 
   return (
     <div className="space-y-5">
-      <div className="page-header">
+      <div className="page-header flex-wrap gap-3">
         <div>
           <h1 className="page-title">Purchase Bills</h1>
-          <p className="page-subtitle">What your suppliers have charged you, and what is still owed</p>
+          <p className="page-subtitle">
+            What your suppliers have charged you, and what is still owed
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
@@ -124,23 +126,23 @@ export default function PurchaseBillsPage() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-          <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+        <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
           <p className="text-sm text-red-400">{error}</p>
         </div>
       )}
       {message && (
-        <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5">
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
         </div>
       )}
 
-      <div className="glass-card p-0 overflow-hidden">
-        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-border">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border flex-1 min-w-[220px] max-w-sm">
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
+          <div className="bg-secondary border-border flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:min-w-[220px] sm:max-w-sm">
             <Search size={14} className="text-muted-foreground" />
             <input
-              className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
               placeholder="Search our number, theirs, or supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -148,7 +150,7 @@ export default function PurchaseBillsPage() {
             />
           </div>
           <select
-            className="form-input h-9 w-40"
+            className="form-input h-9 w-full sm:w-40"
             value={status}
             onChange={(e) => setStatus(e.target.value)}
             aria-label="Filter by status"
@@ -160,7 +162,7 @@ export default function PurchaseBillsPage() {
               </option>
             ))}
           </select>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+          <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-xs">
             <input
               type="checkbox"
               checked={overdueOnly}
@@ -168,148 +170,276 @@ export default function PurchaseBillsPage() {
             />
             Overdue only
           </label>
-          <span className="text-xs text-muted-foreground ml-auto">{total} bills</span>
+          <span className="text-muted-foreground ml-auto text-xs">{total} bills</span>
         </div>
 
         {loading && rows.length === 0 ? (
-          <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
+          <p className="text-muted-foreground px-4 py-8 text-sm">Loading...</p>
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-muted-foreground text-sm">
               {debounced || status || overdueOnly
                 ? 'No bills match what you are looking for. Clear the filters to see them all.'
                 : 'No supplier bills booked yet. Book one to record what a supplier has charged you — start from a goods receipt and it fills itself in.'}
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th>Our ref</th>
-                  <th>Their invoice</th>
-                  <th>Supplier</th>
-                  <th>Booked</th>
-                  <th>Due</th>
-                  <th style={{ textAlign: 'right' }}>Total</th>
-                  <th style={{ textAlign: 'right' }}>Outstanding</th>
-                  <th>Status</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((bill) => {
-                  const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
-                  const overdue = isOverdue(bill)
-                  return (
-                    <tr key={bill.id}>
-                      <td className="font-mono text-xs text-teal-400">{bill.billNumber}</td>
-                      <td>
+          <>
+            {/* ── On a phone, not a table ──────────────────────────────────
+
+              Same reasoning as the purchase order list: 9 columns cannot be
+              made to fit a phone, and a table you drag sideways costs two
+              gestures for every read and keeps the buttons off whichever edge
+              you are not looking at. Below xl each row is a block instead.
+
+              xl and not lg, because lg is where the sidebar comes back and
+              takes 260px of the screen with it. */}
+            <div className="divide-border divide-y xl:hidden">
+              {rows.map((bill) => {
+                const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
+                const overdue =
+                  bill.dueDate &&
+                  bill.status !== 'PAID' &&
+                  bill.status !== 'CANCELLED' &&
+                  new Date(bill.dueDate) < new Date()
+                return (
+                  <div key={bill.id} className="p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-foreground font-mono text-xs font-semibold">
+                            {bill.billNumber}
+                          </span>
+                          <span className={s.cls}>{s.label}</span>
+                          {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
+                        </div>
+                        <p className="text-foreground mt-1 font-medium leading-snug">
+                          {bill.supplier?.name ?? '—'}
+                        </p>
+                        {bill.supplier?.gstin && (
+                          <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
+                            {bill.supplier.gstin}
+                          </p>
+                        )}
+                      </div>
+                      <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
+                        ₹{money(bill.totalAmount)}
+                      </span>
+                    </div>
+
+                    <dl className="mt-2.5 grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-muted-foreground">Their invoice</dt>
+                      <dd className="text-foreground min-w-0">
                         {bill.supplierInvoiceNo ? (
                           <>
-                            <div className="font-mono text-xs text-foreground">
-                              {bill.supplierInvoiceNo}
-                            </div>
+                            <span className="font-mono">{bill.supplierInvoiceNo}</span>
                             {bill.supplierInvoiceDate && (
-                              <div className="text-[10px] text-muted-foreground">
-                                {formatDate(bill.supplierInvoiceDate)}
-                              </div>
+                              <span className="text-muted-foreground">
+                                {' '}
+                                · {formatDate(bill.supplierInvoiceDate)}
+                              </span>
                             )}
                           </>
                         ) : (
                           <span className="text-muted-foreground">—</span>
                         )}
-                      </td>
-                      <td>
-                        <div className="font-medium text-foreground">{bill.supplier?.name}</div>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          {bill.supplier?.gstin && (
-                            <span className="text-[10px] text-muted-foreground font-mono">
-                              {bill.supplier.gstin}
-                            </span>
-                          )}
-                          {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
-                        </div>
-                      </td>
-                      <td className="text-xs">{formatDate(bill.billDate)}</td>
-                      <td className="text-xs">
+                      </dd>
+                      <dt className="text-muted-foreground">Booked</dt>
+                      <dd className="text-foreground min-w-0">{formatDate(bill.billDate)}</dd>
+                      <dt className="text-muted-foreground">Due</dt>
+                      <dd className="min-w-0">
                         {bill.dueDate ? (
-                          <span className={overdue ? 'text-red-400 font-medium' : undefined}>
+                          <span
+                            className={overdue ? 'font-medium text-red-400' : 'text-foreground'}
+                          >
                             {formatDate(bill.dueDate)}
                           </span>
                         ) : (
                           <span className="text-muted-foreground">—</span>
                         )}
-                      </td>
-                      <td className="text-right font-semibold tabular-nums">
-                        ₹{money(bill.totalAmount)}
-                      </td>
-                      <td className="text-right tabular-nums">
+                      </dd>
+                      <dt className="text-muted-foreground">Outstanding</dt>
+                      <dd className="text-foreground min-w-0 tabular-nums">
                         {bill.status === 'CANCELLED' ? (
                           <span className="text-muted-foreground">—</span>
                         ) : (
-                          <>
-                            ₹{money(bill.balanceAmount)}
-                            {Number(bill.tdsAmount) > 0 && (
-                              <div className="text-[10px] text-muted-foreground">
-                                after ₹{money(bill.tdsAmount)} TDS
-                              </div>
-                            )}
-                          </>
+                          <>₹{money(bill.balanceAmount)}</>
                         )}
-                      </td>
-                      <td>
-                        <span className={s.cls}>{s.label}</span>
-                      </td>
-                      <td className="text-right whitespace-nowrap">
-                        <div className="flex justify-end gap-1">
-                          <Link
-                            href={`/print/purchase-bill/${bill.id}`}
-                            target="_blank"
-                            className="btn-ghost p-1.5"
-                            title="Print"
-                            aria-label={`Print ${bill.billNumber}`}
+                      </dd>
+                    </dl>
+
+                    <div className="mt-3 flex justify-end gap-1">
+                      <Link
+                        href={`/print/purchase-bill/${bill.id}`}
+                        target="_blank"
+                        className="btn-ghost border-border rounded-lg border p-1.5"
+                        title="Print"
+                        aria-label={`Print ${bill.billNumber}`}
+                      >
+                        <Printer size={15} />
+                      </Link>
+                      {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
+                        <>
+                          <button
+                            className="btn-ghost border-border rounded-lg border p-1.5"
+                            onClick={() => setDialog({ open: true, record: bill })}
+                            title="Edit"
+                            aria-label={`Edit ${bill.billNumber}`}
                           >
-                            <Printer size={15} />
-                          </Link>
-                          {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
+                            <Pencil size={15} />
+                          </button>
+                          <button
+                            className="btn-ghost border-border text-muted-foreground rounded-lg border p-1.5 hover:text-red-400"
+                            onClick={() => void cancel(bill)}
+                            disabled={busy}
+                            title="Cancel"
+                            aria-label={`Cancel ${bill.billNumber}`}
+                          >
+                            <Ban size={15} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="hidden w-full overflow-x-auto xl:block">
+              {/* A floor, so the nine columns scroll rather than squash. With no
+              minimum they squeeze to fit whatever they are given, and on a
+              narrow screen the supplier and the invoice number end up two
+              characters wide over four lines. 900px is under the 1058px a
+              1366px laptop has to give, so the commonest screen still shows
+              the whole table without scrolling. */}
+              <table className="data-table w-full min-w-[900px]">
+                <thead>
+                  <tr>
+                    <th>Our ref</th>
+                    <th>Their invoice</th>
+                    <th>Supplier</th>
+                    <th>Booked</th>
+                    <th>Due</th>
+                    <th style={{ textAlign: 'right' }}>Total</th>
+                    <th style={{ textAlign: 'right' }}>Outstanding</th>
+                    <th>Status</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((bill) => {
+                    const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
+                    const overdue = isOverdue(bill)
+                    return (
+                      <tr key={bill.id}>
+                        <td className="font-mono text-xs text-teal-400">{bill.billNumber}</td>
+                        <td>
+                          {bill.supplierInvoiceNo ? (
                             <>
-                              <button
-                                className="btn-ghost p-1.5"
-                                onClick={() => setDialog({ open: true, record: bill })}
-                                title="Edit"
-                                aria-label={`Edit ${bill.billNumber}`}
-                              >
-                                <Pencil size={15} />
-                              </button>
-                              <button
-                                className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                                onClick={() => void cancel(bill)}
-                                disabled={busy}
-                                title="Cancel"
-                                aria-label={`Cancel ${bill.billNumber}`}
-                              >
-                                <Ban size={15} />
-                              </button>
+                              <div className="text-foreground font-mono text-xs">
+                                {bill.supplierInvoiceNo}
+                              </div>
+                              {bill.supplierInvoiceDate && (
+                                <div className="text-muted-foreground text-[10px]">
+                                  {formatDate(bill.supplierInvoiceDate)}
+                                </div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td>
+                          <div className="text-foreground font-medium">{bill.supplier?.name}</div>
+                          <div className="mt-0.5 flex items-center gap-1.5">
+                            {bill.supplier?.gstin && (
+                              <span className="text-muted-foreground font-mono text-[10px]">
+                                {bill.supplier.gstin}
+                              </span>
+                            )}
+                            {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
+                          </div>
+                        </td>
+                        <td className="text-xs">{formatDate(bill.billDate)}</td>
+                        <td className="text-xs">
+                          {bill.dueDate ? (
+                            <span className={overdue ? 'font-medium text-red-400' : undefined}>
+                              {formatDate(bill.dueDate)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="text-right font-semibold tabular-nums">
+                          ₹{money(bill.totalAmount)}
+                        </td>
+                        <td className="text-right tabular-nums">
+                          {bill.status === 'CANCELLED' ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : (
+                            <>
+                              ₹{money(bill.balanceAmount)}
+                              {Number(bill.tdsAmount) > 0 && (
+                                <div className="text-muted-foreground text-[10px]">
+                                  after ₹{money(bill.tdsAmount)} TDS
+                                </div>
+                              )}
                             </>
                           )}
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                        <td>
+                          <span className={s.cls}>{s.label}</span>
+                        </td>
+                        <td className="whitespace-nowrap text-right">
+                          <div className="flex justify-end gap-1">
+                            <Link
+                              href={`/print/purchase-bill/${bill.id}`}
+                              target="_blank"
+                              className="btn-ghost p-1.5"
+                              title="Print"
+                              aria-label={`Print ${bill.billNumber}`}
+                            >
+                              <Printer size={15} />
+                            </Link>
+                            {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
+                              <>
+                                <button
+                                  className="btn-ghost p-1.5"
+                                  onClick={() => setDialog({ open: true, record: bill })}
+                                  title="Edit"
+                                  aria-label={`Edit ${bill.billNumber}`}
+                                >
+                                  <Pencil size={15} />
+                                </button>
+                                <button
+                                  className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                                  onClick={() => void cancel(bill)}
+                                  disabled={busy}
+                                  title="Cancel"
+                                  aria-label={`Cancel ${bill.billNumber}`}
+                                >
+                                  <Ban size={15} />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
 
         <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        A bill can be changed until a payment is made against it. After that it is part of the payment
-        record — cancel it, or raise a debit note. A bill for more than was accepted at the gate is
-        refused, which is the whole point of booking it against the receipt.
+      <p className="text-muted-foreground text-xs">
+        A bill can be changed until a payment is made against it. After that it is part of the
+        payment record — cancel it, or raise a debit note. A bill for more than was accepted at the
+        gate is refused, which is the whole point of booking it against the receipt.
       </p>
 
       <PurchaseBillDialog

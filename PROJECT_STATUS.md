@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Thu 17 Sep 2026 — the purchase order form: recycle bin, supplier addresses, rate history, and a tidy-up_
+_Last updated: Thu 17 Sep 2026 — the purchase module: the printed order sheet rebuilt, and the screens made to work on a phone_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -91,6 +91,64 @@ app. Nothing of it is on the live site until then.
   grey, one Save at the top instead of three, the supplier's details as an
   aligned grid instead of a ragged column, smaller labels
 
+**Then, later the same day** — the printed sheet and the screens it is reached
+from:
+
+- **The printed purchase order was rebuilt** to the layout he supplied: navy
+  and a pale navy tint, the logo on the letterhead (it was in Settings all
+  along and the sheet never printed it), a "To," block set out the way the
+  mill's old sheet sets it out, and the supplier's own fields — Kind
+  Attention, TIN No, Colour, Style No. — back on the paper. Style No. was the
+  one that mattered: the order has carried it since the form gained the field
+  and the sheet never showed it.
+- **Three bugs the sheet had all along**, found by printing it to PDF rather
+  than looking at it:
+  1. Every order printed on **two** pages while the footer said one. The
+     toolbar above the sheet is marked `.no-print`, and that class is defined
+     inside `PrintSheet` — which this page does not use. So the toolbar was
+     being printed, pushing the sheet down a page.
+  2. `@page { margin: 0 }` was missing for the same reason, so Chrome applied
+     its own 10mm margin to a 297mm block.
+  3. Nothing set `print-color-adjust`, so every filled band — the heading
+     strips, the total, the footer — would have printed white. White text on
+     white paper for the total.
+- **The page-break numbers were fiction.** They were 9 and 13, calculated
+  from an assumed row height, and this file said in as many words that nobody
+  had printed a long order to check. They are now a pixel budget worked out
+  from four measured heights, because the lines and the charge rows are
+  different heights and compete for the same page. Verified by PDF page count
+  at 1, 2, 3, 4, 13, 14, 22 and 23 lines and with charges on and off.
+- **The sheet was setting in the wrong typeface.** `next/font` publishes Inter
+  under a generated family name and hands it over as `--font-inter`; the sheet
+  asked for the literal `Inter`, which matches nothing. It had been rendering
+  in whatever the system offered. Figures also came off the monospace face —
+  a code font is most of what made a purchase order read like a terminal.
+  **`tailwind.config.js` has the same literal in its `sans` stack, so every
+  screen in the ERP is probably doing this too.** One line to fix and it
+  changes the look of the whole app, so it was left alone.
+- **Charges print only when they are entered on the order.** Printing a row
+  for every charge in the master was tried and reversed: five charges are
+  flagged for purchases, three of them near-duplicates, and four rows of 0.00
+  are four questions a supplier does not need to ask. Worth tidying that
+  master — see "Decisions he has given".
+- **The purchase screens work on a phone.** Below `xl` the three lists stop
+  being tables and become one block per row; a ten-column table cannot be
+  made to fit 390px and dragging it sideways put the buttons off whichever
+  edge you were not looking at. At 1366px — the commonest laptop — the orders
+  table fits with nothing hidden, where before its buttons sat off-screen.
+- **The sidebar is a drawer below 1024px**, with a hamburger in the top bar.
+  This is the one change outside the purchase module and he agreed to it: a
+  260px sidebar on a 390px screen left 130px for the page, so no amount of
+  work inside purchase could have made a phone usable. It touches
+  `(dashboard)/layout.tsx`, `Sidebar.tsx` and `TopBar.tsx`, so **it wants
+  splitting into its own branch before this merges** — one branch, one job.
+
+**A measuring note, because it cost an hour.** Headless Chrome has a minimum
+window of about 500px. Screenshots taken at `--window-size=390` are a 500px
+page cropped to 390, which looks exactly like a layout that overflows — and I
+reported a shell overflow bug on that basis that did not exist. To render a
+true phone width, put the page in a 390px iframe inside a wider window.
+
 **Two things the form deliberately does not do**, both because he checked the
 old ERP and said so:
 - **Charges are not calculated.** Only CGST and SGST work themselves out. He
@@ -170,6 +228,12 @@ items with categories, added as dummy data for testing the pickers.
   a branch and waits.
 - An item code is an item's identity, not a search box. Typing a full code
   resolves that item; it does not filter a list.
+- **Charges are typed in per order, and print only when typed.** The charge
+  master has five kinds flagged for purchases and three look like duplicates
+  — "Dyeing Charges" beside "Dyeing Charges (Processing)", "Freight / Courier"
+  beside "Freight / Courier (Transporter)". Not tidied, because unticking a
+  charge also stops a buyer putting it on an order and both are real things a
+  mill pays for. His call, in Masters → Charges.
 
 **Next:** supplier payments is the last 501 in the purchase module, so a bill
 can be raised but not paid. After that, sales orders have no form either.

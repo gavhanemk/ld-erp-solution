@@ -263,7 +263,10 @@ export function ReceiveGoodsDialog({
 
           {order && !loadingOrder && (
             <div className="border-border overflow-x-auto rounded-lg border">
-              <table className="data-table w-full">
+              {/* A floor, so the seven columns scroll rather than squash.
+                Six of them are figures being typed into, and a number box
+                squeezed to two characters is one somebody will mis-key. */}
+              <table className="data-table w-full min-w-[760px]">
                 <thead>
                   <tr>
                     <th style={{ width: '28%' }}>Item</th>

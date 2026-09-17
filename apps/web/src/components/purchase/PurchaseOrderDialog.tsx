@@ -2977,7 +2977,7 @@ export function PurchaseOrderDialog({
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="form-label" htmlFor="po-new-addr-city">
                         City
@@ -3032,7 +3032,7 @@ export function PurchaseOrderDialog({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="form-label" htmlFor="po-new-addr-label">
                         Name it
@@ -3244,7 +3244,7 @@ export function PurchaseOrderDialog({
                     purchase, last, lowest and highest are all the same figure,
                     and three boxes repeating it is padding. */}
                 {rows.length > 1 && (
-                  <div className="border-border grid shrink-0 grid-cols-3 border-b">
+                  <div className="border-border grid shrink-0 grid-cols-1 border-b sm:grid-cols-3">
                     {[
                       ['Last rate', rates[0]],
                       ['Lowest', Math.min(...rates)],

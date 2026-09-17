@@ -216,24 +216,61 @@
     @apply w-full text-sm;
   }
 
-  .data-table thead tr {
+  /* Direct children, not descendants.
+
+     Written as `.data-table thead th` these rules reached into any table
+     nested inside a `.data-table` — and at one class plus one element they
+     scored above a plain utility, so a `text-right` on a nested table's own
+     header lost to the `text-left` here. The purchase order list showed it:
+     Qty, Rate and Amount sat at the left of their columns while the figures
+     underneath them sat at the right, the two lined up with nothing.
+
+     Scoped to `>` a nested table is left alone and styles itself, which is
+     what every class on it was already trying to do. The screens that nest a
+     table inside another one all give the inner one `data-table` too, so
+     nothing loses its styling by this. */
+  .data-table > thead > tr {
     @apply border-b border-border;
   }
 
-  .data-table thead th {
+  .data-table > thead > tr > th {
     @apply text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider py-3 px-4;
   }
 
-  .data-table tbody tr {
+  .data-table > tbody > tr {
     @apply border-b border-border/50 transition-colors;
   }
 
-  .data-table tbody tr:hover {
+  .data-table > tbody > tr:hover {
     background: var(--hover-overlay);
   }
 
-  .data-table tbody td {
+  .data-table > tbody > tr > td {
     @apply py-3 px-4 text-foreground;
+  }
+
+  /* A denser row, for a list whose cells carry two lines.
+
+     The purchase order list puts a supplier over its GSTIN in one cell and an
+     item count over the item's name in another, so its rows stood 62px tall
+     at the shared 12px of padding and five orders filled a screen. 8px takes
+     the same row to about 50px, and nothing ends up closer to a border than
+     the 8px the rest of the app already uses.
+
+     A modifier rather than a change to `.data-table`: that class dresses
+     every list in the ERP and none of the others asked to be denser.
+
+     Declared after those rules and matched the same way, so it wins on
+     source order at equal specificity — which is also why it is not written
+     `:where(.table-compact)` like the form rules above. `:where()`
+     contributes nothing, so that form would score below the `.data-table`
+     rule it is meant to override and never apply at all. */
+  .table-compact > thead > tr > th {
+    @apply px-3 py-2;
+  }
+
+  .table-compact > tbody > tr > td {
+    @apply px-3 py-2;
   }
 
   /* Status Badges */
