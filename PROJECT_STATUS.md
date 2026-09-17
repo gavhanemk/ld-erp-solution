@@ -31,10 +31,23 @@ the shared database. See `MIGRATION-NOTES.md`.
 The four existing BOMs have no colour, because every one belongs to a style in two
 or three colours and guessing is worse than a blank. They show **Colour not set**.
 
-**Before the Production module starts, one question is still open:** is a sellable
-shirt one item per style and colour, or per style, colour *and* size? A sales order
-names an item, a manufacturing order names a style, and nothing links the two —
-that link has to be decided before an order can find its BOM.
+**Decided (17 Sep): a sellable shirt is one item per style + colour, with sizes
+recorded on the order** — the way the old ERP's MO00089 works: one item, S to 3XL
+underneath it. So style + colour is the key that joins everything: the finished-
+goods item, the sales order line, the manufacturing order line (which already
+carries style and colour) and the BOM (which now does too).
+
+What that means for the next branch, which gives finished-goods items a style and
+a colour so an order can find its BOM:
+- The four finished-goods items in the database (`FG-SHRT-001` and friends) are
+  generic — no colour, no style. Like the four colourless BOMs, they will need
+  splitting per colour rather than guessing.
+- Sales order lines and manufacturing order lines are both empty today, so no saved
+  order has to change shape.
+- **Still to decide, with whoever owns Inventory, before packed goods go into
+  stock:** `stock_ledger` has no size. With one item per colour, finished stock
+  would say "LD-SH-2601 White: 848" with no way to tell how many are XL. That is an
+  Inventory change, not a masters one, and it is not needed until packing.
 
 ---
 
