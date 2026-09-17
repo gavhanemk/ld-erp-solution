@@ -24,9 +24,9 @@ it showed, and what the production team, accounts and the old ERP's users decide
 - The assistant now reports material cost **per colour**; taking the first
   approved BOM would have quoted one colour's cost as the whole style's.
 
-**The migration is written but NOT applied** — the team's hold on migrations is
-still on. Until it is applied, the BOM screen on this branch will not load against
-the shared database. See `MIGRATION-NOTES.md`.
+**The migration was applied on 17 Sep, during the team's hold on migrations**, so
+this could be tested — a deliberate call. `main` is one more migration behind the
+database as a result. See `MIGRATION-NOTES.md`.
 
 The four existing BOMs have no colour, because every one belongs to a style in two
 or three colours and guessing is worse than a blank. They show **Colour not set**.

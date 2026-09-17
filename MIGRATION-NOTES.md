@@ -11,20 +11,20 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 **Migration:** `20260917100000_bom_colour_and_process`
 **Branch:** `feat/masters-bom-colour-and-process` (stacked on `feat/masters-bom-size-routing-status`)
-**Status: NOT applied.** Held on purpose — see below.
+**Status: applied to the shared database on 17 Sep, during the migration hold.**
+Nobody needs to apply it.
 
-### Why it has not been applied
+### Applied during the hold — deliberately
 
 On 16 Sep the team agreed nobody runs a migration until `main` catches up with the
-database. That has not happened yet, so this one is written, checked and committed,
-and waits. **Do not apply it until the hold is lifted.**
+database. This one went in anyway, on 17 Sep, so the colour and department work
+could be tested; that was a decision, not an accident. It is five statements, adds
+two columns, and touches no rows. The folder is pushed on the branch above, so the
+database can still be rebuilt from the repository.
 
-Until it is applied, this branch's BOM screen will not work against the shared
-database: the code expects a `color` column the database does not have yet. Switch
-back to another branch and run `pnpm db:generate` to carry on with other work.
-
-When the hold lifts, apply it with `prisma migrate deploy`, never `migrate dev` —
-see why below.
+What it means for everyone else: **`main` is one more migration behind the database.**
+On any branch without this folder, `prisma migrate dev` will propose dropping
+`bom.color` and `bom_lines.departmentId`. Say no. `prisma migrate deploy` is safe.
 
 ### What changed
 
