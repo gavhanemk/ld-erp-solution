@@ -22,12 +22,46 @@ const qty = z
  * should not also be doing subtraction, and the two figures disagreeing is the
  * commonest way a goods receipt goes wrong.
  */
+/** A reference number off somebody else's paperwork. */
+const ref = (what: string, max = 60) =>
+  z.string().max(max, `That ${what} is too long`).optional().nullable()
+
 export const createGrnSchema = z
   .object({
     poId: z.string().min(1, 'Pick the purchase order these goods came against'),
     grnDate: z.coerce.date().optional(),
     vehicleNo: z.string().max(20, 'That vehicle number is too long').optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
+
+    /*
+     * The delivery itself.
+     *
+     * Every one of these is optional, and that is the point: the person typing
+     * is at the gate with a lorry waiting, and a receipt refused because the
+     * driver's name was blank would put the stock figure behind the goods.
+     * They are worth capturing because they are what settles a query about the
+     * supplier's bill months later, when nobody remembers the delivery.
+     */
+    gateEntryNo: ref('gate entry number', 40),
+    gateEntryDate: z.coerce.date().optional().nullable(),
+    challanNo: ref('challan number'),
+    challanDate: z.coerce.date().optional().nullable(),
+    supplierBillNo: ref('bill number'),
+    supplierInvoiceNo: ref('invoice number'),
+    supplierInvoiceDate: z.coerce.date().optional().nullable(),
+    packageCount: z
+      .number({ invalid_type_error: 'The number of packages has to be a number' })
+      .int('Packages are counted in whole numbers')
+      .min(0, 'A package count cannot be negative')
+      .max(100000, 'That package count looks like a typo')
+      .optional()
+      .nullable(),
+    driverName: ref('driver name', 80),
+    formNo: ref('form number'),
+    clientName: ref('client name', 120),
+    orderedBy: ref('name', 80),
+    referenceNo: ref('reference'),
+
     lines: z
       .array(
         z.object({
@@ -54,16 +88,26 @@ export const createGrnSchema = z
         })
       }
 
-      // The same order line twice in one receipt would pass every per-line
-      // check and then quietly book the goods in twice.
-      if (seen.has(line.poLineId)) {
+      /*
+       * One order line may appear more than once, but only for different
+       * stores.
+       *
+       * A single delivery of 800kg routinely goes 500 to the fabric godown and
+       * 300 to the works, and the mill's old system had a row per location for
+       * exactly that. What is still refused is the same item into the same
+       * store twice, which passes every per-line check and then books the
+       * goods in twice.
+       */
+      const key = `${line.poLineId}::${line.warehouseId}`
+      if (seen.has(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['lines', i, 'poLineId'],
-          message: 'This item is already on the receipt. Put the whole quantity on one line.',
+          path: ['lines', i, 'warehouseId'],
+          message:
+            'This item is already going into that store on this receipt. Put the whole quantity on one row, or pick another store.',
         })
       }
-      seen.add(line.poLineId)
+      seen.add(key)
     })
 
     if (!data.lines.some((l) => l.receivedQty > 0)) {

@@ -70,6 +70,103 @@ bypass (CVE-2025-29927). Do not pin it back.
 
 ---
 
+## Goods receipts, and what comes after a purchase order (Fri 18 Sep 2026)
+
+The mill's old Absolute ERP was logged into and read end to end, read-only, to
+settle what the purchase module actually does after an order is raised. The
+survey and the reasoning are written up as an artifact, **After the Purchase
+Order**; what follows is what it changed here.
+
+### The chain, as the old system has it
+
+```
+Indent —> Provisional PO (enquiry) —> Supplier rates —> PO
+  —> GRN —> QC —> Bill from GRN —> Payment —> Debit note
+```
+
+Traced on a real order to be sure of the links, not inferred from menu names:
+**PO-0514** (₹6,279) —> **GRN-0480** (challan 1872-1887) —> supplier bill
+**777/2627**. The bill's reference is the *receipt*, not the order.
+
+### There are three GRNs in that system, and only one is ours
+
+| GRN type | Against | Goods arrive from | Module |
+|---|---|---|---|
+| **Purchase Order GRN** | A purchase order | A supplier — goods we bought | **Purchase. Ours.** |
+| Job Work GRN | A job-work order | A job worker — our material back | MO Job work |
+| GRN JW Customer | A sales order | A customer — their material in | Customer GRN |
+
+The other two belong to modules that do not exist here yet. Building them now
+would mean guessing at production and sales at the same time.
+
+### Four decisions, his, on 18 Sep
+
+1. **Receive and inspect on one screen.** The old ERP splits them — a store
+   keeper records the arrival, then the receipt waits in *Pending GRN for QC*
+   for somebody else to enter approve and reject quantities. At this mill the
+   same person does both, so a second screen would be a queue with one name in
+   it. Our GRN line already carried ordered / received / rejected / accepted
+   together, so nothing had to be rebuilt to honour this.
+2. **Keep the gate entry and challan fields.** All thirteen.
+3. **One bill covers several receipts, from day one.**
+4. **Roll barcodes later.** The old system prints barcode labels for received
+   fabric rolls. Not started.
+
+### What was built
+
+- **Fourteen delivery columns on `grn`** — migration
+  `20260918064500_grn_delivery_details`, hand-written and applied additively.
+  See [MIGRATION-NOTES.md](MIGRATION-NOTES.md); the generated version of it
+  wanted to drop the other team's BOM tables.
+- **The receiving screen** now has a *Delivery paperwork* panel (open by
+  default, foldable) with gate entry, challan, the supplier's bill and invoice,
+  packages, driver, form no, client, ordered by and reference — plus a time
+  field beside the date, because two deliveries from one supplier on one day
+  are told apart by nothing else. All optional: somebody at the gate with a
+  lorry waiting must never be stopped by a blank driver name.
+- **One order line can be split across stores.** A `+` on each row, as the old
+  grid's Location/Qty repeater does it. 800kg going 500 to the godown and 300
+  to the works is one receipt, not two.
+- **The Goods Receipt Note prints**, at `/print/goods-receipt/[id]`, on the
+  purchase order's sheet — same navy, same letterhead. Three header blocks,
+  the items, the money, and Prepared By / Inspected By / Authorized By.
+- **A bill can now gather several receipts.** The picker adds rather than
+  replaces, refuses a receipt from another supplier or one already on the bill,
+  and drops the order link once the bill spans two orders — the header cannot
+  honestly name one then.
+
+### The two traps this work walked into
+
+- **The over-receipt check had to learn to add up.** It compared each row
+  against what was due. Once a line could appear twice for two stores, two rows
+  of 500 would each pass against an order for 800. It now sums the receipt's
+  own rows per order line first. Verified: two rows of 10 against 5 still due
+  is refused, and the message says 20.
+- **A second padded wrapper costs a printed page.** The `(print)` layout
+  already puts every sheet on `.print-surface`, whose padding is reset for the
+  printer. The note added its own padded wrapper inside it, whose inline
+  padding cannot be reset — and a two-line receipt came out on two sheets.
+  Found by counting `/Type /Page` in the PDF, which is the only test that
+  counts. One page now.
+
+### Checked end to end against the live database
+
+PO-0001 —> **GRN-2627-0001** (60 to Trims & Accessories with 5 rejected, 40 to
+Fabric Godown) —> **GRN-2627-0002** (the last 5) —> the order reads COMPLETED
+—> one bill **PB-2627-0001** pulling all three lines from both receipts, ₹62
+—> billing them a second time refused with *"only 0 is left to bill on
+GRN-2627-0001"*.
+
+**Those documents are real and are still on the system.** They were made to
+test the chain, on his test order. Cancelling the bill and the two receipts
+reverses the stock if he would rather they went.
+
+### Still not built
+
+The QC split (deliberately — see decision 1), roll barcodes, and the whole of
+Provisional PO / supplier rate comparison, which sits *before* the order rather
+than after it.
+
 ## Where we left off (Thu 17 Sep 2026) — READ THIS FIRST
 
 The purchase module is built: orders, goods receipt, bills with a three-way
@@ -147,14 +244,40 @@ from:
 window of about 500px. Screenshots taken at `--window-size=390` are a 500px
 page cropped to 390, which looks exactly like a layout that overflows — and I
 reported a shell overflow bug on that basis that did not exist. To render a
-true phone width, put the page in a 390px iframe inside a wider window.
+true phone width, put the page in a 390px iframe inside a wider window —
+or drive Chrome over the DevTools protocol and set
+`Emulation.setDeviceMetricsOverride`, which gives a real 390px viewport and,
+unlike a screenshot, can click things. Node 24 has a global `WebSocket`, so
+that needs no package: launch with `--remote-debugging-port`, read the target
+from `/json/list`, and drive it with `Runtime.evaluate` and
+`Page.captureScreenshot`. Watch out that Chrome's `innerText` applies
+`text-transform`, so a section heading styled in small capitals is `TOTALS`
+and never `Totals`.
 
 **Two things the form deliberately does not do**, both because he checked the
 old ERP and said so:
-- **Charges are not calculated.** Only CGST and SGST work themselves out. He
-  asked for auto-calculated charges, then looked at the old system and
-  reversed it. The `ChargeType.percentOfValue` column exists from that hour
-  and is **not in use** — it is left in place rather than migrated away twice
+- **Charges are still not calculated, but they can be worked out on request.**
+  Nothing about a charge fills itself in. Since 18 Sep every charge row — and
+  the Other charges box — carries a small `%` button that opens a strip
+  underneath it reading `[5] % of gross total ₹55.00 → ₹2.75 [Use]`. It shows
+  its working, it is typed over freely, and it writes the figure into the box
+  only when Use is pressed. What is saved is a plain amount; no percentage is
+  stored on the order, because the supplier agreed to a number and an order
+  that recalculated itself later would stop matching their copy.
+
+  The box opens on `ChargeType.percentOfValue` when the mill has set one
+  (Masters → Charges → "Usual % of order"), and otherwise on the rate printed
+  on the row. Those two are different things and it is worth keeping straight:
+  `defaultGstRate` is the **tax on** the charge, `percentOfValue` is **how big
+  the charge usually is**. They are frequently the same number, which is
+  exactly why they get confused. Transport Charges is the only row with a
+  usual size set (5%) — the rest fall back to their GST rate, which is at
+  least the number in front of the buyer.
+
+  `percentOfValue` was dead from 17 to 18 Sep. The migration
+  `20260917051240_charge_type_percent_of_value` had already added the column,
+  so wiring it up needed **no migration** — the API schema, the master form
+  and the helper were the whole job.
 - **The rate does not pre-fill** from the item master. A rate nobody typed is
   a rate nobody checked. The GST rate still pre-fills: that is a fact about
   the item, not a negotiated price

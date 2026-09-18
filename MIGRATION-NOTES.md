@@ -7,6 +7,108 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 18 Sep 2026 — a goods receipt records the delivery it came from
+
+**Migration:** `20260918064500_grn_delivery_details`
+**Branch:** `feat/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changes
+
+Fourteen nullable columns on `grn`, and one foreign key. Additive only:
+nothing renamed, nothing dropped, no existing row rewritten. There are no
+receipts on the system yet, so nothing can even be affected.
+
+| Column | Holds |
+|---|---|
+| `gateEntryNo`, `gateEntryDate` | The security gate's own record, written before the goods reach the store |
+| `challanNo`, `challanDate` | The supplier's delivery challan — the paper that travels with the goods |
+| `supplierBillNo` | The bill number as handed over at the gate |
+| `supplierInvoiceNo`, `supplierInvoiceDate` | The supplier's invoice, caught on arrival |
+| `packageCount` | Bales, cartons or rolls off the vehicle |
+| `driverName` | |
+| `formNo`, `clientName`, `orderedBy`, `referenceNo` | Reference numbers from other people's systems |
+| `createdById` | Who recorded it. Prints as "Prepared By" |
+
+`createdById` is `ON DELETE SET NULL`, not cascade: somebody leaving the mill
+must not take the goods receipts they recorded with them.
+
+### Why
+
+Surveyed off the mill's live Absolute ERP on 18 Sep 2026. Every one of these
+had a box on its GRN form, and they are what settles a query about a supplier's
+bill months later — the gate entry is our own independent trace that a lorry
+came, and the challan is what physically travelled with the goods. A receipt
+that cannot be tied back to a physical delivery is one nobody can defend.
+
+All of them are optional. The person typing is at the gate with a lorry
+waiting, and a receipt refused because the driver's name was blank would put
+the stock figure behind the goods.
+
+### Why it is hand-written
+
+`prisma migrate dev` cannot be used. The generated diff for this change was
+read first, and alongside the fourteen `ADD COLUMN`s it contained:
+
+```sql
+DROP TABLE "bom_line_sizes";
+DROP COLUMN "departmentId";
+DROP TYPE "BOMStatus";
+```
+
+That is the other team's BOM work, which is applied to the shared database and
+is still not in this repo's schema. Prisma reads it as drift and offers to
+"fix" it by deleting it. **The answer is still no.** The SQL in the migration
+folder is the fourteen columns and the key, and nothing else.
+
+### How it was applied
+
+```bash
+cd packages/database
+npx prisma db execute --file prisma/migrations/20260918064500_grn_delivery_details/migration.sql --schema prisma/schema.prisma
+npx prisma migrate resolve --applied 20260918064500_grn_delivery_details
+```
+
+`db execute` runs the file and never diffs the schema, so it cannot offer to
+reset anything. `migrate resolve` then records it as applied so the next person
+is not told it is pending.
+
+Row counts taken immediately before and again immediately after — **identical
+on every table**:
+
+| Table | Before | After |
+|---|---|---|
+| `purchase_orders` | 1 | 1 |
+| `purchase_order_lines` | 1 | 1 |
+| `purchase_order_charges` | 1 | 1 |
+| `grn` | 0 | 0 |
+| `grn_lines` | 0 | 0 |
+| `purchase_invoices` | 0 | 0 |
+| `suppliers` | 17 | 17 |
+| `items` | 43 | 43 |
+| `stock_ledger` | 61 | 61 |
+| `users` | 5 | 5 |
+
+The BOM tables the generated migration wanted to drop were checked afterwards
+and are all still there, columns intact: `bom` (16), `bom_lines` (12),
+`bom_line_sizes` (6).
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+Without `db:generate` your Prisma client does not know the fourteen columns
+exist and every read of `grn` fails with `The column grn.gateEntryNo does not
+exist`. Orders, bills, stock and the masters are unaffected.
+
+---
+
 ## 8 Sep 2026 — stock transfers and stock adjustments become documents
 
 **Migration:** `20260908102141_add_stock_transfer_and_adjustment_documents`

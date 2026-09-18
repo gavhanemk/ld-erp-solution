@@ -1,7 +1,8 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
+import { createPortal } from 'react-dom'
 import {
   Plus,
   Pencil,
@@ -18,23 +19,15 @@ import {
   FileText,
   Info,
   Undo2,
+  PackageCheck,
+  History,
+  MoreHorizontal,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
-
-/*
- * One row action.
- *
- * A bordered box rather than a bare glyph. A draft row carries four of these
- * and as plain icons they ran together into a grey smudge at the right edge —
- * a border says where one target ends and the next begins, and gives the
- * pointer something 28px square to find.
- */
-const ICON_BTN =
-  'border-border text-muted-foreground hover:bg-secondary hover:text-foreground inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-50'
 
 /*
  * The columns of the panel that opens under an order.
@@ -52,6 +45,157 @@ const INNER_COLS: Array<{ label: string; width: string }> = [
   { label: 'Rate', width: '10%' },
   { label: 'Amount', width: '12%' },
 ]
+
+/** One line of the actions menu. */
+interface RowAction {
+  key: string
+  label: string
+  icon: React.ReactNode
+  /** A link opens a screen; a press does something to the order. */
+  href?: string
+  newTab?: boolean
+  onClick?: () => void
+  danger?: boolean
+}
+
+/**
+ * What can be done to one order, in words.
+ *
+ * This row used to carry six bare icons. Printer and bin are read at a glance;
+ * a box, a clock and a curved arrow are not, and Mahesh said so — nobody
+ * should have to hover six squares to find out which one books in a delivery.
+ * Words cost one press and remove the guessing.
+ *
+ * The panel is positioned `fixed` off the button's own rectangle rather than
+ * absolutely inside the row, because the table sits in a card that clips its
+ * overflow and the last row's menu would be cut in half by it. It closes on a
+ * press outside, on Escape, and on a scroll — a menu that floats away from
+ * the row it belongs to is worse than one that shuts.
+ */
+function ActionMenu({ label, items }: { label: string; items: RowAction[] }) {
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
+
+  /**
+   * Where the panel goes, measured off the button's own rectangle.
+   *
+   * Taken at the moment of the press rather than in an effect afterwards. An
+   * effect runs a render later, by which time the row can have moved — and a
+   * menu that opens a hand's width away from the button nobody pressed is
+   * worse than no menu.
+   *
+   * Flipped above the button when the row is near the foot of the window, so
+   * the last order on a full page is not the one whose menu runs off screen.
+   */
+  const place = () => {
+    const r = btnRef.current?.getBoundingClientRect()
+    if (!r) return
+    const needed = items.length * 38 + 16
+    const below = window.innerHeight - r.bottom - 12
+    setPos({
+      top: below < needed && r.top > needed ? r.top - needed - 6 : r.bottom + 6,
+      right: Math.max(8, window.innerWidth - r.right),
+    })
+  }
+
+  // A menu anchored to a row must not float away from it. Anything that moves
+  // the row under it — a scroll, a resize — shuts it, and so does Escape.
+  useEffect(() => {
+    if (!open) return
+    const shut = () => setOpen(false)
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('resize', shut)
+    window.addEventListener('scroll', shut, true)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('resize', shut)
+      window.removeEventListener('scroll', shut, true)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const ITEM =
+    'flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50'
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => {
+          if (open) {
+            setOpen(false)
+            return
+          }
+          place()
+          setOpen(true)
+        }}
+        className="border-border text-muted-foreground hover:bg-secondary hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+      >
+        Actions
+        <MoreHorizontal size={14} />
+      </button>
+
+      {/* Rendered into the body, not into the row.
+          `.glass-card` carries a `backdrop-filter`, and that makes the card a
+          containing block for anything positioned `fixed` inside it — so the
+          panel took its coordinates from the card's corner rather than the
+          window's and opened a couple of hundred pixels below the button. A
+          portal puts it back on the viewport, and clears the card's
+          `overflow-hidden` at the same time. */}
+      {open &&
+        pos &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
+            <div
+              role="menu"
+              aria-label={label}
+              className="border-border bg-card fixed z-50 min-w-[14rem] overflow-hidden rounded-xl border py-1 shadow-xl"
+              style={{ top: pos.top, right: pos.right }}
+            >
+              {items.map((it) =>
+                it.href ? (
+                  <Link
+                    key={it.key}
+                    href={it.href}
+                    target={it.newTab ? '_blank' : undefined}
+                    role="menuitem"
+                    className={`${ITEM} text-foreground`}
+                    onClick={() => setOpen(false)}
+                  >
+                    {it.icon}
+                    {it.label}
+                  </Link>
+                ) : (
+                  <button
+                    key={it.key}
+                    type="button"
+                    role="menuitem"
+                    className={`${ITEM} ${it.danger ? 'text-red-400' : 'text-foreground'}`}
+                    onClick={() => {
+                      setOpen(false)
+                      it.onClick?.()
+                    }}
+                  >
+                    {it.icon}
+                    {it.label}
+                  </button>
+                )
+              )}
+            </div>
+          </>,
+          document.body
+        )}
+    </>
+  )
+}
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   DRAFT: { label: 'Draft', cls: 'badge-neutral' },
@@ -193,78 +337,89 @@ export default function PurchaseOrdersPage() {
    * draft or a cancelled order may be deleted — and a second copy would
    * eventually disagree with this one about a live document.
    */
-  const rowActions = (po: PurchaseOrder) => (
-    <>
-      <Link
-        href={`/print/purchase-order/${po.id}`}
-        target="_blank"
-        className={ICON_BTN}
-        title="Print"
-        aria-label={`Print ${po.poNumber}`}
-      >
-        <Printer size={15} />
-      </Link>
-      {/* A sent order cannot be edited in place — the supplier is working
-          from paper. It can be pulled back to a draft, which is a decision
-          rather than a slip: it asks first and it is written to the activity
-          log. Gone once a receipt or a bill exists against the order, because
-          those reconcile against it line by line. */}
-      {po.status === 'SENT' && (
-        <button
-          className={ICON_BTN}
-          onClick={() => void act(po, 'reopen')}
-          disabled={busy}
-          title="Reopen as a draft so it can be changed"
-          aria-label={`Reopen ${po.poNumber} as a draft`}
-        >
-          <Undo2 size={15} />
-        </button>
-      )}
-      {po.status === 'DRAFT' && (
-        <>
-          <button
-            className={ICON_BTN}
-            onClick={() => setDialog({ open: true, record: po })}
-            title="Edit"
-            aria-label={`Edit ${po.poNumber}`}
-          >
-            <Pencil size={15} />
-          </button>
-          <button
-            className={`${ICON_BTN} hover:text-teal-400`}
-            onClick={() => void act(po, 'send')}
-            disabled={busy}
-            title="Mark as sent to the supplier"
-            aria-label={`Mark ${po.poNumber} sent`}
-          >
-            <Send size={15} />
-          </button>
-        </>
-      )}
-      {po.status !== 'CANCELLED' && po.status !== 'COMPLETED' && (
-        <button
-          className={`${ICON_BTN} hover:text-red-400`}
-          onClick={() => void act(po, 'cancel')}
-          disabled={busy}
-          title="Cancel"
-          aria-label={`Cancel ${po.poNumber}`}
-        >
-          <Ban size={15} />
-        </button>
-      )}
-      {(po.status === 'DRAFT' || po.status === 'CANCELLED') && (
-        <button
-          className={`${ICON_BTN} hover:text-red-400`}
-          onClick={() => void remove(po)}
-          disabled={busy}
-          title="Delete for good"
-          aria-label={`Delete ${po.poNumber}`}
-        >
-          <Trash2 size={15} />
-        </button>
-      )}
-    </>
-  )
+  const rowActions = (po: PurchaseOrder): RowAction[] => {
+    const items: RowAction[] = [
+      {
+        key: 'print',
+        label: 'Print order',
+        icon: <Printer size={15} />,
+        href: `/print/purchase-order/${po.id}`,
+        newTab: true,
+      },
+    ]
+
+    // Booking in a delivery, and the deliveries already booked in. The mill's
+    // old ERP carried Add GRN and View History of GRN on the order row itself,
+    // and that is where somebody looks for them: they are holding this order's
+    // paperwork. Both lead to the receipt screen rather than opening a form
+    // here, so the store keeper lands where the rest of the receiving work is.
+    if (po.status === 'SENT' || po.status === 'PARTIALLY_RECEIVED') {
+      items.push({
+        key: 'receive',
+        label: 'Receive goods',
+        icon: <PackageCheck size={15} />,
+        href: `/purchase/grn?receive=${po.id}`,
+      })
+    }
+    if (po.status !== 'DRAFT') {
+      items.push({
+        key: 'history',
+        label: 'Goods receipt history',
+        icon: <History size={15} />,
+        href: `/purchase/grn?q=${encodeURIComponent(po.poNumber)}`,
+      })
+    }
+
+    // A sent order cannot be edited in place — the supplier is working from
+    // paper. It can be pulled back to a draft, which is a decision rather than
+    // a slip: it asks first and it is written to the activity log. Gone once a
+    // receipt or a bill exists against the order, because those reconcile
+    // against it line by line.
+    if (po.status === 'SENT') {
+      items.push({
+        key: 'reopen',
+        label: 'Reopen as a draft',
+        icon: <Undo2 size={15} />,
+        onClick: () => void act(po, 'reopen'),
+      })
+    }
+    if (po.status === 'DRAFT') {
+      items.push(
+        {
+          key: 'edit',
+          label: 'Edit order',
+          icon: <Pencil size={15} />,
+          onClick: () => setDialog({ open: true, record: po }),
+        },
+        {
+          key: 'send',
+          label: 'Mark as sent to supplier',
+          icon: <Send size={15} />,
+          onClick: () => void act(po, 'send'),
+        }
+      )
+    }
+    if (po.status !== 'CANCELLED' && po.status !== 'COMPLETED') {
+      items.push({
+        key: 'cancel',
+        label: 'Cancel order',
+        icon: <Ban size={15} />,
+        onClick: () => void act(po, 'cancel'),
+        danger: true,
+      })
+    }
+    if (po.status === 'DRAFT' || po.status === 'CANCELLED') {
+      items.push({
+        key: 'delete',
+        label: 'Delete for good',
+        icon: <Trash2 size={15} />,
+        onClick: () => void remove(po),
+        danger: true,
+      })
+    }
+
+    return items
+  }
 
   const money = (v: string | number) =>
     Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -441,7 +596,7 @@ export default function PurchaseOrdersPage() {
                         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         {expanded ? 'Hide items' : 'Item details'}
                       </button>
-                      <div className="flex gap-1">{rowActions(po)}</div>
+                      <ActionMenu label={`Actions for ${po.poNumber}`} items={rowActions(po)} />
                     </div>
 
                     {expanded && lines.length > 0 && (
@@ -643,7 +798,12 @@ export default function PurchaseOrdersPage() {
                             <span className={s.cls}>{s.label}</span>
                           </td>
                           <td className="whitespace-nowrap text-right">
-                            <div className="flex justify-end gap-1">{rowActions(po)}</div>
+                            <div className="flex justify-end">
+                              <ActionMenu
+                                label={`Actions for ${po.poNumber}`}
+                                items={rowActions(po)}
+                              />
+                            </div>
                           </td>
                         </tr>
 

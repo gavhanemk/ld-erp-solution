@@ -232,6 +232,18 @@ export function PurchaseBillDialog({
     [grns, supplierId],
   )
 
+  /**
+   * The receipts already gathered onto this bill, in order, without repeats.
+   *
+   * Drives the wording around the picker: the box has to say whether pressing
+   * it starts the bill or adds to it, and somebody halfway through gathering a
+   * week of deliveries needs to see which ones are already on.
+   */
+  const billedReceipts = useMemo(
+    () => [...new Set(lines.map((l) => l.grnNumber).filter(Boolean))] as string[],
+    [lines],
+  )
+
   const taxMode = !supplier
     ? null
     : !supplier.gstin && !isReverseCharge
@@ -300,7 +312,22 @@ export function PurchaseBillDialog({
     })
   }
 
-  /** Fills the bill from a receipt, so nobody retypes what they already entered. */
+  /**
+   * Adds a receipt's lines to the bill, so nobody retypes what they already
+   * entered.
+   *
+   * Adds rather than replaces, and can be pressed again for another receipt.
+   * Suppliers routinely bill a week of deliveries on one invoice, the mill's
+   * old ERP let you tick several receipts and press Create Bill, and Mahesh
+   * asked for that from day one — so a bill covers as many receipts as it
+   * needs to. The three-way match already worked this way: it sums what has
+   * been billed against each receipt line, from every bill, so nothing is
+   * claimed twice however the lines were gathered.
+   *
+   * Two things are refused. A receipt from a different supplier, because a
+   * bill is somebody's demand for money and it comes from one of them. And a
+   * receipt already on this bill, which would double the quantity.
+   */
   const pullFromGrn = async () => {
     if (!pullGrnId) return
     setPulling(true)
@@ -333,23 +360,63 @@ export function PurchaseBillDialog({
         return
       }
 
+      const existing = lines.filter((l) => l.grnLineId)
+
+      if (existing.length && supplierId && supplierId !== d.po.supplier.id) {
+        setError(
+          `${d.grn.grnNumber} is from a different supplier. One bill is one supplier's demand for money — start a separate bill for it.`,
+        )
+        return
+      }
+
+      const already = new Set(existing.map((l) => l.grnLineId))
+      const fresh = open.filter((l) => !already.has(l.grnLineId))
+
+      if (!fresh.length) {
+        setError(`${d.grn.grnNumber} is already on this bill.`)
+        return
+      }
+
       setSupplierId(d.po.supplier.id)
-      setPoId(d.po.id)
-      setLines(
-        open.map((l) => ({
-          itemId: l.item.id,
-          grnLineId: l.grnLineId,
-          description: '',
-          qty: String(l.pendingQty),
-          unitPrice: String(l.orderedRate),
-          discount: '0',
-          gstRate: String(l.gstRate),
-          acceptedQty: l.acceptedQty,
-          pendingQty: l.pendingQty,
-          orderedRate: l.orderedRate,
-          grnNumber: d.grn.grnNumber,
-        })),
-      )
+
+      /*
+       * The order link only survives while the bill is about one order.
+       *
+       * Once receipts from two orders are on it the header cannot honestly
+       * name one, and naming the first would make the bill look like it
+       * settles an order it only half touches. The lines still carry their
+       * receipt, and the receipt still carries its order, so nothing is lost
+       * — it is only the shortcut at the top that goes.
+       */
+      setPoId((prev) => (!prev || prev === d.po.id ? d.po.id : ''))
+
+      const pulled = fresh.map((l) => ({
+        itemId: l.item.id,
+        grnLineId: l.grnLineId,
+        description: '',
+        qty: String(l.pendingQty),
+        unitPrice: String(l.orderedRate),
+        discount: '0',
+        gstRate: String(l.gstRate),
+        acceptedQty: l.acceptedQty,
+        pendingQty: l.pendingQty,
+        orderedRate: l.orderedRate,
+        grnNumber: d.grn.grnNumber,
+      }))
+
+      /*
+       * Blank rows typed before the first pull are dropped, and only then.
+       * A new bill opens with one empty line and keeping it would leave a row
+       * with no item on a bill somebody is about to save.
+       */
+      setLines((prev) => {
+        const keep = prev.filter((l) => l.grnLineId || l.itemId)
+        return [...keep, ...pulled]
+      })
+
+      // Cleared so the next receipt is a deliberate choice rather than a
+      // second press of the same one.
+      setPullGrnId('')
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not read that goods receipt.')
     } finally {
@@ -449,7 +516,7 @@ export function PurchaseBillDialog({
               <div className="flex flex-wrap items-end gap-3">
                 <div className="flex-1 min-w-[240px]">
                   <label className="form-label" htmlFor="bill-grn">
-                    Start from a goods receipt
+                    {billedReceipts.length ? 'Add another goods receipt' : 'Start from a goods receipt'}
                   </label>
                   <select
                     id="bill-grn"
@@ -473,13 +540,15 @@ export function PurchaseBillDialog({
                   disabled={!pullGrnId || pulling}
                 >
                   {pulling ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                  Pull lines
+                  {billedReceipts.length ? 'Add lines' : 'Pull lines'}
                 </button>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
                 {pullable.length === 0
                   ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
-                  : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it.'}
+                  : billedReceipts.length
+                    ? `On this bill: ${billedReceipts.join(', ')}. Pick another receipt to add it — one bill can settle as many deliveries as the supplier invoiced together.`
+                    : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
               </p>
             </div>
           )}

@@ -1382,6 +1382,7 @@ const grnInclude = {
       supplier: { select: { id: true, name: true, code: true } },
     },
   },
+  createdBy: { select: { id: true, name: true } },
   lines: {
     include: {
       item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
@@ -1504,6 +1505,120 @@ router.get('/grn', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+/**
+ * Everything the printed note needs, in one call.
+ *
+ * The figures are worked out here rather than on the sheet. A printed document
+ * that does its own arithmetic is a second implementation of the arithmetic,
+ * and the two drift — the sheet is for laying out numbers, not deciding them.
+ *
+ * What it values is what was **accepted**, at the order's rate. Rejected goods
+ * are on the note as a quantity so the driver and the store keeper can see
+ * them, but they are worth nothing: they never entered stock and they are not
+ * going to be paid for.
+ */
+router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const grn = await prisma.gRN.findUnique({
+    where: { id: req.params.id },
+    include: {
+      createdBy: { select: { id: true, name: true } },
+      po: {
+        include: {
+          supplier: true,
+          deliveryWarehouse: { select: { id: true, name: true } },
+        },
+      },
+      lines: {
+        include: {
+          item: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+              hsnCode: true,
+              uom: { select: { symbol: true } },
+            },
+          },
+          warehouse: { select: { id: true, name: true } },
+          poLine: {
+            select: { id: true, discount: true, gstRate: true, hsnCode: true, description: true },
+          },
+        },
+      },
+    },
+  })
+  if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('GRN')
+
+  /*
+   * The order decides the tax split, not this receipt.
+   *
+   * Which of IGST or CGST+SGST applies was settled when the order was raised —
+   * it follows the place of supply — and a receipt cannot change it. Read off
+   * the order's own figures rather than worked out again, so the note and the
+   * order can never disagree about what kind of tax this is.
+   */
+  const taxMode =
+    Number(grn.po.igst) > 0 ? 'IGST' : Number(grn.po.cgst) > 0 ? 'CGST_SGST' : 'NONE'
+
+  const lines = grn.lines.map((l) => {
+    const accepted = Number(l.acceptedQty)
+    const rate = Number(l.unitRate)
+    const discountPct = Number(l.poLine?.discount ?? 0)
+    const gstPct = taxMode === 'NONE' ? 0 : Number(l.poLine?.gstRate ?? 0)
+
+    const gross = accepted * rate
+    const discount = gross * (discountPct / 100)
+    const taxable = gross - discount
+
+    return {
+      ...l,
+      discountPct,
+      gstPct,
+      gross: round2(gross),
+      discountAmount: round2(discount),
+      taxable: round2(taxable),
+      tax: round2(taxable * (gstPct / 100)),
+    }
+  })
+
+  const subtotal = round2(lines.reduce((sum, l) => sum + l.gross, 0))
+  const discount = round2(lines.reduce((sum, l) => sum + l.discountAmount, 0))
+  const taxable = round2(lines.reduce((sum, l) => sum + l.taxable, 0))
+  const tax = round2(lines.reduce((sum, l) => sum + l.tax, 0))
+
+  /*
+   * Rounded to the rupee, as an Indian document is settled, and the difference
+   * is shown. Without that row the figures above add up to something else and
+   * nothing on the paper says why.
+   */
+  const beforeRound = taxable + tax
+  const total = Math.round(beforeRound)
+
+  res.json({
+    success: true,
+    data: {
+      ...header,
+      grn: { ...grn, lines },
+      totals: {
+        subtotal,
+        discount,
+        taxable,
+        cgst: taxMode === 'CGST_SGST' ? round2(tax / 2) : 0,
+        sgst: taxMode === 'CGST_SGST' ? round2(tax / 2) : 0,
+        igst: taxMode === 'IGST' ? tax : 0,
+        tax,
+        roundOff: round2(total - beforeRound),
+        total,
+        rejectedQty: lines.reduce((sum, l) => sum + Number(l.rejectedQty), 0),
+      },
+      totalInWords: amountInWords(total),
+      taxMode,
+    },
+  })
+})
+
 router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const grn = await prisma.gRN.findUnique({ where: { id: req.params.id }, include: grnInclude })
   if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
@@ -1553,6 +1668,21 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       po.lines.map((l) => l.id)
     )
 
+    /*
+     * What this receipt is booking against each order line, added up first.
+     *
+     * One order line may be split across stores — 500kg to the godown and
+     * 300kg to the works is one delivery, not two — so the quantity that has
+     * to be checked against the order is the sum of this receipt's rows, not
+     * any single row. Checking them one at a time would let two rows of 500
+     * through against an order for 800.
+     */
+    const bookingByPoLine = new Map<string, number>()
+    for (const line of data.lines) {
+      const accepted = round3(round3(line.receivedQty) - round3(line.rejectedQty ?? 0))
+      bookingByPoLine.set(line.poLineId, round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted))
+    }
+
     // Every line is checked before anything is written. A receipt that books
     // three items in and then refuses the fourth would leave the store keeper
     // guessing which ones landed.
@@ -1572,11 +1702,13 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       const ordered = Number(poLine.qty)
       const soFar = already.get(poLine.id) ?? 0
 
-      if (round3(soFar + accepted) > ordered) {
+      const booking = bookingByPoLine.get(poLine.id) ?? accepted
+
+      if (round3(soFar + booking) > ordered) {
         const pending = round3(ordered - soFar)
         throw new AppError(
           pending > 0
-            ? `${poLine.item.name}: only ${pending} of the ${ordered} ordered is still due, and you are booking in ${accepted}. Raise a new order for the extra.`
+            ? `${poLine.item.name}: only ${pending} of the ${ordered} ordered is still due, and you are booking in ${booking}. Raise a new order for the extra.`
             : `${poLine.item.name}: all ${ordered} ordered has already been received.`,
           400,
           'OVER_RECEIPT'
@@ -1627,6 +1759,26 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
         // would be a receipt claiming stock the ledger does not have.
         status: 'ACCEPTED',
         notes: data.notes ?? null,
+
+        // The delivery's own paperwork, exactly as it was handed over.
+        gateEntryNo: data.gateEntryNo ?? null,
+        gateEntryDate: data.gateEntryDate ?? null,
+        challanNo: data.challanNo ?? null,
+        challanDate: data.challanDate ?? null,
+        supplierBillNo: data.supplierBillNo ?? null,
+        supplierInvoiceNo: data.supplierInvoiceNo ?? null,
+        supplierInvoiceDate: data.supplierInvoiceDate ?? null,
+        packageCount: data.packageCount ?? null,
+        driverName: data.driverName ?? null,
+        formNo: data.formNo ?? null,
+        clientName: data.clientName ?? null,
+        orderedBy: data.orderedBy ?? null,
+        referenceNo: data.referenceNo ?? null,
+
+        // Prints as "Prepared By" on the note. Taken from the session rather
+        // than typed, because a signature line somebody can fill in with
+        // anybody's name is not a signature line.
+        createdById: req.user?.id ?? null,
         lines: {
           create: prepared.map((p) => ({
             poLineId: p.poLine.id,

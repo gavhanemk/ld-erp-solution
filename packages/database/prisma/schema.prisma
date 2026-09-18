@@ -267,6 +267,7 @@ model User {
   movedStock      StockTransfer[]           @relation("TransferMovedBy")
   cancelledStock  StockTransfer[]           @relation("TransferCancelledBy")
   countedStock    StockAdjustment[]         @relation("AdjustmentMadeBy")
+  receivedGoods   GRN[]                     @relation("GRNCreatedBy")
 
   @@index([email])
   @@index([roleId])
@@ -1155,17 +1156,74 @@ model PurchaseOrderLine {
   @@map("purchase_order_lines")
 }
 
+/// A delivery, as the gate saw it.
+///
+/// The paperwork below is not decoration. When a supplier's bill is queried
+/// months later, what settles it is the gate entry, the challan the driver
+/// handed over and the vehicle it came on — and in the mill's old system every
+/// one of those had a box on this form. They were surveyed off the live
+/// Absolute ERP on 18 Sep 2026 and added here on the same day, because a
+/// receipt that cannot be tied back to a physical delivery is a receipt
+/// nobody can defend.
+///
+/// All of it is optional. A receipt typed in a hurry with nothing but
+/// quantities is still a receipt, and refusing to save one because the driver's
+/// name was not known would put the stock figure behind the goods.
 model GRN {
   id        String        @id @default(cuid())
   grnNumber String        @unique
   poId      String
   po        PurchaseOrder @relation(fields: [poId], references: [id])
+  /// Carries the time as well as the day. The old form asked for the hour and
+  /// the minute separately; two deliveries from the same supplier on one day
+  /// are told apart by nothing else.
   grnDate   DateTime      @default(now())
   vehicleNo String?
   status    GRNStatus     @default(DRAFT)
   notes     String?
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+
+  /// The security gate's own record, written before the goods reach the store.
+  /// It is the first independent trace that a delivery happened at all.
+  gateEntryNo   String?
+  gateEntryDate DateTime?
+
+  /// The supplier's delivery challan — the document that physically travels
+  /// with the goods. Often a range ("1872 - 1887") when one delivery covers
+  /// several challans, which is why it is text and not a number.
+  challanNo   String?
+  challanDate DateTime?
+
+  /// The supplier's own paperwork, as it arrived with the lorry.
+  ///
+  /// Recorded here as well as on the bill on purpose: the invoice turns up
+  /// with the goods long before accounts book it, and the number caught at the
+  /// gate is what the booked bill gets checked against.
+  supplierBillNo      String?
+  supplierInvoiceNo   String?
+  supplierInvoiceDate DateTime?
+
+  /// How many bales, cartons or rolls came off the vehicle. A count of
+  /// packages, not of goods — it is what the gate can verify without opening
+  /// anything, and it is what a short delivery is argued over.
+  packageCount Int?
+
+  driverName String?
+
+  /// Free text, all four, and deliberately so — they are reference numbers
+  /// from other people's systems and the mill writes in them what it needs to
+  /// find the delivery again.
+  formNo      String?
+  clientName  String?
+  orderedBy   String?
+  referenceNo String?
+
+  /// Who recorded the receipt. Prints as "Prepared By" on the note, which is
+  /// the line somebody signs against.
+  createdById String?
+  createdBy   User?   @relation("GRNCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   lines     GRNLine[]
   qcRecords InwardQC[]
@@ -2126,13 +2184,16 @@ model ChargeType {
   /// share of the order: that is `percentOfValue` below, and confusing the two
   /// puts 58% of an order's value into its charge rows.
   defaultGstRate  Decimal  @default(0) @db.Decimal(5, 2)
-  /// NOT IN USE. Every row is 0 and nothing reads it.
+  /// What this charge usually comes to as a share of the order — 5% of the
+  /// goods for transport, say. Set under Masters -> Charges.
   ///
-  /// Added to work a charge out as a percentage of the order, then dropped:
-  /// the mill's old system types every charge in by hand and works out only
-  /// the GST, and that is the behaviour it wants. The column is left in place
-  /// because removing it would mean another migration against the shared
-  /// database to delete a column that holds nothing.
+  /// Never applied on its own, and a charge is still typed in on every order:
+  /// what a transporter asks for is agreed on a call, not derived. This is the
+  /// figure the purchase order's percentage helper opens at, so the usual rate
+  /// takes one press rather than a calculator. 0 means unset.
+  ///
+  /// Dead from Sep 17 to Sep 18 2026, when the buyers asked for exactly the
+  /// thing it had been added for.
   percentOfValue  Decimal  @default(0) @db.Decimal(5, 2)
   applyOnSale     Boolean  @default(true)
   applyOnPurchase Boolean  @default(false)

@@ -1,7 +1,18 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
-import { Plus, Search, RefreshCw, AlertCircle, Ban, ChevronDown, ChevronRight } from 'lucide-react'
+import {
+  Plus,
+  Search,
+  RefreshCw,
+  AlertCircle,
+  Ban,
+  ChevronDown,
+  ChevronRight,
+  Printer,
+  PackageCheck,
+} from 'lucide-react'
+import Link from 'next/link'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
 import { Pagination } from '@/components/tables/Pagination'
@@ -39,6 +50,26 @@ interface Receipt {
     supplier: { id: string; name: string } | null
   }
   lines: ReceiptLine[]
+}
+
+/**
+ * An order that has been sent and is still owed goods.
+ *
+ * The mill's old ERP put these on the receipt screen itself, with an Add GRN
+ * button on every row, and that is the right way round: a store keeper opens
+ * this screen holding a delivery challan, and what they need is the order it
+ * belongs to. A list of receipts already made answers a question they are not
+ * asking, and on a system with nothing received yet it is simply blank.
+ */
+interface WaitingOrder {
+  id: string
+  poNumber: string
+  poDate: string
+  status: string
+  reference: string | null
+  totalAmount: string | number
+  supplier?: { id: string; name: string } | null
+  lines?: Array<{ id: string; qty: string | number; receivedQty: string | number }>
 }
 
 const qty = (v: string | number) =>
@@ -80,12 +111,46 @@ export default function GoodsReceiptPage() {
   const [status, setStatus] = useState('')
   const [page, setPage] = useState(1)
   const [open, setOpen] = useState<string | null>(null)
-  const [dialog, setDialog] = useState(false)
+
+  /**
+   * The receiving form, and the order it should open on.
+   *
+   * `null` is closed; a string is the order to start from, and the empty string
+   * is the plain "Receive goods" button with nothing chosen yet.
+   */
+  const [dialog, setDialog] = useState<string | null>(null)
+
+  const [waiting, setWaiting] = useState<WaitingOrder[]>([])
+  const [waitingError, setWaitingError] = useState(false)
+  const [waitingOpen, setWaitingOpen] = useState(true)
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
     return () => clearTimeout(t)
   }, [search])
+
+  /*
+   * Arriving from a purchase order row.
+   *
+   * `?receive=<id>` opens the form already on that order — the Add GRN button
+   * on the order list. `?q=PO-0002` fills the search box instead, which is the
+   * history of one order's receipts. Read once, on the way in: after that the
+   * screen is the user's, and re-applying the address every render would fight
+   * whatever they typed next. Read off `window.location` rather than through
+   * `useSearchParams`, which would oblige this page to carry a Suspense
+   * boundary it has no other use for.
+   */
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const receive = params.get('receive')
+    if (receive) setDialog(receive)
+    const q = params.get('q')
+    if (q) {
+      setSearch(q)
+      setDebounced(q)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -111,9 +176,39 @@ export default function GoodsReceiptPage() {
     }
   }, [debounced, status, page])
 
+  /**
+   * The orders still owed goods.
+   *
+   * Two statuses, because an order that has had part of a delivery booked in
+   * is still waiting for the rest and must not drop off this list. A draft
+   * never appears: the server refuses a receipt against one, so offering it
+   * here would be a door that is certain to be shut.
+   *
+   * Its own loader rather than part of `load`, so the search box and the pager
+   * — which belong to the receipts below — do not refetch it on every
+   * keystroke.
+   */
+  const loadWaiting = useCallback(async () => {
+    setWaitingError(false)
+    try {
+      const [sent, partly] = await Promise.all([
+        api.get<Paginated<WaitingOrder>>('/purchase/orders?status=SENT&limit=100'),
+        api.get<Paginated<WaitingOrder>>('/purchase/orders?status=PARTIALLY_RECEIVED&limit=100'),
+      ])
+      setWaiting([...sent.data, ...partly.data])
+    } catch {
+      setWaiting([])
+      setWaitingError(true)
+    }
+  }, [])
+
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    void loadWaiting()
+  }, [loadWaiting])
 
   // Narrowing a filter while on page 3 would show an empty page 3 of a shorter
   // list, which reads as "nothing found" rather than "you moved".
@@ -135,6 +230,9 @@ export default function GoodsReceiptPage() {
         reason: reason.trim(),
       })
       await load()
+      // Cancelling hands the quantity back to the order, which can put it back
+      // on the waiting list or move it off completed.
+      void loadWaiting()
       if (res.message) setMessage(res.message)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not cancel it.')
@@ -151,10 +249,17 @@ export default function GoodsReceiptPage() {
           <p className="page-subtitle">What has arrived against your purchase orders</p>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
+          <button
+            className="btn-ghost"
+            onClick={() => {
+              void load()
+              void loadWaiting()
+            }}
+            disabled={loading}
+          >
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <button className="btn-primary" onClick={() => setDialog(true)}>
+          <button className="btn-primary" onClick={() => setDialog('')}>
             <Plus size={15} /> Receive goods
           </button>
         </div>
@@ -171,6 +276,109 @@ export default function GoodsReceiptPage() {
           <p className="text-sm text-emerald-400">{message}</p>
         </div>
       )}
+
+      {/* ── Orders still waiting for goods ────────────────────────────────
+
+        Above the receipts, not below them, because this is what somebody
+        holding a challan at the gate came here to find. It folds away for the
+        days when the question is "what did we receive last week" instead. */}
+      <div className="glass-card overflow-hidden p-0">
+        <button
+          type="button"
+          onClick={() => setWaitingOpen((v) => !v)}
+          className="hover:bg-secondary/40 flex w-full items-center gap-2 px-4 py-3 text-left transition-colors"
+          aria-expanded={waitingOpen}
+        >
+          {waitingOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <span className="text-foreground text-sm font-semibold">Waiting for goods</span>
+          <span className="badge-info">{waiting.length}</span>
+          <span className="text-muted-foreground ml-auto hidden text-xs sm:inline">
+            Orders sent to a supplier with something still due
+          </span>
+        </button>
+
+        {waitingOpen && (
+          <div className="border-border border-t">
+            {waitingError ? (
+              <p className="text-muted-foreground px-4 py-6 text-sm">
+                Could not load the open orders. Press refresh above to try again.
+              </p>
+            ) : waiting.length === 0 ? (
+              <p className="text-muted-foreground px-4 py-6 text-sm">
+                Nothing is waiting. Every order you have sent has been received in full.
+              </p>
+            ) : (
+              <ul className="divide-border divide-y">
+                {waiting.map((po) => {
+                  const ordered = (po.lines ?? []).reduce((t, l) => t + Number(l.qty), 0)
+                  const got = (po.lines ?? []).reduce((t, l) => t + Number(l.receivedQty), 0)
+                  const due = Math.max(0, ordered - got)
+                  const part = po.status === 'PARTIALLY_RECEIVED'
+                  return (
+                    <li
+                      key={po.id}
+                      className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3"
+                    >
+                      <div className="min-w-[9rem]">
+                        <span className="text-foreground font-mono text-xs font-semibold">
+                          {po.poNumber}
+                        </span>
+                        <p className="text-muted-foreground mt-0.5 text-xs">
+                          {formatDate(po.poDate)}
+                        </p>
+                      </div>
+
+                      <div className="min-w-0 flex-1">
+                        <p className="text-foreground truncate text-sm font-medium">
+                          {po.supplier?.name ?? '—'}
+                        </p>
+                        <p className="text-muted-foreground mt-0.5 truncate text-xs">
+                          {(po.lines ?? []).length}{' '}
+                          {(po.lines ?? []).length === 1 ? 'item' : 'items'}
+                          {po.reference ? ` — ${po.reference}` : ''}
+                        </p>
+                      </div>
+
+                      <div className="text-right">
+                        <p className="text-foreground text-sm font-semibold tabular-nums">
+                          ₹
+                          {Number(po.totalAmount).toLocaleString('en-IN', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </p>
+                        <p className="text-muted-foreground mt-0.5 text-xs tabular-nums">
+                          {part ? `${qty(due)} of ${qty(ordered)} still due` : `${qty(due)} due`}
+                        </p>
+                      </div>
+
+                      <div className="flex shrink-0 items-center gap-2">
+                        {part && <span className="badge-warning">Part received</span>}
+                        <button
+                          className="btn-primary h-8 px-3 text-xs"
+                          onClick={() => setDialog(po.id)}
+                        >
+                          <PackageCheck size={14} /> Receive
+                        </button>
+                        <button
+                          className="btn-ghost border-border h-8 rounded-lg border px-3 text-xs"
+                          onClick={() => {
+                            setSearch(po.poNumber)
+                            setStatus('')
+                          }}
+                          title={`Show the receipts already made against ${po.poNumber}`}
+                        >
+                          History
+                        </button>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="glass-card overflow-hidden p-0">
         <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
@@ -261,17 +469,31 @@ export default function GoodsReceiptPage() {
                         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                         {expanded ? 'Hide items' : 'What arrived'}
                       </button>
-                      {grn.status !== 'CANCELLED' && (
-                        <button
-                          className="btn-ghost border-border rounded-lg border p-1.5 hover:text-red-400"
-                          onClick={() => void cancel(grn)}
-                          disabled={busy === grn.id}
-                          title="Cancel this receipt"
-                          aria-label={`Cancel ${grn.grnNumber}`}
+                      <div className="flex gap-1">
+                        {/* Printable even once cancelled. A cancelled receipt
+                          is still the record of a delivery that happened, and
+                          somebody will need the paper for it. */}
+                        <Link
+                          href={`/print/goods-receipt/${grn.id}`}
+                          target="_blank"
+                          className="btn-ghost border-border rounded-lg border p-1.5"
+                          title="Print the goods receipt note"
+                          aria-label={`Print ${grn.grnNumber}`}
                         >
-                          <Ban size={15} />
-                        </button>
-                      )}
+                          <Printer size={15} />
+                        </Link>
+                        {grn.status !== 'CANCELLED' && (
+                          <button
+                            className="btn-ghost border-border rounded-lg border p-1.5 hover:text-red-400"
+                            onClick={() => void cancel(grn)}
+                            disabled={busy === grn.id}
+                            title="Cancel this receipt"
+                            aria-label={`Cancel ${grn.grnNumber}`}
+                          >
+                            <Ban size={15} />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     {expanded && (
@@ -368,6 +590,15 @@ export default function GoodsReceiptPage() {
                             <span className={s.cls}>{s.label}</span>
                           </td>
                           <td className="whitespace-nowrap text-right">
+                            <Link
+                              href={`/print/goods-receipt/${grn.id}`}
+                              target="_blank"
+                              className="btn-ghost p-1.5"
+                              title="Print the goods receipt note"
+                              aria-label={`Print ${grn.grnNumber}`}
+                            >
+                              <Printer size={15} />
+                            </Link>
                             {grn.status !== 'CANCELLED' && (
                               <button
                                 className="btn-ghost p-1.5 hover:text-red-400"
@@ -452,13 +683,17 @@ export default function GoodsReceiptPage() {
         />
       </div>
 
-      {dialog && (
+      {dialog !== null && (
         <ReceiveGoodsDialog
-          onClose={() => setDialog(false)}
+          poId={dialog || undefined}
+          onClose={() => setDialog(null)}
           onSaved={(msg) => {
-            setDialog(false)
+            setDialog(null)
             setMessage(msg)
             void load()
+            // The order this came from may now be fully received, or may have
+            // dropped to part received. Either way the list above is stale.
+            void loadWaiting()
           }}
         />
       )}
