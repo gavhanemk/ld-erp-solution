@@ -13,6 +13,12 @@ interface ChargeType {
   id: string
   name: string
   defaultGstRate: string | number
+  /**
+   * How big the charge usually is, as a share of the order — not the tax on
+   * it. Purely a suggestion: it is what the percentage helper on a purchase
+   * order opens at, and nothing applies it on its own.
+   */
+  percentOfValue: string | number
   applyOnSale: boolean
   applyOnPurchase: boolean
   isActive: boolean
@@ -26,6 +32,20 @@ const columns: Column<ChargeType>[] = [
     align: 'right',
     sortable: true,
     render: (c) => <span className="font-semibold">{Number(c.defaultGstRate)}%</span>,
+  },
+  {
+    key: 'percentOfValue',
+    header: 'Usual size',
+    align: 'right',
+    sortable: true,
+    /* Dashed rather than 0% when unset, because 0% would read as a decision
+       somebody made and this is the absence of one. */
+    render: (c) =>
+      Number(c.percentOfValue) > 0 ? (
+        <span className="tabular-nums">{Number(c.percentOfValue)}% of order</span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
   },
   {
     key: 'where',
@@ -64,6 +84,13 @@ const formFields: FormField[] = [
     required: true,
     placeholder: '18',
     help: 'Freight often carries a different rate from the garment itself',
+  },
+  {
+    name: 'percentOfValue',
+    label: 'Usual % of order',
+    type: 'number',
+    placeholder: '5',
+    help: 'Optional. Offered on a purchase order in one press — never applied on its own',
   },
   { name: 'applyOnSale', label: 'On sales', type: 'checkbox', placeholder: 'Offer on invoices' },
   {

@@ -516,7 +516,7 @@ router.use(
     createSchema: createChargeTypeSchema,
     updateSchema: updateChargeTypeSchema,
     searchFields: ['name'],
-    sortableFields: ['name', 'defaultGstRate'],
+    sortableFields: ['name', 'defaultGstRate', 'percentOfValue'],
     defaultSort: { field: 'name', order: 'asc' },
   }),
 )

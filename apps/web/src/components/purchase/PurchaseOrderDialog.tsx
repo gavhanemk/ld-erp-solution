@@ -27,6 +27,7 @@ import {
   Pencil,
   MapPinned,
   Check,
+  Percent,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 
@@ -176,6 +177,15 @@ interface ChargeTypeOption {
   name: string
   /** The GST charged on this charge. The amount itself is always typed in. */
   defaultGstRate: string | number
+  /**
+   * What this charge usually comes to as a share of the order, if the mill has
+   * set one under Masters -> Charges.
+   *
+   * Never applied on its own — it is only what the percentage helper opens
+   * on, so a buyer who agrees the usual rate gets it in one press and a buyer
+   * who agreed something else types over it. 0 means nobody has set one.
+   */
+  percentOfValue?: string | number | null
 }
 
 interface Option {
@@ -362,6 +372,84 @@ function NotBuiltNote({ children }: { children: React.ReactNode }) {
   )
 }
 
+/** The percentage helper's key for the Other charges box, which has no id. */
+const OTHER_PCT = '__other'
+
+/**
+ * Works a charge out as a share of the order, so nobody reaches for a phone.
+ *
+ * Every charge on a purchase is typed in by hand, and that is deliberate: it
+ * is how the mill's old system worked, because what a transporter asks for is
+ * a figure agreed on a call, not a formula. But it is very often a round
+ * percentage of the goods, and working 5% of 4,241.60 out by hand forty times
+ * a week is precisely where a wrong figure comes from.
+ *
+ * So this neither prefills a box nor calculates anything on its own. It opens
+ * when it is asked for, shows the whole working — the percentage, what it is
+ * a percentage of, and what that comes to — and writes the figure into the box
+ * only when Use is pressed. What gets saved is still a plain amount; the
+ * percentage is stored nowhere, because the supplier agreed to a number and an
+ * order that quietly recalculated itself later would stop matching their copy.
+ */
+function PercentOfGross({
+  name,
+  base,
+  value,
+  onChange,
+  onUse,
+}: {
+  name: string
+  base: number
+  value: string
+  onChange: (next: string) => void
+  onUse: (amount: number) => void
+}) {
+  const pct = num(value)
+  const worked = base * (pct / 100)
+  const ready = base > 0 && pct > 0
+
+  return (
+    <div className="border-border bg-secondary/40 mt-1.5 rounded-lg border px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
+        <input
+          type="number"
+          step="0.01"
+          min={0}
+          max={100}
+          autoFocus
+          className="form-input h-7 w-16 text-right"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={`Percentage to work ${name} out at`}
+        />
+        {/* Says what it is a percentage of, in figures. A helper that showed
+          only its answer would be one more number to take on trust. */}
+        <span className="text-muted-foreground">% of gross total ₹{inr(base)}</span>
+        {/* The answer and the button wrap together and stay right, so on a
+          phone Use does not end up stranded alone on the left. */}
+        <span className="ml-auto flex items-center gap-2">
+          <span className="text-foreground whitespace-nowrap font-semibold tabular-nums">
+            ₹{inr(worked)}
+          </span>
+          <button
+            type="button"
+            className="btn-primary h-7 shrink-0 px-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+            disabled={!ready}
+            onClick={() => onUse(Number(worked.toFixed(2)))}
+          >
+            Use
+          </button>
+        </span>
+      </div>
+      {base <= 0 && (
+        <p className="text-muted-foreground mt-1.5 text-xs">
+          Nothing to take a percentage of yet — put an item on the order first.
+        </p>
+      )}
+    </div>
+  )
+}
+
 function Row({ label, value }: { label: string; value: number }) {
   return (
     <div className="flex items-center justify-between">
@@ -422,6 +510,15 @@ export function PurchaseOrderDialog({
    */
   const [charges, setCharges] = useState<Record<string, string>>({})
   const [otherCharges, setOtherCharges] = useState('')
+
+  /**
+   * Which charge's percentage helper is open, and what has been typed into it.
+   *
+   * Kept out of `charges` on purpose. This is scratch working, not part of the
+   * order: it is thrown away when the form closes and none of it is sent.
+   */
+  const [pctOpen, setPctOpen] = useState<string | null>(null)
+  const [pctOf, setPctOf] = useState<Record<string, string>>({})
   /*
    * What each item on the form has been bought at before, keyed by item.
    *
@@ -542,6 +639,8 @@ export function PurchaseOrderDialog({
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)]))
     )
     setOtherCharges(num(record?.otherCharges) > 0 ? String(record?.otherCharges) : '')
+    setPctOpen(null)
+    setPctOf({})
     setAttachments([])
     setPendingFiles([])
     setRateHistory({})
@@ -911,6 +1010,7 @@ export function PurchaseOrderDialog({
         chargeTypeId: t.id,
         name: t.name,
         gstRate: num(t.defaultGstRate),
+        percentOfValue: num(t.percentOfValue),
         amount: num(charges[t.id]),
       }))
       .map((c) => ({ ...c, tax: taxMode === 'NONE' ? 0 : c.amount * (c.gstRate / 100) }))
@@ -949,6 +1049,18 @@ export function PurchaseOrderDialog({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines, discountAmount, taxMode, poType, chargeTypes, charges, otherCharges])
+
+  /**
+   * What a charge's percentage box opens on.
+   *
+   * Whatever was last typed for this charge while the form has been open;
+   * failing that the share the charge master carries; failing that the rate
+   * printed on the row, because that is the number in front of the buyer and
+   * the one they mean when they say "five percent". A starting point only —
+   * it is typed over freely and nothing is applied until Use is pressed.
+   */
+  const pctFor = (c: { chargeTypeId: string; gstRate: number; percentOfValue: number }) =>
+    pctOf[c.chargeTypeId] ?? String(c.percentOfValue > 0 ? c.percentOfValue : c.gstRate)
 
   /** One row's own figures, worked out for the row it is shown in. */
   const priceOf = (l: PoLine) => {
@@ -2779,28 +2891,71 @@ export function PurchaseOrderDialog({
                     </p>
                   ) : (
                     <div className="space-y-1.5 pt-0.5">
-                      {totals.chargeRows.map((c) => (
-                        <div
-                          key={c.chargeTypeId}
-                          className="flex items-center justify-between gap-3"
-                        >
-                          <span className="text-muted-foreground">
-                            {c.name} @{c.gstRate}%
-                          </span>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            className="form-input h-8 w-28 text-right"
-                            placeholder="0.00"
-                            value={charges[c.chargeTypeId] ?? ''}
-                            onChange={(e) =>
-                              setCharges((prev) => ({ ...prev, [c.chargeTypeId]: e.target.value }))
-                            }
-                            aria-label={`${c.name} amount`}
-                          />
-                        </div>
-                      ))}
+                      {totals.chargeRows.map((c) => {
+                        const helperOpen = pctOpen === c.chargeTypeId
+                        return (
+                          <div key={c.chargeTypeId}>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-muted-foreground min-w-0">
+                                {c.name} @{c.gstRate}%
+                              </span>
+                              {/* The amount box stays where the other boxes are
+                                and the helper button goes to its left, so the
+                                right edge of every figure on this panel still
+                                lines up down one column. */}
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setPctOpen(helperOpen ? null : c.chargeTypeId)}
+                                  className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
+                                    helperOpen
+                                      ? 'border-primary/30 bg-primary/10 text-primary'
+                                      : 'btn-ghost border-border'
+                                  }`}
+                                  title={`Work ${c.name} out as a percentage of the gross total`}
+                                  aria-expanded={helperOpen}
+                                  aria-label={`Work out ${c.name} as a percentage`}
+                                >
+                                  <Percent size={14} />
+                                </button>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min={0}
+                                  className="form-input h-8 w-28 text-right"
+                                  placeholder="0.00"
+                                  value={charges[c.chargeTypeId] ?? ''}
+                                  onChange={(e) =>
+                                    setCharges((prev) => ({
+                                      ...prev,
+                                      [c.chargeTypeId]: e.target.value,
+                                    }))
+                                  }
+                                  aria-label={`${c.name} amount`}
+                                />
+                              </div>
+                            </div>
+
+                            {helperOpen && (
+                              <PercentOfGross
+                                name={c.name}
+                                base={totals.grossTotal}
+                                value={pctFor(c)}
+                                onChange={(next) =>
+                                  setPctOf((prev) => ({ ...prev, [c.chargeTypeId]: next }))
+                                }
+                                onUse={(amount) => {
+                                  setCharges((prev) => ({
+                                    ...prev,
+                                    [c.chargeTypeId]: String(amount),
+                                  }))
+                                  setPctOpen(null)
+                                }}
+                              />
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
 
@@ -2831,20 +2986,56 @@ export function PurchaseOrderDialog({
 
                   {/* Carries no GST of its own and is added after tax, which is
                     how the mill's old system had it. */}
-                  <div className="flex items-center justify-between gap-3">
-                    <label htmlFor="po-other-charges" className="text-muted-foreground">
-                      Other charges
-                    </label>
-                    <input
-                      id="po-other-charges"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      className="form-input h-8 w-28 text-right"
-                      placeholder="0.00"
-                      value={otherCharges}
-                      onChange={(e) => setOtherCharges(e.target.value)}
-                    />
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <label htmlFor="po-other-charges" className="text-muted-foreground min-w-0">
+                        Other charges
+                      </label>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {/* No rate of its own, so this helper opens empty. It
+                          is here because the sum is the same one — a
+                          percentage of the goods — and a helper on every box
+                          but this one is the sort of gap that sends somebody
+                          back to their phone. */}
+                        <button
+                          type="button"
+                          onClick={() => setPctOpen(pctOpen === OTHER_PCT ? null : OTHER_PCT)}
+                          className={`inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
+                            pctOpen === OTHER_PCT
+                              ? 'border-primary/30 bg-primary/10 text-primary'
+                              : 'btn-ghost border-border'
+                          }`}
+                          title="Work other charges out as a percentage of the gross total"
+                          aria-expanded={pctOpen === OTHER_PCT}
+                          aria-label="Work out other charges as a percentage"
+                        >
+                          <Percent size={14} />
+                        </button>
+                        <input
+                          id="po-other-charges"
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          className="form-input h-8 w-28 text-right"
+                          placeholder="0.00"
+                          value={otherCharges}
+                          onChange={(e) => setOtherCharges(e.target.value)}
+                        />
+                      </div>
+                    </div>
+
+                    {pctOpen === OTHER_PCT && (
+                      <PercentOfGross
+                        name="other charges"
+                        base={totals.grossTotal}
+                        value={pctOf[OTHER_PCT] ?? ''}
+                        onChange={(next) => setPctOf((prev) => ({ ...prev, [OTHER_PCT]: next }))}
+                        onUse={(amount) => {
+                          setOtherCharges(String(amount))
+                          setPctOpen(null)
+                        }}
+                      />
+                    )}
                   </div>
 
                   {/* Shown whenever the total was rounded, and only then.
