@@ -455,6 +455,14 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   order, supplier, rate, quantity, amount and date, newest first. A cancelled
   order is shown and labelled, not hidden: the rate was still quoted. Nothing
   in the panel changes the order; the rate is always typed
+- **Reopen a sent order.** A sent order cannot be edited in place — the
+  supplier is working from paper, and changing it underneath them is how a
+  mill ends up arguing about what was agreed. It can be pulled back to a
+  draft, which asks first, says plainly that the supplier's copy is about to
+  be out of date, and is written to the activity log with who did it. Refused
+  once a goods receipt or a bill exists against the order: those reconcile
+  against it line by line, and an order that moved under them would put the
+  two permanently out of step
 - **Delete an order, into a recycle bin.** Cancel was the only way out before,
   which leaves a cancelled order in every list forever. Delete marks the order
   instead of removing it, so it drops out of every list, report, search and the

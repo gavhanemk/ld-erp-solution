@@ -941,6 +941,93 @@ router.patch(
  * on one number in two people's records, and a restore would then collide with
  * whatever had taken it.
  */
+/**
+ * Pulls a sent order back to draft so it can be corrected and sent again.
+ *
+ * The rule this bends is a real one and it is printed on the sheet: once an
+ * order has gone to a supplier, they are working from paper, and quietly
+ * changing the order underneath them is how a mill ends up arguing about what
+ * was agreed. So this is not "edit a sent order" — it is a deliberate,
+ * recorded step backwards, and the audit log carries who did it and when. The
+ * supplier's copy is out of date from that moment, and whoever reopened it
+ * knows that because they had to ask for it.
+ *
+ * Refused once anything has been booked against the order. A goods receipt or
+ * a bill is somebody else's document and it reconciles line by line against
+ * this one; letting the order move under a receipt that has already increased
+ * stock would put the two permanently out of step. Those orders can still be
+ * cancelled, which is the honest way out.
+ */
+router.patch(
+  '/orders/:id/reopen',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const order = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      include: { _count: { select: { grns: true, invoices: true } } },
+    })
+    if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+    if (order.status === 'DRAFT') {
+      throw new AppError(
+        `${order.poNumber} is already a draft — open it and make the change.`,
+        400,
+        'PO_ALREADY_DRAFT'
+      )
+    }
+
+    /*
+     * Only from SENT. A cancelled order is closed on purpose and a completed
+     * one has been received in full; both have somebody's decision behind them
+     * that reopening would quietly undo.
+     */
+    if (order.status !== 'SENT') {
+      throw new AppError(
+        `${order.poNumber} is ${order.status.toLowerCase().replace(/_/g, ' ')}, and only a sent order can be reopened.`,
+        400,
+        'PO_NOT_SENT'
+      )
+    }
+
+    if (order._count.grns > 0 || order._count.invoices > 0) {
+      const against = [
+        order._count.grns > 0 &&
+          `${order._count.grns} goods receipt${order._count.grns > 1 ? 's' : ''}`,
+        order._count.invoices > 0 &&
+          `${order._count.invoices} bill${order._count.invoices > 1 ? 's' : ''}`,
+      ]
+        .filter(Boolean)
+        .join(' and ')
+      throw new AppError(
+        `${order.poNumber} has ${against} against it and can no longer be reopened — those would stop matching it. Cancel it and raise a new one instead.`,
+        409,
+        'PO_HAS_DOCUMENTS'
+      )
+    }
+
+    const after = await prisma.purchaseOrder.update({
+      where: { id: order.id },
+      data: { status: 'DRAFT' },
+      include: poInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseOrder',
+      entityId: order.id,
+      before: order,
+      after,
+    })
+
+    res.json({
+      success: true,
+      data: after,
+      message: `${order.poNumber} is a draft again. The supplier's copy is now out of date — send it again when you have finished.`,
+    })
+  }
+)
+
 router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
   const order = await prisma.purchaseOrder.findUnique({
     where: { id: req.params.id },

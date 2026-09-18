@@ -17,6 +17,7 @@ import {
   CalendarDays,
   FileText,
   Info,
+  Undo2,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
@@ -120,8 +121,25 @@ export default function PurchaseOrdersPage() {
     setPage(1)
   }, [debounced, status])
 
-  const act = async (po: PurchaseOrder, what: 'send' | 'cancel') => {
+  const act = async (po: PurchaseOrder, what: 'send' | 'cancel' | 'reopen') => {
     if (what === 'cancel' && !confirm(`Cancel ${po.poNumber}?`)) return
+    /*
+     * Reopening is asked about, because it is the one action here that makes
+     * a document somebody already holds wrong. The prompt says that rather
+     * than "are you sure?": the supplier has the old sheet, and the person
+     * clicking is the one who has to send them the new one.
+     */
+    if (
+      what === 'reopen' &&
+      !confirm(
+        `Reopen ${po.poNumber} as a draft?
+
+` +
+          'The supplier already has this order. Their copy will be out of date ' +
+          'until you send it again. This is recorded against your name.'
+      )
+    )
+      return
     setBusy(true)
     setMessage(null)
     try {
@@ -186,6 +204,22 @@ export default function PurchaseOrdersPage() {
       >
         <Printer size={15} />
       </Link>
+      {/* A sent order cannot be edited in place — the supplier is working
+          from paper. It can be pulled back to a draft, which is a decision
+          rather than a slip: it asks first and it is written to the activity
+          log. Gone once a receipt or a bill exists against the order, because
+          those reconcile against it line by line. */}
+      {po.status === 'SENT' && (
+        <button
+          className={ICON_BTN}
+          onClick={() => void act(po, 'reopen')}
+          disabled={busy}
+          title="Reopen as a draft so it can be changed"
+          aria-label={`Reopen ${po.poNumber} as a draft`}
+        >
+          <Undo2 size={15} />
+        </button>
+      )}
       {po.status === 'DRAFT' && (
         <>
           <button
