@@ -7,6 +7,71 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 19 Sep 2026 — an item can be a style in one colour
+
+**Migration:** `20260919120000_item_style_colour`
+**Branch:** `feat/masters-item-style-colour`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Two new columns on `items`:
+
+| Column | Holds |
+|---|---|
+| `styleId` | Which style this item is, for a finished good |
+| `color` | Which of that style's own colours |
+
+A unique index on `(styleId, color)`, so two items can never be the same
+style in the same colour, and a foreign key from `styleId` to `styles`, set
+to `NULL` if the style is ever removed.
+
+**Nothing existing was changed, renamed or deleted.** Both columns are
+optional. No existing row was touched, so the migration could not have
+broken anything already there.
+
+### Why it was needed
+
+A sales order, a manufacturing order and an invoice all need to find "this
+style in this colour" as one sellable item. Until now `Item` had no link to
+`Style` at all — only `BOM` did, and only through the style, not a colour.
+The rule that the chosen colour must actually be one of the style's own
+`colors[]` cannot live in the database — it needs a lookup — so it is
+enforced in the API (`assertItemStyleColorValid` in
+`apps/api/src/lib/itemStyleColor.ts`), not here.
+
+### The four existing finished-goods items
+
+They keep `styleId` and `color` blank, same as the four BOMs that kept a
+blank colour before this. Guessing which of "Men's Formal Shirt", "Men's
+Casual Check Shirt" and so on maps to which real style and colour would be
+worse than leaving it for someone who knows the product line to set
+deliberately. The next time one of them is opened and saved, the form will
+ask for both.
+
+### What you have to do
+
+Nothing to the database. On your own machine, once the branch is merged:
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+### One thing worth knowing
+
+While this migration was being written, the shared database had already
+moved well ahead of `main` and even ahead of the BOM branch — 15 migrations
+from `feat/purchase` and related GRN/purchase-order branches, three of them
+applied that same day. None of them touch `items`, and `prisma migrate
+deploy` only ever applies what is locally pending — it does not care what
+else has already landed — so this went in cleanly regardless. If your
+`prisma migrate status` shows migrations you don't recognise, that is very
+likely this: check with the team before assuming it is drift you caused.
+
+---
+
 ## 8 Sep 2026 — stock transfers and stock adjustments become documents
 
 **Migration:** `20260908102141_add_stock_transfer_and_adjustment_documents`

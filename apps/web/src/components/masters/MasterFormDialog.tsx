@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { X, Loader2, AlertCircle } from 'lucide-react'
-import { ApiError, masterResource, type Paginated } from '@/lib/api'
+import { ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
 
 export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags'
 
@@ -25,6 +25,25 @@ export interface FormField {
     /** Record field shown to the user. Defaults to 'name'. */
     labelKey?: string
   }
+  /**
+   * Populates a select from a property on whatever record another field on
+   * this same form currently points at — a colour picker showing exactly the
+   * colours the chosen style offers, not a fixed master resource.
+   */
+  optionsFromField?: {
+    /** Name of the field on this form holding the related record's id. */
+    field: string
+    /** Master endpoint segment that field's id belongs to, e.g. 'styles'. */
+    resource: string
+    /** Array property on that record to turn into options, e.g. 'colors'. */
+    arrayKey: string
+  }
+  /**
+   * Only rendered, and only required, while this returns true for the
+   * form's current values — a colour field with nothing to choose from until
+   * a style is picked.
+   */
+  showIf?: (values: Record<string, unknown>) => boolean
   /** Short hint rendered under the input. */
   help?: string
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
@@ -145,6 +164,51 @@ export function MasterFormDialog<T extends { id: string }>({
     }
   }, [open, fields])
 
+  // A field can also draw its options from a property on whatever record
+  // another field currently points at — Colour showing exactly the list the
+  // picked Style offers, not every colour in the database. watchedKey is a
+  // stable string (not the field values directly) so the effect's own
+  // dependency array stays a fixed length across renders.
+  const watchedKey = fields
+    .filter((f) => f.optionsFromField)
+    .map((f) => String(values[f.optionsFromField!.field] ?? ''))
+    .join('|')
+
+  useEffect(() => {
+    if (!open) return
+
+    const dependentFields = fields.filter((f) => f.optionsFromField)
+    if (dependentFields.length === 0) return
+
+    let cancelled = false
+
+    void Promise.all(
+      dependentFields.map(async (f) => {
+        const { field: watched, resource: r, arrayKey } = f.optionsFromField!
+        const id = values[watched]
+        if (!id || typeof id !== 'string') return [f.name, []] as const
+        try {
+          const res = (await masterResource<Record<string, unknown>>(r).get(id)) as Single<
+            Record<string, unknown>
+          >
+          const arr = Array.isArray(res.data[arrayKey]) ? (res.data[arrayKey] as unknown[]) : []
+          return [f.name, arr.map((v) => ({ value: String(v), label: String(v) }))] as const
+        } catch {
+          return [f.name, []] as const
+        }
+      }),
+    ).then((entries) => {
+      if (!cancelled) setRemoteOptions((prev) => ({ ...prev, ...Object.fromEntries(entries) }))
+    })
+
+    return () => {
+      cancelled = true
+    }
+    // watchedKey stands in for the actual watched values here on purpose —
+    // see the comment above it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, fields, watchedKey])
+
   // Escape closes, and the page behind must not scroll while the dialog is up.
   useEffect(() => {
     if (!open) return
@@ -176,6 +240,13 @@ export function MasterFormDialog<T extends { id: string }>({
         if (derived) updated[field.derives.field] = derived
       }
 
+      // A field whose options depend on this one no longer has a valid
+      // selection once this one changes — Colour must not keep a value from
+      // whichever Style was picked before.
+      for (const f of fields) {
+        if (f.optionsFromField?.field === name) updated[f.name] = ''
+      }
+
       return updated
     })
 
@@ -192,6 +263,15 @@ export function MasterFormDialog<T extends { id: string }>({
       // Sending back a value nobody could have changed only risks a clash with
       // a code the server has since handed to somebody else.
       if (f.generated) continue
+
+      // A hidden field must be sent as an explicit null, not left out —
+      // leaving it out would let the server keep whatever it held before the
+      // field was hidden, which is exactly the stale value hiding it was
+      // meant to clear.
+      if (f.showIf && !f.showIf(values)) {
+        payload[f.name] = null
+        continue
+      }
 
       const raw = values[f.name]
 
@@ -264,8 +344,11 @@ export function MasterFormDialog<T extends { id: string }>({
     }
   }
 
-  // A generated field has nothing to show before the record exists.
-  const visibleFields = fields.filter((f) => !f.generated || isEdit)
+  // A generated field has nothing to show before the record exists; a
+  // showIf field has nothing to show until its own condition is met.
+  const visibleFields = fields.filter(
+    (f) => (!f.generated || isEdit) && (!f.showIf || f.showIf(values)),
+  )
 
   const sections = visibleFields.reduce<Record<string, FormField[]>>((acc, f) => {
     const key = f.section ?? ''
@@ -313,7 +396,7 @@ export function MasterFormDialog<T extends { id: string }>({
                     field={f}
                     value={values[f.name]}
                     error={fieldErrors[f.name]}
-                    options={f.optionsFrom ? remoteOptions[f.name] : f.options}
+                    options={f.optionsFrom || f.optionsFromField ? remoteOptions[f.name] : f.options}
                     onChange={(v) => set(f.name, v)}
                   />
                 ))}

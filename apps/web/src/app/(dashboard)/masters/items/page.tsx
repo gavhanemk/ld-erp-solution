@@ -18,6 +18,9 @@ interface Item {
   isActive: boolean
   category: { id: string; name: string } | null
   uom: { id: string; name: string; symbol: string } | null
+  styleId: string | null
+  color: string | null
+  style: { id: string; code: string; name: string; colors: string[] } | null
 }
 
 const TYPE_LABEL: Record<string, { label: string; cls: string }> = {
@@ -39,6 +42,21 @@ const columns: Column<Item>[] = [
       const t = TYPE_LABEL[i.type] ?? { label: i.type, cls: 'badge-neutral' }
       return <span className={t.cls}>{t.label}</span>
     },
+  },
+  {
+    key: 'style',
+    header: 'Style · Colour',
+    render: (i) =>
+      i.style ? (
+        <span className="text-xs">
+          <span className="font-mono text-teal-400">{i.style.code}</span>
+          {i.color && <span className="text-muted-foreground"> · {i.color}</span>}
+        </span>
+      ) : i.type === 'FINISHED_GOOD' ? (
+        <span className="text-xs text-amber-400">Style not set</span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
   },
   {
     key: 'category',
@@ -105,6 +123,26 @@ const formFields: FormField[] = [
     required: true,
     section: 'Identity',
     optionsFrom: { resource: 'item-categories' },
+  },
+  {
+    name: 'styleId',
+    label: 'Style',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    optionsFrom: { resource: 'styles' },
+    showIf: (v) => v.type === 'FINISHED_GOOD',
+    help: 'Which garment this is — the item becomes that style in one colour',
+  },
+  {
+    name: 'color',
+    label: 'Colour',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    optionsFromField: { field: 'styleId', resource: 'styles', arrayKey: 'colors' },
+    showIf: (v) => v.type === 'FINISHED_GOOD' && Boolean(v.styleId),
+    help: "One of the style's own colours — add more on the Style if it isn't listed",
   },
   {
     name: 'uomId',

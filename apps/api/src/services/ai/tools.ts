@@ -926,6 +926,7 @@ export async function executeTool(
           uom: { select: { symbol: true } },
           category: { select: { name: true } },
           taxRate: { select: { rate: true } },
+          style: { select: { name: true } },
         },
         take: 10,
       })
@@ -941,6 +942,8 @@ export async function executeTool(
           gst: i.taxRate ? `${Number(i.taxRate.rate)}%` : null,
           standardRate: i.standardRate ? `₹${Number(i.standardRate)}` : null,
           reorderLevel: i.reorderLevel ? Number(i.reorderLevel) : null,
+          style: i.style?.name ?? null,
+          color: i.color,
         })),
       }
     }

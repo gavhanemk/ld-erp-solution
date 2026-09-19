@@ -1,9 +1,11 @@
 import { Router } from 'express'
-import { prisma } from '@ld-erp/database'
+import { prisma, Prisma } from '@ld-erp/database'
 import { crudRouter } from '../lib/crud'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { isGeneratedCode, withGeneratedCode } from '../lib/masterCode'
+import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
 import {
   createBomSchema,
   createBrandSchema,
@@ -96,6 +98,96 @@ router.use(
   }),
 )
 
+const itemInclude = {
+  category: true,
+  uom: true,
+  style: { select: { id: true, code: true, name: true, colors: true } },
+}
+
+/**
+ * crudRouter has no hook a check like "this colour must be one of the
+ * style's own colours" could run from — its POST/PATCH are exactly
+ * parse → save → audit, with no database lookup in between. So /items gets
+ * two routes ahead of the crudRouter mount below: POST and PATCH/:id, which
+ * Express matches first and crudRouter never sees. GET (list, detail) and
+ * DELETE aren't declared here, so they fall straight through to crudRouter
+ * unchanged — this only duplicates the few lines that genuinely need the
+ * extra check, not the pagination/search/sort machinery around them.
+ */
+router.post('/items', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createItemSchema.parse(req.body)
+  const { styleId, color, styleName } = await assertItemStyleColorValid(data.type, data.styleId, data.color)
+  const toSave = { ...data, styleId, color }
+
+  let created
+  try {
+    if (isGeneratedCode('item') && !toSave.code) {
+      created = await withGeneratedCode('item', toSave, (withCode) =>
+        prisma.item.create({ data: withCode as Prisma.ItemUncheckedCreateInput, include: itemInclude }),
+      )
+    } else {
+      created = await prisma.item.create({
+        data: toSave as Prisma.ItemUncheckedCreateInput,
+        include: itemInclude,
+      })
+    }
+  } catch (err) {
+    if (styleName && color) rethrowItemStyleColorClash(err, styleName, color)
+    throw err
+  }
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'Item',
+    entityId: created.id,
+    after: created,
+  })
+
+  res.status(201).json({ success: true, data: created })
+})
+
+router.patch('/items/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = updateItemSchema.parse(req.body)
+
+  const before = await prisma.item.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('Item not found', 404, 'NOT_FOUND')
+
+  const effectiveType = data.type ?? before.type
+  const effectiveStyleId = data.styleId !== undefined ? data.styleId : before.styleId
+  const effectiveColor = data.color !== undefined ? data.color : before.color
+  const { styleId, color, styleName } = await assertItemStyleColorValid(
+    effectiveType,
+    effectiveStyleId,
+    effectiveColor,
+    before.id,
+  )
+  const toSave = { ...data, styleId, color }
+
+  let updated
+  try {
+    updated = await prisma.item.update({
+      where: { id: req.params.id },
+      data: toSave as Prisma.ItemUncheckedUpdateInput,
+      include: itemInclude,
+    })
+  } catch (err) {
+    if (styleName && color) rethrowItemStyleColorClash(err, styleName, color)
+    throw err
+  }
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'Item',
+    entityId: updated.id,
+    before,
+    after: updated,
+  })
+
+  res.json({ success: true, data: updated })
+})
+
 router.use(
   '/items',
   crudRouter({
@@ -107,7 +199,7 @@ router.use(
     searchFields: ['name', 'code', 'description', 'hsnCode'],
     sortableFields: ['name', 'code', 'createdAt', 'standardRate'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { category: true, uom: true },
+    include: itemInclude,
   }),
 )
 
