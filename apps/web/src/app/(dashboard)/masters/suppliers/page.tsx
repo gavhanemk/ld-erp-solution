@@ -126,7 +126,7 @@ const formFields: FormField[] = [
     help: 'Leave blank if the supplier is not registered — the order will then carry no GST',
     // The first two digits are the state, and the state is what decides whether
     // they bill CGST+SGST or IGST.
-    derives: { field: 'stateCode', from: (v) => (/^d{2}/.test(v) ? v.slice(0, 2) : null) },
+    derives: { field: 'stateCode', from: (v) => (/^\d{2}/.test(v) ? v.slice(0, 2) : null) },
   },
   {
     name: 'stateCode',
