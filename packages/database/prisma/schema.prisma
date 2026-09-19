@@ -268,6 +268,8 @@ model User {
   cancelledStock  StockTransfer[]           @relation("TransferCancelledBy")
   countedStock    StockAdjustment[]         @relation("AdjustmentMadeBy")
   receivedGoods   GRN[]                     @relation("GRNCreatedBy")
+  uploadedGrnFiles GRNAttachment[]          @relation("GRNAttachmentUploadedBy")
+  shortClosedPoLines PurchaseOrderLine[]    @relation("PurchaseOrderLineShortClosedBy")
 
   @@index([email])
   @@index([roleId])
@@ -1151,8 +1153,34 @@ model PurchaseOrderLine {
   pendingQty  Decimal       @default(0) @db.Decimal(10, 3)
   sortOrder   Int           @default(0)
 
+  /// The requisition line this was raised to answer, where it was raised from
+  /// one.
+  ///
+  /// Null for an order typed from scratch, which is most of them and always
+  /// will be — a buyer topping up consumables is answering nobody's indent.
+  /// Where it is set, it is what lets the indent list say how much of a
+  /// request has already been ordered, and it is why a purchase can be traced
+  /// back to the job that needed it months later.
+  mrLineId String?
+  mrLine   MaterialRequisitionLine? @relation(fields: [mrLineId], references: [id])
+
+  /// Set when the mill has decided the balance of this line is not coming and
+  /// closed it short of the ordered quantity, rather than leaving the order
+  /// "partially received" forever waiting on a delivery that will not arrive.
+  ///
+  /// Freezes `pendingQty` at 0 without touching `receivedQty` — the shortfall
+  /// is recorded as never received, not quietly written off as if it were.
+  /// Reversible: closing this is a decision, not a deletion, and the line can
+  /// be reopened if the supplier does eventually make it up.
+  shortClosed      Boolean   @default(false)
+  shortCloseReason String?
+  shortClosedAt    DateTime?
+  shortClosedById  String?
+  shortClosedBy    User?     @relation("PurchaseOrderLineShortClosedBy", fields: [shortClosedById], references: [id])
+
   grnLines GRNLine[]
 
+  @@index([mrLineId])
   @@map("purchase_order_lines")
 }
 
@@ -1217,6 +1245,39 @@ model GRN {
   orderedBy   String?
   referenceNo String?
 
+  /// A frozen copy of the address on the supplier's paperwork for this one
+  /// delivery, the same way the order freezes the address it was raised
+  /// against.
+  ///
+  /// Usually the order's own address, copied across when the receipt is
+  /// booked. Changed here rather than assumed when this delivery's challan
+  /// names a different branch of the supplier than the order was placed
+  /// with — a supplier with a head office and three depots routinely ships
+  /// from whichever one has the stock, and the bill that follows has to be
+  /// checked against the address that is actually on it, not the one the
+  /// order happened to carry.
+  supplierAddress String?
+
+  /// A frozen copy of the address of the mill's own store this delivery was
+  /// booked in against — the old system's "Shipping Address", which names
+  /// where the goods were received, not where they came from.
+  ///
+  /// Defaults to the order's own delivery warehouse, and can be changed on
+  /// this one receipt when the driver actually turned up at a different gate
+  /// than the order named. A snapshot, the same as `supplierAddress` above,
+  /// so a warehouse's address edited later does not rewrite a receipt already
+  /// printed. Separate from each line's own store — that decides which
+  /// warehouse the stock is counted into, and a delivery can split across
+  /// several; this is the one gate the lorry itself arrived at.
+  shippingAddress String?
+
+  /// Why this receipt was allowed to book in more than the order's own
+  /// balance — asked for only when the excess is past the mill's configured
+  /// tolerance (Settings → Preferences → Purchase). Kept on the receipt
+  /// itself, not buried in an audit log, so the reason sits with the document
+  /// an auditor actually opens when a bill is queried against the order.
+  overReceiptReason String?
+
   /// Who recorded the receipt. Prints as "Prepared By" on the note, which is
   /// the line somebody signs against.
   createdById String?
@@ -1225,10 +1286,35 @@ model GRN {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  lines     GRNLine[]
-  qcRecords InwardQC[]
+  lines       GRNLine[]
+  qcRecords   InwardQC[]
+  attachments GRNAttachment[]
 
   @@map("grn")
+}
+
+/// A file kept against a receipt — the challan, the supplier's invoice, a
+/// photo of a damaged carton. The bytes live in the bucket; this row is only
+/// the pointer to them, on the same three-step pattern as an order's own
+/// attachments.
+///
+/// Never required. A store keeper standing at the gate with a lorry waiting
+/// must be able to save the receipt with nothing attached, and add the paper
+/// later once it has been scanned.
+model GRNAttachment {
+  id           String   @id @default(cuid())
+  grnId        String
+  grn          GRN      @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String   @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User     @relation("GRNAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([grnId])
+  @@map("grn_attachments")
 }
 
 model GRNLine {
@@ -1381,6 +1467,22 @@ model StockLedger {
 /// who allowed it, and who actually handed it over. They are separate columns
 /// because docs/04-business-rules.md forbids the person who raised a document
 /// from approving it, and that rule cannot be enforced against a single name.
+/// Where a requisitioned item is to come from.
+///
+/// The mill's old ERP calls a requisition an *indent*, and its purchase order
+/// form opens straight onto the indent lines nobody has bought yet — tick
+/// them, set a quantity, and they drop into the order. That only works if a
+/// line says whether it is a call on the store or a call on the buyer, because
+/// the two are answered by different people in different rooms.
+///
+/// FROM_STOCK is the default and is what this model did before: the store
+/// issues it off the rack. PURCHASE means there is none to issue and it has to
+/// be bought, so the line waits on the purchase order form instead.
+enum RequisitionFulfilment {
+  FROM_STOCK
+  PURCHASE
+}
+
 model MaterialRequisition {
   id              String              @id @default(cuid())
   mrNumber        String              @unique
@@ -1425,6 +1527,19 @@ model MaterialRequisitionLine {
   warehouse    Warehouse           @relation(fields: [warehouseId], references: [id])
   purpose      String?
 
+  /// Issue it off the rack, or buy it. Defaults to the rack, which is what
+  /// every line written before this existed meant.
+  fulfilment RequisitionFulfilment @default(FROM_STOCK)
+
+  /// The order lines raised against this one.
+  ///
+  /// How much of the request has been ordered is read off these rather than
+  /// kept as a running total on the line. A counter and the orders it counts
+  /// drift apart the first time an order is cancelled, and then the buyer is
+  /// told to order what they already ordered.
+  poLines PurchaseOrderLine[]
+
+  @@index([fulfilment])
   @@map("material_requisition_lines")
 }
 

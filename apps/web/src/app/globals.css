@@ -351,9 +351,17 @@
      form. The height below is deliberately not `min-height`: a minimum would
      win against `h-9` and defeat the whole filter row.
 
-     The arrow is left to the browser. Drawing our own would mean choosing a
-     colour, and a colour chosen here is a colour that has to be chosen again
-     for the other theme.
+     The arrow used to be left to the browser, on the reasoning that drawing
+     our own meant choosing a colour twice — once per theme. That reasoning
+     missed what "left to the browser" actually buys: without `appearance:
+     none`, Windows draws its own native shell around the whole control, not
+     just the arrow, and that shell's corners follow the OS theme rather than
+     `rounded-lg` — a store picker sitting in a table of otherwise-square
+     fields came out pill-shaped on Windows while looking fine in every
+     screenshot taken from this Mac-rendered dev environment. `appearance:
+     none` was always needed for the box; once it is set the browser's arrow
+     disappears with it, so drawing one was never optional. Two colours, not
+     one avoided.
 
      `:where(select)` rather than `select`, because `:where()` adds no
      specificity. Written as `select.form-input` this rule would outrank the
@@ -362,8 +370,17 @@
      equal specificity Tailwind's utilities layer comes last and wins, which is
      the behaviour a component class should have. */
   :where(select).form-input {
-    @apply py-0;
+    @apply appearance-none bg-no-repeat py-0 pr-9;
     height: 2.625rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-position: right 0.7rem center;
+    background-size: 0.85rem;
+  }
+
+  /* The same arrow, darkened for a light card — the dark-theme grey above
+     reads as a smudge on white. */
+  .light :where(select).form-input {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   }
 
   /* The zebra stripe on the item table.

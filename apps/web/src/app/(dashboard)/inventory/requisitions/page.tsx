@@ -21,6 +21,9 @@ interface Line {
   id: string
   requestedQty: string | number
   issuedQty: string | number
+  /** Off the rack, or to be bought. Absent on rows written before the choice
+      existed, which all meant the rack. */
+  fulfilment?: 'FROM_STOCK' | 'PURCHASE'
   purpose: string | null
   item: { id: string; code: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
@@ -100,6 +103,20 @@ export default function RequisitionsPage() {
     return () => clearTimeout(t)
   }, [search])
 
+  /*
+   * What the store actually has, per line of the requisition that is open.
+   *
+   * Fetched when a row is expanded rather than with the list: it is a balance
+   * per item per warehouse, and working out forty of them to draw a list
+   * nobody has opened is forty queries thrown away.
+   */
+  const [onHand, setOnHand] = useState<Record<string, number>>({})
+  const [loadingStock, setLoadingStock] = useState(false)
+
+  /** The store keeper's answer per line, before it is saved. */
+  const [sourcing, setSourcing] = useState<Record<string, 'FROM_STOCK' | 'PURCHASE'>>({})
+  const [savingSourcing, setSavingSourcing] = useState(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -127,6 +144,71 @@ export default function RequisitionsPage() {
   useEffect(() => {
     void load()
   }, [load])
+
+  /*
+   * Opening an approved requisition loads what is on the rack beside it.
+   *
+   * The mill's old ERP shows a Stock Qty column on its indent form for exactly
+   * this reason: deciding whether something has to be bought without being
+   * told how much there is of it is guessing.
+   */
+  useEffect(() => {
+    const mr = rows.find((r) => r.id === open)
+    if (!mr || mr.status !== 'APPROVED' || mr.issuedAt) {
+      setOnHand({})
+      return
+    }
+
+    let cancelled = false
+    setLoadingStock(true)
+    void (async () => {
+      try {
+        const res = await api.get<{
+          data: { available?: Array<{ lineId: string; available: number }> }
+        }>(`/inventory/requisitions/${mr.id}`)
+        if (cancelled) return
+        const avail = (res as unknown as { data: { available?: Array<{ lineId: string; available: number }> } })
+          .data?.available
+        setOnHand(Object.fromEntries((avail ?? []).map((a) => [a.lineId, Number(a.available)])))
+      } catch {
+        if (!cancelled) setOnHand({})
+      } finally {
+        if (!cancelled) setLoadingStock(false)
+      }
+    })()
+
+    // Start from what is already recorded, so reopening a row shows the
+    // answers given last time rather than resetting them to the rack.
+    setSourcing(
+      Object.fromEntries(mr.lines.map((l) => [l.id, l.fulfilment ?? 'FROM_STOCK'])) as Record<
+        string,
+        'FROM_STOCK' | 'PURCHASE'
+      >
+    )
+
+    return () => {
+      cancelled = true
+    }
+  }, [open, rows])
+
+  /** Saves the store's answer for every line of one requisition. */
+  const saveSourcing = async (mr: Requisition) => {
+    setSavingSourcing(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/inventory/requisitions/${mr.id}/sourcing`,
+        { lines: mr.lines.map((l) => ({ lineId: l.id, fulfilment: sourcing[l.id] ?? 'FROM_STOCK' })) }
+      )
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save what the store decided.')
+    } finally {
+      setSavingSourcing(false)
+    }
+  }
 
   const act = async (mr: Requisition, what: 'approve' | 'reject' | 'issue') => {
     let body: Record<string, unknown> = {}
@@ -324,6 +406,113 @@ export default function RequisitionsPage() {
                         <tr key={`${mr.id}-lines`}>
                           <td colSpan={7} className="bg-secondary/40">
                             <div className="px-4 py-3 space-y-2">
+                              {/* ── What the store can answer ──────────────
+
+                                Only on an approved requisition that has not
+                                been issued, because that is the moment the
+                                question is live: before approval it may yet be
+                                refused, and after issue the stock has moved.
+
+                                The mill's old ERP asks it here too — on
+                                *Approved Material Requisition*, with Issue Raw
+                                Material and Create Indent side by side — and
+                                that is the right screen for it. Whoever raised
+                                the requisition is asking for material; they
+                                cannot know what is on the rack. The store
+                                keeper can, and the figure is beside every line
+                                while they decide. */}
+                              {mr.status === 'APPROVED' && !mr.issuedAt && (
+                                <div className="border-border bg-card mb-3 rounded-lg border">
+                                  <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2">
+                                    <h4 className="text-foreground text-xs font-semibold">
+                                      What the store can give
+                                    </h4>
+                                    <span className="text-muted-foreground text-[11px]">
+                                      {loadingStock
+                                        ? 'checking the rack…'
+                                        : 'Anything the store has not got goes to the buyer.'}
+                                    </span>
+                                    <button
+                                      className="btn-primary ml-auto h-7 px-2.5 text-xs disabled:opacity-50"
+                                      onClick={() => void saveSourcing(mr)}
+                                      disabled={savingSourcing}
+                                    >
+                                      {savingSourcing ? 'Saving…' : 'Save'}
+                                    </button>
+                                  </div>
+                                  <table className="w-full text-sm">
+                                    <thead>
+                                      <tr className="bg-secondary border-border border-b">
+                                        <th className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider">
+                                          Item
+                                        </th>
+                                        <th className="text-muted-foreground px-3 py-1.5 text-right text-[10px] font-semibold uppercase tracking-wider">
+                                          Asked
+                                        </th>
+                                        <th className="text-muted-foreground px-3 py-1.5 text-right text-[10px] font-semibold uppercase tracking-wider">
+                                          In store
+                                        </th>
+                                        <th className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider">
+                                          Answer it from
+                                        </th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {mr.lines.map((l) => {
+                                        const have = onHand[l.id]
+                                        const asked = Number(l.requestedQty)
+                                        const short = have !== undefined && have < asked
+                                        const pick = sourcing[l.id] ?? l.fulfilment ?? 'FROM_STOCK'
+                                        return (
+                                          <tr
+                                            key={l.id}
+                                            className="border-border/40 border-b last:border-0"
+                                          >
+                                            <td className="text-foreground px-3 py-1.5 text-xs">
+                                              {l.item.name}
+                                              <span className="text-muted-foreground ml-2 font-mono text-[10px]">
+                                                {l.item.code}
+                                              </span>
+                                            </td>
+                                            <td className="text-foreground px-3 py-1.5 text-right text-xs tabular-nums">
+                                              {qtyFmt(asked)} {l.item.uom.symbol}
+                                            </td>
+                                            {/* Red when there is not enough, which
+                                              is the only number on this row that
+                                              decides anything. */}
+                                            <td
+                                              className={`px-3 py-1.5 text-right text-xs tabular-nums ${
+                                                short ? 'text-red-400' : 'text-foreground'
+                                              }`}
+                                            >
+                                              {have === undefined ? '—' : qtyFmt(have)}
+                                            </td>
+                                            <td className="px-3 py-1.5">
+                                              <select
+                                                className="form-input h-7 w-40 px-2 py-0 text-xs"
+                                                value={pick}
+                                                onChange={(e) =>
+                                                  setSourcing((prev) => ({
+                                                    ...prev,
+                                                    [l.id]: e.target.value as
+                                                      | 'FROM_STOCK'
+                                                      | 'PURCHASE',
+                                                  }))
+                                                }
+                                                aria-label={`How to answer ${l.item.name}`}
+                                              >
+                                                <option value="FROM_STOCK">Issue from store</option>
+                                                <option value="PURCHASE">Buy it</option>
+                                              </select>
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+
                               {mr.lines.map((l) => (
                                 <div
                                   key={l.id}
@@ -332,8 +521,18 @@ export default function RequisitionsPage() {
                                   <div>
                                     <span className="text-foreground">{l.item.name}</span>
                                     <span className="ml-2 text-[10px] text-muted-foreground font-mono">
-                                      {l.item.code} · from {l.warehouse.name}
+                                      {l.item.code} ·{' '}
+                                      {l.fulfilment === 'PURCHASE'
+                                        ? 'to be bought'
+                                        : `from ${l.warehouse.name}`}
                                     </span>
+                                    {/* A line the store cannot answer. Said here
+                                      so whoever issues the requisition is not
+                                      left hunting a rack for something that was
+                                      never on it. */}
+                                    {l.fulfilment === 'PURCHASE' && (
+                                      <span className="badge-info ml-2">Purchase</span>
+                                    )}
                                     {l.purpose && (
                                       <div className="text-[11px] text-muted-foreground">
                                         {l.purpose}

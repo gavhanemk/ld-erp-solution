@@ -22,9 +22,14 @@ import {
   PackageCheck,
   History,
   MoreHorizontal,
+  Paperclip,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
-import { PurchaseOrderDialog, type PurchaseOrder } from '@/components/purchase/PurchaseOrderDialog'
+import {
+  PurchaseOrderDialog,
+  type PurchaseOrder,
+  type PoLine,
+} from '@/components/purchase/PurchaseOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
@@ -37,14 +42,24 @@ import { formatDate } from '@/lib/utils'
  * while the quantity, rate and amount were squeezed into the last third.
  */
 const INNER_COLS: Array<{ label: string; width: string }> = [
-  { label: 'Item code', width: '11%' },
-  { label: 'Item', width: '27%' },
-  { label: 'Category', width: '15%' },
-  { label: 'Subcategory', width: '15%' },
-  { label: 'Qty', width: '10%' },
-  { label: 'Rate', width: '10%' },
-  { label: 'Amount', width: '12%' },
+  { label: 'Item code', width: '9%' },
+  { label: 'Item', width: '21%' },
+  /* The style the item was bought for. Typed as free text on the form and
+     matched against the style master where it can be, so a line can carry a
+     style number that is not a style yet — which is the ordinary case when the
+     buying runs ahead of the master. */
+  { label: 'Style no', width: '9%' },
+  { label: 'Category', width: '12%' },
+  { label: 'Subcategory', width: '12%' },
+  { label: 'Qty', width: '9%' },
+  { label: 'Rate', width: '8%' },
+  { label: 'Disc', width: '6%' },
+  { label: 'GST', width: '5%' },
+  { label: 'Amount', width: '9%' },
 ]
+
+/** The inner columns whose figures line up on the right. */
+const INNER_NUMERIC = ['Qty', 'Rate', 'Disc', 'GST', 'Amount']
 
 /** One line of the actions menu. */
 interface RowAction {
@@ -292,6 +307,53 @@ export default function PurchaseOrdersPage() {
       if (res.message) setMessage(res.message)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /*
+   * Tells one line that the rest of it is not coming, instead of leaving the
+   * order "Partially Received" forever waiting on a delivery that will not
+   * arrive. Reversible — `reopenLine` below undoes it — so this is a decision
+   * recorded with a reason, not a deletion.
+   */
+  const shortCloseLine = async (po: PurchaseOrder, line: PoLine) => {
+    const reason = prompt(
+      `Why is ${line.item?.name ?? 'this line'} on ${po.poNumber} being closed short?\n\n` +
+        'This says the rest of it is not coming — it does not touch what has already been received.'
+    )
+    if (!reason || !reason.trim()) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${line.id}/short-close`,
+        { reason: reason.trim() }
+      )
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not close that line.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const reopenLine = async (po: PurchaseOrder, line: PoLine) => {
+    if (!confirm(`Reopen ${line.item?.name ?? 'this line'} on ${po.poNumber}? It will count as pending again.`))
+      return
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${line.id}/reopen`,
+        {}
+      )
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reopen that line.')
     } finally {
       setBusy(false)
     }
@@ -697,17 +759,24 @@ export default function PurchaseOrdersPage() {
                     characters — ENQ-2026-0187 — and narrower than this it
                     broke across two lines, which made every row on the screen
                     taller for it. */}
-                    <th style={{ width: '10%' }}>Enquiry</th>
-                    <th style={{ width: '9.4%' }}>Reference</th>
-                    <th style={{ width: '11%' }}>Items</th>
+                    <th style={{ width: '9%' }}>Enquiry</th>
+                    {/* Where the goods are to land. A warehouse of ours most
+                    of the time, a customer when the supplier ships straight to
+                    them — which also decides the tax, so it is not a detail. */}
+                    <th style={{ width: '10%' }}>Location</th>
+                    <th style={{ width: '8%' }}>Reference</th>
+                    <th style={{ width: '10%' }}>Items</th>
                     <th style={{ width: '8%', textAlign: 'right' }}>Total</th>
-                    <th style={{ width: '7.5%' }}>Status</th>
+                    <th style={{ width: '7%' }}>Status</th>
+                    {/* Attachments hang off the order, not off a line, so the
+                    paperclip belongs here rather than in the item table. */}
+                    <th style={{ width: '4%', textAlign: 'center' }}>Files</th>
                     {/* 16.3%, because a draft row carries five of them — print,
                     edit, send, cancel, delete. Five 28px buttons with 4px
                     between come to 156px, and 16.3% of the 1040px floor is
                     170. At 10% they were 104px and spilled out of the cell on
                     every laptop. */}
-                    <th style={{ width: '16.3%' }} />
+                    <th style={{ width: '14.2%' }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -770,6 +839,24 @@ export default function PurchaseOrdersPage() {
                             )}
                           </td>
                           <td className="text-xs">
+                            {po.deliveryWarehouse || po.deliveryCustomer ? (
+                              <>
+                                <div className="text-foreground truncate">
+                                  {po.deliveryWarehouse?.name ?? po.deliveryCustomer?.name}
+                                </div>
+                                {/* Named, because the two are not the same thing.
+                                  Goods going to a customer are taxed where the
+                                  customer is, and a row that only said the name
+                                  would leave somebody guessing which it was. */}
+                                <div className="text-muted-foreground text-[10px] leading-tight">
+                                  {po.deliveryWarehouse ? 'Our store' : 'Customer'}
+                                </div>
+                              </>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
+                          <td className="text-xs">
                             {po.reference ? (
                               po.reference
                             ) : (
@@ -797,6 +884,21 @@ export default function PurchaseOrdersPage() {
                           <td>
                             <span className={s.cls}>{s.label}</span>
                           </td>
+                          <td className="text-center">
+                            {po._count?.attachments ? (
+                              <span
+                                className="text-muted-foreground inline-flex items-center gap-0.5 text-xs"
+                                title={`${po._count.attachments} file${
+                                  po._count.attachments === 1 ? '' : 's'
+                                } attached`}
+                              >
+                                <Paperclip size={12} />
+                                {po._count.attachments}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
                           <td className="whitespace-nowrap text-right">
                             <div className="flex justify-end">
                               <ActionMenu
@@ -814,7 +916,7 @@ export default function PurchaseOrdersPage() {
                             inset the inner table's first row sat flush
                             against the order above it and read as a tenth
                             column of that row. */}
-                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <div className="border-border bg-card overflow-hidden rounded-lg border">
                                 <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
                                   <FileText size={13} className="text-muted-foreground shrink-0" />
@@ -834,9 +936,7 @@ export default function PurchaseOrdersPage() {
                                           key={h}
                                           style={width ? { width } : undefined}
                                           className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                            ['Qty', 'Rate', 'Amount'].includes(h)
-                                              ? 'text-right'
-                                              : 'text-left'
+                                            INNER_NUMERIC.includes(h) ? 'text-right' : 'text-left'
                                           }`}
                                         >
                                           {h}
@@ -878,6 +978,22 @@ export default function PurchaseOrdersPage() {
                                             )}
                                           </td>
                                           <td className="px-3 py-1.5 text-xs">
+                                            {line.style?.code || line.styleNo ? (
+                                              <>
+                                                <div className="text-foreground truncate font-mono text-xs">
+                                                  {line.style?.code ?? line.styleNo}
+                                                </div>
+                                                {line.style?.name && (
+                                                  <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                    {line.style.name}
+                                                  </div>
+                                                )}
+                                              </>
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-1.5 text-xs">
                                             {parent?.name ?? cat?.name ?? (
                                               <span className="text-muted-foreground">—</span>
                                             )}
@@ -891,9 +1007,56 @@ export default function PurchaseOrdersPage() {
                                           </td>
                                           <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
                                             {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                            {line.shortClosed ? (
+                                              <div className="mt-0.5 flex items-center justify-end gap-1 whitespace-normal text-[10px] font-normal normal-case text-amber-500">
+                                                <span title={line.shortCloseReason ?? undefined}>
+                                                  Closed short
+                                                </span>
+                                                <button
+                                                  type="button"
+                                                  className="text-primary underline"
+                                                  onClick={() => void reopenLine(po, line)}
+                                                >
+                                                  Reopen
+                                                </button>
+                                              </div>
+                                            ) : (
+                                              (po.status === 'SENT' || po.status === 'PARTIALLY_RECEIVED') &&
+                                              Number(line.pendingQty) > 0 && (
+                                                <div className="text-muted-foreground mt-0.5 flex items-center justify-end gap-1 whitespace-normal text-[10px] font-normal normal-case">
+                                                  <span>{Number(line.pendingQty)} pending</span>
+                                                  <span>·</span>
+                                                  <button
+                                                    type="button"
+                                                    className="text-primary underline"
+                                                    onClick={() => void shortCloseLine(po, line)}
+                                                  >
+                                                    Close short
+                                                  </button>
+                                                </div>
+                                              )
+                                            )}
                                           </td>
                                           <td className="px-3 py-1.5 text-right text-xs tabular-nums">
                                             ₹{money(line.unitRate)}
+                                          </td>
+                                          {/* A discount is stored as a percentage
+                                            whatever was typed into the form, so it
+                                            is shown as one. A dash rather than 0%,
+                                            because nothing was taken off. */}
+                                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                            {Number(line.discount) > 0 ? (
+                                              `${Number(line.discount)}%`
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                            {Number(line.gstRate) > 0 ? (
+                                              `${Number(line.gstRate)}%`
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
                                           </td>
                                           <td className="px-3 py-1.5 text-right text-xs font-medium tabular-nums">
                                             ₹{money(line.amount ?? 0)}

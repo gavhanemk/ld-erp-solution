@@ -9,6 +9,7 @@ import {
   adjustmentSchema,
   cancelTransferSchema,
   createRequisitionSchema,
+  requisitionSourcingSchema,
   issueRequisitionSchema,
   openingStockSchema,
   rejectRequisitionSchema,
@@ -705,6 +706,117 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
   res.status(201).json({ success: true, data: mr })
 })
 
+/**
+ * The store's answer: which lines it will issue, and which have to be bought.
+ *
+ * Only on an approved requisition, and only until it is issued. Before approval
+ * there is nothing to answer — the request may yet be refused. After issue the
+ * stock has already moved, and saying a line should have been bought would be
+ * rewriting what happened.
+ *
+ * A line marked PURCHASE is not issued by the store; it appears on the purchase
+ * order form instead, and stays there until it has been ordered.
+ */
+router.patch(
+  '/requisitions/:id/sourcing',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const data = requisitionSourcingSchema.parse(req.body)
+
+    const after = await prisma.$transaction(async (tx) => {
+      const mr = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+      if (mr.status !== 'APPROVED') {
+        throw new AppError(
+          mr.status === 'PENDING'
+            ? 'This requisition has not been approved yet, so there is nothing for the store to answer.'
+            : 'This requisition was refused.',
+          400,
+          'NOT_APPROVED',
+        )
+      }
+      if (mr.issuedAt) {
+        throw new AppError(
+          `${mr.mrNumber} was already issued on ${mr.issuedAt.toLocaleDateString('en-IN')}, so how it was answered can no longer be changed.`,
+          400,
+          'ALREADY_ISSUED',
+        )
+      }
+
+      const own = new Set(mr.lines.map((l) => l.id))
+      for (const l of data.lines) {
+        if (!own.has(l.lineId)) {
+          throw new AppError(
+            `One of those lines is not on ${mr.mrNumber}. Reopen the requisition and try again.`,
+            400,
+            'WRONG_LINE',
+          )
+        }
+      }
+
+      /*
+       * A line already ordered against cannot be handed back to the store.
+       * The purchase order exists, the supplier may have despatched, and the
+       * indent list would go on showing a request that has been placed.
+       */
+      const backToStock = data.lines.filter((l) => l.fulfilment === 'FROM_STOCK')
+      if (backToStock.length) {
+        const ordered = await tx.purchaseOrderLine.findMany({
+          where: {
+            mrLineId: { in: backToStock.map((l) => l.lineId) },
+            po: { status: { not: 'CANCELLED' } },
+          },
+          select: { mrLineId: true, po: { select: { poNumber: true } } },
+        })
+        if (ordered.length) {
+          throw new AppError(
+            `That line is already on ${ordered[0].po.poNumber}. Cancel the order first if it is to come from the store instead.`,
+            400,
+            'ALREADY_ORDERED',
+          )
+        }
+      }
+
+      await Promise.all(
+        data.lines.map((l) =>
+          tx.materialRequisitionLine.update({
+            where: { id: l.lineId },
+            data: { fulfilment: l.fulfilment },
+          }),
+        ),
+      )
+
+      return tx.materialRequisition.findUnique({
+        where: { id: mr.id },
+        include: mrInclude,
+      })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: req.params.id,
+      after,
+    })
+
+    const buying = data.lines.filter((l) => l.fulfilment === 'PURCHASE').length
+    res.json({
+      success: true,
+      data: after,
+      message: buying
+        ? `${buying} ${buying === 1 ? 'line goes' : 'lines go'} to the buyer. ${
+            buying === 1 ? 'It is' : 'They are'
+          } waiting on the purchase order screen.`
+        : 'Every line will be issued from the store.',
+    })
+  },
+)
+
 router.patch(
   '/requisitions/:id/approve',
   requirePermission(MODULE, 'approve'),
@@ -837,6 +949,18 @@ router.post(
       const askedFor = new Map(body.lines?.map((l) => [l.lineId, l.issueQty]) ?? [])
 
       for (const line of mr.lines) {
+        /*
+         * A line marked for purchase is not the store's to answer.
+         *
+         * It is on this requisition to tell the buyer what to order, and there
+         * is nothing on the rack behind it. Skipped silently rather than
+         * refused: a requisition routinely mixes the two — four things off
+         * the shelf and one to be bought — and stopping the whole issue
+         * because of the fifth would leave the other four sitting in a store
+         * somebody is waiting at.
+         */
+        if (line.fulfilment === 'PURCHASE') continue
+
         const qty = askedFor.get(line.id) ?? Number(line.requestedQty)
         if (qty <= 0) continue
 

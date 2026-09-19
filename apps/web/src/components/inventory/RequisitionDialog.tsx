@@ -107,12 +107,12 @@ export function RequisitionDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div className="glass-card w-full max-w-4xl my-auto" role="dialog" aria-modal="true">
-        <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-border">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm sm:p-8">
+      <div className="glass-card my-auto w-full max-w-4xl" role="dialog" aria-modal="true">
+        <div className="border-border flex items-start justify-between gap-4 border-b px-5 py-4">
           <div>
-            <h2 className="text-base font-semibold text-foreground">New material requisition</h2>
-            <p className="mt-1 text-xs text-muted-foreground max-w-2xl">
+            <h2 className="text-foreground text-base font-semibold">New material requisition</h2>
+            <p className="text-muted-foreground mt-1 max-w-2xl text-xs">
               Nothing leaves the store on this alone. Somebody else has to approve it, and then the
               store hands it over — those are three different people on purpose.
             </p>
@@ -122,10 +122,10 @@ export function RequisitionDialog({
           </button>
         </div>
 
-        <div className="px-5 py-4 space-y-4">
+        <div className="space-y-4 px-5 py-4">
           {error && (
-            <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-              <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+            <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
               <p className="text-sm text-red-400">{error}</p>
             </div>
           )}
@@ -174,7 +174,7 @@ export function RequisitionDialog({
             </label>
           </div>
 
-          <div className="overflow-x-auto rounded-lg border border-border">
+          <div className="border-border overflow-x-auto rounded-lg border">
             <table className="data-table w-full">
               <thead>
                 <tr>
@@ -214,7 +214,7 @@ export function RequisitionDialog({
                           onChange={(e) => setLine(i, { requestedQty: e.target.value })}
                           aria-label={`Quantity on line ${i + 1}`}
                         />
-                        <span className="text-xs text-muted-foreground w-8 text-left">
+                        <span className="text-muted-foreground w-8 text-left text-xs">
                           {itemsById.get(line.itemId)?.uom?.symbol ?? ''}
                         </span>
                       </div>
@@ -230,10 +230,10 @@ export function RequisitionDialog({
                     </td>
                     <td className="text-right">
                       <button
-                        className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
+                        className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
                         onClick={() =>
                           setLines((prev) =>
-                            prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i),
+                            prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
                           )
                         }
                         aria-label={`Remove line ${i + 1}`}
@@ -265,7 +265,7 @@ export function RequisitionDialog({
           </label>
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-border">
+        <div className="border-border flex items-center justify-end gap-2 border-t px-5 py-4">
           <button className="btn-ghost" onClick={onClose} disabled={saving}>
             Cancel
           </button>

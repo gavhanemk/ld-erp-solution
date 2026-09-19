@@ -17,6 +17,7 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
+import { getNumericPreference } from '../lib/preferences'
 import { cancelGrnSchema, createGrnSchema } from '../schemas/grn.schemas'
 import {
   createBillSchema,
@@ -47,6 +48,16 @@ const lineSchema = z.object({
   unitRate: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
   gstRate: z.number().min(0).max(100).optional(),
+  /*
+   * The requisition line this answers, when the buyer took it off the indent
+   * list rather than typing it.
+   *
+   * Not checked against the item here on purpose. A buyer who orders a
+   * substitute against an indent — a different thread, the same job — is
+   * doing something ordinary, and refusing it would send them back to typing
+   * the line by hand, which loses the link entirely.
+   */
+  mrLineId: z.string().optional().nullable(),
 })
 
 /**
@@ -137,10 +148,23 @@ const poInclude = {
   deliveryCustomer: { select: { id: true, name: true, code: true, gstin: true } },
   createdBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
+  // A count, not the rows. The list only needs to say whether an order has
+  // paperwork against it; fetching every file name for every order on the page
+  // to decide whether to draw one paperclip would be a second query's worth of
+  // data thrown away.
+  _count: { select: { attachments: true } },
   lines: {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       style: { select: { id: true, code: true, name: true } },
+      mrLine: {
+        select: {
+          id: true,
+          requestedQty: true,
+          mr: { select: { id: true, mrNumber: true } },
+        },
+      },
+      shortClosedBy: { select: { id: true, name: true } },
       item: {
         select: {
           id: true,
@@ -151,6 +175,52 @@ const poInclude = {
           // The category, and its parent where it has one. An item sits in
           // whichever level it was filed under, so the parent is what the list
           // shows as the category and the item's own becomes the subcategory.
+          category: {
+            select: { id: true, name: true, parent: { select: { id: true, name: true } } },
+          },
+        },
+      },
+    },
+  },
+}
+
+/**
+ * For the "which order is this against" picker on the goods-receipt screen.
+ *
+ * That screen never reads a line, a charge, or who approved the order — only
+ * the number, the supplier and where it was told to go. `poInclude` above
+ * pulls every order's full item table to answer that, and on a supplier
+ * sitting over the Supabase pooler each relation is its own round trip: a
+ * hundred sent orders with ten lines apiece made the dropdown the slowest
+ * thing on the screen. This is the same list with only what the picker draws.
+ */
+const poPickerInclude = {
+  supplier: { select: { id: true, name: true } },
+  deliveryWarehouse: { select: { id: true, name: true, address: true } },
+}
+
+/**
+ * For booking goods in against one order.
+ *
+ * Receiving reads each line's quantity and its item, and nothing past that —
+ * not the charges, not the style, not who approved the order. Fetched with
+ * `poInclude` this one order alone cost as much as opening it for a full edit;
+ * this trims it to the round trips receiving actually needs.
+ */
+const poReceivingInclude = {
+  supplier: { select: { id: true, name: true } },
+  deliveryWarehouse: { select: { id: true, name: true, address: true } },
+  lines: {
+    orderBy: { sortOrder: 'asc' as const },
+    include: {
+      shortClosedBy: { select: { id: true, name: true } },
+      item: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          hsnCode: true,
+          uom: { select: { symbol: true } },
           category: {
             select: { id: true, name: true, parent: { select: { id: true, name: true } } },
           },
@@ -277,6 +347,23 @@ async function supplierBillingAddress(
       .filter(Boolean)
       .join(', ') || null
   )
+}
+
+/**
+ * The mill's own address for a goods receipt — the old system's "Shipping
+ * Address". Where the lorry actually turned up, not where it came from.
+ */
+async function shippingAddressFor(
+  tx: Prisma.TransactionClient,
+  warehouseId?: string | null
+): Promise<string | null> {
+  if (!warehouseId) return null
+  const warehouse = await tx.warehouse.findUnique({
+    where: { id: warehouseId },
+    select: { address: true },
+  })
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+  return warehouse.address ?? null
 }
 
 async function customerDeliveryState(tx: Prisma.TransactionClient, customerId: string) {
@@ -526,6 +613,114 @@ router.get(
   }
 )
 
+/**
+ * The indent lines still waiting to be ordered.
+ *
+ * The mill's old ERP opens this as a modal off the purchase order form —
+ * "Select Items From Indent Items" — and the buyer ticks what they are about
+ * to place, rather than typing item codes somebody in production already
+ * typed. Three things come out of that, and all three are the point:
+ *
+ *   - Nothing is ordered twice. What has already been ordered against a
+ *     request is subtracted here, so the figure offered is what is left.
+ *   - Nothing is forgotten. A request that has not been ordered stays on this
+ *     list until it has.
+ *   - Every purchase has a reason. The line carries the requisition, and the
+ *     requisition carries the job.
+ *
+ * Ordered quantity is summed off the order lines rather than kept as a
+ * counter. A counter and the orders it counts disagree the first time an order
+ * is cancelled, and then the buyer is told to order what they already ordered.
+ * Cancelled orders are excluded for the same reason: an order that was called
+ * off has bought nothing.
+ *
+ * Only approved requisitions. An indent nobody has signed off is a wish, and
+ * committing the mill's money to a wish is how the buyer ends up holding
+ * something nobody will own.
+ */
+router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) => {
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+
+  const mrNumber = text(req.query.mrNumber)
+  const itemId = text(req.query.itemId)
+  const moId = text(req.query.moId)
+  // Off by default: somebody who has just ordered part of a request usually
+  // wants to see what is left, not the rows that are done.
+  const includeDone = req.query.includeDone === 'true'
+
+  const lines = await prisma.materialRequisitionLine.findMany({
+    where: {
+      fulfilment: 'PURCHASE',
+      ...(itemId ? { itemId } : {}),
+      mr: {
+        status: 'APPROVED',
+        ...(mrNumber ? { mrNumber: { contains: mrNumber, mode: 'insensitive' } } : {}),
+        ...(moId ? { moId } : {}),
+      },
+    },
+    include: {
+      item: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          hsnCode: true,
+          // The rate the form should offer for this item, so a line lifted off
+          // an indent arrives taxed rather than at zero.
+          taxRate: { select: { id: true, rate: true } },
+          uom: { select: { symbol: true } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      mr: {
+        select: {
+          id: true,
+          mrNumber: true,
+          requestDate: true,
+          requiredDate: true,
+          notes: true,
+          department: { select: { id: true, name: true } },
+          mo: { select: { id: true, moNumber: true } },
+        },
+      },
+      poLines: {
+        where: { po: { status: { not: 'CANCELLED' } } },
+        select: { qty: true },
+      },
+    },
+    orderBy: [{ mr: { requestDate: 'asc' } }, { id: 'asc' }],
+  })
+
+  const rows = lines
+    .map((l) => {
+      const requested = Number(l.requestedQty)
+      const ordered = round3(l.poLines.reduce((t, p) => t + Number(p.qty), 0))
+      return {
+        mrLineId: l.id,
+        mrId: l.mr.id,
+        mrNumber: l.mr.mrNumber,
+        requestDate: l.mr.requestDate,
+        requiredDate: l.mr.requiredDate,
+        department: l.mr.department,
+        // Named the way the old screen names them, so the two read the same to
+        // somebody moving across. There is no sales order in this system yet;
+        // the column stays empty rather than being left out, because it is
+        // coming.
+        moNumber: l.mr.mo?.moNumber ?? null,
+        soNumber: null as string | null,
+        remark: l.purpose ?? l.mr.notes ?? null,
+        item: l.item,
+        warehouse: l.warehouse,
+        indentQty: requested,
+        orderedQty: ordered,
+        pendingQty: round3(Math.max(0, requested - ordered)),
+      }
+    })
+    .filter((r) => includeDone || r.pendingQty > 0)
+
+  res.json({ success: true, data: rows })
+})
+
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -548,7 +743,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const [rows, total] = await Promise.all([
     prisma.purchaseOrder.findMany({
       where,
-      include: poInclude,
+      include: req.query.view === 'picker' ? poPickerInclude : poInclude,
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
       take: limit,
@@ -566,7 +761,7 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
 router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const po = await prisma.purchaseOrder.findUnique({
     where: { id: req.params.id },
-    include: poInclude,
+    include: req.query.view === 'receiving' ? poReceivingInclude : poInclude,
   })
   if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
   res.json({ success: true, data: po })
@@ -668,6 +863,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
             description: l.description ?? null,
             styleNo: l.styleNo?.trim() || null,
             styleId: l.styleId || null,
+            mrLineId: l.mrLineId || null,
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
             unitRate: l.unitRate,
@@ -792,6 +988,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           description: l.description ?? null,
           styleNo: l.styleNo?.trim() || null,
           styleId: l.styleId || null,
+          mrLineId: l.mrLineId || null,
           hsnCode: hsnById.get(l.itemId) ?? null,
           qty: l.qty,
           unitRate: l.unitRate,
@@ -854,7 +1051,8 @@ router.patch(
   requirePermission(MODULE, 'edit'),
   async (req: AuthRequest, res) => {
     const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
-    if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (!before || before.deletedAt)
+      throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
     if (before.status !== 'DRAFT') {
       throw new AppError('Only a draft order can be sent', 400, 'PO_NOT_DRAFT')
     }
@@ -885,7 +1083,8 @@ router.patch(
     const reason = z.object({ reason: z.string().max(300).optional() }).parse(req.body ?? {})
 
     const before = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } })
-    if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (!before || before.deletedAt)
+      throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
     if (before.status === 'COMPLETED') {
       throw new AppError('A completed order cannot be cancelled', 400, 'PO_COMPLETED')
     }
@@ -911,6 +1110,130 @@ router.patch(
     })
 
     res.json({ success: true, data: after, message: `${after.poNumber} cancelled.` })
+  }
+)
+
+const shortCloseSchema = z.object({
+  reason: z
+    .string()
+    .min(5, 'Say why this line is being closed short — one line is enough')
+    .max(500),
+})
+
+/**
+ * Tells one line of an order that the rest of it is not coming.
+ *
+ * Nothing forces a supplier to make up a shortfall, and an order sitting
+ * "Partially Received" forever because 40kg of a 2,000kg line never turned up
+ * is a pending-order report that never clears and a buyer who has to
+ * remember, months later, that this one is actually done. Closing the line
+ * says so on purpose: `pendingQty` drops to 0, `receivedQty` is untouched —
+ * the shortfall is recorded as never received, not quietly counted as if it
+ * were — and the order's own status is recomputed the same way a receipt
+ * would recompute it, so a line closed last reaches COMPLETED exactly like a
+ * line received last would.
+ *
+ * Refused once nothing is actually outstanding (there is nothing to close)
+ * and once the line is closed already (say so, do not error). Reversible —
+ * see the route below — because a supplier who turns up eight weeks late with
+ * the balance should not have to go through a new order to deliver it.
+ */
+router.patch(
+  '/orders/:id/lines/:lineId/short-close',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = shortCloseSchema.parse(req.body)
+
+    const after = await prisma.$transaction(async (tx) => {
+      const po = await tx.purchaseOrder.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+      if (po.status !== 'SENT' && po.status !== 'PARTIALLY_RECEIVED') {
+        throw new AppError(
+          `${po.poNumber} is ${po.status.toLowerCase().replace('_', ' ')} — only a sent order with goods still due can be closed short.`,
+          400,
+          'PO_NOT_RECEIVABLE'
+        )
+      }
+
+      const line = po.lines.find((l) => l.id === req.params.lineId)
+      if (!line) throw new AppError('That line is not on this order', 404, 'NOT_FOUND')
+      if (line.shortClosed) {
+        throw new AppError('This line is already closed short.', 400, 'ALREADY_CLOSED')
+      }
+      if (Number(line.pendingQty) <= 0) {
+        throw new AppError('Everything on this line has already been received — there is nothing to close.', 400, 'NOTHING_PENDING')
+      }
+
+      await tx.purchaseOrderLine.update({
+        where: { id: line.id },
+        data: {
+          shortClosed: true,
+          shortCloseReason: reason,
+          shortClosedAt: new Date(),
+          shortClosedById: req.user!.id,
+        },
+      })
+
+      return syncOrderFromReceipts(tx, po.id)
+    })
+
+    const full = await prisma.purchaseOrder.findUnique({ where: { id: after.id }, include: poInclude })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseOrder',
+      entityId: after.id,
+      after: full,
+    })
+
+    res.json({ success: true, data: full, message: 'Line closed short. It will not count as pending any more.' })
+  }
+)
+
+/** Undoes a short-close — the supplier turned up with the balance after all. */
+router.patch(
+  '/orders/:id/lines/:lineId/reopen',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const after = await prisma.$transaction(async (tx) => {
+      const po = await tx.purchaseOrder.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+
+      const line = po.lines.find((l) => l.id === req.params.lineId)
+      if (!line) throw new AppError('That line is not on this order', 404, 'NOT_FOUND')
+      if (!line.shortClosed) throw new AppError('This line is not closed short', 400, 'NOT_CLOSED')
+
+      await tx.purchaseOrderLine.update({
+        where: { id: line.id },
+        data: {
+          shortClosed: false,
+          shortCloseReason: null,
+          shortClosedAt: null,
+          shortClosedById: null,
+        },
+      })
+
+      return syncOrderFromReceipts(tx, po.id)
+    })
+
+    const full = await prisma.purchaseOrder.findUnique({ where: { id: after.id }, include: poInclude })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseOrder',
+      entityId: after.id,
+      after: full,
+    })
+
+    res.json({ success: true, data: full, message: 'Line reopened — it counts as pending again.' })
   }
 )
 
@@ -1383,6 +1706,10 @@ const grnInclude = {
     },
   },
   createdBy: { select: { id: true, name: true } },
+  // A count, not the rows — the list only needs to say whether a receipt has
+  // paperwork attached, and the dialog that shows the files fetches them
+  // itself when it opens.
+  _count: { select: { attachments: true } },
   lines: {
     include: {
       item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
@@ -1421,10 +1748,16 @@ async function acceptedByPoLine(
 /**
  * Puts the order back in step with what has been received.
  *
- * Called after every receipt and every cancellation, so the order's status and
- * its pending quantities are a reading of the receipts rather than a guess made
- * at the time. Rejected goods do not count as received: they are going back on
- * the lorry, and the order still needs those pieces.
+ * Called after every receipt, every cancellation, and every short-close, so
+ * the order's status and its pending quantities are a reading of the receipts
+ * rather than a guess made at the time. Rejected goods do not count as
+ * received: they are going back on the lorry, and the order still needs those
+ * pieces.
+ *
+ * A line closed short counts as done here without counting as received: its
+ * `pendingQty` is pinned at 0 regardless of the ordered-versus-accepted
+ * arithmetic that decides every other line, and it does not hold the order
+ * back from COMPLETED the way an ordinary shortfall would.
  */
 async function syncOrderFromReceipts(tx: Prisma.TransactionClient, poId: string) {
   const po = await tx.purchaseOrder.findUnique({ where: { id: poId }, include: { lines: true } })
@@ -1443,11 +1776,14 @@ async function syncOrderFromReceipts(tx: Prisma.TransactionClient, poId: string)
     const ordered = Number(line.qty)
 
     if (got > 0) anyReceived = true
-    if (got < ordered) allComplete = false
+    if (!line.shortClosed && got < ordered) allComplete = false
 
     await tx.purchaseOrderLine.update({
       where: { id: line.id },
-      data: { receivedQty: got, pendingQty: round3(Math.max(0, ordered - got)) },
+      data: {
+        receivedQty: got,
+        pendingQty: line.shortClosed ? 0 : round3(Math.max(0, ordered - got)),
+      },
     })
   }
 
@@ -1475,10 +1811,34 @@ router.get('/grn', requirePermission(MODULE, 'view'), async (req, res) => {
   const where: Prisma.GRNWhereInput = {}
   const poId = text(req.query.poId)
   const status = text(req.query.status)
+  const supplierId = text(req.query.supplierId)
+  const itemId = text(req.query.itemId)
+  const from = text(req.query.from)
+  const to = text(req.query.to)
   const q = text(req.query.q)
 
   if (poId) where.poId = poId
   if (status) where.status = status as Prisma.GRNWhereInput['status']
+  // Through the order, because a receipt has no supplier of its own — it is
+  // whoever the order was placed with.
+  if (supplierId) where.po = { supplierId }
+  // `some`, not `every`: a receipt of four things is still a receipt of the
+  // thread, and whoever asks where the thread came in wants it listed.
+  if (itemId) where.lines = { some: { itemId } }
+
+  /*
+   * A day range, inclusive at both ends.
+   *
+   * `to` is pushed to the end of its day. A receipt booked at four in the
+   * afternoon on the 19th belongs to the 19th, and a range ending on the 19th
+   * that left it out would be a filter quietly losing the day you asked for.
+   */
+  if (from || to) {
+    const range: Prisma.DateTimeFilter = {}
+    if (from) range.gte = new Date(`${from}T00:00:00`)
+    if (to) range.lte = new Date(`${to}T23:59:59.999`)
+    where.grnDate = range
+  }
   if (q) {
     where.OR = [
       { grnNumber: { contains: q, mode: 'insensitive' } },
@@ -1559,8 +1919,7 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
    * the order's own figures rather than worked out again, so the note and the
    * order can never disagree about what kind of tax this is.
    */
-  const taxMode =
-    Number(grn.po.igst) > 0 ? 'IGST' : Number(grn.po.cgst) > 0 ? 'CGST_SGST' : 'NONE'
+  const taxMode = Number(grn.po.igst) > 0 ? 'IGST' : Number(grn.po.cgst) > 0 ? 'CGST_SGST' : 'NONE'
 
   const lines = grn.lines.map((l) => {
     const accepted = Number(l.acceptedQty)
@@ -1640,9 +1999,13 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
   const grn = await prisma.$transaction(async (tx) => {
     const po = await tx.purchaseOrder.findUnique({
       where: { id: data.poId },
-      include: { lines: { include: { item: { select: { name: true } } } } },
+      include: {
+        lines: { include: { item: { select: { name: true } } } },
+        deliveryWarehouse: { select: { id: true, name: true, address: true } },
+      },
     })
-    if (!po || po.deletedAt) throw new AppError('That purchase order does not exist', 404, 'NOT_FOUND')
+    if (!po || po.deletedAt)
+      throw new AppError('That purchase order does not exist', 404, 'NOT_FOUND')
 
     if (po.status === 'DRAFT') {
       throw new AppError(
@@ -1659,7 +2022,11 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       )
     }
     if (po.status === 'COMPLETED') {
-      throw new AppError(`Everything on ${po.poNumber} has already been received.`, 400, 'PO_DONE')
+      throw new AppError(
+        `${po.poNumber} is complete — everything on it has either been received or closed short. Reopen a line first if more is expected.`,
+        400,
+        'PO_DONE'
+      )
     }
 
     const poLines = new Map(po.lines.map((l) => [l.id, l]))
@@ -1680,12 +2047,25 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     const bookingByPoLine = new Map<string, number>()
     for (const line of data.lines) {
       const accepted = round3(round3(line.receivedQty) - round3(line.rejectedQty ?? 0))
-      bookingByPoLine.set(line.poLineId, round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted))
+      bookingByPoLine.set(
+        line.poLineId,
+        round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted)
+      )
     }
+
+    /*
+     * How far over the ordered quantity a delivery may run before someone has
+     * to say why — a roll or a bale routinely lands a fraction over, and
+     * refusing that outright just sends the store keeper to type a slightly
+     * smaller number than the scale actually showed. Configured in Settings →
+     * Preferences → Purchase; 2% until a mill says otherwise.
+     */
+    const tolerancePercent = await getNumericPreference('grnOverReceiptTolerancePercent', 2)
 
     // Every line is checked before anything is written. A receipt that books
     // three items in and then refuses the fourth would leave the store keeper
     // guessing which ones landed.
+    const overTolerance: string[] = []
     const prepared = data.lines.map((line) => {
       const poLine = poLines.get(line.poLineId)
       if (!poLine) {
@@ -1696,6 +2076,14 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
         )
       }
 
+      if (poLine.shortClosed) {
+        throw new AppError(
+          `${poLine.item.name} was closed short — reopen that line on the order before receiving more against it.`,
+          400,
+          'LINE_SHORT_CLOSED'
+        )
+      }
+
       const received = round3(line.receivedQty)
       const rejected = round3(line.rejectedQty ?? 0)
       const accepted = round3(received - rejected)
@@ -1703,15 +2091,19 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       const soFar = already.get(poLine.id) ?? 0
 
       const booking = bookingByPoLine.get(poLine.id) ?? accepted
+      const total = round3(soFar + booking)
 
-      if (round3(soFar + booking) > ordered) {
-        const pending = round3(ordered - soFar)
-        throw new AppError(
-          pending > 0
-            ? `${poLine.item.name}: only ${pending} of the ${ordered} ordered is still due, and you are booking in ${booking}. Raise a new order for the extra.`
-            : `${poLine.item.name}: all ${ordered} ordered has already been received.`,
-          400,
-          'OVER_RECEIPT'
+      /*
+       * Past the tolerance is not refused, only asked about — `overTolerance`
+       * collects what to name in that ask, and receiving still goes ahead
+       * once `overReceiptReason` is on the payload. A hard refusal here would
+       * be the same problem the tolerance exists to solve, just moved a
+       * percentage point further out.
+       */
+      const allowed = round3(ordered * (1 + tolerancePercent / 100))
+      if (total > allowed) {
+        overTolerance.push(
+          `${poLine.item.name}: ${total} against ${ordered} ordered (${tolerancePercent}% allowed without a reason)`
         )
       }
 
@@ -1728,6 +2120,14 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
         unitRate: Number(poLine.unitRate),
       }
     })
+
+    if (overTolerance.length > 0 && !data.overReceiptReason?.trim()) {
+      throw new AppError(
+        `This books in more than ordered, past the usual allowance — say why before saving: ${overTolerance.join('; ')}.`,
+        400,
+        'OVER_RECEIPT_REASON_REQUIRED'
+      )
+    }
 
     const warehouseIds = [...new Set(prepared.map((p) => p.warehouseId))]
     const warehouses = await tx.warehouse.findMany({
@@ -1749,16 +2149,39 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
 
     const grnNumber = await nextDocumentNumber(tx, 'GRN', when)
 
+    /*
+     * The address this delivery's own paperwork is checked against.
+     *
+     * The order's own address by default — that is where it was ordered
+     * from and is right most of the time. Only recomputed when this receipt
+     * names a different one of the supplier's addresses, the same helper and
+     * the same validation the order itself uses: an id that does not belong
+     * to this supplier is refused rather than silently printing somebody
+     * else's premises on the receipt.
+     */
+    const supplierAddress = data.supplierAddressId
+      ? await supplierBillingAddress(tx, po.supplierId, data.supplierAddressId)
+      : (po.supplierAddress ?? null)
+
+    const shippingAddress = data.shippingWarehouseId
+      ? await shippingAddressFor(tx, data.shippingWarehouseId)
+      : (po.deliveryWarehouse?.address ?? null)
+
     const created = await tx.gRN.create({
       data: {
         grnNumber,
         poId: po.id,
         grnDate: when,
         vehicleNo: data.vehicleNo ?? null,
+        supplierAddress,
+        shippingAddress,
         // The goods are on the rack the moment this saves. Any other status
         // would be a receipt claiming stock the ledger does not have.
         status: 'ACCEPTED',
         notes: data.notes ?? null,
+        // Only ever set when overTolerance actually found something —
+        // otherwise this is an ordinary receipt and the field stays null.
+        overReceiptReason: overTolerance.length > 0 ? (data.overReceiptReason?.trim() ?? null) : null,
 
         // The delivery's own paperwork, exactly as it was handed over.
         gateEntryNo: data.gateEntryNo ?? null,
@@ -1841,6 +2264,150 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     data: grn,
   })
 })
+
+// —— Files kept against a receipt ——
+//
+// The same three-step pattern as a purchase order's own attachments: ask for
+// a link, send the file straight to storage, then tell us it landed. Optional
+// throughout — a receipt saves with nothing attached, and the challan or the
+// supplier's invoice can be scanned in afterwards.
+
+const grnAttachmentInclude = {
+  uploadedBy: { select: { id: true, name: true } },
+}
+
+router.get('/grn/:id/attachments', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.gRNAttachment.findMany({
+    where: { grnId: req.params.id },
+    include: grnAttachmentInclude,
+    orderBy: { createdAt: 'asc' },
+  })
+  res.json({ success: true, data: rows })
+})
+
+router.post(
+  '/grn/:id/attachments/upload-url',
+  requirePermission(MODULE, 'edit'),
+  async (req, res) => {
+    const { fileName, sizeBytes } = z
+      .object({
+        fileName: z.string().min(1, 'The file needs a name').max(255),
+        sizeBytes: z
+          .number()
+          .int()
+          .positive('That file is empty')
+          .max(MAX_FILE_BYTES, `Files have to be ${MAX_FILE_BYTES / 1024 / 1024}MB or smaller`),
+      })
+      .parse(req.body)
+
+    const grn = await prisma.gRN.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, grnNumber: true },
+    })
+    if (!grn) throw new AppError('Goods receipt not found', 404, 'NOT_FOUND')
+
+    const already = await prisma.gRNAttachment.count({ where: { grnId: grn.id } })
+    if (already >= MAX_FILES_PER_DOCUMENT) {
+      throw new AppError(
+        `${grn.grnNumber} already has ${MAX_FILES_PER_DOCUMENT} files. Remove one before adding another.`,
+        409,
+        'TOO_MANY_FILES'
+      )
+    }
+
+    const path = storagePathFor('grn', grn.id, fileName)
+    const { uploadUrl } = await signedUploadUrl(path)
+
+    res.json({ success: true, data: { uploadUrl, storagePath: path, fileName, sizeBytes } })
+  }
+)
+
+router.post(
+  '/grn/:id/attachments',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { fileName, storagePath } = z
+      .object({
+        fileName: z.string().min(1).max(255),
+        storagePath: z.string().min(1),
+      })
+      .parse(req.body)
+
+    const grn = await prisma.gRN.findUnique({ where: { id: req.params.id }, select: { id: true } })
+    if (!grn) throw new AppError('Goods receipt not found', 404, 'NOT_FOUND')
+
+    if (!storagePath.startsWith(`grn/${grn.id}/`)) {
+      throw new AppError('That file does not belong to this receipt', 400, 'WRONG_DOCUMENT')
+    }
+
+    const { sizeBytes, mimeType } = await statObject(storagePath)
+    if (sizeBytes > MAX_FILE_BYTES) {
+      await removeObject(storagePath).catch(() => {})
+      throw new AppError(
+        `That file is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_BYTES / 1024 / 1024}MB.`,
+        400,
+        'FILE_TOO_LARGE'
+      )
+    }
+
+    const attachment = await prisma.gRNAttachment.create({
+      data: {
+        grnId: grn.id,
+        fileName,
+        storagePath,
+        mimeType,
+        sizeBytes,
+        uploadedById: req.user!.id,
+      },
+      include: grnAttachmentInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'GRNAttachment',
+      entityId: attachment.id,
+      after: attachment,
+    })
+
+    res.status(201).json({ success: true, data: attachment })
+  }
+)
+
+router.get('/grn-attachments/:id/link', requirePermission(MODULE, 'view'), async (req, res) => {
+  const file = await prisma.gRNAttachment.findUnique({ where: { id: req.params.id } })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+
+  res.json({
+    success: true,
+    data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName },
+  })
+})
+
+router.delete(
+  '/grn-attachments/:id',
+  requirePermission(MODULE, 'delete'),
+  async (req: AuthRequest, res) => {
+    const file = await prisma.gRNAttachment.findUnique({
+      where: { id: req.params.id },
+      include: grnAttachmentInclude,
+    })
+    if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+
+    await prisma.gRNAttachment.delete({ where: { id: file.id } })
+    await removeObject(file.storagePath).catch(() => {})
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'DELETE',
+      entityType: 'GRNAttachment',
+      entityId: file.id,
+      before: file,
+    })
+
+    res.json({ success: true, message: `${file.fileName} removed.` })
+  }
+)
 
 /**
  * Cancelling a receipt.

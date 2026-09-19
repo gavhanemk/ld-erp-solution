@@ -62,6 +62,36 @@ export const createGrnSchema = z
     orderedBy: ref('name', 80),
     referenceNo: ref('reference'),
 
+    /*
+     * Which of the supplier's addresses this delivery's paperwork names.
+     *
+     * Defaults to the order's own address when left out — most deliveries
+     * come from wherever the order was placed with. Set only when this
+     * challan or invoice names a different branch of the supplier than the
+     * order was raised against.
+     */
+    supplierAddressId: z.string().optional().nullable(),
+
+    /*
+     * Which of the mill's own stores the lorry actually arrived at.
+     *
+     * Defaults to the order's own delivery warehouse when left out. Set only
+     * when the driver turned up somewhere else than the order named — a
+     * different gate needs no correction to every line's own store, which is
+     * what actually decides where the stock is counted.
+     */
+    shippingWarehouseId: z.string().optional().nullable(),
+
+    /*
+     * Why this receipt books in more than the order's own balance.
+     *
+     * Left out on an ordinary receipt. Required only when some line's excess
+     * runs past the mill's configured tolerance — checked and enforced
+     * server-side, not here, because that check needs the order and the
+     * tolerance setting, neither of which this schema can see.
+     */
+    overReceiptReason: z.string().max(500).optional().nullable(),
+
     lines: z
       .array(
         z.object({
