@@ -1,9 +1,69 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Wed 2 Sep 2026 — stock, the ledger and material requisitions_
+_Last updated: Sat 19 Sep 2026 — an item can be a style in one colour_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+**This copy is behind `main` on GitHub.** The Bill of Materials work (per
+colour, sizes, routing, a status lifecycle) is merged into this branch's
+history but its own PROJECT_STATUS.md entries live on PR #12
+(`feat/masters-bom-colour-and-process`), not yet merged. Whoever merges both
+branches into `main` will need to reconcile two sets of entries at the top of
+this file — normal, expected, nothing to avoid it for.
+
+---
+
+## An item can be a style in one colour (Sat 19 Sep)
+
+A finished-good item now carries `styleId` and `color`: required when
+`type` is `FINISHED_GOOD`, forbidden otherwise, and the colour must be one
+of that style's own `colors[]`. This is the piece the BOM work identified
+as needed before Production can build manufacturing orders — an MO, a sales
+order or an invoice can now find "this style in this colour" as one item.
+
+**What changed:**
+
+- **`Item.styleId` / `Item.color`**, both optional at the database level,
+  unique together so two items can never be the same style in the same
+  colour. Migration `20260919120000_item_style_colour`, already applied to
+  the shared database.
+- **The colour rule can't live in the database** — "one of this style's own
+  colours" needs a lookup — so it's enforced in the API, in one place:
+  `assertItemStyleColorValid` in `apps/api/src/lib/itemStyleColor.ts`,
+  shared by the HTTP routes and the AI assistant's `create_item` tool.
+- **`/items` gets two hand-written routes** (POST, PATCH/:id) ahead of its
+  `crudRouter` mount, since `crudRouter` has no hook a database-backed check
+  could run from. GET and DELETE are untouched.
+- **`MasterFormDialog` gains two small, additive capabilities** every master
+  screen can use from here on: `showIf` (a field only shown, and only
+  required, once another field's value says it applies) and
+  `optionsFromField` (a dropdown whose choices come from a property on
+  whatever record another field currently points at). The Items screen uses
+  both — Style only shows for a Finished Good, Colour only offers that
+  style's own list.
+- **A bug fix, found while wiring the AI assistant through this**:
+  `create_item` already resolved and sent a `taxRateId`, but
+  `createItemSchema` had no such field — Zod silently strips unrecognised
+  keys, so every item the assistant created with a GST rate specified was
+  quietly losing it. Fixed alongside adding the field properly.
+
+**The four items seeded before this stay blank** on style and colour — the
+same call the BOM migration made for blank-colour BOMs. Guessing which of
+"Men's Formal Shirt", "Men's Casual Check Shirt" and so on maps to which
+real style is worse than leaving it for someone who knows the product line.
+The next time one is opened and saved, the form will ask for both.
+
+**Verified:** both apps typecheck clean; the web build compiles (fails only
+on the pre-existing `/404` prerender bug, confirmed unrelated — nothing in
+this change touches routing or error pages); 8 smoke-test cases run against
+the real database covering every branch of the validation, then cleaned up.
+**Not yet tested on screen** — that's the next step before this merges.
+
+**Deliberately not touched here:** `SalesOrderLine.styleCode`/`color` and
+`MOLine.color` still duplicate what `Item` now owns properly, as free text.
+Left as a follow-up for whenever Sales or Production is next worked on —
+noted directly on those two schema fields as doc comments.
 
 ---
 
