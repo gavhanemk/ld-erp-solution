@@ -253,17 +253,23 @@ model User {
   auditLogs       AuditLog[]
   notifications   Notification[]
   aiConversations AIConversation[]
-  createdSOs      SalesOrder[]         @relation("SOCreatedBy")
-  approvedSOs     SalesOrder[]         @relation("SOApprovedBy")
-  createdPOs      PurchaseOrder[]      @relation("POCreatedBy")
-  approvedPOs     PurchaseOrder[]      @relation("POApprovedBy")
-  createdMOs      ManufacturingOrder[] @relation("MOCreatedBy")
-  raisedMRs       MaterialRequisition[] @relation("MRRaisedBy")
-  approvedMRs     MaterialRequisition[] @relation("MRApprovedBy")
-  issuedMRs       MaterialRequisition[] @relation("MRIssuedBy")
-  movedStock      StockTransfer[]       @relation("TransferMovedBy")
-  cancelledStock  StockTransfer[]       @relation("TransferCancelledBy")
-  countedStock    StockAdjustment[]     @relation("AdjustmentMadeBy")
+  createdSOs      SalesOrder[]              @relation("SOCreatedBy")
+  approvedSOs     SalesOrder[]              @relation("SOApprovedBy")
+  createdPOs      PurchaseOrder[]           @relation("POCreatedBy")
+  approvedPOs     PurchaseOrder[]           @relation("POApprovedBy")
+  createdMOs      ManufacturingOrder[]      @relation("MOCreatedBy")
+  raisedMRs       MaterialRequisition[]     @relation("MRRaisedBy")
+  approvedMRs     MaterialRequisition[]     @relation("MRApprovedBy")
+  issuedMRs       MaterialRequisition[]     @relation("MRIssuedBy")
+  createdBills    PurchaseInvoice[]         @relation("BillCreatedBy")
+  createdPayments SupplierPayment[]         @relation("PaymentCreatedBy")
+  uploadedFiles   PurchaseOrderAttachment[] @relation("AttachmentUploadedBy")
+  movedStock      StockTransfer[]           @relation("TransferMovedBy")
+  cancelledStock  StockTransfer[]           @relation("TransferCancelledBy")
+  countedStock    StockAdjustment[]         @relation("AdjustmentMadeBy")
+  receivedGoods   GRN[]                     @relation("GRNCreatedBy")
+  uploadedGrnFiles GRNAttachment[]          @relation("GRNAttachmentUploadedBy")
+  shortClosedPoLines PurchaseOrderLine[]    @relation("PurchaseOrderLineShortClosedBy")
 
   @@index([email])
   @@index([roleId])
@@ -330,42 +336,42 @@ model AuditLog {
 // ═══════════════════════════════════════════
 
 model Company {
-  id           String   @id @default(cuid())
-  name         String
-  legalName    String?
-  address      String?
-  city         String?
-  state        String?
-  pincode      String?
-  gstin        String?  @unique
+  id             String    @id @default(cuid())
+  name           String
+  legalName      String?
+  address        String?
+  city           String?
+  state          String?
+  pincode        String?
+  gstin          String?   @unique
   /// Two-digit GST state code, e.g. "27" for Maharashtra. Place of supply is
   /// decided by comparing this against the customer's, so it cannot be free text.
-  stateCode    String?
-  pan          String?
+  stateCode      String?
+  pan            String?
   /// Needed on every TDS challan and to issue Form 16A to contractors.
-  tan          String?
+  tan            String?
   /// Udyam registration. Drives the 45-day payment rule for MSME suppliers.
-  msmeNumber   String?
-  phone        String?
-  email        String?
-  website      String?
+  msmeNumber     String?
+  phone          String?
+  email          String?
+  website        String?
   /// Printed at the top of every document. Stored inline so a mill PC with no
   /// file server still prints a letterhead.
-  logoUrl      String?
+  logoUrl        String?
   /// Printed above the signature line.
-  signatureUrl String?
+  signatureUrl   String?
   /// The account a customer is asked to pay into, printed on the invoice.
-  bankName     String?
-  bankBranch   String?
-  bankAccount  String?
-  bankIFSC     String?
-  upiId        String?
-  currentFY    String?
-  fyStartMonth Int      @default(4)
+  bankName       String?
+  bankBranch     String?
+  bankAccount    String?
+  bankIFSC       String?
+  upiId          String?
+  currentFY      String?
+  fyStartMonth   Int       @default(4)
   /// Nothing may be dated before the books open.
   booksStartDate DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   brands       Brand[]
   warehouses   Warehouse[]
@@ -515,8 +521,8 @@ model Item {
 }
 
 model Style {
-  id          String    @id @default(cuid())
-  code        String    @unique
+  id          String     @id @default(cuid())
+  code        String     @unique
   name        String
   season      String?
   brandType   BrandType
@@ -533,13 +539,14 @@ model Style {
   colors      String[]
   techPackUrl String?
   imageUrl    String?
-  isActive    Boolean   @default(true)
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
 
   boms     BOM[]
   moLines  MOLine[]
   routings Routing[]
+  poLines  PurchaseOrderLine[]
 
   @@index([code])
   @@map("styles")
@@ -580,92 +587,131 @@ model BOMLine {
 }
 
 model Customer {
-  id              String       @id @default(cuid())
-  code            String       @unique
-  name            String
-  type            CustomerType
-  gstin           String?
-  pan             String?
-  phone           String?
-  email           String?
-  billingAddress  String?
-  billingCity     String?
-  billingState    String?
+  id                String       @id @default(cuid())
+  code              String       @unique
+  name              String
+  type              CustomerType
+  gstin             String?
+  pan               String?
+  phone             String?
+  email             String?
+  billingAddress    String?
+  billingCity       String?
+  billingState      String?
   /// Two-digit GST state code. This, not the state name, decides CGST+SGST vs IGST.
-  billingStateCode String?
-  billingPincode  String?
-  shippingAddress String?
-  shippingCity    String?
-  shippingState   String?
+  billingStateCode  String?
+  billingPincode    String?
+  shippingAddress   String?
+  shippingCity      String?
+  shippingState     String?
   shippingStateCode String?
-  shippingPincode String?
+  shippingPincode   String?
   /// A buyer can take delivery in one state under a GSTIN registered in another.
-  shippingGstin   String?
-  creditLimit     Decimal?     @db.Decimal(12, 2)
-  creditDays      Int          @default(30)
-  paymentTerms    String?
-  bankName        String?
-  bankAccount     String?
-  bankIFSC        String?
+  shippingGstin     String?
+  creditLimit       Decimal?     @db.Decimal(12, 2)
+  creditDays        Int          @default(30)
+  paymentTerms      String?
+  bankName          String?
+  bankAccount       String?
+  bankIFSC          String?
   /// The agent who brings this buyer, and what they are paid on the sale.
-  brokerId        String?
-  broker          Broker?      @relation(fields: [brokerId], references: [id])
-  brokeragePercent Decimal?    @db.Decimal(5, 2)
+  brokerId          String?
+  broker            Broker?      @relation(fields: [brokerId], references: [id])
+  brokeragePercent  Decimal?     @db.Decimal(5, 2)
   /// Another company under the same owners — LD Silk Mills, for instance.
   /// Trades at arm's length with its own GSTIN, but is flagged so intercompany
   /// turnover can be identified and excluded from group figures.
-  isGroupCompany  Boolean      @default(false)
-  isActive        Boolean      @default(true)
-  isBlacklisted   Boolean      @default(false)
-  notes           String?
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
+  isGroupCompany    Boolean      @default(false)
+  isActive          Boolean      @default(true)
+  isBlacklisted     Boolean      @default(false)
+  notes             String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   salesOrders  SalesOrder[]
+  /// Purchase orders the supplier was told to deliver straight to this customer.
+  poDeliveries PurchaseOrder[]  @relation("PODeliveryCustomer")
   invoices     SalesInvoice[]
   payments     PaymentReceipt[]
   creditNotes  CreditNote[]
-  ownedStock   StockLedger[]  @relation("CustomerOwnedStock")
+  ownedStock   StockLedger[]    @relation("CustomerOwnedStock")
 
   @@index([code])
   @@map("customers")
 }
 
+/// One of the places a supplier bills from.
+///
+/// A supplier can have more than one: a head office and a works, or a second
+/// registration in another state. The supplier master held exactly one address
+/// before this, so the second one went into a remark and never reconciled
+/// against anything.
+///
+/// `stateCode` sits on the address and not only on the supplier because it is
+/// what decides the tax split — a second address in another state changes what
+/// that supplier may charge on an order billed from there. Same reason `gstin`
+/// is here: a business registers per place of business.
+model SupplierAddress {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  /// What the mill calls it — "Head office", "Bhiwandi works". Optional,
+  /// because most suppliers have one place and naming it is busywork.
+  label      String?
+  address    String
+  city       String?
+  state      String?
+  /// Two-digit GST state code.
+  stateCode  String?
+  pincode    String?
+  country    String?  @default("India")
+  gstin      String?
+  /// The one a new order is offered first.
+  isDefault  Boolean  @default(false)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([supplierId])
+  @@map("supplier_addresses")
+}
+
 model Supplier {
-  id           String           @id @default(cuid())
-  code         String           @unique
-  name         String
-  category     SupplierCategory
-  gstin        String?
-  pan          String?
-  phone        String?
-  email        String?
-  address      String?
-  city         String?
-  state        String?
+  id             String           @id @default(cuid())
+  code           String           @unique
+  name           String
+  category       SupplierCategory
+  gstin          String?
+  pan            String?
+  phone          String?
+  email          String?
+  address        String?
+  city           String?
+  state          String?
   /// Two-digit GST state code — decides the tax split on a purchase.
-  stateCode    String?
-  pincode      String?
-  creditDays   Int              @default(30)
-  leadTimeDays Int              @default(7)
-  paymentTerms String?
-  bankName     String?
-  bankAccount  String?
-  bankIFSC     String?
-  rating       Int?             @db.SmallInt
-  isPreferred  Boolean          @default(false)
+  stateCode      String?
+  pincode        String?
+  creditDays     Int              @default(30)
+  leadTimeDays   Int              @default(7)
+  paymentTerms   String?
+  bankName       String?
+  bankAccount    String?
+  bankIFSC       String?
+  rating         Int?             @db.SmallInt
+  isPreferred    Boolean          @default(false)
   /// Registered under MSME/Udyam — payment falls due within 45 days by law.
-  isMsme       Boolean          @default(false)
-  msmeNumber   String?
+  isMsme         Boolean          @default(false)
+  msmeNumber     String?
   /// Another company under the same owners, trading at arm's length under its
   /// own GSTIN. LD Silk Mills supplies fabric to LD Cotton Mills this way, so
   /// the purchase is real and carries GST, but group figures must exclude it.
-  isGroupCompany Boolean        @default(false)
-  isActive     Boolean          @default(true)
-  notes        String?
-  createdAt    DateTime         @default(now())
-  updatedAt    DateTime         @updatedAt
+  isGroupCompany Boolean          @default(false)
+  isActive       Boolean          @default(true)
+  notes          String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
 
+  addresses      SupplierAddress[]
   purchaseOrders PurchaseOrder[]
   invoices       PurchaseInvoice[]
   payments       SupplierPayment[]
@@ -728,29 +774,29 @@ model Operation {
   sortOrder    Int        @default(0)
   isActive     Boolean    @default(true)
 
-  routingSteps     RoutingStep[]
+  routingSteps      RoutingStep[]
   productionEntries ProductionEntry[]
 
   @@map("operations")
 }
 
 model Machine {
-  id             String     @id @default(cuid())
-  machineNo      String     @unique
+  id             String        @id @default(cuid())
+  machineNo      String        @unique
   name           String
   type           String
   brand          String?
   model          String?
   departmentId   String
-  department     Department @relation(fields: [departmentId], references: [id])
+  department     Department    @relation(fields: [departmentId], references: [id])
   purchaseDate   DateTime?
   warrantyExpiry DateTime?
   amcStart       DateTime?
   amcEnd         DateTime?
   status         MachineStatus @default(OPERATIONAL)
-  isActive       Boolean    @default(true)
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   breakdowns   MachineBreakdown[]
   maintenances MaintenanceSchedule[]
@@ -763,48 +809,48 @@ model Machine {
 // ═══════════════════════════════════════════
 
 model SalesOrder {
-  id              String           @id @default(cuid())
-  soNumber        String           @unique
-  brandId         String
-  brand           Brand            @relation(fields: [brandId], references: [id])
-  customerId      String
-  customer        Customer         @relation(fields: [customerId], references: [id])
-  customerPORef   String?
-  customerPODate  DateTime?
-  orderDate       DateTime         @default(now())
-  deliveryDate    DateTime?
-  deliveryAddress String?
-  salesperson     String?
+  id                String           @id @default(cuid())
+  soNumber          String           @unique
+  brandId           String
+  brand             Brand            @relation(fields: [brandId], references: [id])
+  customerId        String
+  customer          Customer         @relation(fields: [customerId], references: [id])
+  customerPORef     String?
+  customerPODate    DateTime?
+  orderDate         DateTime         @default(now())
+  deliveryDate      DateTime?
+  deliveryAddress   String?
+  salesperson       String?
   /// The agent on this sale and what they earn. Brokerage is a real cost with
   /// TDS deducted against it, so it cannot live only in someone's notebook.
-  brokerId        String?
-  broker          Broker?          @relation(fields: [brokerId], references: [id])
-  brokeragePercent Decimal?        @db.Decimal(5, 2)
-  brokerageAmount Decimal          @default(0) @db.Decimal(12, 2)
+  brokerId          String?
+  broker            Broker?          @relation(fields: [brokerId], references: [id])
+  brokeragePercent  Decimal?         @db.Decimal(5, 2)
+  brokerageAmount   Decimal          @default(0) @db.Decimal(12, 2)
   /// Two-digit GST state code of the delivery. Compared against the company's
   /// to decide CGST+SGST or IGST — and it is compulsory on a tax invoice.
   placeOfSupplyCode String?
-  status          SalesOrderStatus @default(DRAFT)
-  subtotal        Decimal          @default(0) @db.Decimal(12, 2)
-  discountAmount  Decimal          @default(0) @db.Decimal(12, 2)
-  taxableAmount   Decimal          @default(0) @db.Decimal(12, 2)
-  cgst            Decimal          @default(0) @db.Decimal(12, 2)
-  sgst            Decimal          @default(0) @db.Decimal(12, 2)
-  igst            Decimal          @default(0) @db.Decimal(12, 2)
-  roundOff        Decimal          @default(0) @db.Decimal(6, 2)
-  totalAmount     Decimal          @default(0) @db.Decimal(12, 2)
-  currency        String           @default("INR")
-  isJobWork       Boolean          @default(false)
-  notes           String?
-  attachmentUrl   String?
-  version         Int              @default(1)
-  createdById     String
-  createdBy       User             @relation("SOCreatedBy", fields: [createdById], references: [id])
-  approvedById    String?
-  approvedBy      User?            @relation("SOApprovedBy", fields: [approvedById], references: [id])
-  approvedAt      DateTime?
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  status            SalesOrderStatus @default(DRAFT)
+  subtotal          Decimal          @default(0) @db.Decimal(12, 2)
+  discountAmount    Decimal          @default(0) @db.Decimal(12, 2)
+  taxableAmount     Decimal          @default(0) @db.Decimal(12, 2)
+  cgst              Decimal          @default(0) @db.Decimal(12, 2)
+  sgst              Decimal          @default(0) @db.Decimal(12, 2)
+  igst              Decimal          @default(0) @db.Decimal(12, 2)
+  roundOff          Decimal          @default(0) @db.Decimal(6, 2)
+  totalAmount       Decimal          @default(0) @db.Decimal(12, 2)
+  currency          String           @default("INR")
+  isJobWork         Boolean          @default(false)
+  notes             String?
+  attachmentUrl     String?
+  version           Int              @default(1)
+  createdById       String
+  createdBy         User             @relation("SOCreatedBy", fields: [createdById], references: [id])
+  approvedById      String?
+  approvedBy        User?            @relation("SOApprovedBy", fields: [approvedById], references: [id])
+  approvedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
 
   lines               SalesOrderLine[]
   deliveryChallans    DeliveryChallan[]
@@ -842,42 +888,42 @@ model SalesOrderLine {
 }
 
 model SalesInvoice {
-  id            String      @id @default(cuid())
-  invoiceNumber String      @unique
-  soId          String?
-  so            SalesOrder? @relation(fields: [soId], references: [id])
-  customerId    String
-  customer      Customer    @relation(fields: [customerId], references: [id])
-  invoiceDate   DateTime    @default(now())
-  dueDate       DateTime?
+  id                String        @id @default(cuid())
+  invoiceNumber     String        @unique
+  soId              String?
+  so                SalesOrder?   @relation(fields: [soId], references: [id])
+  customerId        String
+  customer          Customer      @relation(fields: [customerId], references: [id])
+  invoiceDate       DateTime      @default(now())
+  dueDate           DateTime?
   /// Two-digit GST state code of the delivery — compulsory on a tax invoice.
   placeOfSupplyCode String?
-  brokerId      String?
-  broker        Broker?     @relation(fields: [brokerId], references: [id])
-  brokeragePercent Decimal? @db.Decimal(5, 2)
-  brokerageAmount Decimal   @default(0) @db.Decimal(12, 2)
-  subtotal      Decimal     @db.Decimal(12, 2)
+  brokerId          String?
+  broker            Broker?       @relation(fields: [brokerId], references: [id])
+  brokeragePercent  Decimal?      @db.Decimal(5, 2)
+  brokerageAmount   Decimal       @default(0) @db.Decimal(12, 2)
+  subtotal          Decimal       @db.Decimal(12, 2)
   /// A discount given on the whole bill rather than line by line, which is how
   /// LD actually prices. Without it the invoice total cannot be reproduced.
-  discountAmount Decimal    @default(0) @db.Decimal(12, 2)
-  taxableAmount Decimal     @default(0) @db.Decimal(12, 2)
-  cgst          Decimal     @default(0) @db.Decimal(12, 2)
-  sgst          Decimal     @default(0) @db.Decimal(12, 2)
-  igst          Decimal     @default(0) @db.Decimal(12, 2)
+  discountAmount    Decimal       @default(0) @db.Decimal(12, 2)
+  taxableAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  cgst              Decimal       @default(0) @db.Decimal(12, 2)
+  sgst              Decimal       @default(0) @db.Decimal(12, 2)
+  igst              Decimal       @default(0) @db.Decimal(12, 2)
   /// Rounds the bill to the nearest rupee. Without it every total carries paise
   /// and nothing ties out against the customer's ledger.
-  roundOff      Decimal     @default(0) @db.Decimal(6, 2)
-  totalAmount   Decimal     @db.Decimal(12, 2)
-  paidAmount    Decimal     @default(0) @db.Decimal(12, 2)
-  balanceAmount Decimal     @db.Decimal(12, 2)
-  status        InvoiceStatus @default(UNPAID)
-  irnNumber     String?
-  qrCodeData    String?
-  ackNumber     String?
-  ackDate       DateTime?
-  notes         String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  roundOff          Decimal       @default(0) @db.Decimal(6, 2)
+  totalAmount       Decimal       @db.Decimal(12, 2)
+  paidAmount        Decimal       @default(0) @db.Decimal(12, 2)
+  balanceAmount     Decimal       @db.Decimal(12, 2)
+  status            InvoiceStatus @default(UNPAID)
+  irnNumber         String?
+  qrCodeData        String?
+  ackNumber         String?
+  ackDate           DateTime?
+  notes             String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
 
   payments    PaymentReceipt[]
   lines       SalesInvoiceLine[]
@@ -890,20 +936,20 @@ model SalesInvoice {
 }
 
 model DeliveryChallan {
-  id             String     @id @default(cuid())
-  dcNumber       String     @unique
+  id             String        @id @default(cuid())
+  dcNumber       String        @unique
   soId           String
-  so             SalesOrder @relation(fields: [soId], references: [id])
-  dcDate         DateTime   @default(now())
-  isReturnable   Boolean    @default(false)
+  so             SalesOrder    @relation(fields: [soId], references: [id])
+  dcDate         DateTime      @default(now())
+  isReturnable   Boolean       @default(false)
   vehicleNumber  String?
   transporter    String?
   lrNumber       String?
   eWayBillNumber String?
   status         ChallanStatus @default(DRAFT)
   notes          String?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   lines DeliveryChallanLine[]
 
@@ -947,48 +993,129 @@ model PaymentReceipt {
 // ═══════════════════════════════════════════
 
 model PurchaseOrder {
-  id           String              @id @default(cuid())
-  poNumber     String              @unique
-  supplierId   String
-  supplier     Supplier            @relation(fields: [supplierId], references: [id])
-  poDate       DateTime            @default(now())
-  deliveryDate DateTime?
-  status       PurchaseOrderStatus @default(DRAFT)
-  poType       String              @default("STANDARD")
+  id                  String              @id @default(cuid())
+  poNumber            String              @unique
+  supplierId          String
+  supplier            Supplier            @relation(fields: [supplierId], references: [id])
+  poDate              DateTime            @default(now())
+  deliveryDate        DateTime?
+  status              PurchaseOrderStatus @default(DRAFT)
+  poType              String              @default("STANDARD")
+  /// The supplier's quotation or our enquiry that this order answers. Carried
+  /// on the order because the first thing asked when a price is questioned
+  /// months later is which quote it came from, and that answer lived only in
+  /// somebody's email before now.
+  enquiryNo           String?
+  enquiryDate         DateTime?
+  /// Whatever the mill needs to quote back — a job number, an indent slip, the
+  /// buyer's own reference. Deliberately free text: every mill numbers these
+  /// differently and a fixed format would fit none of them.
+  reference           String?
+  /// An internal note. Separate from `notes`, which is printed on the order the
+  /// supplier receives — a remark about a supplier is not always something to
+  /// send them.
+  remark              String?
   /// Where the goods are delivered, as a two-digit GST state code. Compared
   /// against ours to decide whether the supplier should bill CGST+SGST or IGST.
-  placeOfSupplyCode String?
-  subtotal     Decimal             @default(0) @db.Decimal(12, 2)
-  discountAmount Decimal           @default(0) @db.Decimal(12, 2)
-  taxableAmount Decimal            @default(0) @db.Decimal(12, 2)
+  placeOfSupplyCode   String?
+  subtotal            Decimal             @default(0) @db.Decimal(12, 2)
+  discountAmount      Decimal             @default(0) @db.Decimal(12, 2)
+  taxableAmount       Decimal             @default(0) @db.Decimal(12, 2)
   /// Split rather than one lump, so the order can be checked against the bill
   /// the supplier eventually sends.
-  cgst         Decimal             @default(0) @db.Decimal(12, 2)
-  sgst         Decimal             @default(0) @db.Decimal(12, 2)
-  igst         Decimal             @default(0) @db.Decimal(12, 2)
-  roundOff     Decimal             @default(0) @db.Decimal(6, 2)
-  totalAmount  Decimal             @default(0) @db.Decimal(12, 2)
+  cgst                Decimal             @default(0) @db.Decimal(12, 2)
+  sgst                Decimal             @default(0) @db.Decimal(12, 2)
+  igst                Decimal             @default(0) @db.Decimal(12, 2)
+  roundOff            Decimal             @default(0) @db.Decimal(6, 2)
+  /// Anything the mill agrees to pay that is not one of the named charges and
+  /// carries no GST of its own — the old ERP's "Other charges" box. Added
+  /// after tax, which is why it is not part of `taxableAmount`.
+  otherCharges        Decimal             @default(0) @db.Decimal(12, 2)
+  totalAmount         Decimal             @default(0) @db.Decimal(12, 2)
   /// Where the supplier is told to deliver.
   deliveryWarehouseId String?
-  deliveryWarehouse   Warehouse?   @relation(fields: [deliveryWarehouseId], references: [id])
-  notes        String?
-  terms        String?
-  createdById  String
-  createdBy    User                @relation("POCreatedBy", fields: [createdById], references: [id])
-  approvedById String?
-  approvedBy   User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
-  approvedAt   DateTime?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
+  deliveryWarehouse   Warehouse?          @relation(fields: [deliveryWarehouseId], references: [id])
+  /// Set when the supplier ships straight to a customer instead of to us.
+  /// It changes the tax: goods are taxed where they are delivered, so a
+  /// customer in another state makes the supplier's bill IGST even though we
+  /// are in theirs.
+  deliveryCustomerId  String?
+  deliveryCustomer    Customer?           @relation("PODeliveryCustomer", fields: [deliveryCustomerId], references: [id])
+  /// The address as it read the day the order was raised. A customer moves;
+  /// an order already with a supplier must not.
+  deliveryAddress     String?
+  /// The supplier's billing address, as it read the day the order was raised.
+  ///
+  /// Text, not a link to `SupplierAddress`, for the same reason
+  /// `deliveryAddress` is: this is what is printed on the order the supplier
+  /// is holding. Correcting a typo in the master, or retiring an address,
+  /// must not quietly change what an order already sent says.
+  supplierAddress     String?
+  notes               String?
+  terms               String?
+  createdById         String
+  createdBy           User                @relation("POCreatedBy", fields: [createdById], references: [id])
+  approvedById        String?
+  approvedBy          User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
+  approvedAt          DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
-  lines    PurchaseOrderLine[]
-  grns     GRN[]
-  invoices PurchaseInvoice[]
+  /// When this order was put in the recycle bin, and by whom.
+  ///
+  /// Deleting an order does not remove it. The row stays, marked, and every
+  /// list, count and lookup outside the bin itself passes over it — so as far
+  /// as the mill is concerned it is gone, but it can be put back whole.
+  ///
+  /// A `deletedById` rather than a relation: it is read once, on the one
+  /// screen that lists the bin, and a relation here would put a
+  /// `deletedPurchaseOrders` back-reference on User that nothing else wants.
+  deletedAt   DateTime?
+  deletedById String?
+
+  lines       PurchaseOrderLine[]
+  charges     PurchaseOrderCharge[]
+  grns        GRN[]
+  invoices    PurchaseInvoice[]
+  attachments PurchaseOrderAttachment[]
 
   @@index([poNumber])
   @@index([supplierId])
   @@index([status])
+  /// Every list of orders filters on this, so it earns an index of its own.
+  @@index([deletedAt])
   @@map("purchase_orders")
+}
+
+/// A file kept against a purchase order — the supplier's quotation, a sample
+/// approval, a signed copy that came back.
+///
+/// The file itself lives in object storage, not in the database. What is kept
+/// here is where it is and what it was called, because a row is cheap to read
+/// and a blob in a row makes every query that touches the order slower.
+///
+/// `storagePath` is the whole address of the file. The bucket is private, so
+/// nothing here is reachable without a link the API signs on request and which
+/// expires — a purchase order is a commercial document and a guessable URL is
+/// how those end up indexed.
+model PurchaseOrderAttachment {
+  id           String        @id @default(cuid())
+  poId         String
+  po           PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  /// What the person called it on their own machine. Shown in the list; never
+  /// used to build the storage path, because two people upload "scan.pdf".
+  fileName     String
+  /// Where it sits in the bucket. Unique so a row can never point at a file
+  /// another row also claims.
+  storagePath  String        @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User          @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime      @default(now())
+
+  @@index([poId])
+  @@map("purchase_order_attachments")
 }
 
 model PurchaseOrderLine {
@@ -999,6 +1126,21 @@ model PurchaseOrderLine {
   item        Item          @relation(fields: [itemId], references: [id])
   /// What we asked for in our own words, when it differs from the item name.
   description String?
+  /// The garment style this material is being bought for, both ways round.
+  ///
+  /// `styleNo` is whatever the buyer typed. `styleId` is the master style it
+  /// turned out to be, set only when the text matches a style's code exactly.
+  ///
+  /// Both, rather than one or the other, because each alone loses something.
+  /// Free text alone lets "SH-1042" and "SH1042" sit side by side and stop
+  /// reconciling against production. The relation alone cannot hold a style
+  /// the mill has not set up yet — and on a purchase order that is common,
+  /// because material is often bought before the style is entered. Keeping
+  /// the text means nothing the buyer wrote is ever dropped; keeping the
+  /// relation means the link is there whenever it can be made.
+  styleNo     String?
+  styleId     String?
+  style       Style?        @relation(fields: [styleId], references: [id])
   /// Copied from the item when the order is raised, because an item's HSN can
   /// be corrected later and an order already sent must not change.
   hsnCode     String?
@@ -1011,27 +1153,168 @@ model PurchaseOrderLine {
   pendingQty  Decimal       @default(0) @db.Decimal(10, 3)
   sortOrder   Int           @default(0)
 
+  /// The requisition line this was raised to answer, where it was raised from
+  /// one.
+  ///
+  /// Null for an order typed from scratch, which is most of them and always
+  /// will be — a buyer topping up consumables is answering nobody's indent.
+  /// Where it is set, it is what lets the indent list say how much of a
+  /// request has already been ordered, and it is why a purchase can be traced
+  /// back to the job that needed it months later.
+  mrLineId String?
+  mrLine   MaterialRequisitionLine? @relation(fields: [mrLineId], references: [id])
+
+  /// Set when the mill has decided the balance of this line is not coming and
+  /// closed it short of the ordered quantity, rather than leaving the order
+  /// "partially received" forever waiting on a delivery that will not arrive.
+  ///
+  /// Freezes `pendingQty` at 0 without touching `receivedQty` — the shortfall
+  /// is recorded as never received, not quietly written off as if it were.
+  /// Reversible: closing this is a decision, not a deletion, and the line can
+  /// be reopened if the supplier does eventually make it up.
+  shortClosed      Boolean   @default(false)
+  shortCloseReason String?
+  shortClosedAt    DateTime?
+  shortClosedById  String?
+  shortClosedBy    User?     @relation("PurchaseOrderLineShortClosedBy", fields: [shortClosedById], references: [id])
+
   grnLines GRNLine[]
 
+  @@index([mrLineId])
   @@map("purchase_order_lines")
 }
 
+/// A delivery, as the gate saw it.
+///
+/// The paperwork below is not decoration. When a supplier's bill is queried
+/// months later, what settles it is the gate entry, the challan the driver
+/// handed over and the vehicle it came on — and in the mill's old system every
+/// one of those had a box on this form. They were surveyed off the live
+/// Absolute ERP on 18 Sep 2026 and added here on the same day, because a
+/// receipt that cannot be tied back to a physical delivery is a receipt
+/// nobody can defend.
+///
+/// All of it is optional. A receipt typed in a hurry with nothing but
+/// quantities is still a receipt, and refusing to save one because the driver's
+/// name was not known would put the stock figure behind the goods.
 model GRN {
   id        String        @id @default(cuid())
   grnNumber String        @unique
   poId      String
   po        PurchaseOrder @relation(fields: [poId], references: [id])
+  /// Carries the time as well as the day. The old form asked for the hour and
+  /// the minute separately; two deliveries from the same supplier on one day
+  /// are told apart by nothing else.
   grnDate   DateTime      @default(now())
   vehicleNo String?
   status    GRNStatus     @default(DRAFT)
   notes     String?
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
 
-  lines     GRNLine[]
-  qcRecords InwardQC[]
+  /// The security gate's own record, written before the goods reach the store.
+  /// It is the first independent trace that a delivery happened at all.
+  gateEntryNo   String?
+  gateEntryDate DateTime?
+
+  /// The supplier's delivery challan — the document that physically travels
+  /// with the goods. Often a range ("1872 - 1887") when one delivery covers
+  /// several challans, which is why it is text and not a number.
+  challanNo   String?
+  challanDate DateTime?
+
+  /// The supplier's own paperwork, as it arrived with the lorry.
+  ///
+  /// Recorded here as well as on the bill on purpose: the invoice turns up
+  /// with the goods long before accounts book it, and the number caught at the
+  /// gate is what the booked bill gets checked against.
+  supplierBillNo      String?
+  supplierInvoiceNo   String?
+  supplierInvoiceDate DateTime?
+
+  /// How many bales, cartons or rolls came off the vehicle. A count of
+  /// packages, not of goods — it is what the gate can verify without opening
+  /// anything, and it is what a short delivery is argued over.
+  packageCount Int?
+
+  driverName String?
+
+  /// Free text, all four, and deliberately so — they are reference numbers
+  /// from other people's systems and the mill writes in them what it needs to
+  /// find the delivery again.
+  formNo      String?
+  clientName  String?
+  orderedBy   String?
+  referenceNo String?
+
+  /// A frozen copy of the address on the supplier's paperwork for this one
+  /// delivery, the same way the order freezes the address it was raised
+  /// against.
+  ///
+  /// Usually the order's own address, copied across when the receipt is
+  /// booked. Changed here rather than assumed when this delivery's challan
+  /// names a different branch of the supplier than the order was placed
+  /// with — a supplier with a head office and three depots routinely ships
+  /// from whichever one has the stock, and the bill that follows has to be
+  /// checked against the address that is actually on it, not the one the
+  /// order happened to carry.
+  supplierAddress String?
+
+  /// A frozen copy of the address of the mill's own store this delivery was
+  /// booked in against — the old system's "Shipping Address", which names
+  /// where the goods were received, not where they came from.
+  ///
+  /// Defaults to the order's own delivery warehouse, and can be changed on
+  /// this one receipt when the driver actually turned up at a different gate
+  /// than the order named. A snapshot, the same as `supplierAddress` above,
+  /// so a warehouse's address edited later does not rewrite a receipt already
+  /// printed. Separate from each line's own store — that decides which
+  /// warehouse the stock is counted into, and a delivery can split across
+  /// several; this is the one gate the lorry itself arrived at.
+  shippingAddress String?
+
+  /// Why this receipt was allowed to book in more than the order's own
+  /// balance — asked for only when the excess is past the mill's configured
+  /// tolerance (Settings → Preferences → Purchase). Kept on the receipt
+  /// itself, not buried in an audit log, so the reason sits with the document
+  /// an auditor actually opens when a bill is queried against the order.
+  overReceiptReason String?
+
+  /// Who recorded the receipt. Prints as "Prepared By" on the note, which is
+  /// the line somebody signs against.
+  createdById String?
+  createdBy   User?   @relation("GRNCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines       GRNLine[]
+  qcRecords   InwardQC[]
+  attachments GRNAttachment[]
 
   @@map("grn")
+}
+
+/// A file kept against a receipt — the challan, the supplier's invoice, a
+/// photo of a damaged carton. The bytes live in the bucket; this row is only
+/// the pointer to them, on the same three-step pattern as an order's own
+/// attachments.
+///
+/// Never required. A store keeper standing at the gate with a lorry waiting
+/// must be able to save the receipt with nothing attached, and add the paper
+/// later once it has been scanned.
+model GRNAttachment {
+  id           String   @id @default(cuid())
+  grnId        String
+  grn          GRN      @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String   @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User     @relation("GRNAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([grnId])
+  @@map("grn_attachments")
 }
 
 model GRNLine {
@@ -1052,6 +1335,8 @@ model GRNLine {
   batchDetails Json?
   unitRate     Decimal            @default(0) @db.Decimal(10, 2)
   amount       Decimal            @default(0) @db.Decimal(12, 2)
+
+  billLines PurchaseInvoiceLine[]
 
   @@map("grn_lines")
 }
@@ -1102,6 +1387,8 @@ model PurchaseInvoice {
   balanceAmount       Decimal        @db.Decimal(12, 2)
   status              InvoiceStatus  @default(UNPAID)
   notes               String?
+  createdById         String
+  createdBy           User           @relation("BillCreatedBy", fields: [createdById], references: [id])
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
 
@@ -1110,6 +1397,13 @@ model PurchaseInvoice {
   charges    PurchaseInvoiceCharge[]
   debitNotes DebitNote[]
 
+  /// The same supplier bill must never be booked twice — a duplicate claims the
+  /// input credit a second time, which is the mistake a GST notice is written
+  /// about. Postgres treats NULLs as distinct, so bills with no supplier number
+  /// yet are unaffected.
+  @@unique([supplierId, supplierInvoiceNo])
+  @@index([supplierId])
+  @@index([status])
   @@map("purchase_invoices")
 }
 
@@ -1126,8 +1420,11 @@ model SupplierPayment {
   referenceNo   String?
   chequeDate    DateTime?
   notes         String?
+  createdById   String
+  createdBy     User             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
   createdAt     DateTime         @default(now())
 
+  @@index([supplierId])
   @@map("supplier_payments")
 }
 
@@ -1170,31 +1467,47 @@ model StockLedger {
 /// who allowed it, and who actually handed it over. They are separate columns
 /// because docs/04-business-rules.md forbids the person who raised a document
 /// from approving it, and that rule cannot be enforced against a single name.
+/// Where a requisitioned item is to come from.
+///
+/// The mill's old ERP calls a requisition an *indent*, and its purchase order
+/// form opens straight onto the indent lines nobody has bought yet — tick
+/// them, set a quantity, and they drop into the order. That only works if a
+/// line says whether it is a call on the store or a call on the buyer, because
+/// the two are answered by different people in different rooms.
+///
+/// FROM_STOCK is the default and is what this model did before: the store
+/// issues it off the rack. PURCHASE means there is none to issue and it has to
+/// be bought, so the line waits on the purchase order form instead.
+enum RequisitionFulfilment {
+  FROM_STOCK
+  PURCHASE
+}
+
 model MaterialRequisition {
-  id           String              @id @default(cuid())
-  mrNumber     String              @unique
-  moId         String?
-  mo           ManufacturingOrder? @relation(fields: [moId], references: [id])
-  departmentId String
-  department   Department          @relation(fields: [departmentId], references: [id])
-  requestDate  DateTime            @default(now())
-  requiredDate DateTime?
-  status       ApprovalStatus      @default(PENDING)
-  raisedById   String?
-  raisedBy     User?               @relation("MRRaisedBy", fields: [raisedById], references: [id])
-  approvedById String?
-  approvedBy   User?               @relation("MRApprovedBy", fields: [approvedById], references: [id])
-  approvedAt   DateTime?
+  id              String              @id @default(cuid())
+  mrNumber        String              @unique
+  moId            String?
+  mo              ManufacturingOrder? @relation(fields: [moId], references: [id])
+  departmentId    String
+  department      Department          @relation(fields: [departmentId], references: [id])
+  requestDate     DateTime            @default(now())
+  requiredDate    DateTime?
+  status          ApprovalStatus      @default(PENDING)
+  raisedById      String?
+  raisedBy        User?               @relation("MRRaisedBy", fields: [raisedById], references: [id])
+  approvedById    String?
+  approvedBy      User?               @relation("MRApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
   /// Set the moment stock actually moves. A requisition can be approved on
   /// Monday and issued on Wednesday, and the stock date is Wednesday.
-  issuedById   String?
-  issuedBy     User?               @relation("MRIssuedBy", fields: [issuedById], references: [id])
-  issuedAt     DateTime?
+  issuedById      String?
+  issuedBy        User?               @relation("MRIssuedBy", fields: [issuedById], references: [id])
+  issuedAt        DateTime?
   /// Why it was refused. A rejection with no reason just gets raised again.
   rejectionReason String?
-  notes        String?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
+  notes           String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
 
   lines MaterialRequisitionLine[]
 
@@ -1214,6 +1527,19 @@ model MaterialRequisitionLine {
   warehouse    Warehouse           @relation(fields: [warehouseId], references: [id])
   purpose      String?
 
+  /// Issue it off the rack, or buy it. Defaults to the rack, which is what
+  /// every line written before this existed meant.
+  fulfilment RequisitionFulfilment @default(FROM_STOCK)
+
+  /// The order lines raised against this one.
+  ///
+  /// How much of the request has been ordered is read off these rather than
+  /// kept as a running total on the line. A counter and the orders it counts
+  /// drift apart the first time an order is cancelled, and then the buyer is
+  /// told to order what they already ordered.
+  poLines PurchaseOrderLine[]
+
+  @@index([fulfilment])
   @@map("material_requisition_lines")
 }
 
@@ -1352,13 +1678,13 @@ model ManufacturingOrder {
 }
 
 model MOLine {
-  id          String             @id @default(cuid())
-  moId        String
-  mo          ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
-  styleId     String
-  style       Style              @relation(fields: [styleId], references: [id])
-  color       String
-  totalQty    Int
+  id       String             @id @default(cuid())
+  moId     String
+  mo       ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
+  styleId  String
+  style    Style              @relation(fields: [styleId], references: [id])
+  color    String
+  totalQty Int
 
   sizes MOLineSize[]
 
@@ -1390,27 +1716,27 @@ model CuttingOrder {
 }
 
 model ProductionEntry {
-  id          String             @id @default(cuid())
-  moId        String
-  mo          ManufacturingOrder @relation(fields: [moId], references: [id])
-  entryDate   DateTime           @default(now())
-  departmentId String
-  department  Department         @relation(fields: [departmentId], references: [id])
+  id            String             @id @default(cuid())
+  moId          String
+  mo            ManufacturingOrder @relation(fields: [moId], references: [id])
+  entryDate     DateTime           @default(now())
+  departmentId  String
+  department    Department         @relation(fields: [departmentId], references: [id])
   /// Which line or outside unit produced this. Without it, what is owed to a
   /// job-work unit can never be totalled.
   workstationId String?
-  workstation Workstation?       @relation(fields: [workstationId], references: [id])
-  shift       String?
-  target      Int
-  achieved    Int
-  rejection   Int                @default(0)
-  rework      Int                @default(0)
-  efficiency  Decimal?           @db.Decimal(5, 2)
-  operationId String?
-  operation   Operation?         @relation(fields: [operationId], references: [id])
-  notes       String?
-  enteredBy   String?
-  createdAt   DateTime           @default(now())
+  workstation   Workstation?       @relation(fields: [workstationId], references: [id])
+  shift         String?
+  target        Int
+  achieved      Int
+  rejection     Int                @default(0)
+  rework        Int                @default(0)
+  efficiency    Decimal?           @db.Decimal(5, 2)
+  operationId   String?
+  operation     Operation?         @relation(fields: [operationId], references: [id])
+  notes         String?
+  enteredBy     String?
+  createdAt     DateTime           @default(now())
 
   @@index([moId])
   @@index([entryDate])
@@ -1618,34 +1944,34 @@ model Attendance {
 }
 
 model PayrollRecord {
-  id               String    @id @default(cuid())
+  id               String       @id @default(cuid())
   employeeId       String
-  employee         Employee  @relation(fields: [employeeId], references: [id])
+  employee         Employee     @relation(fields: [employeeId], references: [id])
   month            Int
   year             Int
   workingDays      Int
-  presentDays      Decimal   @db.Decimal(5, 2)
-  lwpDays          Decimal   @default(0) @db.Decimal(5, 2)
-  basic            Decimal   @db.Decimal(10, 2)
-  hra              Decimal   @default(0) @db.Decimal(10, 2)
-  da               Decimal   @default(0) @db.Decimal(10, 2)
-  conveyance       Decimal   @default(0) @db.Decimal(10, 2)
-  specialAllowance Decimal   @default(0) @db.Decimal(10, 2)
-  otherEarnings    Decimal   @default(0) @db.Decimal(10, 2)
-  grossSalary      Decimal   @db.Decimal(10, 2)
-  pfDeduction      Decimal   @default(0) @db.Decimal(10, 2)
-  esicDeduction    Decimal   @default(0) @db.Decimal(10, 2)
-  tdsDeduction     Decimal   @default(0) @db.Decimal(10, 2)
-  advanceDeduction Decimal   @default(0) @db.Decimal(10, 2)
-  otherDeductions  Decimal   @default(0) @db.Decimal(10, 2)
-  totalDeductions  Decimal   @db.Decimal(10, 2)
-  netSalary        Decimal   @db.Decimal(10, 2)
-  isPaid           Boolean   @default(false)
+  presentDays      Decimal      @db.Decimal(5, 2)
+  lwpDays          Decimal      @default(0) @db.Decimal(5, 2)
+  basic            Decimal      @db.Decimal(10, 2)
+  hra              Decimal      @default(0) @db.Decimal(10, 2)
+  da               Decimal      @default(0) @db.Decimal(10, 2)
+  conveyance       Decimal      @default(0) @db.Decimal(10, 2)
+  specialAllowance Decimal      @default(0) @db.Decimal(10, 2)
+  otherEarnings    Decimal      @default(0) @db.Decimal(10, 2)
+  grossSalary      Decimal      @db.Decimal(10, 2)
+  pfDeduction      Decimal      @default(0) @db.Decimal(10, 2)
+  esicDeduction    Decimal      @default(0) @db.Decimal(10, 2)
+  tdsDeduction     Decimal      @default(0) @db.Decimal(10, 2)
+  advanceDeduction Decimal      @default(0) @db.Decimal(10, 2)
+  otherDeductions  Decimal      @default(0) @db.Decimal(10, 2)
+  totalDeductions  Decimal      @db.Decimal(10, 2)
+  netSalary        Decimal      @db.Decimal(10, 2)
+  isPaid           Boolean      @default(false)
   paidDate         DateTime?
   paymentMode      PaymentMode?
   payslipUrl       String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
 
   @@unique([employeeId, month, year])
   @@map("payroll_records")
@@ -1656,28 +1982,28 @@ model PayrollRecord {
 // ═══════════════════════════════════════════
 
 model MachineBreakdown {
-  id             String    @id @default(cuid())
+  id             String          @id @default(cuid())
   machineId      String
-  machine        Machine   @relation(fields: [machineId], references: [id])
-  reportedAt     DateTime  @default(now())
+  machine        Machine         @relation(fields: [machineId], references: [id])
+  reportedAt     DateTime        @default(now())
   reportedBy     String?
   problemDesc    String
-  severity       String    @default("MEDIUM")
+  severity       String          @default("MEDIUM")
   assignedTo     String?
   resolvedAt     DateTime?
   resolutionDesc String?
-  downtimeHours  Decimal?  @db.Decimal(6, 2)
+  downtimeHours  Decimal?        @db.Decimal(6, 2)
   status         BreakdownStatus @default(OPEN)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
 
   @@map("machine_breakdowns")
 }
 
 model MaintenanceSchedule {
-  id              String    @id @default(cuid())
+  id              String            @id @default(cuid())
   machineId       String
-  machine         Machine   @relation(fields: [machineId], references: [id])
+  machine         Machine           @relation(fields: [machineId], references: [id])
   maintenanceType String
   title           String
   checklistItems  Json?
@@ -1686,7 +2012,7 @@ model MaintenanceSchedule {
   completedBy     String?
   status          MaintenanceStatus @default(PENDING)
   notes           String?
-  createdAt       DateTime  @default(now())
+  createdAt       DateTime          @default(now())
 
   @@map("maintenance_schedules")
 }
@@ -1770,9 +2096,9 @@ model Broker {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  customers    Customer[]
-  salesOrders  SalesOrder[]
-  invoices     SalesInvoice[]
+  customers   Customer[]
+  salesOrders SalesOrder[]
+  invoices    SalesInvoice[]
 
   @@index([code])
   @@map("brokers")
@@ -1894,11 +2220,11 @@ model SalesOrderLineSize {
 }
 
 model MOLineSize {
-  id       String  @id @default(cuid())
+  id       String @id @default(cuid())
   moLineId String
-  moLine   MOLine  @relation(fields: [moLineId], references: [id], onDelete: Cascade)
+  moLine   MOLine @relation(fields: [moLineId], references: [id], onDelete: Cascade)
   sizeId   String
-  size     Size    @relation(fields: [sizeId], references: [id])
+  size     Size   @relation(fields: [sizeId], references: [id])
   qty      Int
 
   @@unique([moLineId, sizeId])
@@ -1910,25 +2236,25 @@ model MOLineSize {
 // ═══════════════════════════════════════════
 
 model SalesInvoiceLine {
-  id          String       @id @default(cuid())
-  invoiceId   String
-  invoice     SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  itemId      String
-  item        Item         @relation(fields: [itemId], references: [id])
-  description String?
+  id           String       @id @default(cuid())
+  invoiceId    String
+  invoice      SalesInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  itemId       String
+  item         Item         @relation(fields: [itemId], references: [id])
+  description  String?
   /// Copied onto the line at the time of billing, because an item's HSN can be
   /// corrected later and an issued invoice must never change.
-  hsnCode     String?
-  qty         Decimal      @db.Decimal(10, 3)
-  unitPrice   Decimal      @db.Decimal(10, 2)
-  discount    Decimal      @default(0) @db.Decimal(5, 2)
-  taxableValue Decimal     @default(0) @db.Decimal(12, 2)
-  gstRate     Decimal      @default(0) @db.Decimal(5, 2)
-  cgst        Decimal      @default(0) @db.Decimal(12, 2)
-  sgst        Decimal      @default(0) @db.Decimal(12, 2)
-  igst        Decimal      @default(0) @db.Decimal(12, 2)
-  amount      Decimal      @default(0) @db.Decimal(12, 2)
-  sortOrder   Int          @default(0)
+  hsnCode      String?
+  qty          Decimal      @db.Decimal(10, 3)
+  unitPrice    Decimal      @db.Decimal(10, 2)
+  discount     Decimal      @default(0) @db.Decimal(5, 2)
+  taxableValue Decimal      @default(0) @db.Decimal(12, 2)
+  gstRate      Decimal      @default(0) @db.Decimal(5, 2)
+  cgst         Decimal      @default(0) @db.Decimal(12, 2)
+  sgst         Decimal      @default(0) @db.Decimal(12, 2)
+  igst         Decimal      @default(0) @db.Decimal(12, 2)
+  amount       Decimal      @default(0) @db.Decimal(12, 2)
+  sortOrder    Int          @default(0)
 
   @@index([invoiceId])
   @@map("sales_invoice_lines")
@@ -1940,6 +2266,13 @@ model PurchaseInvoiceLine {
   bill         PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Cascade)
   itemId       String
   item         Item            @relation(fields: [itemId], references: [id])
+  /// The receipt line this bill line settles, which is what makes the
+  /// three-way match possible: ordered, received and billed have to agree one
+  /// row at a time. Held per line rather than once on the bill, because a
+  /// supplier routinely bills several deliveries together — and because a bill
+  /// line for something never received is exactly what the match must catch.
+  grnLineId    String?
+  grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id])
   description  String?
   hsnCode      String?
   qty          Decimal         @db.Decimal(10, 3)
@@ -1962,14 +2295,29 @@ model PurchaseInvoiceLine {
 model ChargeType {
   id              String   @id @default(cuid())
   name            String   @unique
+  /// The GST charged ON this charge — 5% on dyeing, 18% on freight. Not a
+  /// share of the order: that is `percentOfValue` below, and confusing the two
+  /// puts 58% of an order's value into its charge rows.
   defaultGstRate  Decimal  @default(0) @db.Decimal(5, 2)
+  /// What this charge usually comes to as a share of the order — 5% of the
+  /// goods for transport, say. Set under Masters -> Charges.
+  ///
+  /// Never applied on its own, and a charge is still typed in on every order:
+  /// what a transporter asks for is agreed on a call, not derived. This is the
+  /// figure the purchase order's percentage helper opens at, so the usual rate
+  /// takes one press rather than a calculator. 0 means unset.
+  ///
+  /// Dead from Sep 17 to Sep 18 2026, when the buyers asked for exactly the
+  /// thing it had been added for.
+  percentOfValue  Decimal  @default(0) @db.Decimal(5, 2)
   applyOnSale     Boolean  @default(true)
   applyOnPurchase Boolean  @default(false)
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
 
-  salesCharges    SalesInvoiceCharge[]
-  purchaseCharges PurchaseInvoiceCharge[]
+  salesCharges         SalesInvoiceCharge[]
+  purchaseCharges      PurchaseInvoiceCharge[]
+  purchaseOrderCharges PurchaseOrderCharge[]
 
   @@map("charge_types")
 }
@@ -1987,6 +2335,32 @@ model SalesInvoiceCharge {
   igst         Decimal      @default(0) @db.Decimal(12, 2)
 
   @@map("sales_invoice_charges")
+}
+
+/// A charge on a purchase order — transport, freight, dyeing.
+///
+/// Deliberately the same shape as `PurchaseInvoiceCharge`, so a charge the
+/// mill agreed on the order and the charge that turns up on the bill can be
+/// compared line for line by the three-way match. Six named columns on the
+/// order would have been quicker to write and would have baked today's GST
+/// rates into column names; the mill has renamed and re-rated these before.
+model PurchaseOrderCharge {
+  id           String        @id @default(cuid())
+  poId         String
+  po           PurchaseOrder @relation(fields: [poId], references: [id], onDelete: Cascade)
+  chargeTypeId String
+  chargeType   ChargeType    @relation(fields: [chargeTypeId], references: [id])
+  amount       Decimal       @db.Decimal(12, 2)
+  /// Copied from the charge type when the order is raised. A rate corrected in
+  /// the master next week must not silently change an order already sent.
+  gstRate      Decimal       @default(0) @db.Decimal(5, 2)
+  cgst         Decimal       @default(0) @db.Decimal(12, 2)
+  sgst         Decimal       @default(0) @db.Decimal(12, 2)
+  igst         Decimal       @default(0) @db.Decimal(12, 2)
+
+  @@unique([poId, chargeTypeId])
+  @@index([poId])
+  @@map("purchase_order_charges")
 }
 
 model PurchaseInvoiceCharge {
@@ -2115,9 +2489,9 @@ model DocumentTemplate {
   company   Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
   /// INV, PO, DC, JW — matches the document numbering series.
-  docType   String
+  docType String
   /// Printed as the heading, e.g. "TAX INVOICE" or "DELIVERY CHALLAN".
-  title     String
+  title   String
 
   /// Long-form terms printed at the foot.
   termsText   String?
@@ -2126,10 +2500,10 @@ model DocumentTemplate {
   /// A short line under everything else, such as jurisdiction.
   footerNote  String?
 
-  showHsn           Boolean @default(true)
-  showAmountInWords Boolean @default(true)
-  showBankDetails   Boolean @default(true)
-  showSignature     Boolean @default(true)
+  showHsn           Boolean  @default(true)
+  showAmountInWords Boolean  @default(true)
+  showBankDetails   Boolean  @default(true)
+  showSignature     Boolean  @default(true)
   /// Copy labels printed one per page, e.g. Original for Recipient.
   copies            String[]
 

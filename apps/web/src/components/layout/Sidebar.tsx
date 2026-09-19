@@ -48,6 +48,7 @@ const navItems: NavItem[] = [
     label: 'Masters', icon: Layers,
     children: [
       { label: 'Items & Products', href: '/masters/items' },
+      { label: 'Item Categories', href: '/masters/item-categories' },
       { label: 'Styles & SKU', href: '/masters/styles' },
       { label: 'Bill of Materials', href: '/masters/bom' },
       { label: 'Size Runs', href: '/masters/size-runs' },
@@ -73,7 +74,7 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Purchase Orders', href: '/purchase/orders' },
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
-      { label: 'Purchase Bills', href: '/purchase/bills', planned: true },
+      { label: 'Purchase Bills', href: '/purchase/bills' },
       { label: 'Supplier Payments', href: '/purchase/payments', planned: true },
     ],
   },
@@ -132,9 +133,18 @@ const navItems: NavItem[] = [
 interface SidebarProps {
   collapsed: boolean
   onCollapse: (v: boolean) => void
+  /**
+   * Whether the drawer is showing, on the screens where this is a drawer.
+   *
+   * Below `lg` the sidebar is 260px of a screen that may only be 390px wide,
+   * so it slides in over the page instead of sitting beside it. Above `lg` it
+   * is always there and this is ignored.
+   */
+  mobileOpen: boolean
+  onMobileClose: () => void
 }
 
-export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
+export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
   const [openMenus, setOpenMenus] = useState<string[]>(['Masters'])
@@ -175,6 +185,20 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
     )
   }
 
+  /*
+   * Following a link closes the drawer.
+   *
+   * On a phone the drawer covers the page, so without this you tap a menu
+   * item, the page behind you changes, and you are still looking at the menu
+   * — which reads as the tap not having worked.
+   */
+  useEffect(() => {
+    onMobileClose()
+    // Only when the route changes. Including the callback would close the
+    // drawer on every render of the layout above it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname])
+
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/')
 
   const isGroupActive = (item: NavItem) =>
@@ -185,7 +209,12 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
       className={cn(
         'h-screen flex flex-col fixed left-0 top-0 z-40 transition-all duration-300',
         'border-r border-[hsl(var(--sidebar-border))]',
-        collapsed ? 'w-[68px]' : 'w-[260px]'
+        collapsed ? 'w-[68px]' : 'w-[260px]',
+        /* Below lg this is a drawer: off the left edge until it is asked for,
+           and always in place from lg up. 260px of a 390px screen left 130px
+           for the screen itself, which is not a layout, it is a sliver. */
+        'lg:translate-x-0',
+        mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'
       )}
       style={{ background: 'hsl(var(--sidebar-bg))' }}
     >
@@ -378,9 +407,11 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
           </div>
         )}
 
+        {/* Hidden where this is a drawer: a drawer is open or shut, and a
+            68px-wide drawer over a 390px screen is neither. */}
         <button
           onClick={() => onCollapse(!collapsed)}
-          className="btn-ghost w-full justify-center py-2 text-muted-foreground"
+          className="btn-ghost hidden w-full justify-center py-2 text-muted-foreground lg:flex"
         >
           {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           {!collapsed && <span className="text-xs">Collapse</span>}

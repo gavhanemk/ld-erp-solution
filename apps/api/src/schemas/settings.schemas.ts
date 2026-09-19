@@ -210,6 +210,17 @@ export const PREFERENCES: PreferenceDefinition[] = [
     max: 30,
     affects: 'Dashboard pending approvals',
   },
+  {
+    key: 'grnOverReceiptTolerancePercent',
+    label: 'Allow receiving over the ordered quantity by',
+    help: 'A delivery within this percentage of the order is booked in without asking anything. Past it, receiving still goes through, but a reason has to be typed and is kept on the receipt.',
+    group: 'Purchase',
+    type: 'number',
+    default: 2,
+    min: 0,
+    max: 25,
+    affects: 'Receiving goods against a purchase order',
+  },
 ]
 
 const byKey = new Map(PREFERENCES.map((p) => [p.key, p]))

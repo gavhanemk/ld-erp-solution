@@ -43,6 +43,31 @@ export const openingStockSchema = z.object({
 })
 
 /**
+ * What the store can answer, and what has to be bought.
+ *
+ * A separate call from creating the requisition, and deliberately so. The mill's
+ * old ERP asks this question on the store's own screen — *Approved Material
+ * Requisition*, with Issue Raw Material and Create Indent side by side — after
+ * the requisition has been approved, and it is right to ask it there. The person
+ * raising a requisition is asking for material; they do not know what is on the
+ * rack. The store keeper does, and their form shows the stock beside every line
+ * while they decide.
+ *
+ * Asking it on the requisition form instead, as this once did, puts the answer
+ * in the hands of the only person in the building who cannot know it.
+ */
+export const requisitionSourcingSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        lineId: id('a line'),
+        fulfilment: z.enum(['FROM_STOCK', 'PURCHASE']),
+      }),
+    )
+    .min(1, 'Nothing to change'),
+})
+
+/**
  * A correction after a physical count.
  *
  * `countedQty` rather than a plus-or-minus figure: the store keeper counts what

@@ -50,6 +50,12 @@ const DEFAULT_TITLES: Record<string, string> = {
   PO: 'PURCHASE ORDER',
   DC: 'DELIVERY CHALLAN',
   JW: 'DELIVERY CHALLAN (JOB WORK)',
+  // Our own booking record of a supplier's invoice, not a tax invoice we issue.
+  // Calling it one on paper would be claiming to have raised it.
+  PB: 'PURCHASE BILL',
+  // What the mill's old system called it, word for word, because this is the
+  // sheet a store keeper and a supplier's driver both already know by name.
+  GRN: 'GOODS RECEIPT NOTE',
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {
