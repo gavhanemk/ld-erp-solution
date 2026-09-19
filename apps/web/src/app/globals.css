@@ -47,6 +47,11 @@
     --sidebar-border: 217 33% 18%;
     --sidebar-width: 260px;
     --sidebar-collapsed-width: 68px;
+    /* Whichever of the two the sidebar is showing right now. The dashboard
+       layout keeps it up to date, because a dialog is rendered outside that
+       layout's markup and cannot ask it directly — and a dialog needs to know
+       so its overlay can stop at the sidebar rather than burying it. */
+    --sidebar-current-width: 260px;
 
     /* Glass effect */
     --glass-bg: rgba(255, 255, 255, 0.04);
@@ -78,7 +83,16 @@
     --secondary-foreground: 222 40% 18%;
 
     --muted: 220 14% 90%;
-    --muted-foreground: 215 16% 42%; /* readable secondary text, not faint grey */
+    /* Secondary text: labels, hints, placeholders, table headers, the small
+       print on a form. Darkened from 42% to 34% lightness, which takes it from
+       5.7:1 against a white card to 7.7:1.
+
+       It was passing AA either way, but almost all of it is set at 12px, and
+       at that size 5.7:1 is the difference between text you read and text you
+       squint at. The main ink is left alone — it already measures about 15:1,
+       so where a form felt unreadable it was never the body text, it was
+       everything around it. */
+    --muted-foreground: 215 20% 34%;
 
     --accent: 38 88% 45%;            /* amber is hard to read on white at full brightness */
     --accent-foreground: 0 0% 100%;
@@ -202,24 +216,61 @@
     @apply w-full text-sm;
   }
 
-  .data-table thead tr {
+  /* Direct children, not descendants.
+
+     Written as `.data-table thead th` these rules reached into any table
+     nested inside a `.data-table` — and at one class plus one element they
+     scored above a plain utility, so a `text-right` on a nested table's own
+     header lost to the `text-left` here. The purchase order list showed it:
+     Qty, Rate and Amount sat at the left of their columns while the figures
+     underneath them sat at the right, the two lined up with nothing.
+
+     Scoped to `>` a nested table is left alone and styles itself, which is
+     what every class on it was already trying to do. The screens that nest a
+     table inside another one all give the inner one `data-table` too, so
+     nothing loses its styling by this. */
+  .data-table > thead > tr {
     @apply border-b border-border;
   }
 
-  .data-table thead th {
+  .data-table > thead > tr > th {
     @apply text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider py-3 px-4;
   }
 
-  .data-table tbody tr {
+  .data-table > tbody > tr {
     @apply border-b border-border/50 transition-colors;
   }
 
-  .data-table tbody tr:hover {
+  .data-table > tbody > tr:hover {
     background: var(--hover-overlay);
   }
 
-  .data-table tbody td {
+  .data-table > tbody > tr > td {
     @apply py-3 px-4 text-foreground;
+  }
+
+  /* A denser row, for a list whose cells carry two lines.
+
+     The purchase order list puts a supplier over its GSTIN in one cell and an
+     item count over the item's name in another, so its rows stood 62px tall
+     at the shared 12px of padding and five orders filled a screen. 8px takes
+     the same row to about 50px, and nothing ends up closer to a border than
+     the 8px the rest of the app already uses.
+
+     A modifier rather than a change to `.data-table`: that class dresses
+     every list in the ERP and none of the others asked to be denser.
+
+     Declared after those rules and matched the same way, so it wins on
+     source order at equal specificity — which is also why it is not written
+     `:where(.table-compact)` like the form rules above. `:where()`
+     contributes nothing, so that form would score below the `.data-table`
+     rule it is meant to override and never apply at all. */
+  .table-compact > thead > tr > th {
+    @apply px-3 py-2;
+  }
+
+  .table-compact > tbody > tr > td {
+    @apply px-3 py-2;
   }
 
   /* Status Badges */
@@ -283,9 +334,116 @@
            transition-colors duration-200;
   }
 
+  /* A dropdown is the same control as a text field and must look like one, but
+     it does not behave like one when a height is forced on it.
+
+     `.form-input` stands 42px tall on its own: a 20px line of text-sm between
+     10px of padding, inside a 1px border. The filter row above every list sets
+     `h-9` to line the control up with the buttons beside it, which leaves 14px
+     of content box for that 20px line. A text field simply overflows its box
+     and the browser still centres the caret, so nobody noticed. A select clips
+     its label against the padding box instead, and the words sit half-buried
+     along the bottom edge.
+
+     Padding is therefore dropped for a select and the centring left to the
+     height, which is what a select does well — the label ends up centred in
+     whatever height it is given, 36px in a filter row or the full 42px in a
+     form. The height below is deliberately not `min-height`: a minimum would
+     win against `h-9` and defeat the whole filter row.
+
+     The arrow used to be left to the browser, on the reasoning that drawing
+     our own meant choosing a colour twice — once per theme. That reasoning
+     missed what "left to the browser" actually buys: without `appearance:
+     none`, Windows draws its own native shell around the whole control, not
+     just the arrow, and that shell's corners follow the OS theme rather than
+     `rounded-lg` — a store picker sitting in a table of otherwise-square
+     fields came out pill-shaped on Windows while looking fine in every
+     screenshot taken from this Mac-rendered dev environment. `appearance:
+     none` was always needed for the box; once it is set the browser's arrow
+     disappears with it, so drawing one was never optional. Two colours, not
+     one avoided.
+
+     `:where(select)` rather than `select`, because `:where()` adds no
+     specificity. Written as `select.form-input` this rule would outrank the
+     `.h-9` beside it in the markup and force all 44 of them to 42px — fixing
+     the clipping by quietly overriding every height the screens ask for. At
+     equal specificity Tailwind's utilities layer comes last and wins, which is
+     the behaviour a component class should have. */
+  :where(select).form-input {
+    @apply appearance-none bg-no-repeat py-0 pr-9;
+    height: 2.625rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+    background-position: right 0.7rem center;
+    background-size: 0.85rem;
+  }
+
+  /* The same arrow, darkened for a light card — the dark-theme grey above
+     reads as a smudge on white. */
+  .light :where(select).form-input {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  }
+
+  /* The zebra stripe on the item table.
+
+     Mixed from the palette rather than picked, so it follows the theme: five
+     parts of the teal already used for the primary colour into the card
+     colour behind it. Light mode gets a pale mint over white, dark mode a
+     faint teal over navy, and neither is a new colour.
+
+     Opaque on purpose, which is why this is not simply `bg-primary/5`. That
+     utility is a colour at five percent alpha — ninety-five percent
+     see-through. The first columns of that table are sticky, and a
+     see-through cell lets the row scroll visibly underneath it. Mixing
+     produces one solid colour instead, which the sticky cells can inherit. */
+  .zebra-row {
+    background-color: color-mix(in srgb, hsl(var(--primary)) 5%, hsl(var(--card)));
+  }
+
   .form-label {
     @apply block text-sm font-medium text-foreground mb-1.5;
   }
+
+  /* A denser field on the longest forms in the ERP.
+
+     The purchase order form asks for about forty things on one screen. At the
+     app's normal rhythm — a 14px label over a 42px control, 6px apart — that
+     is roughly 55px of height per field before anything is typed, and the
+     form scrolled past two screens with a third of it spent on labels.
+
+     So inside `.po-form` the label steps back and the control tightens: a
+     small capitalised label in the muted colour, which reads as a caption
+     rather than competing with the value beside it, and 38px of control
+     instead of 42px. Nothing about the hit area suffers — 38px is still well
+     above the floor for a pointer target.
+
+     Written as `:where(.po-form)` so the whole rule stays at one class of
+     specificity. Written plainly, `.po-form .form-input` would outrank every
+     `h-8` and `h-9` in the markup and quietly force all of them — including
+     the item table's rows — back to full height. At equal specificity
+     Tailwind's utilities come last and win, which is what a component class
+     should do. */
+  :where(.po-form) .form-label {
+    @apply mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground;
+  }
+
+  :where(.po-form) .form-input {
+    @apply py-2;
+  }
+
+  /* The select's height is set rather than padded, for the reason given
+     further up. Placed after that rule so it wins at the same specificity. */
+  :where(.po-form) :where(select).form-input {
+    height: 2.375rem;
+  }
+
+  /* Amber text that holds up in both themes.
+
+     `text-amber-400` was chosen against the dark background; on the light
+     theme's white card it comes out near 2.9:1, under the 4.5:1 floor for
+     small text. This is the line that says why Save is switched off, so it
+     is the last thing that should be hard to read. */
+  .warn-text { @apply text-amber-400; }
+  .light .warn-text { @apply text-amber-700; }
 
   /* Divider */
   .divider {

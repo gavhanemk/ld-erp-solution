@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import bcrypt from 'bcryptjs'
 import { prisma } from '@ld-erp/database'
+import { formatDocumentNumber } from '../lib/docNumber'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -569,7 +570,15 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   VCH: 'Voucher',
 }
 
-/** SO-2425-0001 — the number the next document of this type will carry. */
+/**
+ * What the next number off this series will look like — SO-2425-0001.
+ *
+ * Built by the same function that issues the real one, rather than a second
+ * copy of the same arithmetic. The copy that used to live here had already
+ * drifted: a series with no financial year previewed as "PO--0001" while the
+ * order actually written was "PO-0001". A preview that disagrees with the
+ * document is worse than no preview.
+ */
 function sampleNumber(s: {
   prefix: string
   separator: string
@@ -577,7 +586,7 @@ function sampleNumber(s: {
   lastNumber: number
   padding: number
 }): string {
-  return [s.prefix, s.financialYear, String(s.lastNumber + 1).padStart(s.padding, '0')].join(s.separator)
+  return formatDocumentNumber({ ...s, lastNumber: s.lastNumber + 1 })
 }
 
 router.get('/number-series', requirePermission(SETTINGS, 'view'), async (_req, res) => {

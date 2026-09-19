@@ -1,13 +1,15 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff } from 'lucide-react'
+import { Bell, Search, Sun, Moon, Zap, ChevronDown, BellOff, Menu } from 'lucide-react'
 import Link from 'next/link'
 import { api, currentUser } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 
 interface TopBarProps {
   sidebarCollapsed: boolean
+  /** Opens the navigation drawer, on the screens where the sidebar is one. */
+  onOpenMobileNav: () => void
 }
 
 interface Notification {
@@ -27,7 +29,7 @@ function initialsOf(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
-export function TopBar({ sidebarCollapsed: _ }: TopBarProps) {
+export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
   const [isDark, setIsDark] = useState(true)
   const [notifOpen, setNotifOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
@@ -91,9 +93,18 @@ export function TopBar({ sidebarCollapsed: _ }: TopBarProps) {
   const firstName = user?.name ? user.name.trim().split(/\s+/)[0] : null
 
   return (
-    <header className="h-16 border-b border-border flex items-center px-6 gap-4 sticky top-0 z-30 bg-background/80 backdrop-blur-md">
-      <div className="flex-1">
-        <p className="text-sm font-medium text-foreground">
+    <header className="h-16 border-b border-border flex items-center px-4 sm:px-6 gap-3 sm:gap-4 sticky top-0 z-30 bg-background/80 backdrop-blur-md">
+      {/* The only way to the menu below lg, where the sidebar is a drawer. */}
+      <button
+        onClick={onOpenMobileNav}
+        className="btn-ghost -ml-1 shrink-0 p-2 lg:hidden"
+        aria-label="Open the menu"
+      >
+        <Menu size={18} />
+      </button>
+
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-foreground">
           {greeting()}
           {firstName && (
             <>
@@ -101,7 +112,10 @@ export function TopBar({ sidebarCollapsed: _ }: TopBarProps) {
             </>
           )}
         </p>
-        <p className="text-xs text-muted-foreground">
+        {/* Dropped on a phone. It is the least useful thing in the bar and
+            the most expensive: a wrapped date was what pushed everything to
+            the right of it off the edge of the screen. */}
+        <p className="hidden truncate text-xs text-muted-foreground sm:block">
           {new Date().toLocaleDateString('en-IN', {
             weekday: 'long',
             day: 'numeric',
@@ -188,20 +202,20 @@ export function TopBar({ sidebarCollapsed: _ }: TopBarProps) {
 
       <button
         onClick={toggleTheme}
-        className="p-2 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
+        className="shrink-0 p-2 rounded-lg hover:bg-secondary transition-colors text-muted-foreground hover:text-foreground"
         aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
         title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
       >
         {isDark ? <Sun size={18} /> : <Moon size={18} />}
       </button>
 
-      <button className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-secondary transition-colors">
-        <div className="w-8 h-8 rounded-full bg-teal-500/20 border border-teal-500/30 flex items-center justify-center">
+      <button className="flex shrink-0 items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-secondary transition-colors">
+        <div className="w-8 h-8 shrink-0 rounded-full bg-teal-500/20 border border-teal-500/30 flex items-center justify-center">
           <span className="text-xs font-bold text-teal-400">
             {user?.name ? initialsOf(user.name) : '—'}
           </span>
         </div>
-        <ChevronDown size={14} className="text-muted-foreground" />
+        <ChevronDown size={14} className="hidden text-muted-foreground sm:block" />
       </button>
     </header>
   )

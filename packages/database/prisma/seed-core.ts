@@ -335,6 +335,10 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'MO', prefix: 'MO' },
     { docType: 'GRN', prefix: 'GRN' },
     { docType: 'INV', prefix: 'INV' },
+    // Our booking reference for a supplier's bill. The supplier's own invoice
+    // number is recorded separately — this one only has to be unique here.
+    { docType: 'PB', prefix: 'PB' },
+    { docType: 'SP', prefix: 'SP' },
     { docType: 'MR', prefix: 'MR' },
     { docType: 'DC', prefix: 'DC' },
     { docType: 'JW', prefix: 'JW' },

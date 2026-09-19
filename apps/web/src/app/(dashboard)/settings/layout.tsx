@@ -2,7 +2,15 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Building2, Users, SlidersHorizontal, Activity, Sparkles, FileText } from 'lucide-react'
+import {
+  Building2,
+  Users,
+  SlidersHorizontal,
+  Activity,
+  Sparkles,
+  FileText,
+  Trash2,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /**
@@ -42,6 +50,12 @@ const tabs = [
     description: 'Connect the AI assistant and decide what it may do',
   },
   {
+    href: '/settings/recycle-bin',
+    label: 'Recycle Bin',
+    icon: Trash2,
+    description: 'Documents that were deleted, and how to put them back',
+  },
+  {
     href: '/settings/system',
     label: 'System',
     icon: Activity,
@@ -65,7 +79,7 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
       </div>
 
       <nav
-        className="flex flex-wrap gap-1 p-1 rounded-xl border border-border bg-secondary/40 w-fit"
+        className="border-border bg-secondary/40 flex w-fit flex-wrap gap-1 rounded-xl border p-1"
         aria-label="Settings sections"
       >
         {tabs.map((tab) => {
@@ -78,10 +92,10 @@ export default function SettingsLayout({ children }: { children: React.ReactNode
               href={tab.href}
               aria-current={isActive ? 'page' : undefined}
               className={cn(
-                'flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+                'flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors',
                 isActive
-                  ? 'bg-teal-500/15 text-teal-400 border border-teal-500/25'
-                  : 'text-muted-foreground hover:text-foreground border border-transparent',
+                  ? 'border border-teal-500/25 bg-teal-500/15 text-teal-400'
+                  : 'text-muted-foreground hover:text-foreground border border-transparent'
               )}
             >
               <Icon size={15} />

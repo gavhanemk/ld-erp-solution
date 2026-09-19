@@ -1055,7 +1055,7 @@ async function findDocument(number: string) {
   const trimmed = number.trim()
 
   const po = await prisma.purchaseOrder.findFirst({
-    where: { poNumber: like(trimmed) },
+    where: { poNumber: like(trimmed), deletedAt: null },
     include: { supplier: { select: { name: true } } },
   })
   if (po) {

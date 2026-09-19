@@ -81,7 +81,9 @@ router.post('/:type/:id/reject', guard('approve'), async (req: AuthRequest, res)
 async function approve(type: DocumentType, id: string, userId: string) {
   if (type === 'PO') {
     const before = await prisma.purchaseOrder.findUnique({ where: { id } })
-    if (!before) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (!before || before.deletedAt) {
+      throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    }
     if (before.approvedAt) {
       throw new AppError('This purchase order is already approved', 409, 'ALREADY_APPROVED')
     }
@@ -133,7 +135,9 @@ async function approve(type: DocumentType, id: string, userId: string) {
 async function reject(type: DocumentType, id: string, reason: string) {
   if (type === 'PO') {
     const before = await prisma.purchaseOrder.findUnique({ where: { id } })
-    if (!before) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    if (!before || before.deletedAt) {
+      throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
+    }
 
     const after = await prisma.purchaseOrder.update({
       where: { id },
