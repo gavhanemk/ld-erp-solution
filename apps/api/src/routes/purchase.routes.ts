@@ -2803,7 +2803,23 @@ const billInclude = {
       creditDays: true,
     },
   },
-  po: { select: { id: true, poNumber: true } },
+  /*
+   * The order's own paperwork travels with the bill.
+   *
+   * A bill is checked against the quotation that was agreed and the challan
+   * that came off the lorry, and neither is attached to the bill itself —
+   * they live on the order and the receipt. Carrying them here saves opening
+   * two more screens to answer one question.
+   */
+  po: {
+    select: {
+      id: true,
+      poNumber: true,
+      attachments: {
+        select: { id: true, fileName: true, mimeType: true, sizeBytes: true, createdAt: true },
+      },
+    },
+  },
   createdBy: { select: { id: true, name: true } },
   lines: {
     orderBy: { sortOrder: 'asc' as const },
@@ -2822,7 +2838,21 @@ const billInclude = {
           id: true,
           acceptedQty: true,
           unitRate: true,
-          grn: { select: { id: true, grnNumber: true } },
+          grn: {
+            select: {
+              id: true,
+              grnNumber: true,
+              attachments: {
+                select: {
+                  id: true,
+                  fileName: true,
+                  mimeType: true,
+                  sizeBytes: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
         },
       },
     },

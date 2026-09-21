@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronRight,
   Eye,
+  Paperclip,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
@@ -46,6 +47,22 @@ const receiptsOn = (bill: PurchaseBill): string[] => [
       .filter((n): n is string => Boolean(n))
   ),
 ]
+
+/**
+ * How many files sit behind a bill, counting the order's and each receipt's.
+ *
+ * A bill holds no files of its own — the quotation is on the order and the
+ * challan on the receipt — so this counts by id across both, or a receipt
+ * reached through two lines would be counted twice.
+ */
+const fileCountOn = (bill: PurchaseBill): number => {
+  const ids = new Set<string>()
+  for (const f of bill.po?.attachments ?? []) ids.add(f.id)
+  for (const l of bill.lines ?? []) {
+    for (const f of l.grnLine?.grn?.attachments ?? []) ids.add(f.id)
+  }
+  return ids.size
+}
 
 function PurchaseBillsTable() {
   const { rowsPerPage } = useAppSettings()
@@ -298,6 +315,12 @@ function PurchaseBillsTable() {
                         ) : (
                           <span className="text-muted-foreground">Direct</span>
                         )}
+                        {fileCountOn(bill) > 0 && (
+                          <span className="text-muted-foreground ml-1.5 inline-flex items-center gap-0.5">
+                            <Paperclip size={10} />
+                            {fileCountOn(bill)}
+                          </span>
+                        )}
                       </dd>
                       <dt className="text-muted-foreground">Booked</dt>
                       <dd className="text-foreground min-w-0">{formatDate(bill.billDate)}</dd>
@@ -428,15 +451,31 @@ function PurchaseBillsTable() {
                           )}
                         </td>
                         <td>
-                          {receiptsOn(bill).length ? (
-                            <div className="text-foreground font-mono text-xs">
-                              {receiptsOn(bill).join(', ')}
-                            </div>
-                          ) : (
-                            <span className="text-muted-foreground" title="Entered by hand — a service or transport bill with no goods receipt behind it">
-                              Direct
-                            </span>
-                          )}
+                          <div className="flex items-center gap-2">
+                            {receiptsOn(bill).length ? (
+                              <span className="text-foreground font-mono text-xs">
+                                {receiptsOn(bill).join(', ')}
+                              </span>
+                            ) : (
+                              <span
+                                className="text-muted-foreground"
+                                title="Entered by hand — a service or transport bill with no goods receipt behind it"
+                              >
+                                Direct
+                              </span>
+                            )}
+                            {fileCountOn(bill) > 0 && (
+                              <span
+                                className="text-muted-foreground inline-flex shrink-0 items-center gap-0.5 text-[10px]"
+                                title={`${fileCountOn(bill)} file${
+                                  fileCountOn(bill) === 1 ? '' : 's'
+                                } on the order and its receipts — open View details to read them`}
+                              >
+                                <Paperclip size={11} />
+                                {fileCountOn(bill)}
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td>
                           <div className="text-foreground font-medium">{bill.supplier?.name}</div>

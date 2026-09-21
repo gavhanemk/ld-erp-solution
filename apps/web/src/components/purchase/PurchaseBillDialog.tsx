@@ -31,6 +31,15 @@ export interface BillCharge {
   gstRate: number | string
 }
 
+/** A file hanging off an order or a receipt. The bill itself holds none. */
+export interface BillAttachment {
+  id: string
+  fileName: string
+  mimeType: string | null
+  sizeBytes: number
+  createdAt: string
+}
+
 export interface PurchaseBill {
   id: string
   billNumber: string
@@ -57,7 +66,7 @@ export interface PurchaseBill {
   status: string
   notes: string | null
   supplier?: { id: string; name: string; code: string; gstin: string | null; stateCode: string | null; isMsme?: boolean; creditDays?: number }
-  po?: { id: string; poNumber: string } | null
+  po?: { id: string; poNumber: string; attachments?: BillAttachment[] } | null
   createdBy?: { id: string; name: string } | null
   createdAt?: string
   lines?: Array<
@@ -74,7 +83,7 @@ export interface PurchaseBill {
         id: string
         acceptedQty: string
         unitRate?: string | number
-        grn: { id: string; grnNumber: string }
+        grn: { id: string; grnNumber: string; attachments?: BillAttachment[] }
       } | null
     }
   >

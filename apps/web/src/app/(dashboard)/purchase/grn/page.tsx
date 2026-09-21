@@ -15,6 +15,7 @@ import {
   Trash2,
   FileText,
   ReceiptIndianRupee,
+  Paperclip,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
@@ -55,6 +56,8 @@ interface Receipt {
     supplier: { id: string; name: string } | null
   }
   lines: ReceiptLine[]
+  /** How many files were scanned onto the receipt — the challan, usually. */
+  _count?: { attachments: number }
 }
 
 /**
@@ -1080,6 +1083,12 @@ export default function GoodsReceiptPage() {
                                 {grn.grnNumber}
                               </span>
                               <span className={s.cls}>{s.label}</span>
+                              {grn._count?.attachments ? (
+                                <span className="text-muted-foreground inline-flex items-center gap-0.5 text-[10px]">
+                                  <Paperclip size={10} />
+                                  {grn._count.attachments}
+                                </span>
+                              ) : null}
                             </div>
                             <p className="text-foreground mt-1 font-medium leading-snug">
                               {grn.po.supplier?.name ?? '—'}
@@ -1219,7 +1228,23 @@ export default function GoodsReceiptPage() {
                                   )}
                                 </button>
                               </td>
-                              <td className="font-mono text-xs text-teal-400">{grn.grnNumber}</td>
+                              <td className="font-mono text-xs text-teal-400">
+                                {grn.grnNumber}
+                                {/* The challan that came off the lorry is
+                                  scanned onto the receipt, so the paperclip
+                                  belongs with the receipt's own number. */}
+                                {grn._count?.attachments ? (
+                                  <div
+                                    className="text-muted-foreground mt-0.5 inline-flex items-center gap-0.5 text-[10px]"
+                                    title={`${grn._count.attachments} file${
+                                      grn._count.attachments === 1 ? '' : 's'
+                                    } attached`}
+                                  >
+                                    <Paperclip size={10} />
+                                    {grn._count.attachments}
+                                  </div>
+                                ) : null}
+                              </td>
                               <td className="whitespace-nowrap">
                                 <a
                                   href={`/print/purchase-order/${grn.po.id}`}

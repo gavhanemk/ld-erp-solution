@@ -1,8 +1,10 @@
 'use client'
 
+import { useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X } from 'lucide-react'
-import type { PurchaseBill } from './PurchaseBillDialog'
+import { Download, Loader2, Paperclip, X } from 'lucide-react'
+import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
+import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 
 const inr = (v: string | number | null | undefined) =>
@@ -124,7 +126,114 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
   )
 }
 
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
+const fileSize = (bytes: number) => {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * The papers hanging off a bill's order and its receipts.
+ *
+ * A bill carries no files of its own — the quotation was agreed on the order
+ * and the challan came in on the receipt, and both stay where they were
+ * attached. Gathering them here is what saves opening two more screens to
+ * check a bill against what was promised and what arrived.
+ *
+ * `kind` decides which endpoint signs the link: an order's files and a
+ * receipt's files are different tables and different routes.
+ */
+function Attachments({
+  files,
+}: {
+  files: Array<BillAttachment & { kind: 'order' | 'receipt'; source: string }>
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const open = async (file: { id: string; kind: 'order' | 'receipt' }) => {
+    setBusy(file.id)
+    setError(null)
+    try {
+      // The link is signed and short-lived, so it is fetched at the moment it
+      // is wanted rather than put in the page and left to go stale.
+      const path = file.kind === 'order' ? 'attachments' : 'grn-attachments'
+      const res = await api.get<{ data: { url: string } }>(`/purchase/${path}/${file.id}/link`)
+      window.open(res.data.url, '_blank', 'noopener')
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : 'Could not open that file. Try again.'
+      )
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!files.length) {
+    return (
+      <p className="text-muted-foreground text-sm">
+        No files on the order or its receipts.
+      </p>
+    )
+  }
+
+  return (
+    <>
+      {error && (
+        <div className="mb-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          {error}
+        </div>
+      )}
+      <div className="border-border overflow-x-auto rounded-lg border">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-border text-muted-foreground border-b text-left">
+              <th className="px-3 py-2 font-medium">File</th>
+              <th className="px-3 py-2 font-medium">On</th>
+              <th className="px-3 py-2 font-medium">Added</th>
+              <th className="px-3 py-2 text-right font-medium">Size</th>
+              <th className="px-3 py-2" />
+            </tr>
+          </thead>
+          <tbody>
+            {files.map((f) => (
+              <tr key={f.id} className="border-border/50 border-b last:border-0">
+                <td className="text-foreground px-3 py-2">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Paperclip size={12} className="text-muted-foreground shrink-0" />
+                    {f.fileName}
+                  </span>
+                </td>
+                <td className="text-muted-foreground px-3 py-2 font-mono">{f.source}</td>
+                <td className="text-muted-foreground px-3 py-2">{formatDate(f.createdAt)}</td>
+                <td className="text-muted-foreground px-3 py-2 text-right tabular-nums">
+                  {fileSize(f.sizeBytes)}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    className="btn-ghost p-1"
+                    onClick={() => void open(f)}
+                    disabled={busy === f.id}
+                    title={`Open ${f.fileName}`}
+                    aria-label={`Open ${f.fileName}`}
+                  >
+                    {busy === f.id ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Download size={14} />
+                    )}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )
+}
+
+function Field({ label, value }: { label: React.ReactNode; value: React.ReactNode }) {
   return (
     <div>
       <dt className="text-muted-foreground text-[11px]">{label}</dt>
@@ -159,6 +268,29 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
   const tds = Number(bill.tdsAmount ?? 0)
   const payments = bill.payments ?? []
   const notes = bill.debitNotes ?? []
+
+  /*
+   * Every file behind this bill, from the order and from each receipt.
+   *
+   * A receipt reached through several bill lines would otherwise contribute
+   * its files once per line, so they are gathered by id.
+   */
+  const files = (() => {
+    const seen = new Map<string, BillAttachment & { kind: 'order' | 'receipt'; source: string }>()
+
+    for (const f of bill.po?.attachments ?? []) {
+      seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
+    }
+    for (const line of bill.lines ?? []) {
+      const grn = line.grnLine?.grn
+      if (!grn) continue
+      for (const f of grn.attachments ?? []) {
+        if (!seen.has(f.id)) seen.set(f.id, { ...f, kind: 'receipt', source: grn.grnNumber })
+      }
+    }
+
+    return [...seen.values()]
+  })()
 
   return createPortal(
     <div
@@ -511,6 +643,11 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
               </div>
             </section>
           )}
+
+          <section>
+            <Heading>Attachments ({files.length})</Heading>
+            <Attachments files={files} />
+          </section>
 
           {bill.notes && (
             <section>
