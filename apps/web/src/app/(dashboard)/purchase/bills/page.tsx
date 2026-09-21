@@ -456,7 +456,7 @@ function PurchaseBillsTable() {
                               target="_blank"
                               className="text-teal-400 underline-offset-2 hover:underline"
                               onClick={(e) => e.stopPropagation()}
-                              title={`Open this bill to print or save`}
+                              title="Open this bill to print or save"
                             >
                               {bill.supplierInvoiceNo || bill.billNumber}
                             </Link>
@@ -464,14 +464,6 @@ function PurchaseBillsTable() {
                           {bill.supplierInvoiceDate && (
                             <div className="text-muted-foreground pl-[18px] text-[10px]">
                               {formatDate(bill.supplierInvoiceDate)}
-                            </div>
-                          )}
-                          {!bill.supplierInvoiceNo && (
-                            <div
-                              className="text-muted-foreground pl-[18px] text-[10px]"
-                              title="The supplier's invoice number has not been entered — our own reference stands in until it is"
-                            >
-                              their number not given
                             </div>
                           )}
                         </td>

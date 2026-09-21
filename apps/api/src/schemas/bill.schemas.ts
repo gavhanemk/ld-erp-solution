@@ -81,9 +81,30 @@ export const billChargeSchema = z.object({
 const billBase = z.object({
   supplierId: id('a supplier'),
   poId: z.string().optional().nullable(),
-  /** The number printed on the supplier's own invoice. */
-  supplierInvoiceNo: z.string().max(50).optional().nullable(),
-  supplierInvoiceDate: z.coerce.date().optional().nullable(),
+  /*
+   * The number and date printed on the supplier's own invoice.
+   *
+   * Both required. A bill is only ever booked once their invoice is on the
+   * desk — that is the document being entered, and this is its identity.
+   * They were optional while nobody had said otherwise, which let a bill be
+   * saved with no way to tie it back to the supplier's paper.
+   *
+   * It is also what makes the duplicate guard bite. The unique index on
+   * (supplier, invoice number) cannot catch a second booking of the same
+   * invoice while the number is allowed to be blank, because Postgres treats
+   * every NULL as distinct from every other.
+   */
+  supplierInvoiceNo: z
+    .string({ required_error: "Put the supplier's bill number in" })
+    .trim()
+    .min(1, "Put the supplier's bill number in")
+    .max(50, 'That bill number is too long'),
+  // An error map rather than required_error: `coerce.date` turns a missing
+  // value into an Invalid Date before the required check ever runs, so it
+  // fails as "Invalid date" — which tells a clerk nothing about which box.
+  supplierInvoiceDate: z.coerce.date({
+    errorMap: () => ({ message: 'Put the date on the supplier’s bill' }),
+  }),
   billDate: z.coerce.date().optional(),
   dueDate: z.coerce.date().optional().nullable(),
   discountAmount: money.optional(),

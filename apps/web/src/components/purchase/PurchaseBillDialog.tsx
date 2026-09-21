@@ -564,8 +564,8 @@ export function PurchaseBillDialog({
     const payload = {
       supplierId,
       poId: poId || null,
-      supplierInvoiceNo: supplierInvoiceNo.trim() || null,
-      supplierInvoiceDate: supplierInvoiceDate || null,
+      supplierInvoiceNo: supplierInvoiceNo.trim(),
+      supplierInvoiceDate,
       billDate,
       dueDate: dueDate || null,
       discountAmount: num(discountAmount),
@@ -629,6 +629,10 @@ export function PurchaseBillDialog({
 
   const incomplete =
     !supplierId ||
+    // The supplier's invoice is on the desk when a bill is booked, so its
+    // number and date are part of the document rather than optional extras.
+    !supplierInvoiceNo.trim() ||
+    !supplierInvoiceDate ||
     lines.some((l) => !l.itemId || num(l.qty) <= 0) ||
     undecidedRates.length > 0 ||
     (needsRateReason && !rateVarianceReason.trim())
@@ -737,8 +741,11 @@ export function PurchaseBillDialog({
             </div>
 
             <div>
+              {/* The bill is booked with their invoice on the desk, so this is
+                the document's own number rather than an afterthought. It is
+                also what stops the same invoice being booked twice. */}
               <label className="form-label" htmlFor="bill-supplier-no">
-                Supplier’s invoice no.
+                Bill no. <span className="text-muted-foreground">(theirs)</span>
               </label>
               <input
                 id="bill-supplier-no"
@@ -746,12 +753,18 @@ export function PurchaseBillDialog({
                 placeholder="As printed on their bill"
                 value={supplierInvoiceNo}
                 onChange={(e) => setSupplierInvoiceNo(e.target.value)}
+                required
               />
+              {!supplierInvoiceNo.trim() && (
+                <span className="mt-1 block text-xs text-amber-400">
+                  Put the supplier’s bill number in
+                </span>
+              )}
             </div>
 
             <div>
               <label className="form-label" htmlFor="bill-supplier-date">
-                Their invoice date
+                Bill date
               </label>
               <input
                 id="bill-supplier-date"
@@ -759,7 +772,13 @@ export function PurchaseBillDialog({
                 className="form-input"
                 value={supplierInvoiceDate}
                 onChange={(e) => setSupplierInvoiceDate(e.target.value)}
+                required
               />
+              {!supplierInvoiceDate && (
+                <span className="mt-1 block text-xs text-amber-400">
+                  Put the date on their bill
+                </span>
+              )}
             </div>
 
             <div>

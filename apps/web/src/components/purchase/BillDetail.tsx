@@ -346,11 +346,9 @@ export function BillDetailDialog({
               <Field
                 label="Bill no. (the supplier's)"
                 value={
-                  bill.supplierInvoiceNo ? (
-                    <span className="font-mono text-teal-400">{bill.supplierInvoiceNo}</span>
-                  ) : (
-                    <span className="text-muted-foreground">Not given yet</span>
-                  )
+                  <span className="font-mono text-teal-400">
+                    {bill.supplierInvoiceNo || bill.billNumber}
+                  </span>
                 }
               />
               <Field
