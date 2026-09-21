@@ -2,7 +2,17 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2, AlertCircle, Plus, Trash2, Download, TriangleAlert, Receipt } from 'lucide-react'
+import {
+  X,
+  Loader2,
+  AlertCircle,
+  Plus,
+  Trash2,
+  Download,
+  TriangleAlert,
+  Receipt,
+  Info,
+} from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 
 export interface BillLine {
@@ -739,7 +749,12 @@ export function PurchaseBillDialog({
                   {billedReceipts.length ? 'Add lines' : 'Pull lines'}
                 </button>
               </div>
-              <p className="text-xs text-muted-foreground mt-1.5">
+              {/* A tinted strip with a mark on it, not a line of grey under
+                the box. This sentence is the running record of which
+                deliveries are on the bill, and somebody gathering a week of
+                them looks at it repeatedly — it has to be findable. */}
+              <p className="border-border bg-secondary/60 text-muted-foreground mt-2 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
+                <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
                 {billedReceipts.length > 0 && pullable.length === 0
                   ? `On this bill: ${billedReceipts.join(', ')}. That is every receipt this supplier has waiting — add more lines by hand if their invoice covers anything else.`
                   : billedReceipts.length
@@ -800,8 +815,11 @@ export function PurchaseBillDialog({
                 onChange={(e) => setSupplierInvoiceNo(e.target.value)}
                 required
               />
+              {/* A prompt, not an alarm. An empty box on a form nobody has
+                filled in yet has not gone wrong — it is simply not done, and
+                amber on first sight reads as a mistake already made. */}
               {!supplierInvoiceNo.trim() && (
-                <span className="mt-1 block text-xs text-amber-400">
+                <span className="mt-1 block text-xs text-muted-foreground">
                   Put the supplier’s bill number in
                 </span>
               )}
@@ -820,7 +838,7 @@ export function PurchaseBillDialog({
                 required
               />
               {!supplierInvoiceDate && (
-                <span className="mt-1 block text-xs text-amber-400">
+                <span className="mt-1 block text-xs text-muted-foreground">
                   Put the date on their bill
                 </span>
               )}
@@ -1005,13 +1023,13 @@ export function PurchaseBillDialog({
             <div className="overflow-x-auto border border-border rounded-lg">
               <table className="w-full text-sm min-w-[900px]">
                 <thead>
-                  <tr className="border-b border-border bg-secondary/40">
-                    {['Item', 'Against receipt', 'Qty', 'Rate', 'Disc %', 'GST %', 'Amount', ''].map(
+                  <tr className="border-b border-border bg-secondary/70">
+                    {['Item', 'Against receipt', 'Qty', 'Rate', 'Disc %', 'GST %', 'Amount (₹)', ''].map(
                       (h, i) => (
                         <th
                           key={h || i}
-                          className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-3 ${
-                            ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount'].includes(h)
+                          className={`text-[10px] uppercase tracking-wider font-semibold text-muted-foreground py-2 px-3 ${
+                            ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount (₹)'].includes(h)
                               ? 'text-right'
                               : 'text-left'
                           }`}
@@ -1243,10 +1261,16 @@ export function PurchaseBillDialog({
             </div>
           )}
 
-          {/* Totals, TDS and notes */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {/* Totals, TDS and notes.
+            Two boxes, shoulder to shoulder, each ruled off — what is typed on
+            the left, what it comes to on the right. Loose on the page they
+            read as four unrelated fields floating under the grid. */}
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            <div className="border-border space-y-2.5 rounded-lg border p-2.5">
+              <h3 className="text-muted-foreground text-xs font-semibold uppercase tracking-wide">
+                Deducted at source, and anything worth noting
+              </h3>
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 <div>
                   <label className="form-label" htmlFor="bill-tds-section">
                     TDS section
@@ -1283,13 +1307,14 @@ export function PurchaseBillDialog({
                   id="bill-notes"
                   rows={3}
                   className="form-input"
+                  placeholder="Add any notes or remarks about this bill..."
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                 />
               </div>
             </div>
 
-            <div className="rounded-lg border border-border bg-secondary/30 p-4 space-y-2 text-sm h-fit">
+            <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
               <Row label="Goods subtotal" value={totals.subtotal} />
               <div className="flex items-center justify-between gap-4">
                 <label htmlFor="bill-discount" className="text-muted-foreground">

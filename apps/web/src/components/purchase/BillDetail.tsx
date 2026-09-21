@@ -16,8 +16,8 @@ import {
   Undo2,
   Wallet,
   X,
-  type LucideIcon,
 } from 'lucide-react'
+import { Section } from './PurchaseOrderDialog'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
@@ -206,32 +206,32 @@ function Attachments({
           {error}
         </div>
       )}
-      <div className="border-border bg-card overflow-x-auto rounded-lg border">
+      <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
             <tr className="border-border text-muted-foreground border-b text-left">
-              <th className="px-3 py-2 font-medium">File</th>
-              <th className="px-3 py-2 font-medium">On</th>
-              <th className="px-3 py-2 font-medium">Added</th>
-              <th className="px-3 py-2 text-right font-medium">Size</th>
-              <th className="px-3 py-2" />
+              <th className="py-2 pr-3 font-medium">File</th>
+              <th className="py-2 pr-3 font-medium">On</th>
+              <th className="py-2 pr-3 font-medium">Added</th>
+              <th className="py-2 pr-3 text-right font-medium">Size</th>
+              <th className="py-2" />
             </tr>
           </thead>
           <tbody>
             {files.map((f) => (
               <tr key={f.id} className="border-border/50 border-b last:border-0">
-                <td className="text-foreground px-3 py-2">
+                <td className="text-foreground py-2 pr-3">
                   <span className="inline-flex items-center gap-1.5">
                     <Paperclip size={12} className="text-muted-foreground shrink-0" />
                     {f.fileName}
                   </span>
                 </td>
-                <td className="text-muted-foreground px-3 py-2 font-mono">{f.source}</td>
-                <td className="text-muted-foreground px-3 py-2">{formatDate(f.createdAt)}</td>
-                <td className="text-muted-foreground px-3 py-2 text-right tabular-nums">
+                <td className="text-muted-foreground py-2 pr-3 font-mono">{f.source}</td>
+                <td className="text-muted-foreground py-2 pr-3">{formatDate(f.createdAt)}</td>
+                <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
                   {fileSize(f.sizeBytes)}
                 </td>
-                <td className="px-3 py-2 text-right">
+                <td className="py-2 text-right">
                   <button
                     className="btn-ghost p-1"
                     onClick={() => void open(f)}
@@ -264,27 +264,6 @@ function Field({ label, value }: { label: React.ReactNode; value: React.ReactNod
   )
 }
 
-function Heading({
-  icon: Icon,
-  children,
-}: {
-  icon?: LucideIcon
-  children: React.ReactNode
-}) {
-  return (
-    <h3 className="text-muted-foreground mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide">
-      {Icon && <Icon size={12} className="shrink-0" />}
-      {children}
-    </h3>
-  )
-}
-
-/** A section's content, boxed the same way a table's already is — so the
-    dl-only sections stop reading as loose text next to the boxed ones. */
-function Card({ children }: { children: React.ReactNode }) {
-  return <div className="border-border bg-card rounded-lg border p-4">{children}</div>
-}
-
 /**
  * Everything a bill is, in one read-only window.
  *
@@ -303,7 +282,7 @@ export function BillDetailDialog({
   /** Opened from the paperclip — land on the files rather than at the top. */
   focus?: 'attachments'
 }) {
-  const filesRef = useRef<HTMLElement | null>(null)
+  const filesRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (focus === 'attachments') {
@@ -396,7 +375,7 @@ export function BillDetailDialog({
               },
               { label: 'Items', value: String(bill.lines?.length ?? 0), color: 'text-teal-400' },
             ].map((s) => (
-              <div key={s.label} className="border-border bg-card rounded-lg border p-3 text-center">
+              <div key={s.label} className="border-border bg-card rounded-xl border p-3 text-center">
                 <p className={`text-lg font-bold tabular-nums ${s.color}`}>{s.value}</p>
                 <p className="text-muted-foreground mt-0.5 text-[11px] uppercase tracking-wide">
                   {s.label}
@@ -406,150 +385,140 @@ export function BillDetailDialog({
           </div>
 
           {/* The paperwork, and the trail behind it. */}
-          <section>
-            <Heading icon={FileText}>The bill</Heading>
-            <Card>
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-                <Field
-                  label="Bill no. (the supplier's)"
-                  value={
-                    <span className="font-mono text-teal-400">
-                      {bill.supplierInvoiceNo || bill.billNumber}
+          <Section icon={FileText} title="The bill">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+              <Field
+                label="Bill no. (the supplier's)"
+                value={
+                  <span className="font-mono text-teal-400">
+                    {bill.supplierInvoiceNo || bill.billNumber}
+                  </span>
+                }
+              />
+              <Field
+                label="Bill date"
+                value={
+                  bill.supplierInvoiceDate ? (
+                    formatDate(bill.supplierInvoiceDate)
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )
+                }
+              />
+              <Field
+                label="Our reference"
+                value={<span className="font-mono">{bill.billNumber}</span>}
+              />
+              <Field label="Booked on" value={formatDate(bill.billDate)} />
+              <Field
+                label="Payment due"
+                value={
+                  bill.dueDate ? (
+                    formatDate(bill.dueDate)
+                  ) : (
+                    <span className="text-muted-foreground">No terms given</span>
+                  )
+                }
+              />
+              <Field
+                label="Against order"
+                value={
+                  bill.po ? (
+                    <span className="font-mono">{bill.po.poNumber}</span>
+                  ) : (
+                    <span
+                      className="text-muted-foreground"
+                      title="Typed by hand, or it gathers receipts from more than one order — the header cannot honestly name one then"
+                    >
+                      Not one order
                     </span>
-                  }
-                />
-                <Field
-                  label="Bill date"
-                  value={
-                    bill.supplierInvoiceDate ? (
-                      formatDate(bill.supplierInvoiceDate)
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )
-                  }
-                />
-                <Field
-                  label="Our reference"
-                  value={<span className="font-mono">{bill.billNumber}</span>}
-                />
-                <Field label="Booked on" value={formatDate(bill.billDate)} />
-                <Field
-                  label="Payment due"
-                  value={
-                    bill.dueDate ? (
-                      formatDate(bill.dueDate)
-                    ) : (
-                      <span className="text-muted-foreground">No terms given</span>
-                    )
-                  }
-                />
-                <Field
-                  label="Against order"
-                  value={
-                    bill.po ? (
-                      <span className="font-mono">{bill.po.poNumber}</span>
-                    ) : (
-                      <span
-                        className="text-muted-foreground"
-                        title="Typed by hand, or it gathers receipts from more than one order — the header cannot honestly name one then"
-                      >
-                        Not one order
-                      </span>
-                    )
-                  }
-                />
-                <Field
-                  label="Against receipts"
-                  value={
-                    receipts.length ? (
-                      <span className="font-mono">{receipts.join(', ')}</span>
-                    ) : (
-                      <span className="text-muted-foreground">Direct, no receipt</span>
-                    )
-                  }
-                />
-                <Field label="Entered by" value={bill.createdBy?.name ?? '—'} />
-              </dl>
-            </Card>
-          </section>
+                  )
+                }
+              />
+              <Field
+                label="Against receipts"
+                value={
+                  receipts.length ? (
+                    <span className="font-mono">{receipts.join(', ')}</span>
+                  ) : (
+                    <span className="text-muted-foreground">Direct, no receipt</span>
+                  )
+                }
+              />
+              <Field label="Entered by" value={bill.createdBy?.name ?? '—'} />
+            </dl>
+          </Section>
 
-          <section>
-            <Heading icon={Building2}>The supplier</Heading>
-            <Card>
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-                <Field label="Name" value={bill.supplier?.name ?? '—'} />
-                <Field
-                  label="GSTIN"
-                  value={
-                    bill.supplier?.gstin ? (
-                      <span className="font-mono text-xs">{bill.supplier.gstin}</span>
-                    ) : (
-                      <span
-                        className="text-muted-foreground"
-                        title="An unregistered supplier — there is no tax split to make and none is charged"
-                      >
-                        Unregistered
-                      </span>
-                    )
-                  }
-                />
-                <Field
-                  label="Tax"
-                  value={
-                    bill.isReverseCharge ? (
-                      <span className="text-amber-400">Reverse charge — we pay the GST</span>
-                    ) : Number(bill.igst ?? 0) > 0 ? (
-                      'IGST — across states'
-                    ) : Number(bill.cgst ?? 0) > 0 ? (
-                      'CGST + SGST — inside the state'
-                    ) : (
-                      <span className="text-muted-foreground">No tax on this bill</span>
-                    )
-                  }
-                />
-                <Field
-                  label="TDS"
-                  value={
-                    bill.tdsSection ? (
-                      `${bill.tdsSection} at ${Number(bill.tdsRate ?? 0)}% — ₹${inr(tds)} withheld`
-                    ) : (
-                      <span className="text-muted-foreground">None</span>
-                    )
-                  }
-                />
-              </dl>
-            </Card>
-          </section>
+          <Section icon={Building2} title="The supplier">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+              <Field label="Name" value={bill.supplier?.name ?? '—'} />
+              <Field
+                label="GSTIN"
+                value={
+                  bill.supplier?.gstin ? (
+                    <span className="font-mono text-xs">{bill.supplier.gstin}</span>
+                  ) : (
+                    <span
+                      className="text-muted-foreground"
+                      title="An unregistered supplier — there is no tax split to make and none is charged"
+                    >
+                      Unregistered
+                    </span>
+                  )
+                }
+              />
+              <Field
+                label="Tax"
+                value={
+                  bill.isReverseCharge ? (
+                    <span className="text-amber-400">Reverse charge — we pay the GST</span>
+                  ) : Number(bill.igst ?? 0) > 0 ? (
+                    'IGST — across states'
+                  ) : Number(bill.cgst ?? 0) > 0 ? (
+                    'CGST + SGST — inside the state'
+                  ) : (
+                    <span className="text-muted-foreground">No tax on this bill</span>
+                  )
+                }
+              />
+              <Field
+                label="TDS"
+                value={
+                  bill.tdsSection ? (
+                    `${bill.tdsSection} at ${Number(bill.tdsRate ?? 0)}% — ₹${inr(tds)} withheld`
+                  ) : (
+                    <span className="text-muted-foreground">None</span>
+                  )
+                }
+              />
+            </dl>
+          </Section>
 
-          <section>
-            <Heading icon={Package}>Items ({bill.lines?.length ?? 0})</Heading>
-            <div className="border-border bg-card overflow-hidden rounded-lg border">
-              <BillItems bill={bill} />
-            </div>
-          </section>
+          <Section icon={Package} title={`Items (${bill.lines?.length ?? 0})`}>
+            <BillItems bill={bill} />
+          </Section>
 
           {bill.charges && bill.charges.length > 0 && (
-            <section>
-              <Heading icon={Percent}>Extra charges</Heading>
-              <div className="border-border bg-card overflow-x-auto rounded-lg border">
+            <Section icon={Percent} title="Extra charges">
+              <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-border text-muted-foreground border-b text-left">
-                      <th className="px-3 py-2 font-medium">Charge</th>
-                      <th className="px-3 py-2 text-right font-medium">GST</th>
-                      <th className="px-3 py-2 text-right font-medium">Amount</th>
+                      <th className="py-2 pr-3 font-medium">Charge</th>
+                      <th className="py-2 pr-3 text-right font-medium">GST</th>
+                      <th className="py-2 text-right font-medium">Amount</th>
                     </tr>
                   </thead>
                   <tbody>
                     {bill.charges.map((c) => (
                       <tr key={c.id} className="border-border/50 border-b last:border-0">
-                        <td className="text-foreground px-3 py-2">
+                        <td className="text-foreground py-2 pr-3">
                           {c.chargeType?.name ?? 'Charge'}
                         </td>
-                        <td className="text-muted-foreground px-3 py-2 text-right tabular-nums">
+                        <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
                           {Number(c.gstRate ?? 0)}%
                         </td>
-                        <td className="text-foreground px-3 py-2 text-right tabular-nums">
+                        <td className="text-foreground py-2 text-right tabular-nums">
                           ₹{inr(c.amount)}
                         </td>
                       </tr>
@@ -557,13 +526,12 @@ export function BillDetailDialog({
                   </tbody>
                 </table>
               </div>
-            </section>
+            </Section>
           )}
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <section>
-              <Heading icon={Calculator}>What it adds up to</Heading>
-              <dl className="border-border bg-card space-y-1.5 rounded-lg border p-4 text-sm">
+            <Section icon={Calculator} title="What it adds up to">
+              <dl className="space-y-1.5 text-sm">
                 {[
                   ['Goods', inr(bill.subtotal)],
                   ...(Number(bill.discountAmount ?? 0) > 0
@@ -617,31 +585,30 @@ export function BillDetailDialog({
                   </dd>
                 </div>
               </dl>
-            </section>
+            </Section>
 
-            <section>
-              <Heading icon={Wallet}>Payment history ({payments.length})</Heading>
+            <Section icon={Wallet} title={`Payment history (${payments.length})`}>
               {payments.length ? (
-                <div className="border-border bg-card overflow-x-auto rounded-lg border">
+                <div className="overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-border text-muted-foreground border-b text-left">
-                        <th className="px-3 py-2 font-medium">Payment</th>
-                        <th className="px-3 py-2 font-medium">Date</th>
-                        <th className="px-3 py-2 font-medium">Mode</th>
-                        <th className="px-3 py-2 font-medium">Reference</th>
-                        <th className="px-3 py-2 font-medium">By</th>
-                        <th className="px-3 py-2 text-right font-medium">Amount</th>
+                        <th className="py-2 pr-3 font-medium">Payment</th>
+                        <th className="py-2 pr-3 font-medium">Date</th>
+                        <th className="py-2 pr-3 font-medium">Mode</th>
+                        <th className="py-2 pr-3 font-medium">Reference</th>
+                        <th className="py-2 pr-3 font-medium">By</th>
+                        <th className="py-2 text-right font-medium">Amount</th>
                       </tr>
                     </thead>
                     <tbody>
                       {payments.map((p) => (
                         <tr key={p.id} className="border-border/50 border-b last:border-0">
-                          <td className="px-3 py-2 font-mono text-teal-400">{p.paymentNumber}</td>
-                          <td className="text-muted-foreground px-3 py-2">
+                          <td className="py-2 pr-3 font-mono text-teal-400">{p.paymentNumber}</td>
+                          <td className="text-muted-foreground py-2 pr-3">
                             {formatDate(p.paymentDate)}
                           </td>
-                          <td className="text-foreground px-3 py-2">
+                          <td className="text-foreground py-2 pr-3">
                             {MODE_LABEL[p.mode] ?? p.mode}
                             {p.chequeDate && (
                               <div className="text-muted-foreground text-[10px]">
@@ -649,13 +616,13 @@ export function BillDetailDialog({
                               </div>
                             )}
                           </td>
-                          <td className="text-muted-foreground px-3 py-2 font-mono">
+                          <td className="text-muted-foreground py-2 pr-3 font-mono">
                             {p.referenceNo ?? '—'}
                           </td>
-                          <td className="text-muted-foreground px-3 py-2">
+                          <td className="text-muted-foreground py-2 pr-3">
                             {p.createdBy?.name ?? '—'}
                           </td>
-                          <td className="text-foreground px-3 py-2 text-right font-medium tabular-nums">
+                          <td className="text-foreground py-2 text-right font-medium tabular-nums">
                             ₹{inr(p.amount)}
                           </td>
                         </tr>
@@ -663,10 +630,10 @@ export function BillDetailDialog({
                     </tbody>
                     <tfoot>
                       <tr className="border-border border-t">
-                        <td colSpan={5} className="text-muted-foreground px-3 py-2">
+                        <td colSpan={5} className="text-muted-foreground py-2 pr-3">
                           Paid against this bill
                         </td>
-                        <td className="text-foreground px-3 py-2 text-right font-semibold tabular-nums">
+                        <td className="text-foreground py-2 text-right font-semibold tabular-nums">
                           ₹{inr(paid)}
                         </td>
                       </tr>
@@ -674,25 +641,24 @@ export function BillDetailDialog({
                   </table>
                 </div>
               ) : (
-                <p className="text-muted-foreground border-border bg-card rounded-lg border p-4 text-sm">
+                <p className="text-muted-foreground text-sm">
                   Nothing has been paid against this bill yet.
                 </p>
               )}
-            </section>
+            </Section>
           </div>
 
           {notes.length > 0 && (
-            <section>
-              <Heading icon={Undo2}>Claimed back from the supplier ({notes.length})</Heading>
-              <div className="border-border bg-card overflow-x-auto rounded-lg border">
+            <Section icon={Undo2} title={`Claimed back from the supplier (${notes.length})`}>
+              <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-border text-muted-foreground border-b text-left">
-                      <th className="px-3 py-2 font-medium">Note</th>
-                      <th className="px-3 py-2 font-medium">Date</th>
-                      <th className="px-3 py-2 font-medium">Why</th>
-                      <th className="px-3 py-2 font-medium">Status</th>
-                      <th className="px-3 py-2 text-right font-medium">Amount</th>
+                      <th className="py-2 pr-3 font-medium">Note</th>
+                      <th className="py-2 pr-3 font-medium">Date</th>
+                      <th className="py-2 pr-3 font-medium">Why</th>
+                      <th className="py-2 pr-3 font-medium">Status</th>
+                      <th className="py-2 text-right font-medium">Amount</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -703,12 +669,12 @@ export function BillDetailDialog({
                       }
                       return (
                         <tr key={n.id} className="border-border/50 border-b last:border-0">
-                          <td className="px-3 py-2 font-mono text-amber-400">{n.noteNumber}</td>
-                          <td className="text-muted-foreground px-3 py-2">
+                          <td className="py-2 pr-3 font-mono text-amber-400">{n.noteNumber}</td>
+                          <td className="text-muted-foreground py-2 pr-3">
                             {formatDate(n.noteDate)}
                           </td>
-                          <td className="text-foreground px-3 py-2">{n.reason ?? '—'}</td>
-                          <td className="px-3 py-2">
+                          <td className="text-foreground py-2 pr-3">{n.reason ?? '—'}</td>
+                          <td className="py-2 pr-3">
                             <span className={st.cls}>{st.label}</span>
                             {n.status === 'DRAFT' && (
                               <div className="text-muted-foreground mt-0.5 text-[10px]">
@@ -716,7 +682,7 @@ export function BillDetailDialog({
                               </div>
                             )}
                           </td>
-                          <td className="text-foreground px-3 py-2 text-right font-medium tabular-nums">
+                          <td className="text-foreground py-2 text-right font-medium tabular-nums">
                             ₹{inr(n.totalAmount)}
                           </td>
                         </tr>
@@ -725,21 +691,19 @@ export function BillDetailDialog({
                   </tbody>
                 </table>
               </div>
-            </section>
+            </Section>
           )}
 
-          <section ref={filesRef}>
-            <Heading icon={Paperclip}>Attachments ({files.length})</Heading>
-            <Attachments files={files} />
-          </section>
+          <div ref={filesRef}>
+            <Section icon={Paperclip} title={`Attachments (${files.length})`}>
+              <Attachments files={files} />
+            </Section>
+          </div>
 
           {bill.notes && (
-            <section>
-              <Heading icon={MessageSquare}>Notes</Heading>
-              <p className="text-foreground border-border bg-card rounded-lg border p-4 text-sm whitespace-pre-wrap">
-                {bill.notes}
-              </p>
-            </section>
+            <Section icon={MessageSquare} title="Notes">
+              <p className="text-foreground text-sm whitespace-pre-wrap">{bill.notes}</p>
+            </Section>
           )}
         </div>
 
