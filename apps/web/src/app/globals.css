@@ -40,6 +40,14 @@
     --input: 217 33% 18%;
     --ring: 173 80% 40%;
 
+    /* What a form field is filled with.
+       Its own token rather than `--secondary`, because the two want opposite
+       things: a badge or a tab sits *on* the card and should barely lift off
+       it, while a field is a hole punched *into* the card and has to read as
+       recessed. Sharing one value meant whichever won, the other was wrong.
+       Dark mode wants the field lighter than the card. */
+    --field: 217 33% 15%;
+
     --radius: 0.625rem;
 
     /* Sidebar */
@@ -81,6 +89,13 @@
 
     --secondary: 220 16% 96%;
     --secondary-foreground: 222 40% 18%;
+
+    /* Light mode wants the field *darker* than the card, and by enough to see.
+       Fields used to take `--secondary` at 96% on a 100% white card — four
+       points of lightness, which on a bright office screen is no difference at
+       all: every box on a form read as one flat white sheet with text floating
+       on it. 91% is a clear step down without turning the form grey. */
+    --field: 220 16% 91%;
 
     --muted: 220 14% 90%;
     /* Secondary text: labels, hints, placeholders, table headers, the small
@@ -328,10 +343,11 @@
   /* Form Inputs */
   .form-input {
     @apply w-full px-3 py-2.5 rounded-lg text-sm
-           bg-secondary border border-border text-foreground
+           border border-border text-foreground
            placeholder:text-muted-foreground
            focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500
            transition-colors duration-200;
+    background: hsl(var(--field));
   }
 
   /* A dropdown is the same control as a text field and must look like one, but

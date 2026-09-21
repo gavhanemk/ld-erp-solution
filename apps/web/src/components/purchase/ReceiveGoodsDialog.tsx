@@ -681,7 +681,7 @@ export function ReceiveGoodsDialog({
   })
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       {/* `h-full`, not a cap. A cap only says how tall the card may not be, so
         a form shorter than the screen hugs its content and the leftover is
         split above and below as centring slack — which is the strip of dimmed

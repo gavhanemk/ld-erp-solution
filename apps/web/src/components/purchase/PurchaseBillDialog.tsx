@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, Download, TriangleAlert, Receipt } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 
@@ -646,8 +647,18 @@ export function PurchaseBillDialog({
     undecidedRates.length > 0 ||
     (needsRateReason && !rateVarianceReason.trim())
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+  /*
+   * Rendered on `document.body`, as the order and receipt dialogs already are.
+   *
+   * Left in the page it sat 32px from the top and 12px from the bottom, and no
+   * amount of centring fixed it: an ancestor in the dashboard shell carries a
+   * `backdrop-filter`, and that makes it the containing block for anything
+   * `position: fixed` inside it. So `inset-0` was measuring from the top bar
+   * rather than from the window, and the strip of page showing above the form
+   * was the top bar's own height leaking through.
+   */
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       {/* `h-full`, not a cap — see PurchaseOrderDialog for why: a cap only
         says how tall the card may not be, so a form shorter than the screen
         hugs its content and the leftover is split above and below as
@@ -1361,7 +1372,8 @@ export function PurchaseBillDialog({
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
