@@ -1743,8 +1743,45 @@ const grnInclude = {
     include: {
       item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
       warehouse: { select: { id: true, name: true } },
+      // What has already been claimed against each receipt line, so the list
+      // can say which receipts are still waiting on a supplier's bill. A
+      // cancelled bill claims nothing, so it is filtered out of the sum rather
+      // than left to make a receipt look settled.
+      billLines: {
+        where: { bill: { status: { not: 'CANCELLED' as const } } },
+        select: { id: true, qty: true, bill: { select: { id: true, billNumber: true } } },
+      },
     },
   },
+}
+
+/**
+ * Whether a receipt still needs a bill raising against it.
+ *
+ * Counted from what was **accepted**, not what arrived: rejected goods are on
+ * the note so the store keeper can see them, but nobody is going to be paid
+ * for them, so a receipt with rejections is fully billed well before its
+ * received quantity is.
+ */
+function billingStateOf(grn: {
+  lines: Array<{ acceptedQty: Prisma.Decimal | number | string; billLines: Array<{ qty: Prisma.Decimal | number | string }> }>
+}) {
+  let accepted = 0
+  let billed = 0
+
+  for (const line of grn.lines) {
+    accepted += Number(line.acceptedQty)
+    for (const bl of line.billLines) billed += Number(bl.qty)
+  }
+
+  return {
+    acceptedQty: round3(accepted),
+    billedQty: round3(billed),
+    pendingQty: round3(Math.max(0, accepted - billed)),
+    status:
+      accepted <= 0 ? 'NOTHING_TO_BILL' : billed <= 0 ? 'NOT_BILLED' : billed >= accepted ? 'BILLED' : 'PARTLY_BILLED',
+
+  }
 }
 
 /**
@@ -1993,7 +2030,18 @@ router.get('/grn', requirePermission(MODULE, 'view'), async (req, res) => {
 
   res.json({
     success: true,
-    data: rows,
+    // Billing state is worked out here rather than on the screen, so the list
+    // and the bill form cannot come to different conclusions about what is
+    // still owed against a receipt.
+    data: rows.map((grn) => ({
+      ...grn,
+      billing: billingStateOf(grn),
+      bills: [
+        ...new Map(
+          grn.lines.flatMap((l) => l.billLines.map((bl) => bl.bill)).map((b) => [b.id, b])
+        ).values(),
+      ],
+    })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   })
 })

@@ -23,14 +23,30 @@ interface Attachment {
  * way to see what it was. This opens read-only, off that same count.
  */
 export function OrderAttachmentsDialog({
-  poId,
-  poNumber,
+  docId,
+  docNumber,
+  kind = 'order',
   onClose,
 }: {
-  poId: string
-  poNumber: string
+  docId: string
+  docNumber: string
+  /**
+   * Which document's files these are.
+   *
+   * Orders and receipts keep their attachments in separate tables behind
+   * separate routes, and both have the same problem this dialog was written
+   * for: a paperclip on the row saying a file exists, with no way to see it.
+   * One dialog, two callers, rather than the same component twice.
+   */
+  kind?: 'order' | 'receipt'
   onClose: () => void
 }) {
+  const listPath =
+    kind === 'order'
+      ? `/purchase/orders/${docId}/attachments`
+      : `/purchase/grn/${docId}/attachments`
+  const linkBase = kind === 'order' ? '/purchase/attachments' : '/purchase/grn-attachments'
+
   const [files, setFiles] = useState<Attachment[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -41,7 +57,7 @@ export function OrderAttachmentsDialog({
     void (async () => {
       try {
         const res = await api.get<{ success: boolean; data: Attachment[] }>(
-          `/purchase/orders/${poId}/attachments`
+          listPath
         )
         if (!cancelled) setFiles(res.data)
       } catch (err) {
@@ -55,13 +71,13 @@ export function OrderAttachmentsDialog({
     return () => {
       cancelled = true
     }
-  }, [poId])
+  }, [listPath])
 
   const open = async (file: Attachment) => {
     setOpening(file.id)
     try {
       const res = await api.get<{ success: boolean; data: { url: string } }>(
-        `/purchase/attachments/${file.id}/link`
+        `${linkBase}/${file.id}/link`
       )
       window.open(res.data.url, '_blank', 'noopener')
     } catch (err) {
@@ -86,7 +102,7 @@ export function OrderAttachmentsDialog({
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 id="order-files-title" className="text-foreground text-base font-semibold">
-              Files on {poNumber}
+              Files on {docNumber}
             </h2>
             <p className="text-muted-foreground mt-0.5 text-sm">
               What was scanned or attached against this order.

@@ -1,6 +1,8 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
+import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import {
   Plus,
   Search,
@@ -58,6 +60,31 @@ interface Receipt {
   lines: ReceiptLine[]
   /** How many files were scanned onto the receipt — the challan, usually. */
   _count?: { attachments: number }
+  challanNo?: string | null
+  challanDate?: string | null
+  gateEntryNo?: string | null
+  /**
+   * How much of what was accepted has been billed, worked out by the API so
+   * this screen and the bill form cannot disagree about what is still owed.
+   */
+  billing?: {
+    acceptedQty: number
+    billedQty: number
+    pendingQty: number
+    status: 'NOTHING_TO_BILL' | 'NOT_BILLED' | 'PARTLY_BILLED' | 'BILLED'
+  }
+  bills?: Array<{ id: string; billNumber: string }>
+}
+
+/** How the billing state of a receipt reads on the row. */
+function billStage(grn: Receipt): { label: string; cls: string } | null {
+  if (grn.status === 'CANCELLED') return null
+  const b = grn.billing
+  if (!b) return null
+  if (b.status === 'NOTHING_TO_BILL') return { label: 'Nothing to bill', cls: 'badge-neutral' }
+  if (b.status === 'BILLED') return { label: 'Billed', cls: 'badge-success' }
+  if (b.status === 'PARTLY_BILLED') return { label: 'Part billed', cls: 'badge-info' }
+  return { label: 'Bill pending', cls: 'badge-warning' }
 }
 
 /**
@@ -205,6 +232,8 @@ export default function GoodsReceiptPage() {
 
   /** The receipt being corrected, or null when the form above is closed. */
   const [editGrnId, setEditGrnId] = useState<string | null>(null)
+  /** The receipt whose files are open, off the paperclip on its row. */
+  const [filesFor, setFilesFor] = useState<Receipt | null>(null)
 
   /** Which receipt is being cancelled or deleted, and which — the reason box asks once both are known. */
   const [confirmAction, setConfirmAction] = useState<{ type: 'cancel' | 'delete'; grn: Receipt } | null>(
@@ -1083,11 +1112,20 @@ export default function GoodsReceiptPage() {
                                 {grn.grnNumber}
                               </span>
                               <span className={s.cls}>{s.label}</span>
+                              {(() => {
+                                const b = billStage(grn)
+                                return b ? <span className={b.cls}>{b.label}</span> : null
+                              })()}
                               {grn._count?.attachments ? (
-                                <span className="text-muted-foreground inline-flex items-center gap-0.5 text-[10px]">
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground hover:text-foreground inline-flex items-center gap-0.5 text-[10px] transition"
+                                  onClick={() => setFilesFor(grn)}
+                                  title="Open the files on this receipt"
+                                >
                                   <Paperclip size={10} />
                                   {grn._count.attachments}
-                                </span>
+                                </button>
                               ) : null}
                             </div>
                             <p className="text-foreground mt-1 font-medium leading-snug">
@@ -1140,6 +1178,16 @@ export default function GoodsReceiptPage() {
                             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             {expanded ? 'Hide items' : 'What arrived'}
                           </button>
+                          {grn.status !== 'CANCELLED' &&
+                            grn.billing &&
+                            Number(grn.billing.pendingQty) > 0 && (
+                              <Link
+                                href={`/purchase/bills?fromGrn=${grn.id}`}
+                                className="btn-secondary h-7 whitespace-nowrap px-2 text-xs"
+                              >
+                                Add bill
+                              </Link>
+                            )}
                           <ActionMenu label={`Actions for ${grn.grnNumber}`} items={rowActions(grn)} />
                         </div>
 
@@ -1194,16 +1242,26 @@ export default function GoodsReceiptPage() {
               It is under the 1058px a 1366px laptop has to give, so the
               commonest screen there is still shows the whole table without
               scrolling at all. */}
-                  <table className="data-table w-full min-w-[900px]">
+                  <table className="data-table w-full min-w-[1180px]">
                     <thead>
                       <tr>
                         <th style={{ width: 30 }} />
                         <th>Number</th>
                         <th>Against order</th>
                         <th>Supplier</th>
+                        {/* The supplier's own document, which is what the
+                          store and the accounts team both quote when they
+                          argue about a delivery. It was on the receipt all
+                          along and not on the screen. */}
+                        <th>Challan</th>
                         <th>Received</th>
                         <th>Items</th>
+                        <th style={{ textAlign: 'right' }}>Accepted</th>
                         <th>Status</th>
+                        {/* Which receipts are still waiting on a bill — the
+                          question this screen exists to answer for whoever is
+                          holding a supplier's invoice. */}
+                        <th>Billing</th>
                         <th />
                       </tr>
                     </thead>
@@ -1234,15 +1292,20 @@ export default function GoodsReceiptPage() {
                                   scanned onto the receipt, so the paperclip
                                   belongs with the receipt's own number. */}
                                 {grn._count?.attachments ? (
-                                  <div
-                                    className="text-muted-foreground mt-0.5 inline-flex items-center gap-0.5 text-[10px]"
-                                    title={`${grn._count.attachments} file${
+                                  // A paperclip that cannot be pressed is a
+                                  // tease: it says a file exists and offers no
+                                  // way to see it.
+                                  <button
+                                    type="button"
+                                    className="text-muted-foreground hover:text-foreground mt-0.5 inline-flex items-center gap-0.5 text-[10px] transition"
+                                    onClick={() => setFilesFor(grn)}
+                                    title={`Open the ${grn._count.attachments} file${
                                       grn._count.attachments === 1 ? '' : 's'
-                                    } attached`}
+                                    } on this receipt`}
                                   >
                                     <Paperclip size={10} />
                                     {grn._count.attachments}
-                                  </div>
+                                  </button>
                                 ) : null}
                               </td>
                               <td className="whitespace-nowrap">
@@ -1257,6 +1320,28 @@ export default function GoodsReceiptPage() {
                                 </a>
                               </td>
                               <td className="text-sm">{grn.po.supplier?.name ?? '—'}</td>
+                              <td className="text-xs">
+                                {grn.challanNo ? (
+                                  <>
+                                    <div className="text-foreground font-mono">{grn.challanNo}</div>
+                                    {grn.challanDate && (
+                                      <div className="text-muted-foreground text-[10px]">
+                                        {formatDate(grn.challanDate)}
+                                      </div>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                                {grn.gateEntryNo && (
+                                  <div
+                                    className="text-muted-foreground text-[10px]"
+                                    title="Gate entry number"
+                                  >
+                                    Gate {grn.gateEntryNo}
+                                  </div>
+                                )}
+                              </td>
                               <td className="text-xs">
                                 {formatDate(grn.grnDate)}
                                 {grn.vehicleNo && (
@@ -1282,11 +1367,53 @@ export default function GoodsReceiptPage() {
                                   )
                                 })()}
                               </td>
+                              <td className="text-right text-sm tabular-nums">
+                                {grn.billing
+                                  ? Number(grn.billing.acceptedQty).toLocaleString('en-IN', {
+                                      maximumFractionDigits: 3,
+                                    })
+                                  : '—'}
+                              </td>
                               <td>
                                 <span className={s.cls}>{s.label}</span>
                               </td>
+                              <td className="whitespace-nowrap">
+                                {(() => {
+                                  const b = billStage(grn)
+                                  if (!b) return <span className="text-muted-foreground">—</span>
+                                  return (
+                                    <>
+                                      <span className={b.cls}>{b.label}</span>
+                                      {grn.bills && grn.bills.length > 0 && (
+                                        <div className="text-muted-foreground mt-0.5 font-mono text-[10px]">
+                                          {grn.bills.map((x) => x.billNumber).join(', ')}
+                                        </div>
+                                      )}
+                                    </>
+                                  )
+                                })()}
+                              </td>
                               <td className="whitespace-nowrap text-right">
-                                <div className="flex justify-end">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {/* The old ERP puts Add Bill From GRN on the
+                                    row itself, not behind a menu, because a
+                                    clerk working through a stack of supplier
+                                    invoices does this on nearly every receipt.
+                                    Shown only while something is still left to
+                                    bill. */}
+                                  {grn.status !== 'CANCELLED' &&
+                                    grn.billing &&
+                                    Number(grn.billing.pendingQty) > 0 && (
+                                      <Link
+                                        href={`/purchase/bills?fromGrn=${grn.id}`}
+                                        className="btn-secondary h-7 whitespace-nowrap px-2 text-xs"
+                                        title={`Raise a bill for the ${Number(
+                                          grn.billing.pendingQty
+                                        ).toLocaleString('en-IN')} still unbilled on ${grn.grnNumber}`}
+                                      >
+                                        Add bill
+                                      </Link>
+                                    )}
                                   <ActionMenu
                                     label={`Actions for ${grn.grnNumber}`}
                                     items={rowActions(grn)}
@@ -1448,6 +1575,15 @@ export default function GoodsReceiptPage() {
               ? closeLineShort(lineConfirm.po, lineConfirm.line, reason)
               : reopenLine(lineConfirm.po, lineConfirm.line))
           }
+        />
+      )}
+
+      {filesFor && (
+        <OrderAttachmentsDialog
+          kind="receipt"
+          docId={filesFor.id}
+          docNumber={filesFor.grnNumber}
+          onClose={() => setFilesFor(null)}
         />
       )}
     </div>

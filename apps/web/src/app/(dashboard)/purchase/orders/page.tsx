@@ -1089,8 +1089,8 @@ export default function PurchaseOrdersPage() {
 
       {filesFor && (
         <OrderAttachmentsDialog
-          poId={filesFor.id}
-          poNumber={filesFor.poNumber}
+          docId={filesFor.id}
+          docNumber={filesFor.poNumber}
           onClose={() => setFilesFor(null)}
         />
       )}
