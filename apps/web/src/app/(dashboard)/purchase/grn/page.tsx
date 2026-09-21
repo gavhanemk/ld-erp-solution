@@ -105,15 +105,13 @@ interface WaitingLine {
   shortCloseReason: string | null
   styleNo?: string | null
   style?: { id: string; code: string; name: string } | null
-  item?:
-    | {
-        id: string
-        code: string
-        name: string
-        uom?: { symbol: string } | null
-        category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
-      }
-    | null
+  item?: {
+    id: string
+    code: string
+    name: string
+    uom?: { symbol: string } | null
+    category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
+  } | null
 }
 
 interface WaitingOrder {
@@ -141,7 +139,10 @@ const qty = (v: string | number) =>
  * seen, so Total/Received/Pending line up group-for-group across the row.
  */
 function qtyByUnit(lines: WaitingLine[]) {
-  const groups = new Map<string, { unit: string; ordered: number; received: number; pending: number }>()
+  const groups = new Map<
+    string,
+    { unit: string; ordered: number; received: number; pending: number }
+  >()
   for (const l of lines) {
     const unit = l.item?.uom?.symbol ?? ''
     const g = groups.get(unit) ?? { unit, ordered: 0, received: 0, pending: 0 }
@@ -218,9 +219,11 @@ export default function GoodsReceiptPage() {
   const [openOrder, setOpenOrder] = useState<string | null>(null)
 
   /** A line being closed short or reopened — the reason box (if any) asks once both are known. */
-  const [lineConfirm, setLineConfirm] = useState<
-    { type: 'close' | 'reopen'; po: WaitingOrder; line: WaitingLine } | null
-  >(null)
+  const [lineConfirm, setLineConfirm] = useState<{
+    type: 'close' | 'reopen'
+    po: WaitingOrder
+    line: WaitingLine
+  } | null>(null)
 
   /**
    * The receiving form, and the order it should open on.
@@ -236,9 +239,10 @@ export default function GoodsReceiptPage() {
   const [filesFor, setFilesFor] = useState<Receipt | null>(null)
 
   /** Which receipt is being cancelled or deleted, and which — the reason box asks once both are known. */
-  const [confirmAction, setConfirmAction] = useState<{ type: 'cancel' | 'delete'; grn: Receipt } | null>(
-    null
-  )
+  const [confirmAction, setConfirmAction] = useState<{
+    type: 'cancel' | 'delete'
+    grn: Receipt
+  } | null>(null)
 
   /**
    * Which of the two lists is showing.
@@ -671,7 +675,7 @@ export default function GoodsReceiptPage() {
           {/* One box for words, whichever list is showing. It reaches item
             names and codes as well as the order and the supplier, so "poplin"
             finds the order that has poplin on it. */}
-          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px]">
+          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0">
             <Search size={14} className="text-muted-foreground shrink-0" />
             <input
               className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
@@ -799,276 +803,522 @@ export default function GoodsReceiptPage() {
                   : 'No order matches those filters. Clear them to see the rest.'}
               </p>
             ) : (
-              <div className="w-full overflow-x-auto">
-                <table className="data-table table-compact w-full min-w-[1080px]">
-                  <thead>
-                    <tr className="bg-secondary">
-                      <th style={{ width: 30 }} />
-                      <th style={{ width: '10%' }}>Order</th>
-                      <th style={{ width: '17%' }}>Supplier</th>
-                      <th style={{ width: '9%' }}>Date</th>
-                      <th style={{ width: '8%' }}>Reference</th>
-                      <th style={{ width: '14%' }}>Items</th>
-                      <th style={{ width: '11%', textAlign: 'right' }}>Total qty</th>
-                      <th style={{ width: '11%', textAlign: 'right' }}>Received qty</th>
-                      <th style={{ width: '11%', textAlign: 'right' }}>Pending qty</th>
-                      <th style={{ width: '7%' }}>Status</th>
-                      <th style={{ width: '14%' }} />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {waitingShown.map((po) => {
-                      const part = po.status === 'PARTIALLY_RECEIVED'
-                      const lines = po.lines ?? []
-                      const groups = qtyByUnit(lines)
-                      const anyPending = groups.some((g) => g.pending > 0)
-                      const expanded = openOrder === po.id
-                      return (
-                        <Fragment key={po.id}>
-                        <tr>
-                          <td>
-                            <button
-                              className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
-                                lines.length === 0
-                                  ? 'text-muted-foreground cursor-not-allowed opacity-50'
-                                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+              <div className="list-scope">
+                {/* ── On a phone, not a table ────────────────────────────────
+
+                  This tab had no such thing until now: eleven columns behind
+                  a 1080px floor and a sideways drag, at every width including
+                  the laptop everyone here uses. It is the one screen in
+                  purchase that somebody stands at a gate with a phone to use,
+                  and it was the one screen you could not.
+
+                  What is due is the figure the whole tab exists for, so it
+                  sits where the money sits on the other cards — hard right of
+                  the first line — and Receive is a full-width press rather
+                  than a 13px icon. */}
+                <div className="list-cards divide-border divide-y">
+                  {waitingShown.map((po) => {
+                    const part = po.status === 'PARTIALLY_RECEIVED'
+                    const lines = po.lines ?? []
+                    const groups = qtyByUnit(lines)
+                    const anyPending = groups.some((g) => g.pending > 0)
+                    const expanded = openOrder === po.id
+                    const items = itemsPreview(lines.map((l) => l.item?.name))
+                    const ordered = qtyPreview(groups, 'ordered')
+                    const received = qtyPreview(groups, 'received')
+                    const pending = qtyPreview(groups, 'pending')
+                    return (
+                      <div key={po.id} className="p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <a
+                                href={`/print/purchase-order/${po.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                                title="Open this order's PDF"
+                              >
+                                {po.poNumber}
+                              </a>
+                              <span className={part ? 'badge-warning' : 'badge-info'}>
+                                {part ? 'Part received' : 'Sent'}
+                              </span>
+                            </div>
+                            <p className="text-foreground mt-1 font-medium leading-snug">
+                              {po.supplier?.name ?? '—'}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-right" title={pending.full}>
+                            <span
+                              className={`block text-sm font-semibold tabular-nums ${
+                                anyPending ? 'text-amber-500' : 'text-muted-foreground'
                               }`}
-                              onClick={() => setOpenOrder(expanded ? null : po.id)}
-                              disabled={lines.length === 0}
-                              title={expanded ? 'Hide items' : 'Show items'}
-                              aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
-                              aria-expanded={expanded}
                             >
-                              {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                            </button>
-                          </td>
-                          <td className="whitespace-nowrap">
-                            <a
-                              href={`/print/purchase-order/${po.id}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
-                              title="Open this order's PDF"
-                            >
-                              {po.poNumber}
-                            </a>
-                          </td>
-                          <td className="text-sm">{po.supplier?.name ?? '—'}</td>
-                          <td className="whitespace-nowrap text-xs">{formatDate(po.poDate)}</td>
-                          <td className="text-xs">
-                            {po.reference || <span className="text-muted-foreground">—</span>}
-                          </td>
-                          <td className="text-xs">
-                            {lines.length === 0 ? (
-                              <span className="text-muted-foreground">—</span>
-                            ) : (
-                              <>
-                                <div className="text-foreground whitespace-nowrap">
-                                  {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                              {pending.shown}
+                              {pending.extra}
+                            </span>
+                            <span className="text-muted-foreground block text-[10px]">
+                              still due
+                            </span>
+                          </span>
+                        </div>
+
+                        <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                          <dt className="text-muted-foreground">Ordered</dt>
+                          <dd className="text-foreground min-w-0 tabular-nums" title={ordered.full}>
+                            {ordered.shown}
+                            {ordered.extra}
+                          </dd>
+                          <dt className="text-muted-foreground">Received</dt>
+                          <dd
+                            className="text-foreground min-w-0 tabular-nums"
+                            title={received.full}
+                          >
+                            {received.shown}
+                            {received.extra}
+                          </dd>
+                          <dt className="text-muted-foreground">Ordered on</dt>
+                          <dd className="text-foreground min-w-0">{formatDate(po.poDate)}</dd>
+                          {po.reference ? (
+                            <>
+                              <dt className="text-muted-foreground">Reference</dt>
+                              <dd className="text-foreground min-w-0 truncate">{po.reference}</dd>
+                            </>
+                          ) : null}
+                          <dt className="text-muted-foreground">Items</dt>
+                          <dd className="text-foreground min-w-0 truncate" title={items.full}>
+                            {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                            {items.shown ? (
+                              <span className="text-muted-foreground">
+                                {' '}
+                                · {items.shown}
+                                {items.extra}
+                              </span>
+                            ) : null}
+                          </dd>
+                        </dl>
+
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => setOpenOrder(expanded ? null : po.id)}
+                            disabled={lines.length === 0}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                              lines.length === 0
+                                ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                : 'bg-primary/10 text-primary hover:bg-primary/20'
+                            }`}
+                            aria-expanded={expanded}
+                          >
+                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            {expanded ? 'Hide items' : 'Show items'}
+                          </button>
+                          <button
+                            className="btn-ghost border-border ml-auto h-8 rounded-lg border px-2.5 text-xs"
+                            onClick={() => {
+                              setTab('receipts')
+                              setSearch(po.poNumber)
+                              setStatus('')
+                            }}
+                            title={`Show the receipts already made against ${po.poNumber}`}
+                          >
+                            History
+                          </button>
+                          <button
+                            className="btn-primary h-8 px-3 text-xs"
+                            onClick={() => setDialog(po.id)}
+                          >
+                            <PackageCheck size={14} /> Receive
+                          </button>
+                        </div>
+
+                        {expanded && lines.length > 0 && (
+                          <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] space-y-2 overflow-y-auto rounded-lg border p-2">
+                            {lines.map((line) => (
+                              <div
+                                key={line.id}
+                                className="border-border bg-card rounded-lg border p-2.5"
+                              >
+                                <p className="text-foreground text-sm font-medium leading-snug">
+                                  {line.item?.name ?? '—'}
+                                </p>
+                                <p className="text-muted-foreground mt-0.5 truncate text-[10px]">
+                                  <span className="font-mono">{line.item?.code ?? '—'}</span>
+                                  {(line.style?.code || line.styleNo) && (
+                                    <> · {line.style?.code ?? line.styleNo}</>
+                                  )}
+                                </p>
+                                <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                                  <div>
+                                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">
+                                      Ordered
+                                    </dt>
+                                    <dd className="text-foreground tabular-nums">
+                                      {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">
+                                      Received
+                                    </dt>
+                                    <dd className="text-foreground tabular-nums">
+                                      {qty(line.receivedQty)}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">
+                                      Still due
+                                    </dt>
+                                    <dd className="tabular-nums">
+                                      {line.shortClosed ? (
+                                        <span
+                                          className="text-amber-500"
+                                          title={line.shortCloseReason ?? undefined}
+                                        >
+                                          Closed short
+                                        </span>
+                                      ) : (
+                                        <span className="text-foreground">
+                                          {qty(Number(line.qty) - Number(line.receivedQty))}
+                                        </span>
+                                      )}
+                                    </dd>
+                                  </div>
                                 </div>
-                                {(() => {
-                                  const p = itemsPreview(lines.map((l) => l.item?.name))
-                                  return (
-                                    <div
-                                      className="text-muted-foreground truncate text-[10px] leading-tight"
-                                      title={p.full}
-                                    >
-                                      {p.shown}
-                                      {p.extra}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="list-rows w-full">
+                  {/* What goes when the list narrows, in the order it goes:
+
+                      under "full"   the reference and the item summary
+                      under "wide"   the order date and what has arrived so far
+                      under "roomy"  the ordered quantity
+
+                      Never dropped: the order number, the supplier, what is
+                      still due, the status, and Receive. Still-due is the
+                      figure this whole tab exists to show. */}
+                  <table className="data-table table-compact w-full">
+                    <thead>
+                      <tr className="bg-secondary">
+                        <th style={{ width: 30 }} />
+                        <th>Order</th>
+                        <th>Supplier</th>
+                        <th className="col-wide">Date</th>
+                        <th className="col-full">Reference</th>
+                        <th className="col-full">Items</th>
+                        <th className="col-roomy" style={{ textAlign: 'right' }}>
+                          Total qty
+                        </th>
+                        <th className="col-wide" style={{ textAlign: 'right' }}>
+                          Received qty
+                        </th>
+                        <th style={{ textAlign: 'right' }}>Pending qty</th>
+                        <th>Status</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {waitingShown.map((po) => {
+                        const part = po.status === 'PARTIALLY_RECEIVED'
+                        const lines = po.lines ?? []
+                        const groups = qtyByUnit(lines)
+                        const anyPending = groups.some((g) => g.pending > 0)
+                        const expanded = openOrder === po.id
+                        return (
+                          <Fragment key={po.id}>
+                            <tr>
+                              <td>
+                                <button
+                                  className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                    lines.length === 0
+                                      ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                      : 'bg-primary/10 text-primary hover:bg-primary/20'
+                                  }`}
+                                  onClick={() => setOpenOrder(expanded ? null : po.id)}
+                                  disabled={lines.length === 0}
+                                  title={expanded ? 'Hide items' : 'Show items'}
+                                  aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
+                                  aria-expanded={expanded}
+                                >
+                                  {expanded ? (
+                                    <ChevronDown size={14} />
+                                  ) : (
+                                    <ChevronRight size={14} />
+                                  )}
+                                </button>
+                              </td>
+                              <td className="whitespace-nowrap">
+                                <a
+                                  href={`/print/purchase-order/${po.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                                  title="Open this order's PDF"
+                                >
+                                  {po.poNumber}
+                                </a>
+                              </td>
+                              <td>
+                                <div className="max-w-[15rem] truncate text-sm">
+                                  {po.supplier?.name ?? '—'}
+                                </div>
+                              </td>
+                              <td className="col-wide whitespace-nowrap text-xs">
+                                {formatDate(po.poDate)}
+                              </td>
+                              <td className="col-full text-xs">
+                                {po.reference || <span className="text-muted-foreground">—</span>}
+                              </td>
+                              <td className="col-full text-xs">
+                                {lines.length === 0 ? (
+                                  <span className="text-muted-foreground">—</span>
+                                ) : (
+                                  <>
+                                    <div className="text-foreground whitespace-nowrap">
+                                      {lines.length} {lines.length === 1 ? 'item' : 'items'}
                                     </div>
-                                  )
-                                })()}
-                              </>
-                            )}
-                          </td>
-                          {/* Three columns, not one net figure — a mixed-unit
+                                    {(() => {
+                                      const p = itemsPreview(lines.map((l) => l.item?.name))
+                                      return (
+                                        <div
+                                          className="text-muted-foreground truncate text-[10px] leading-tight"
+                                          title={p.full}
+                                        >
+                                          {p.shown}
+                                          {p.extra}
+                                        </div>
+                                      )
+                                    })()}
+                                  </>
+                                )}
+                              </td>
+                              {/* Three columns, not one net figure — a mixed-unit
                             order cannot be netted into a single "still due"
                             without pretending metres and pieces are the same
                             thing. Grouped by unit and truncated the same way
                             the item list above is, with every group on hover. */}
-                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                            {(() => {
-                              const p = qtyPreview(groups, 'ordered')
-                              return (
-                                <span title={p.full}>
-                                  {p.shown}
-                                  {p.extra}
+                              <td className="col-roomy whitespace-nowrap text-right text-xs tabular-nums">
+                                {(() => {
+                                  const p = qtyPreview(groups, 'ordered')
+                                  return (
+                                    <span title={p.full}>
+                                      {p.shown}
+                                      {p.extra}
+                                    </span>
+                                  )
+                                })()}
+                              </td>
+                              <td className="col-wide whitespace-nowrap text-right text-xs tabular-nums">
+                                {(() => {
+                                  const p = qtyPreview(groups, 'received')
+                                  return (
+                                    <span title={p.full}>
+                                      {p.shown}
+                                      {p.extra}
+                                    </span>
+                                  )
+                                })()}
+                              </td>
+                              <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                {(() => {
+                                  const p = qtyPreview(groups, 'pending')
+                                  return (
+                                    <span
+                                      className={
+                                        anyPending
+                                          ? 'font-medium text-amber-500'
+                                          : 'text-muted-foreground'
+                                      }
+                                      title={p.full}
+                                    >
+                                      {p.shown}
+                                      {p.extra}
+                                    </span>
+                                  )
+                                })()}
+                              </td>
+                              <td>
+                                <span className={part ? 'badge-warning' : 'badge-info'}>
+                                  {part ? 'Part received' : 'Sent'}
                                 </span>
-                              )
-                            })()}
-                          </td>
-                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                            {(() => {
-                              const p = qtyPreview(groups, 'received')
-                              return (
-                                <span title={p.full}>
-                                  {p.shown}
-                                  {p.extra}
-                                </span>
-                              )
-                            })()}
-                          </td>
-                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                            {(() => {
-                              const p = qtyPreview(groups, 'pending')
-                              return (
-                                <span className={anyPending ? 'font-medium text-amber-500' : 'text-muted-foreground'} title={p.full}>
-                                  {p.shown}
-                                  {p.extra}
-                                </span>
-                              )
-                            })()}
-                          </td>
-                          <td>
-                            <span className={part ? 'badge-warning' : 'badge-info'}>
-                              {part ? 'Part received' : 'Sent'}
-                            </span>
-                          </td>
-                          <td className="whitespace-nowrap text-right">
-                            <div className="flex justify-end gap-1.5">
-                              <button
-                                className="btn-primary h-7 px-2.5 text-xs"
-                                onClick={() => setDialog(po.id)}
-                              >
-                                <PackageCheck size={13} /> Receive
-                              </button>
-                              <button
-                                className="btn-ghost border-border h-7 rounded-lg border px-2.5 text-xs"
-                                onClick={() => {
-                                  setTab('receipts')
-                                  setSearch(po.poNumber)
-                                  setStatus('')
-                                }}
-                                title={`Show the receipts already made against ${po.poNumber}`}
-                              >
-                                History
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-
-                        {expanded && lines.length > 0 && (
-                          <tr>
-                            <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                              <div className="border-border bg-card overflow-hidden rounded-lg border">
-                                <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
-                                  <FileText size={13} className="text-muted-foreground shrink-0" />
-                                  <h4 className="text-foreground text-[11px] font-semibold">
-                                    Item Details
-                                  </h4>
-                                  <span className="text-muted-foreground ml-auto text-[10px]">
-                                    {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
-                                    {po.poNumber}
-                                  </span>
+                              </td>
+                              <td className="whitespace-nowrap text-right">
+                                <div className="flex justify-end gap-1.5">
+                                  <button
+                                    className="btn-primary h-7 px-2.5 text-xs"
+                                    onClick={() => setDialog(po.id)}
+                                  >
+                                    <PackageCheck size={13} /> Receive
+                                  </button>
+                                  <button
+                                    className="btn-ghost border-border h-7 rounded-lg border px-2.5 text-xs"
+                                    onClick={() => {
+                                      setTab('receipts')
+                                      setSearch(po.poNumber)
+                                      setStatus('')
+                                    }}
+                                    title={`Show the receipts already made against ${po.poNumber}`}
+                                  >
+                                    History
+                                  </button>
                                 </div>
-                                {/* Capped and scrollable — an order with
+                              </td>
+                            </tr>
+
+                            {expanded && lines.length > 0 && (
+                              <tr>
+                                <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                  <div className="border-border bg-card overflow-hidden rounded-lg border">
+                                    <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
+                                      <FileText
+                                        size={13}
+                                        className="text-muted-foreground shrink-0"
+                                      />
+                                      <h4 className="text-foreground text-[11px] font-semibold">
+                                        Item Details
+                                      </h4>
+                                      <span className="text-muted-foreground ml-auto text-[10px]">
+                                        {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
+                                        {po.poNumber}
+                                      </span>
+                                    </div>
+                                    {/* Capped and scrollable — an order with
                                   thirty trims on it would otherwise push the
                                   next order, and the pager, halfway down the
                                   screen. */}
-                                <div className="max-h-[22rem] overflow-y-auto">
-                                <table className="w-full table-fixed text-sm">
-                                  <thead className="sticky top-0 z-10">
-                                    <tr className="bg-secondary border-border border-b">
-                                      {WAITING_COLS.map(({ label: h, width, numeric }) => (
-                                        <th
-                                          key={h}
-                                          style={{ width }}
-                                          className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                            numeric ? 'text-right' : 'text-left'
-                                          }`}
-                                        >
-                                          {h}
-                                        </th>
-                                      ))}
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {lines.map((line) => {
-                                      const cat = line.item?.category
-                                      const parent = cat?.parent
-                                      return (
-                                        <tr key={line.id} className="border-border/40 border-b last:border-0">
-                                          <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
-                                            {line.item?.code ?? '—'}
-                                          </td>
-                                          <td className="px-3 py-1.5">
-                                            <div className="text-foreground truncate text-xs">
-                                              {line.item?.name ?? '—'}
-                                            </div>
-                                          </td>
-                                          <td className="px-3 py-1.5 text-xs">
-                                            {line.style?.code || line.styleNo ? (
-                                              <div className="text-foreground truncate font-mono text-xs">
-                                                {line.style?.code ?? line.styleNo}
-                                              </div>
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-xs">
-                                            {parent?.name ?? cat?.name ?? (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-xs">
-                                            {parent ? (
-                                              cat?.name
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                            {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
-                                          </td>
-                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                            {qty(line.receivedQty)}
-                                          </td>
-                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                            {line.shortClosed ? (
-                                              <div className="flex items-center justify-end gap-1 whitespace-normal text-amber-500">
-                                                <span title={line.shortCloseReason ?? undefined}>
-                                                  Closed short
-                                                </span>
-                                                <span className="text-muted-foreground">·</span>
-                                                <button
-                                                  type="button"
-                                                  className="text-primary underline"
-                                                  onClick={() => setLineConfirm({ type: 'reopen', po, line })}
-                                                >
-                                                  Reopen
-                                                </button>
-                                              </div>
-                                            ) : Number(line.pendingQty) > 0 ? (
-                                              <div className="flex items-center justify-end gap-1 whitespace-normal">
-                                                <span>{qty(line.pendingQty)}</span>
-                                                <span className="text-muted-foreground">·</span>
-                                                <button
-                                                  type="button"
-                                                  className="text-primary underline"
-                                                  onClick={() => setLineConfirm({ type: 'close', po, line })}
-                                                >
-                                                  Close short
-                                                </button>
-                                              </div>
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      )
-                                    })}
-                                  </tbody>
-                                </table>
-                                </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                        </Fragment>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                                    <div className="max-h-[22rem] overflow-y-auto">
+                                      <table className="w-full table-fixed text-sm">
+                                        <thead className="sticky top-0 z-10">
+                                          <tr className="bg-secondary border-border border-b">
+                                            {WAITING_COLS.map(({ label: h, width, numeric }) => (
+                                              <th
+                                                key={h}
+                                                style={{ width }}
+                                                className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                                  numeric ? 'text-right' : 'text-left'
+                                                }`}
+                                              >
+                                                {h}
+                                              </th>
+                                            ))}
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {lines.map((line) => {
+                                            const cat = line.item?.category
+                                            const parent = cat?.parent
+                                            return (
+                                              <tr
+                                                key={line.id}
+                                                className="border-border/40 border-b last:border-0"
+                                              >
+                                                <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                                  {line.item?.code ?? '—'}
+                                                </td>
+                                                <td className="px-3 py-1.5">
+                                                  <div className="text-foreground truncate text-xs">
+                                                    {line.item?.name ?? '—'}
+                                                  </div>
+                                                </td>
+                                                <td className="px-3 py-1.5 text-xs">
+                                                  {line.style?.code || line.styleNo ? (
+                                                    <div className="text-foreground truncate font-mono text-xs">
+                                                      {line.style?.code ?? line.styleNo}
+                                                    </div>
+                                                  ) : (
+                                                    <span className="text-muted-foreground">—</span>
+                                                  )}
+                                                </td>
+                                                <td className="px-3 py-1.5 text-xs">
+                                                  {parent?.name ?? cat?.name ?? (
+                                                    <span className="text-muted-foreground">—</span>
+                                                  )}
+                                                </td>
+                                                <td className="px-3 py-1.5 text-xs">
+                                                  {parent ? (
+                                                    cat?.name
+                                                  ) : (
+                                                    <span className="text-muted-foreground">—</span>
+                                                  )}
+                                                </td>
+                                                <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                                  {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                                </td>
+                                                <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                                  {qty(line.receivedQty)}
+                                                </td>
+                                                <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                                  {line.shortClosed ? (
+                                                    <div className="flex items-center justify-end gap-1 whitespace-normal text-amber-500">
+                                                      <span
+                                                        title={line.shortCloseReason ?? undefined}
+                                                      >
+                                                        Closed short
+                                                      </span>
+                                                      <span className="text-muted-foreground">
+                                                        ·
+                                                      </span>
+                                                      <button
+                                                        type="button"
+                                                        className="text-primary underline"
+                                                        onClick={() =>
+                                                          setLineConfirm({
+                                                            type: 'reopen',
+                                                            po,
+                                                            line,
+                                                          })
+                                                        }
+                                                      >
+                                                        Reopen
+                                                      </button>
+                                                    </div>
+                                                  ) : Number(line.pendingQty) > 0 ? (
+                                                    <div className="flex items-center justify-end gap-1 whitespace-normal">
+                                                      <span>{qty(line.pendingQty)}</span>
+                                                      <span className="text-muted-foreground">
+                                                        ·
+                                                      </span>
+                                                      <button
+                                                        type="button"
+                                                        className="text-primary underline"
+                                                        onClick={() =>
+                                                          setLineConfirm({
+                                                            type: 'close',
+                                                            po,
+                                                            line,
+                                                          })
+                                                        }
+                                                      >
+                                                        Close short
+                                                      </button>
+                                                    </div>
+                                                  ) : (
+                                                    <span className="text-muted-foreground">—</span>
+                                                  )}
+                                                </td>
+                                              </tr>
+                                            )
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </>
@@ -1089,17 +1339,18 @@ export default function GoodsReceiptPage() {
                 </p>
               </div>
             ) : (
-              <>
-                {/* ── On a phone, not a table ──────────────────────────────────
+              <div className="list-scope">
+                {/* ── On a phone, not a table ──────────────────────────────
 
-              Same reasoning as the purchase order list: 8 columns cannot be
-              made to fit a phone, and a table you drag sideways costs two
-              gestures for every read and keeps the buttons off whichever edge
-              you are not looking at. Below xl each row is a block instead.
+                  Same reasoning as the tab beside it: eleven columns cannot
+                  be made to fit a phone, and a table you drag sideways costs
+                  two gestures for every read and keeps the buttons off
+                  whichever edge you are not looking at. On a narrow list each
+                  row is a block instead.
 
-              xl and not lg, because lg is where the sidebar comes back and
-              takes 260px of the screen with it. */}
-                <div className="divide-border divide-y xl:hidden">
+                  Measured on the list rather than the window — see
+                  `.list-scope` in globals.css. */}
+                <div className="list-cards divide-border divide-y">
                   {rows.map((grn) => {
                     const s = stage(grn.status)
                     const expanded = open === grn.id
@@ -1188,7 +1439,10 @@ export default function GoodsReceiptPage() {
                                 Add bill
                               </Link>
                             )}
-                          <ActionMenu label={`Actions for ${grn.grnNumber}`} items={rowActions(grn)} />
+                          <ActionMenu
+                            label={`Actions for ${grn.grnNumber}`}
+                            items={rowActions(grn)}
+                          />
                         </div>
 
                         {expanded && (
@@ -1229,39 +1483,48 @@ export default function GoodsReceiptPage() {
                   })}
                 </div>
 
-                <div className="hidden w-full overflow-x-auto xl:block">
-                  {/* A floor, so the table scrolls rather than squashing.
+                <div className="list-rows w-full">
+                  {/* What goes when the list narrows, in the order it goes:
 
-              Eight columns with no minimum width squeeze to fit whatever they
-              are given: on a narrow screen the supplier and the number end up
-              two characters wide and wrapped over four lines. 900px is what
-              these columns need to stay readable, and the wrapper around them
-              already scrolls — which is the honest behaviour when a table is
-              genuinely wider than the screen.
+                      under "full"   the challan, the item summary, and how
+                                     much was accepted
+                      under "wide"   the order it came against
+                      under "roomy"  the date it arrived, and the billing
+                                     badge
 
-              It is under the 1058px a 1366px laptop has to give, so the
-              commonest screen there is still shows the whole table without
-              scrolling at all. */}
-                  <table className="data-table w-full min-w-[1180px]">
+                      Never dropped: the receipt number, the supplier, the
+                      status and the actions.
+
+                      The billing badge goes last of the three and loses
+                      nothing when it does: the Add bill button in the actions
+                      cell is only there while something is still unbilled, so
+                      on a narrow list the button is the badge. Both together
+                      cost 306px of a 718px list, which is what pushed this
+                      table over the edge on a tablet.
+
+                      This table used to hold a 1180px floor and scroll
+                      sideways below it — on a 1366px laptop, which has 1056px
+                      to give, that meant dragging on the commonest screen in
+                      the building. */}
+                  <table className="data-table w-full">
                     <thead>
                       <tr>
                         <th style={{ width: 30 }} />
                         <th>Number</th>
-                        <th>Against order</th>
+                        <th className="col-wide">Against order</th>
                         <th>Supplier</th>
                         {/* The supplier's own document, which is what the
                           store and the accounts team both quote when they
                           argue about a delivery. It was on the receipt all
                           along and not on the screen. */}
-                        <th>Challan</th>
-                        <th>Received</th>
-                        <th>Items</th>
-                        <th style={{ textAlign: 'right' }}>Accepted</th>
+                        <th className="col-full">Challan</th>
+                        <th className="col-roomy">Received</th>
+                        <th className="col-full">Items</th>
+                        <th className="col-full" style={{ textAlign: 'right' }}>
+                          Accepted
+                        </th>
                         <th>Status</th>
-                        {/* Which receipts are still waiting on a bill — the
-                          question this screen exists to answer for whoever is
-                          holding a supplier's invoice. */}
-                        <th>Billing</th>
+                        <th className="col-roomy">Billing</th>
                         <th />
                       </tr>
                     </thead>
@@ -1308,7 +1571,7 @@ export default function GoodsReceiptPage() {
                                   </button>
                                 ) : null}
                               </td>
-                              <td className="whitespace-nowrap">
+                              <td className="col-wide whitespace-nowrap">
                                 <a
                                   href={`/print/purchase-order/${grn.po.id}`}
                                   target="_blank"
@@ -1319,8 +1582,12 @@ export default function GoodsReceiptPage() {
                                   {grn.po.poNumber}
                                 </a>
                               </td>
-                              <td className="text-sm">{grn.po.supplier?.name ?? '—'}</td>
-                              <td className="text-xs">
+                              <td>
+                                <div className="max-w-[15rem] truncate text-sm">
+                                  {grn.po.supplier?.name ?? '—'}
+                                </div>
+                              </td>
+                              <td className="col-full text-xs">
                                 {grn.challanNo ? (
                                   <>
                                     <div className="text-foreground font-mono">{grn.challanNo}</div>
@@ -1342,7 +1609,7 @@ export default function GoodsReceiptPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="text-xs">
+                              <td className="col-roomy text-xs">
                                 {formatDate(grn.grnDate)}
                                 {grn.vehicleNo && (
                                   <div className="text-muted-foreground text-[10px]">
@@ -1350,7 +1617,7 @@ export default function GoodsReceiptPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="text-xs">
+                              <td className="col-full text-xs">
                                 <div className="text-foreground whitespace-nowrap text-sm tabular-nums">
                                   {grn.lines.length}
                                 </div>
@@ -1367,7 +1634,7 @@ export default function GoodsReceiptPage() {
                                   )
                                 })()}
                               </td>
-                              <td className="text-right text-sm tabular-nums">
+                              <td className="col-full text-right text-sm tabular-nums">
                                 {grn.billing
                                   ? Number(grn.billing.acceptedQty).toLocaleString('en-IN', {
                                       maximumFractionDigits: 3,
@@ -1377,7 +1644,7 @@ export default function GoodsReceiptPage() {
                               <td>
                                 <span className={s.cls}>{s.label}</span>
                               </td>
-                              <td className="whitespace-nowrap">
+                              <td className="col-roomy whitespace-nowrap">
                                 {(() => {
                                   const b = billStage(grn)
                                   if (!b) return <span className="text-muted-foreground">—</span>
@@ -1409,7 +1676,9 @@ export default function GoodsReceiptPage() {
                                         className="btn-secondary h-7 whitespace-nowrap px-2 text-xs"
                                         title={`Raise a bill for the ${Number(
                                           grn.billing.pendingQty
-                                        ).toLocaleString('en-IN')} still unbilled on ${grn.grnNumber}`}
+                                        ).toLocaleString(
+                                          'en-IN'
+                                        )} still unbilled on ${grn.grnNumber}`}
                                       >
                                         Add bill
                                       </Link>
@@ -1426,50 +1695,50 @@ export default function GoodsReceiptPage() {
                               <tr>
                                 <td colSpan={8} className="bg-secondary/40 p-0">
                                   <div className="max-h-[22rem] overflow-y-auto">
-                                  <table className="data-table w-full">
-                                    <thead className="sticky top-0 z-10">
-                                      <tr className="bg-secondary">
-                                        <th>Item</th>
-                                        <th>Store</th>
-                                        <th style={{ textAlign: 'right' }}>Ordered</th>
-                                        <th style={{ textAlign: 'right' }}>Arrived</th>
-                                        <th style={{ textAlign: 'right' }}>Rejected</th>
-                                        <th style={{ textAlign: 'right' }}>Into stock</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {grn.lines.map((l) => (
-                                        <tr key={l.id}>
-                                          <td>
-                                            <div className="text-sm">{l.item.name}</div>
-                                            <div className="text-muted-foreground font-mono text-[10px]">
-                                              {l.item.code}
-                                              {l.batchNumber ? ` · batch ${l.batchNumber}` : ''}
-                                            </div>
-                                          </td>
-                                          <td className="text-xs">{l.warehouse.name}</td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {qty(l.orderedQty)}
-                                          </td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {qty(l.receivedQty)}
-                                          </td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {Number(l.rejectedQty) > 0 ? (
-                                              <span className="text-red-400">
-                                                {qty(l.rejectedQty)}
-                                              </span>
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {qty(l.acceptedQty)} {l.item.uom?.symbol ?? ''}
-                                          </td>
+                                    <table className="data-table w-full">
+                                      <thead className="sticky top-0 z-10">
+                                        <tr className="bg-secondary">
+                                          <th>Item</th>
+                                          <th>Store</th>
+                                          <th style={{ textAlign: 'right' }}>Ordered</th>
+                                          <th style={{ textAlign: 'right' }}>Arrived</th>
+                                          <th style={{ textAlign: 'right' }}>Rejected</th>
+                                          <th style={{ textAlign: 'right' }}>Into stock</th>
                                         </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
+                                      </thead>
+                                      <tbody>
+                                        {grn.lines.map((l) => (
+                                          <tr key={l.id}>
+                                            <td>
+                                              <div className="text-sm">{l.item.name}</div>
+                                              <div className="text-muted-foreground font-mono text-[10px]">
+                                                {l.item.code}
+                                                {l.batchNumber ? ` · batch ${l.batchNumber}` : ''}
+                                              </div>
+                                            </td>
+                                            <td className="text-xs">{l.warehouse.name}</td>
+                                            <td className="text-right text-sm tabular-nums">
+                                              {qty(l.orderedQty)}
+                                            </td>
+                                            <td className="text-right text-sm tabular-nums">
+                                              {qty(l.receivedQty)}
+                                            </td>
+                                            <td className="text-right text-sm tabular-nums">
+                                              {Number(l.rejectedQty) > 0 ? (
+                                                <span className="text-red-400">
+                                                  {qty(l.rejectedQty)}
+                                                </span>
+                                              ) : (
+                                                <span className="text-muted-foreground">—</span>
+                                              )}
+                                            </td>
+                                            <td className="text-right text-sm tabular-nums">
+                                              {qty(l.acceptedQty)} {l.item.uom?.symbol ?? ''}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
                                   </div>
                                   {grn.notes && (
                                     <p className="text-muted-foreground px-4 py-2 text-xs">
@@ -1485,7 +1754,7 @@ export default function GoodsReceiptPage() {
                     </tbody>
                   </table>
                 </div>
-              </>
+              </div>
             )}
 
             <Pagination

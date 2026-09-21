@@ -95,7 +95,10 @@ function bucketClass(bucket: string) {
  * settles several, and a bill with none behind it was typed by hand.
  */
 function grnsOn(trail: BillTrail) {
-  const seen = new Map<string, { id: string; grnNumber: string; grnDate: string; files: BillFile[] }>()
+  const seen = new Map<
+    string,
+    { id: string; grnNumber: string; grnDate: string; files: BillFile[] }
+  >()
   for (const l of trail.lines ?? []) {
     const grn = l.grnLine?.grn
     if (!grn || seen.has(grn.id)) continue
@@ -378,7 +381,11 @@ export default function SupplierPaymentsPage() {
 
           <span className="bg-border hidden h-6 w-px shrink-0 lg:block" />
 
-          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[260px]">
+          {/* A whole line to itself on a phone. Sharing the row with the two
+            tab buttons left it 20px wide — narrower than its own magnifying
+            glass and padding, so the icon spilled out of its border. The row
+            already wraps; it just needed telling to. */}
+          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[260px] sm:basis-0">
             <Search size={14} className="text-muted-foreground shrink-0" />
             <input
               className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
@@ -416,8 +423,8 @@ export default function SupplierPaymentsPage() {
               </p>
             </div>
           ) : (
-            <>
-              <div className="divide-border divide-y xl:hidden">
+            <div className="list-scope">
+              <div className="list-cards divide-border divide-y">
                 {visibleBills.map((b) => {
                   const grns = grnsOn(b)
                   const bOpen = expanded === b.id
@@ -527,17 +534,21 @@ export default function SupplierPaymentsPage() {
                 })}
               </div>
 
-              <div className="hidden w-full overflow-x-auto xl:block">
-                <table className="data-table w-full min-w-[960px]">
+              <div className="list-rows w-full">
+                <table className="data-table w-full">
                   <thead>
                     <tr>
                       <th style={{ width: 30 }} />
                       <th>Supplier</th>
                       <th>Bill</th>
-                      <th>PO</th>
-                      <th>Due</th>
-                      <th style={{ textAlign: 'right' }}>Bill total</th>
-                      <th style={{ textAlign: 'right' }}>Paid</th>
+                      <th className="col-full">PO</th>
+                      <th className="col-roomy">Due</th>
+                      <th className="col-wide" style={{ textAlign: 'right' }}>
+                        Bill total
+                      </th>
+                      <th className="col-wide" style={{ textAlign: 'right' }}>
+                        Paid
+                      </th>
                       <th style={{ textAlign: 'right' }}>Outstanding</th>
                       <th>Ageing</th>
                       <th />
@@ -567,7 +578,11 @@ export default function SupplierPaymentsPage() {
                                 {bOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                               </button>
                             </td>
-                            <td className="text-foreground">{b.supplier.name}</td>
+                            <td>
+                              <div className="text-foreground max-w-[14rem] truncate">
+                                {b.supplier.name}
+                              </div>
+                            </td>
                             <td className="whitespace-nowrap">
                               <a
                                 href={`/print/purchase-bill/${b.id}`}
@@ -584,7 +599,7 @@ export default function SupplierPaymentsPage() {
                                 </div>
                               )}
                             </td>
-                            <td className="whitespace-nowrap text-xs">
+                            <td className="col-full whitespace-nowrap text-xs">
                               {b.po ? (
                                 <a
                                   href={`/print/purchase-order/${b.po.id}`}
@@ -604,15 +619,19 @@ export default function SupplierPaymentsPage() {
                                 </span>
                               )}
                             </td>
-                            <td className="text-xs">
+                            <td className="col-roomy text-xs">
                               {b.dueDate ? (
                                 formatDate(b.dueDate)
                               ) : (
                                 <span className="text-muted-foreground">—</span>
                               )}
                             </td>
-                            <td className="text-right tabular-nums">₹{money(b.totalAmount)}</td>
-                            <td className="text-right tabular-nums">₹{money(b.paidAmount)}</td>
+                            <td className="col-wide text-right tabular-nums">
+                              ₹{money(b.totalAmount)}
+                            </td>
+                            <td className="col-wide text-right tabular-nums">
+                              ₹{money(b.paidAmount)}
+                            </td>
                             <td className="text-foreground text-right font-medium tabular-nums">
                               ₹{money(b.balanceAmount)}
                             </td>
@@ -635,7 +654,11 @@ export default function SupplierPaymentsPage() {
                           {bOpen && canExpand && (
                             <tr>
                               <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                                <BillTrailPanel billNumber={b.billNumber} po={b.po} lines={b.lines} />
+                                <BillTrailPanel
+                                  billNumber={b.billNumber}
+                                  po={b.po}
+                                  lines={b.lines}
+                                />
                               </td>
                             </tr>
                           )}
@@ -645,7 +668,7 @@ export default function SupplierPaymentsPage() {
                   </tbody>
                 </table>
               </div>
-            </>
+            </div>
           )
         ) : visiblePayments.length === 0 ? (
           <div className="px-4 py-10 text-center">
@@ -660,8 +683,8 @@ export default function SupplierPaymentsPage() {
             </p>
           </div>
         ) : (
-          <>
-            <div className="divide-border divide-y xl:hidden">
+          <div className="list-scope">
+            <div className="list-cards divide-border divide-y">
               {visiblePayments.map((p) => {
                 const grns = p.invoice ? grnsOn(p.invoice) : []
                 const canExpand = grns.length > 0 || Boolean(p.invoice?.po?.attachments?.length)
@@ -756,19 +779,19 @@ export default function SupplierPaymentsPage() {
               })}
             </div>
 
-            <div className="hidden w-full overflow-x-auto xl:block">
-              <table className="data-table w-full min-w-[960px]">
+            <div className="list-rows w-full">
+              <table className="data-table w-full">
                 <thead>
                   <tr>
                     <th style={{ width: 30 }} />
                     <th>Payment</th>
                     <th>Date</th>
                     <th>Supplier</th>
-                    <th>Against</th>
-                    <th>PO</th>
-                    <th>How</th>
+                    <th className="col-roomy">Against</th>
+                    <th className="col-full">PO</th>
+                    <th className="col-wide">How</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
-                    <th>Recorded by</th>
+                    <th className="col-full">Recorded by</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -797,8 +820,12 @@ export default function SupplierPaymentsPage() {
                           </td>
                           <td className="font-mono text-xs text-teal-400">{p.paymentNumber}</td>
                           <td className="text-xs">{formatDate(p.paymentDate)}</td>
-                          <td className="text-foreground">{p.supplier.name}</td>
-                          <td className="text-xs">
+                          <td>
+                            <div className="text-foreground max-w-[14rem] truncate">
+                              {p.supplier.name}
+                            </div>
+                          </td>
+                          <td className="col-roomy text-xs">
                             {p.invoice ? (
                               <a
                                 href={`/print/purchase-bill/${p.invoice.id}`}
@@ -813,7 +840,7 @@ export default function SupplierPaymentsPage() {
                               <span className="text-muted-foreground">—</span>
                             )}
                           </td>
-                          <td className="whitespace-nowrap text-xs">
+                          <td className="col-full whitespace-nowrap text-xs">
                             {p.invoice?.po ? (
                               <a
                                 href={`/print/purchase-order/${p.invoice.po.id}`}
@@ -830,7 +857,7 @@ export default function SupplierPaymentsPage() {
                               </span>
                             )}
                           </td>
-                          <td>
+                          <td className="col-wide">
                             <span className="text-foreground text-xs">
                               {MODE_LABEL[p.mode] ?? p.mode}
                             </span>
@@ -843,7 +870,7 @@ export default function SupplierPaymentsPage() {
                           <td className="text-foreground text-right font-medium tabular-nums">
                             ₹{money(p.amount)}
                           </td>
-                          <td className="text-xs">{p.createdBy?.name ?? '—'}</td>
+                          <td className="col-full text-xs">{p.createdBy?.name ?? '—'}</td>
                         </tr>
                         {pOpen && canExpand && p.invoice && (
                           <tr>
@@ -862,7 +889,7 @@ export default function SupplierPaymentsPage() {
                 </tbody>
               </table>
             </div>
-          </>
+          </div>
         )}
       </div>
 

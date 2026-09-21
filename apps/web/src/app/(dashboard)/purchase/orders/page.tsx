@@ -400,7 +400,7 @@ export default function PurchaseOrdersPage() {
           {/* One box for words. It reaches the supplier as well as the order
             number, so typing "ambika" finds every order raised against them
             just as typing "PO-0006" finds the one order. */}
-          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px]">
+          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0">
             <Search size={14} className="text-muted-foreground shrink-0" />
             <input
               className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
@@ -497,7 +497,7 @@ export default function PurchaseOrdersPage() {
             </p>
           </div>
         ) : (
-          <>
+          <div className="list-scope">
             {/* ── On a phone, not a table ──────────────────────────────────
 
               Ten columns cannot be made to fit 360px, and the honest options
@@ -506,16 +506,16 @@ export default function PurchaseOrdersPage() {
               buttons are always off the edge you are not looking at, and
               every read costs two gestures.
 
-              So below xl each order is a block instead: the number and the
-              status on the first line, the supplier under it, the money hard
-              right, and the rest as label-and-value pairs that wrap. Nothing
-              scrolls sideways at any width.
+              So on a narrow list each order is a block instead: the number
+              and the status on the first line, the supplier under it, the
+              money hard right, and the rest as label-and-value pairs that
+              wrap. Nothing scrolls sideways at any width.
 
-              xl and not lg, because the table needs about 960px and lg is
-              where the sidebar reappears and takes 260px of the screen with
-              it — at 1024px wide there would be 732px left and the table
-              would be back to being dragged. */}
-            <div className="divide-border divide-y xl:hidden">
+              Where it switches is decided by how wide the list is, not how
+              wide the window is — those are two different numbers, and the
+              sidebar between them is 260px and collapsible. See
+              `.list-scope` in globals.css. */}
+            <div className="list-cards divide-border divide-y">
               {rows.map((po) => {
                 const s = STATUS[po.status] ?? { label: po.status, cls: 'badge-neutral' }
                 const lines = po.lines ?? []
@@ -696,64 +696,55 @@ export default function PurchaseOrdersPage() {
                 )
               })}
             </div>
-            <div className="hidden w-full overflow-x-auto xl:block">
-              <table className="data-table w-full min-w-[960px] table-fixed">
+            <div className="list-rows w-full">
+              {/* What goes when the list narrows, in the order it goes:
+
+                  under "full"   the reference and the item summary — somebody
+                                 else's paperwork, and a list of names that is
+                                 one press away under the expand arrow
+                  under "wide"   the total quantity
+                  under "roomy"  the order date
+
+                  Never dropped: the order number, the supplier, the total,
+                  the status and the actions.
+
+                  Sized by content. This table used to carry a set of
+                  percentages tuned so that all ten columns fit a 1058px
+                  laptop — which worked, at the cost of every column being
+                  exactly as wide as the tuning said rather than as wide as it
+                  needed, and of falling apart the moment a column was hidden:
+                  percentages only add to 100% when they are all showing, and
+                  the leftover goes wherever the browser likes. */}
+              <table className="data-table w-full">
                 <thead>
-                  {/* Filled, not just underlined. Nine columns of small grey
+                  {/* Filled, not just underlined. Ten columns of small grey
                   capitals over white read as another row of data; a tint says
-                  where the list starts.
-
-                  Every width is declared and the table is `table-fixed`, so
-                  the browser stops handing the slack to whichever column
-                  happens to hold the longest word. Left to itself it gave
-                  three hundred pixels to the supplier and left the total
-                  butted up against the status pill — the right-hand end
-                  cramped while the left-hand end was half empty.
-
-                  Shares rather than pixels. Pixels fixed the cramping but
-                  then whichever column was left blank swallowed all the
-                  slack: seven hundred of it sat in one cell. Shares spread
-                  it, and they still hold at the 1040px floor, where a set of
-                  pixel widths would have taken the whole table and left
-                  nothing for the rest.
-
-                  The floor is 1040 and not 1240 because of the commonest
-                  laptop there is. A 1366px screen less the 260px sidebar and
-                  the page's own padding leaves 1058px, and at a 1240px floor
-                  this table overflowed it by nearly two hundred — which put
-                  the row's buttons off the right-hand edge of the screen,
-                  reachable only by scrolling a table nobody could see needed
-                  scrolling. Every column below was measured against what it
-                  actually holds so that ten of them fit in 1058px with
-                  nothing hidden. */}
+                  where the list starts. */}
                   <tr className="bg-secondary">
-                    <th style={{ width: '3.8%' }} />
-                    <th style={{ width: '9%' }}>Order</th>
-                    <th style={{ width: '16%' }}>Supplier</th>
-                    <th style={{ width: '9%' }}>Date</th>
+                    <th style={{ width: 30 }} />
+                    <th>Order</th>
+                    <th>Supplier</th>
+                    <th className="col-roomy">Date</th>
                     {/* Reference and enquiry are both somebody else's paperwork
                     this order answers to, so they read as one column — the
                     enquiry underneath, the way an item's HSN sits under its
                     name. Two columns that are each empty as often as not read
                     as gaps in the table; one column that is sometimes short
                     and sometimes two lines reads as an ordinary column. */}
-                    <th style={{ width: '11%' }}>Reference</th>
-                    <th style={{ width: '13%' }}>Items</th>
+                    <th className="col-full">Reference</th>
+                    <th className="col-full">Items</th>
                     {/* The quantity, not just the count — grouped by unit,
                     because metres of fabric and pieces of button cannot be
                     added into one figure. Where "Location" sat before: a
                     warehouse or customer name is on the printed order and the
                     item table below, and was empty on every order that had
                     nothing filled in for it, which is most of them. */}
-                    <th style={{ width: '13%', textAlign: 'right' }}>Total qty</th>
-                    <th style={{ width: '9%', textAlign: 'right' }}>Total</th>
-                    <th style={{ width: '8%' }}>Status</th>
-                    {/* 15.2%, because a draft row carries five of them — print,
-                    edit, send, cancel, delete. Five 28px buttons with 4px
-                    between come to 156px, and 15.2% of the 1040px floor is
-                    158. At 10% they were 104px and spilled out of the cell on
-                    every laptop. */}
-                    <th style={{ width: '15.2%' }} />
+                    <th className="col-wide" style={{ textAlign: 'right' }}>
+                      Total qty
+                    </th>
+                    <th style={{ textAlign: 'right' }}>Total</th>
+                    <th>Status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -811,27 +802,36 @@ export default function PurchaseOrdersPage() {
                             ) : null}
                           </td>
                           <td>
-                            <div className="text-foreground font-medium">{po.supplier?.name}</div>
+                            {/* Capped, because nothing else caps it. Under
+                              content sizing this column grows to the longest
+                              name on the page, and one long trading name
+                              would push the figures off the right-hand
+                              edge. */}
+                            <div className="text-foreground max-w-[15rem] truncate font-medium">
+                              {po.supplier?.name}
+                            </div>
                             {po.supplier?.gstin && (
                               <div className="text-muted-foreground font-mono text-[10px] leading-tight">
                                 {po.supplier.gstin}
                               </div>
                             )}
                           </td>
-                          <td className="whitespace-nowrap text-xs">
+                          <td className="col-roomy whitespace-nowrap text-xs">
                             <span className="flex items-center gap-1.5">
                               <CalendarDays size={13} className="text-muted-foreground shrink-0" />
                               {formatDate(po.poDate)}
                             </span>
                           </td>
-                          <td className="text-xs">
+                          <td className="col-full text-xs">
                             {po.reference || po.enquiryNo ? (
                               <>
-                                <div className="text-foreground truncate">
-                                  {po.reference || <span className="font-mono">{po.enquiryNo}</span>}
+                                <div className="text-foreground max-w-[11rem] truncate">
+                                  {po.reference || (
+                                    <span className="font-mono">{po.enquiryNo}</span>
+                                  )}
                                 </div>
                                 {po.reference && po.enquiryNo && (
-                                  <div className="text-muted-foreground truncate font-mono text-[10px] leading-tight">
+                                  <div className="text-muted-foreground max-w-[11rem] truncate font-mono text-[10px] leading-tight">
                                     Enq: {po.enquiryNo}
                                   </div>
                                 )}
@@ -840,7 +840,7 @@ export default function PurchaseOrdersPage() {
                               <span className="text-muted-foreground">—</span>
                             )}
                           </td>
-                          <td className="whitespace-nowrap text-xs">
+                          <td className="col-full whitespace-nowrap text-xs">
                             {lines.length === 0 ? (
                               <span className="text-muted-foreground">—</span>
                             ) : (
@@ -863,7 +863,7 @@ export default function PurchaseOrdersPage() {
                               </>
                             )}
                           </td>
-                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                          <td className="col-wide whitespace-nowrap text-right text-xs tabular-nums">
                             {lines.length === 0 ? (
                               <span className="text-muted-foreground">—</span>
                             ) : (
@@ -939,114 +939,115 @@ export default function PurchaseOrdersPage() {
                                     </thead>
                                     <tbody>
                                       {lines.map((line, i) => {
-                                      // An item is filed under one category, which may
-                                      // itself sit under a parent. Where it does, the
-                                      // parent is the category and the item's own is the
-                                      // subcategory; where it does not, there is no
-                                      // subcategory to show.
-                                      const cat = line.item?.category
-                                      const parent = cat?.parent
-                                      return (
-                                        <tr
-                                          key={line.itemId + i}
-                                          className="border-border/40 border-b last:border-0"
-                                        >
-                                          <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
-                                            {line.item?.code ?? '—'}
-                                          </td>
-                                          <td className="px-3 py-1.5">
-                                            <div className="text-foreground truncate text-xs">
-                                              {line.item?.name ?? '—'}
-                                            </div>
-                                            {(line.description || line.item?.hsnCode) && (
-                                              <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                                {line.description}
-                                                {line.description && line.item?.hsnCode
-                                                  ? ' · '
-                                                  : ''}
-                                                {line.item?.hsnCode
-                                                  ? `HSN: ${line.item.hsnCode}`
-                                                  : ''}
+                                        // An item is filed under one category, which may
+                                        // itself sit under a parent. Where it does, the
+                                        // parent is the category and the item's own is the
+                                        // subcategory; where it does not, there is no
+                                        // subcategory to show.
+                                        const cat = line.item?.category
+                                        const parent = cat?.parent
+                                        return (
+                                          <tr
+                                            key={line.itemId + i}
+                                            className="border-border/40 border-b last:border-0"
+                                          >
+                                            <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                              {line.item?.code ?? '—'}
+                                            </td>
+                                            <td className="px-3 py-1.5">
+                                              <div className="text-foreground truncate text-xs">
+                                                {line.item?.name ?? '—'}
                                               </div>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-xs">
-                                            {line.style?.code || line.styleNo ? (
-                                              <>
-                                                <div className="text-foreground truncate font-mono text-xs">
-                                                  {line.style?.code ?? line.styleNo}
+                                              {(line.description || line.item?.hsnCode) && (
+                                                <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                  {line.description}
+                                                  {line.description && line.item?.hsnCode
+                                                    ? ' · '
+                                                    : ''}
+                                                  {line.item?.hsnCode
+                                                    ? `HSN: ${line.item.hsnCode}`
+                                                    : ''}
                                                 </div>
-                                                {line.style?.name && (
-                                                  <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                                    {line.style.name}
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-xs">
+                                              {line.style?.code || line.styleNo ? (
+                                                <>
+                                                  <div className="text-foreground truncate font-mono text-xs">
+                                                    {line.style?.code ?? line.styleNo}
                                                   </div>
-                                                )}
-                                              </>
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-xs">
-                                            {parent?.name ?? cat?.name ? (
-                                              <>
-                                                <div className="text-foreground truncate">
-                                                  {parent?.name ?? cat?.name}
-                                                </div>
-                                                {parent && cat?.name && (
-                                                  <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                                    {cat.name}
+                                                  {line.style?.name && (
+                                                    <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                      {line.style.name}
+                                                    </div>
+                                                  )}
+                                                </>
+                                              ) : (
+                                                <span className="text-muted-foreground">—</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-xs">
+                                              {(parent?.name ?? cat?.name) ? (
+                                                <>
+                                                  <div className="text-foreground truncate">
+                                                    {parent?.name ?? cat?.name}
                                                   </div>
-                                                )}
-                                              </>
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                            {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
-                                            {line.shortClosed ? (
-                                              <div
-                                                className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
-                                                title={line.shortCloseReason ?? undefined}
-                                              >
-                                                Closed short
-                                              </div>
-                                            ) : (
-                                              (po.status === 'SENT' || po.status === 'PARTIALLY_RECEIVED') &&
-                                              Number(line.pendingQty) > 0 && (
-                                                <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
-                                                  {Number(line.pendingQty)} pending
+                                                  {parent && cat?.name && (
+                                                    <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                      {cat.name}
+                                                    </div>
+                                                  )}
+                                                </>
+                                              ) : (
+                                                <span className="text-muted-foreground">—</span>
+                                              )}
+                                            </td>
+                                            <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                              {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                              {line.shortClosed ? (
+                                                <div
+                                                  className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
+                                                  title={line.shortCloseReason ?? undefined}
+                                                >
+                                                  Closed short
                                                 </div>
-                                              )
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                            ₹{money(line.unitRate)}
-                                          </td>
-                                          {/* A discount is stored as a percentage
+                                              ) : (
+                                                (po.status === 'SENT' ||
+                                                  po.status === 'PARTIALLY_RECEIVED') &&
+                                                Number(line.pendingQty) > 0 && (
+                                                  <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
+                                                    {Number(line.pendingQty)} pending
+                                                  </div>
+                                                )
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                              ₹{money(line.unitRate)}
+                                            </td>
+                                            {/* A discount is stored as a percentage
                                             whatever was typed into the form, so it
                                             is shown as one. A dash rather than 0%,
                                             because nothing was taken off. */}
-                                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                            {Number(line.discount) > 0 ? (
-                                              `${Number(line.discount)}%`
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                            {Number(line.gstRate) > 0 ? (
-                                              `${Number(line.gstRate)}%`
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-right text-xs font-medium tabular-nums">
-                                            ₹{money(line.amount ?? 0)}
-                                          </td>
-                                        </tr>
-                                      )
-                                    })}
+                                            <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                              {Number(line.discount) > 0 ? (
+                                                `${Number(line.discount)}%`
+                                              ) : (
+                                                <span className="text-muted-foreground">—</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                              {Number(line.gstRate) > 0 ? (
+                                                `${Number(line.gstRate)}%`
+                                              ) : (
+                                                <span className="text-muted-foreground">—</span>
+                                              )}
+                                            </td>
+                                            <td className="px-3 py-1.5 text-right text-xs font-medium tabular-nums">
+                                              ₹{money(line.amount ?? 0)}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
                                     </tbody>
                                   </table>
                                 </div>
@@ -1060,7 +1061,7 @@ export default function PurchaseOrdersPage() {
                 </tbody>
               </table>
             </div>
-          </>
+          </div>
         )}
 
         <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />

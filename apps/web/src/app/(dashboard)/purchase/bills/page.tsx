@@ -44,9 +44,7 @@ const money = (v: string | number) =>
  */
 const receiptsOn = (bill: PurchaseBill): string[] => [
   ...new Set(
-    (bill.lines ?? [])
-      .map((l) => l.grnLine?.grn?.grnNumber)
-      .filter((n): n is string => Boolean(n))
+    (bill.lines ?? []).map((l) => l.grnLine?.grn?.grnNumber).filter((n): n is string => Boolean(n))
   ),
 ]
 
@@ -248,7 +246,7 @@ function PurchaseBillsTable() {
 
       <div className="glass-card overflow-hidden p-0">
         <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
-          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[220px]">
+          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[220px] sm:basis-0">
             <Search size={14} className="text-muted-foreground shrink-0" />
             <input
               className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
@@ -307,17 +305,17 @@ function PurchaseBillsTable() {
             </p>
           </div>
         ) : (
-          <>
+          <div className="list-scope">
             {/* ── On a phone, not a table ──────────────────────────────────
 
-              Same reasoning as the purchase order list: 9 columns cannot be
-              made to fit a phone, and a table you drag sideways costs two
-              gestures for every read and keeps the buttons off whichever edge
-              you are not looking at. Below xl each row is a block instead.
+              Eleven columns cannot be made to fit a phone, and a table you
+              drag sideways costs two gestures for every read and keeps the
+              buttons off whichever edge you are not looking at. Under 700px
+              of list each row is a block instead.
 
-              xl and not lg, because lg is where the sidebar comes back and
-              takes 260px of the screen with it. */}
-            <div className="divide-border divide-y xl:hidden">
+              Measured on the list rather than the window, so collapsing the
+              sidebar widens it — see `.list-scope` in globals.css. */}
+            <div className="list-cards divide-border divide-y">
               {rows.map((bill) => {
                 const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                 const overdue =
@@ -444,14 +442,31 @@ function PurchaseBillsTable() {
               })}
             </div>
 
-            <div className="hidden w-full overflow-x-auto xl:block">
-              {/* A floor, so the nine columns scroll rather than squash. With no
-              minimum they squeeze to fit whatever they are given, and on a
-              narrow screen the supplier and the invoice number end up two
-              characters wide over four lines. 900px is under the 1058px a
-              1366px laptop has to give, so the commonest screen still shows
-              the whole table without scrolling. */}
-              <table className="data-table w-full min-w-[1080px] table-fixed">
+            <div className="list-rows w-full">
+              {/* What goes when the list narrows, in the order it goes:
+
+                  under "full"   our own reference and the booking date — the
+                              supplier's number is the one both sides quote
+                              and ours is on the card and in the detail
+                              window, and nobody scans a list for the day a
+                              bill was keyed in
+                  under "wide"   the receipts it settles, and the due date
+                  under "roomy"  what is outstanding
+
+                  Never dropped: the bill number, the supplier, the total, the
+                  status and the actions. That is enough to find a row and do
+                  something to it, which is the floor.
+
+                  Sized by content, not by a table of percentages. Percentages
+                  only ever add to 100% with every column showing — with five
+                  of them gone the other half of the table went to whichever
+                  column the browser felt like, which here was the 30px expand
+                  toggle: 345px of empty first column and a bill number
+                  spilling out of 79px beside it. Content sizing redistributes
+                  on its own, and the two columns that can run long are capped
+                  below so one supplier with a long name cannot push the
+                  figures off the end. */}
+              <table className="data-table w-full">
                 <thead>
                   <tr className="bg-secondary">
                     <th style={{ width: 30 }} />
@@ -459,20 +474,22 @@ function PurchaseBillsTable() {
                       both sides quote. Ours is the book reference beside it —
                       the old ERP printed one value in both places and lost the
                       distinction entirely. */}
-                    <th style={{ width: '11%' }}>Bill no.</th>
-                    <th style={{ width: '9%' }}>Our ref</th>
+                    <th>Bill no.</th>
+                    <th className="col-full">Our ref</th>
                     {/* The receipts this bill settles. The old ERP called it
                       Reference# and put a GRN number in it, because that is
                       what the accounts team reconciles against — the bill's
                       own number means nothing to the store. */}
-                    <th style={{ width: '13%' }}>Against receipt</th>
-                    <th style={{ width: '15%' }}>Supplier</th>
-                    <th style={{ width: '8%' }}>Booked</th>
-                    <th style={{ width: '8%' }}>Due</th>
-                    <th style={{ width: '9%', textAlign: 'right' }}>Total</th>
-                    <th style={{ width: '10%', textAlign: 'right' }}>Outstanding</th>
-                    <th style={{ width: '7%' }}>Status</th>
-                    <th style={{ width: '10%' }} />
+                    <th className="col-wide">Against receipt</th>
+                    <th>Supplier</th>
+                    <th className="col-full">Booked</th>
+                    <th className="col-wide">Due</th>
+                    <th style={{ textAlign: 'right' }}>Total</th>
+                    <th className="col-roomy" style={{ textAlign: 'right' }}>
+                      Outstanding
+                    </th>
+                    <th>Status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -483,155 +500,162 @@ function PurchaseBillsTable() {
                     const lines = bill.lines ?? []
                     return (
                       <Fragment key={bill.id}>
-                      <tr>
-                        <td>
-                          <button
-                            className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
-                              lines.length === 0
-                                ? 'text-muted-foreground cursor-not-allowed opacity-50'
-                                : 'bg-primary/10 text-primary hover:bg-primary/20'
-                            }`}
-                            onClick={() => setExpanded(open ? null : bill.id)}
-                            disabled={lines.length === 0}
-                            title={open ? 'Hide items' : 'Show items'}
-                            aria-label={`${open ? 'Hide' : 'Show'} items on ${bill.billNumber}`}
-                            aria-expanded={open}
-                          >
-                            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                          </button>
-                        </td>
-                        <td className="whitespace-nowrap font-mono text-xs">
-                          {/* The number opens the printable bill, the way the
+                        <tr>
+                          <td>
+                            <button
+                              className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                lines.length === 0
+                                  ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+                              }`}
+                              onClick={() => setExpanded(open ? null : bill.id)}
+                              disabled={lines.length === 0}
+                              title={open ? 'Hide items' : 'Show items'}
+                              aria-label={`${open ? 'Hide' : 'Show'} items on ${bill.billNumber}`}
+                              aria-expanded={open}
+                            >
+                              {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </td>
+                          <td className="whitespace-nowrap font-mono text-xs">
+                            {/* The number opens the printable bill, the way the
                             old ERP's invoice number did. */}
-                          <Link
-                            href={`/print/purchase-bill/${bill.id}`}
-                            target="_blank"
-                            className="text-teal-400 underline-offset-2 hover:underline"
-                            title="Open this bill to print or save"
-                          >
-                            {bill.supplierInvoiceNo || bill.billNumber}
-                          </Link>
-                          {bill.supplierInvoiceDate && (
-                            <div className="text-muted-foreground text-[10px]">
-                              {formatDate(bill.supplierInvoiceDate)}
+                            <Link
+                              href={`/print/purchase-bill/${bill.id}`}
+                              target="_blank"
+                              className="text-teal-400 underline-offset-2 hover:underline"
+                              title="Open this bill to print or save"
+                            >
+                              {bill.supplierInvoiceNo || bill.billNumber}
+                            </Link>
+                            {bill.supplierInvoiceDate && (
+                              <div className="text-muted-foreground text-[10px]">
+                                {formatDate(bill.supplierInvoiceDate)}
+                              </div>
+                            )}
+                          </td>
+                          <td className="text-muted-foreground col-full font-mono text-xs">
+                            {bill.billNumber}
+                          </td>
+                          <td className="col-wide text-xs">
+                            <div className="flex items-center gap-2">
+                              {receiptsOn(bill).length ? (
+                                <span className="text-foreground max-w-[11rem] truncate font-mono">
+                                  {receiptsOn(bill).join(', ')}
+                                </span>
+                              ) : (
+                                <span
+                                  className="text-muted-foreground"
+                                  title="Entered by hand — a service or transport bill with no goods receipt behind it"
+                                >
+                                  Direct
+                                </span>
+                              )}
+                              {fileCountOn(bill) > 0 && (
+                                // A paperclip that cannot be pressed is a tease.
+                                // It opens the detail window at its attachments,
+                                // which is where the files are listed and signed.
+                                <button
+                                  type="button"
+                                  className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] underline transition"
+                                  onClick={() => setDetail({ bill, focus: 'attachments' })}
+                                  title={`Open the ${fileCountOn(bill)} file${
+                                    fileCountOn(bill) === 1 ? '' : 's'
+                                  } on this bill's order and receipts`}
+                                >
+                                  <Paperclip size={11} />
+                                  {fileCountOn(bill)}
+                                </button>
+                              )}
                             </div>
-                          )}
-                        </td>
-                        <td className="text-muted-foreground font-mono text-xs">
-                          {bill.billNumber}
-                        </td>
-                        <td className="text-xs">
-                          <div className="flex items-center gap-2">
-                            {receiptsOn(bill).length ? (
-                              <span className="text-foreground truncate font-mono">
-                                {receiptsOn(bill).join(', ')}
+                          </td>
+                          <td>
+                            {/* Capped, because nothing else caps it. Under
+                            content sizing the column grows to whatever the
+                            longest name on the page is, and one
+                            "Shree Balaji Textiles Private Limited" would push
+                            the figures off the end of the screen. */}
+                            <div className="text-foreground max-w-[15rem] truncate font-medium">
+                              {bill.supplier?.name}
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-1.5">
+                              {bill.supplier?.gstin && (
+                                <span className="text-muted-foreground font-mono text-[10px]">
+                                  {bill.supplier.gstin}
+                                </span>
+                              )}
+                              {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
+                            </div>
+                          </td>
+                          <td className="col-full whitespace-nowrap text-xs">
+                            {formatDate(bill.billDate)}
+                          </td>
+                          <td className="col-wide whitespace-nowrap text-xs">
+                            {bill.dueDate ? (
+                              <span className={overdue ? 'font-medium text-red-400' : undefined}>
+                                {formatDate(bill.dueDate)}
                               </span>
                             ) : (
-                              <span
-                                className="text-muted-foreground"
-                                title="Entered by hand — a service or transport bill with no goods receipt behind it"
-                              >
-                                Direct
-                              </span>
+                              <span className="text-muted-foreground">—</span>
                             )}
-                            {fileCountOn(bill) > 0 && (
-                              // A paperclip that cannot be pressed is a tease.
-                              // It opens the detail window at its attachments,
-                              // which is where the files are listed and signed.
-                              <button
-                                type="button"
-                                className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] underline transition"
-                                onClick={() => setDetail({ bill, focus: 'attachments' })}
-                                title={`Open the ${fileCountOn(bill)} file${
-                                  fileCountOn(bill) === 1 ? '' : 's'
-                                } on this bill's order and receipts`}
-                              >
-                                <Paperclip size={11} />
-                                {fileCountOn(bill)}
-                              </button>
+                          </td>
+                          <td className="whitespace-nowrap text-right font-semibold tabular-nums">
+                            ₹{money(bill.totalAmount)}
+                          </td>
+                          <td className="col-roomy whitespace-nowrap text-right tabular-nums">
+                            {bill.status === 'CANCELLED' ? (
+                              <span className="text-muted-foreground">—</span>
+                            ) : (
+                              <>
+                                ₹{money(bill.balanceAmount)}
+                                {Number(bill.tdsAmount) > 0 && (
+                                  <div className="text-muted-foreground text-[10px]">
+                                    after ₹{money(bill.tdsAmount)} TDS
+                                  </div>
+                                )}
+                              </>
                             )}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="text-foreground truncate font-medium">
-                            {bill.supplier?.name}
-                          </div>
-                          <div className="mt-0.5 flex items-center gap-1.5">
-                            {bill.supplier?.gstin && (
-                              <span className="text-muted-foreground font-mono text-[10px]">
-                                {bill.supplier.gstin}
-                              </span>
-                            )}
-                            {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
-                          </div>
-                        </td>
-                        <td className="whitespace-nowrap text-xs">{formatDate(bill.billDate)}</td>
-                        <td className="whitespace-nowrap text-xs">
-                          {bill.dueDate ? (
-                            <span className={overdue ? 'font-medium text-red-400' : undefined}>
-                              {formatDate(bill.dueDate)}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td className="whitespace-nowrap text-right font-semibold tabular-nums">
-                          ₹{money(bill.totalAmount)}
-                        </td>
-                        <td className="whitespace-nowrap text-right tabular-nums">
-                          {bill.status === 'CANCELLED' ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : (
-                            <>
-                              ₹{money(bill.balanceAmount)}
-                              {Number(bill.tdsAmount) > 0 && (
-                                <div className="text-muted-foreground text-[10px]">
-                                  after ₹{money(bill.tdsAmount)} TDS
-                                </div>
-                              )}
-                            </>
-                          )}
-                        </td>
-                        <td>
-                          <span className={s.cls}>{s.label}</span>
-                        </td>
-                        <td className="whitespace-nowrap text-right">
-                          <div className="flex justify-end">
-                            <ActionMenu
-                              label={`Actions for ${bill.billNumber}`}
-                              items={billActions(bill)}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                      {open && lines.length > 0 && (
-                        <tr>
-                          <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                            <div className="border-border bg-card overflow-hidden rounded-lg border">
-                              <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
-                                <FileText size={13} className="text-muted-foreground shrink-0" />
-                                <h4 className="text-foreground text-[11px] font-semibold">
-                                  Bill Items
-                                </h4>
-                                <span className="text-muted-foreground ml-auto text-[10px]">
-                                  {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
-                                  {bill.billNumber}
-                                </span>
-                              </div>
-                              <div className="max-h-[22rem] overflow-y-auto">
-                                <BillItems bill={bill} />
-                              </div>
+                          </td>
+                          <td>
+                            <span className={s.cls}>{s.label}</span>
+                          </td>
+                          <td className="whitespace-nowrap text-right">
+                            <div className="flex justify-end">
+                              <ActionMenu
+                                label={`Actions for ${bill.billNumber}`}
+                                items={billActions(bill)}
+                              />
                             </div>
                           </td>
                         </tr>
-                      )}
+                        {open && lines.length > 0 && (
+                          <tr>
+                            <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <div className="border-border bg-card overflow-hidden rounded-lg border">
+                                <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
+                                  <FileText size={13} className="text-muted-foreground shrink-0" />
+                                  <h4 className="text-foreground text-[11px] font-semibold">
+                                    Bill Items
+                                  </h4>
+                                  <span className="text-muted-foreground ml-auto text-[10px]">
+                                    {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
+                                    {bill.billNumber}
+                                  </span>
+                                </div>
+                                <div className="max-h-[22rem] overflow-y-auto">
+                                  <BillItems bill={bill} />
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
                       </Fragment>
                     )
                   })}
                 </tbody>
               </table>
             </div>
-          </>
+          </div>
         )}
 
         <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
@@ -657,11 +681,7 @@ function PurchaseBillsTable() {
       />
 
       {detail && (
-        <BillDetailDialog
-          bill={detail.bill}
-          focus={detail.focus}
-          onClose={() => setDetail(null)}
-        />
+        <BillDetailDialog bill={detail.bill} focus={detail.focus} onClose={() => setDetail(null)} />
       )}
     </div>
   )

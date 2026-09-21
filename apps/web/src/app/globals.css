@@ -288,6 +288,109 @@
     @apply px-3 py-2;
   }
 
+  /* ── A list that fits the space it is given ──────────────────────────────
+
+     These lists used to swap between a card stack and a table at Tailwind's
+     `xl`, which is a window measurement. The table does not live in the
+     window though — it lives in what is left of it after the sidebar, and
+     the sidebar is 260px wide and can be collapsed to 68px. So the same
+     window gave the list two quite different widths and one breakpoint had
+     to answer for both. It got it wrong in the obvious direction: on a
+     1366px laptop, the commonest screen in the office, `xl` said "table"
+     while the list itself had only 1056px — under the 1080px floor the table
+     was holding — so the thing dragged sideways.
+
+     A container query asks the list how wide *it* is, which is the question
+     that was being answered wrongly. Collapse the sidebar and the columns
+     come back on their own; nothing has to know the sidebar exists.
+
+     `container-type: inline-size` makes this a containing block for `fixed`
+     descendants, the same trap `.glass-card`'s backdrop-filter set. Every
+     row menu here already renders through a portal, so nothing inside is
+     positioned against it. */
+  .list-scope {
+    container-type: inline-size;
+  }
+
+  /* Below this the columns cannot be made to read, so each row becomes a
+     block instead. 700px clears the widest of the six base tiers, which is
+     the purchase bill list at 682px. */
+  .list-cards {
+    display: block;
+  }
+
+  .list-rows {
+    display: none;
+  }
+
+  @container (min-width: 700px) {
+    .list-cards {
+      display: none;
+    }
+
+    .list-rows {
+      display: block;
+    }
+  }
+
+  /* Columns that earn their place as the list widens. Below their tier they
+     are gone — not squeezed to four characters over three lines, which is
+     what a `min-width` floor and a sideways drag buy you.
+
+     Three tiers, the same three for every list, so the lists behave alike.
+     Which columns go in which tier is the per-list judgement and is written
+     down at each table. Two rules hold it together:
+
+       · nothing needed to identify a row or act on it goes in a tier at all
+       · a tier must not hold more than still fits at that tier's width
+
+     The second one is measurable, not a matter of taste: force the tier on,
+     set the table to `width: min-content` and read it back. Every list here
+     was checked that way, and the widths below are the widest of those
+     floors with a little room over. They are deliberately the only numbers —
+     name the tiers by size rather than by pixels and retuning is one edit
+     here instead of six files of class renames.
+
+     Applied to the `th` and every matching `td` together — a table with one
+     more cell in a row than in its header is a table with its columns off by
+     one from there rightwards. */
+  .col-roomy,
+  .col-wide,
+  .col-full {
+    display: table-cell;
+  }
+
+  /* 1320 clears the widest full tier, the goods receipt list at 1302px. It
+     wants a real desk: a 1920px screen, or a 1600px one with the sidebar
+     collapsed. That is the honest answer for the least-scanned columns in
+     each list, and it is the only tier that no laptop reaches — it was set
+     at 1240 first, which a 1366px laptop cleared with the sidebar collapsed
+     and then overflowed by 18px, because the widest table underneath it
+     needs 1267. */
+  @container (max-width: 1319px) {
+    .col-full {
+      display: none;
+    }
+  }
+
+  /* 1040 sits in a 22px window: above the widest wide tier (the bill list at
+     1011px) and below the 1056px a 1366px laptop has with the sidebar open,
+     which is the commonest screen in the office and the one this whole
+     arrangement exists to serve. Anything added to a wide tier has to be
+     measured against that 1040, not guessed at. */
+  @container (max-width: 1039px) {
+    .col-wide {
+      display: none;
+    }
+  }
+
+  /* 860 clears the widest roomy tier, the goods receipt list at 843px. */
+  @container (max-width: 859px) {
+    .col-roomy {
+      display: none;
+    }
+  }
+
   /* Status Badges */
   .badge {
     @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium;
