@@ -20,6 +20,21 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 const money = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
+/**
+ * The goods receipts a bill was raised from, without repeats.
+ *
+ * One bill routinely settles several — a supplier ships through the week and
+ * invoices once — so this is a list, not a field. A bill with none behind it
+ * was typed by hand, which is legitimate for a service or a transporter.
+ */
+const receiptsOn = (bill: PurchaseBill): string[] => [
+  ...new Set(
+    (bill.lines ?? [])
+      .map((l) => l.grnLine?.grn?.grnNumber)
+      .filter((n): n is string => Boolean(n))
+  ),
+]
+
 function PurchaseBillsTable() {
   const { rowsPerPage } = useAppSettings()
 
@@ -260,6 +275,14 @@ function PurchaseBillsTable() {
                           <span className="text-muted-foreground">—</span>
                         )}
                       </dd>
+                      <dt className="text-muted-foreground">Against</dt>
+                      <dd className="text-foreground min-w-0">
+                        {receiptsOn(bill).length ? (
+                          <span className="font-mono">{receiptsOn(bill).join(', ')}</span>
+                        ) : (
+                          <span className="text-muted-foreground">Direct</span>
+                        )}
+                      </dd>
                       <dt className="text-muted-foreground">Booked</dt>
                       <dd className="text-foreground min-w-0">{formatDate(bill.billDate)}</dd>
                       <dt className="text-muted-foreground">Due</dt>
@@ -328,11 +351,16 @@ function PurchaseBillsTable() {
               characters wide over four lines. 900px is under the 1058px a
               1366px laptop has to give, so the commonest screen still shows
               the whole table without scrolling. */}
-              <table className="data-table w-full min-w-[900px]">
+              <table className="data-table w-full min-w-[1020px]">
                 <thead>
                   <tr>
                     <th>Our ref</th>
                     <th>Their invoice</th>
+                    {/* The receipts this bill settles. The old ERP called it
+                      Reference# and put a GRN number in it, because that is
+                      what the accounts team reconciles against — the bill's
+                      own number means nothing to the store. */}
+                    <th>Against receipt</th>
                     <th>Supplier</th>
                     <th>Booked</th>
                     <th>Due</th>
@@ -363,6 +391,17 @@ function PurchaseBillsTable() {
                             </>
                           ) : (
                             <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td>
+                          {receiptsOn(bill).length ? (
+                            <div className="text-foreground font-mono text-xs">
+                              {receiptsOn(bill).join(', ')}
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground" title="Entered by hand — a service or transport bill with no goods receipt behind it">
+                              Direct
+                            </span>
                           )}
                         </td>
                         <td>
