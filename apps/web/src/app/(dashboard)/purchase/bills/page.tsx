@@ -13,10 +13,11 @@ import {
   Ban,
   ChevronDown,
   ChevronRight,
+  Eye,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
-import { BillDetail } from '@/components/purchase/BillDetail'
+import { BillItems, BillDetailDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
@@ -65,8 +66,10 @@ function PurchaseBillsTable() {
     open: false,
     record: null,
   })
-  /** The one bill whose full detail is open. One at a time, so the list stays a list. */
+  /** The one bill whose items are showing. One at a time, so the list stays a list. */
   const [expanded, setExpanded] = useState<string | null>(null)
+  /** The bill open in the full detail window, if any. */
+  const [detail, setDetail] = useState<PurchaseBill | null>(null)
 
   /*
    * Arriving from "Book a bill for this" on a goods receipt.
@@ -321,6 +324,14 @@ function PurchaseBillsTable() {
                     </dl>
 
                     <div className="mt-3 flex justify-end gap-1">
+                      <button
+                        className="btn-ghost border-border rounded-lg border p-1.5"
+                        onClick={() => setDetail(bill)}
+                        title="View full detail"
+                        aria-label={`View details of ${bill.billNumber}`}
+                      >
+                        <Eye size={15} />
+                      </button>
                       <Link
                         href={`/print/purchase-bill/${bill.id}`}
                         target="_blank"
@@ -475,6 +486,14 @@ function PurchaseBillsTable() {
                             className="flex justify-end gap-1"
                             onClick={(e) => e.stopPropagation()}
                           >
+                            <button
+                              className="btn-ghost p-1.5"
+                              onClick={() => setDetail(bill)}
+                              title="View full detail"
+                              aria-label={`View details of ${bill.billNumber}`}
+                            >
+                              <Eye size={15} />
+                            </button>
                             <Link
                               href={`/print/purchase-bill/${bill.id}`}
                               target="_blank"
@@ -513,7 +532,7 @@ function PurchaseBillsTable() {
                           {/* The panel spans the table rather than sitting in a
                             cell, so its own columns are free of the list's. */}
                           <td colSpan={9} className="p-0">
-                            <BillDetail bill={bill} />
+                            <BillItems bill={bill} />
                           </td>
                         </tr>
                       )}
@@ -547,6 +566,8 @@ function PurchaseBillsTable() {
         }}
         onSaved={() => void load()}
       />
+
+      {detail && <BillDetailDialog bill={detail} onClose={() => setDetail(null)} />}
     </div>
   )
 }
