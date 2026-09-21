@@ -1,12 +1,47 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { AlertCircle, IndianRupee, RefreshCw, Search } from 'lucide-react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  IndianRupee,
+  Paperclip,
+  RefreshCw,
+  Search,
+} from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { RecordPaymentDialog, type PayableBill } from '@/components/purchase/RecordPaymentDialog'
 import { formatDate } from '@/lib/utils'
 
-interface OutstandingBill extends PayableBill {
+/** A file hanging off an order or a receipt — a bill and a payment hold none of their own. */
+interface BillFile {
+  id: string
+  fileName: string
+  mimeType: string | null
+  sizeBytes: number
+  createdAt: string
+}
+
+/**
+ * The paper trail behind a bill: the order it was raised from, and the
+ * receipts it was matched against — each carrying whatever was scanned onto
+ * it. Shared by the outstanding list and the payment history, since both are
+ * one hop from the same bill.
+ */
+interface BillTrail {
+  po?: { id: string; poNumber: string; attachments?: BillFile[] } | null
+  lines?: Array<{
+    id: string
+    grnLine?: {
+      id: string
+      grn: { id: string; grnNumber: string; grnDate: string; attachments?: BillFile[] }
+    } | null
+  }>
+}
+
+interface OutstandingBill extends PayableBill, BillTrail {
   billDate: string
   dueDate?: string | null
   totalAmount: string | number
@@ -25,7 +60,7 @@ interface Payment {
   referenceNo?: string | null
   chequeDate?: string | null
   supplier: { id: string; name: string }
-  invoice?: { id: string; billNumber: string } | null
+  invoice?: ({ id: string; billNumber: string } & BillTrail) | null
   createdBy?: { id: string; name: string } | null
 }
 
@@ -55,6 +90,145 @@ function bucketClass(bucket: string) {
   return 'badge-danger'
 }
 
+/**
+ * The receipts a bill was raised from, without repeats — one bill routinely
+ * settles several, and a bill with none behind it was typed by hand.
+ */
+function grnsOn(trail: BillTrail) {
+  const seen = new Map<string, { id: string; grnNumber: string; grnDate: string; files: BillFile[] }>()
+  for (const l of trail.lines ?? []) {
+    const grn = l.grnLine?.grn
+    if (!grn || seen.has(grn.id)) continue
+    seen.set(grn.id, {
+      id: grn.id,
+      grnNumber: grn.grnNumber,
+      grnDate: grn.grnDate,
+      files: grn.attachments ?? [],
+    })
+  }
+  return [...seen.values()]
+}
+
+/** The link is signed and short-lived, so it is fetched at the moment it is wanted. */
+async function openFile(id: string, kind: 'order' | 'receipt') {
+  try {
+    const path = kind === 'order' ? 'attachments' : 'grn-attachments'
+    const res = await api.get<{ data: { url: string } }>(`/purchase/${path}/${id}/link`)
+    window.open(res.data.url, '_blank', 'noopener')
+  } catch {
+    // A failed link is not worth a page-level error banner — the file is
+    // still there, this click just did not open it.
+  }
+}
+
+/**
+ * What opens under a bill row, on both the outstanding list and the payment
+ * history — the receipts it was matched against, and whatever was scanned
+ * onto the order or any of them.
+ */
+function BillTrailPanel({ billNumber, po, lines }: { billNumber: string } & BillTrail) {
+  const grns = grnsOn({ lines })
+  const orderFiles = po?.attachments ?? []
+
+  return (
+    <div className="border-border bg-card overflow-hidden rounded-lg border">
+      <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
+        <FileText size={13} className="text-muted-foreground shrink-0" />
+        <h4 className="text-foreground text-[11px] font-semibold">Receipts &amp; Files</h4>
+        <span className="text-muted-foreground ml-auto text-[10px]">
+          {grns.length} {grns.length === 1 ? 'receipt' : 'receipts'} on {billNumber}
+        </span>
+      </div>
+
+      <div className="max-h-[22rem] overflow-y-auto">
+        {orderFiles.length > 0 && (
+          <div className="border-border flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-3 py-2 text-xs">
+            <span className="text-muted-foreground shrink-0">Order {po?.poNumber}:</span>
+            {orderFiles.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className="text-primary inline-flex items-center gap-1 truncate underline"
+                onClick={() => void openFile(f.id, 'order')}
+                title={`Open ${f.fileName}`}
+              >
+                <Paperclip size={11} className="shrink-0" />
+                {f.fileName}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {grns.length === 0 ? (
+          <p className="text-muted-foreground px-3 py-3 text-xs">
+            Entered by hand — no goods receipt behind this bill.
+          </p>
+        ) : (
+          <table className="w-full table-fixed text-sm">
+            <thead className="sticky top-0 z-10">
+              <tr className="bg-secondary border-border border-b">
+                <th
+                  style={{ width: '18%' }}
+                  className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider"
+                >
+                  GRN No.
+                </th>
+                <th
+                  style={{ width: '18%' }}
+                  className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider"
+                >
+                  Date
+                </th>
+                <th className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider">
+                  Files
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {grns.map((g) => (
+                <tr key={g.id} className="border-border/40 border-b last:border-0">
+                  <td className="whitespace-nowrap px-3 py-1.5 text-xs">
+                    <a
+                      href={`/print/goods-receipt/${g.id}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-teal-400 hover:underline"
+                      title="Open this receipt's PDF"
+                    >
+                      {g.grnNumber}
+                    </a>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-1.5 text-xs">{formatDate(g.grnDate)}</td>
+                  <td className="px-3 py-1.5 text-xs">
+                    {g.files.length === 0 ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
+                        {g.files.map((f) => (
+                          <button
+                            key={f.id}
+                            type="button"
+                            className="text-primary inline-flex items-center gap-1 truncate underline"
+                            onClick={() => void openFile(f.id, 'receipt')}
+                            title={`Open ${f.fileName}`}
+                          >
+                            <Paperclip size={11} className="shrink-0" />
+                            {f.fileName}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function SupplierPaymentsPage() {
   const [tab, setTab] = useState<'outstanding' | 'history'>('outstanding')
 
@@ -67,6 +241,8 @@ export default function SupplierPaymentsPage() {
   const [message, setMessage] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [paying, setPaying] = useState<OutstandingBill | null>(null)
+  /** Which row's receipts and files are showing. One at a time, on whichever tab is open. */
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -242,61 +418,99 @@ export default function SupplierPaymentsPage() {
           ) : (
             <>
               <div className="divide-border divide-y xl:hidden">
-                {visibleBills.map((b) => (
-                  <div key={b.id} className="p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-foreground font-medium leading-snug">
-                          {b.supplier.name}
-                        </p>
-                        <div className="mt-1 flex flex-wrap items-center gap-2">
-                          <span className="text-foreground font-mono text-xs">
-                            {b.billNumber}
-                          </span>
-                          <span className={bucketClass(b.bucket)}>
-                            {b.bucket}
-                            {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
-                          </span>
-                        </div>
-                        {b.supplierInvoiceNo && (
-                          <p className="text-muted-foreground mt-0.5 text-[10px]">
-                            Theirs: {b.supplierInvoiceNo}
+                {visibleBills.map((b) => {
+                  const grns = grnsOn(b)
+                  const bOpen = expanded === b.id
+                  return (
+                    <div key={b.id} className="p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-foreground font-medium leading-snug">
+                            {b.supplier.name}
                           </p>
-                        )}
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <a
+                              href={`/print/purchase-bill/${b.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs text-teal-400 underline-offset-2 hover:underline"
+                              title="Open this bill to print or save"
+                            >
+                              {b.billNumber}
+                            </a>
+                            <span className={bucketClass(b.bucket)}>
+                              {b.bucket}
+                              {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
+                            </span>
+                          </div>
+                          {b.supplierInvoiceNo && (
+                            <p className="text-muted-foreground mt-0.5 text-[10px]">
+                              Theirs: {b.supplierInvoiceNo}
+                            </p>
+                          )}
+                        </div>
+                        <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
+                          ₹{money(b.balanceAmount)}
+                        </span>
                       </div>
-                      <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
-                        ₹{money(b.balanceAmount)}
-                      </span>
-                    </div>
 
-                    <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-                      <dt className="text-muted-foreground">Due</dt>
-                      <dd className="text-foreground min-w-0">
-                        {b.dueDate ? formatDate(b.dueDate) : <span className="text-muted-foreground">—</span>}
-                      </dd>
-                      <dt className="text-muted-foreground">Bill total</dt>
-                      <dd className="text-foreground min-w-0 tabular-nums">₹{money(b.totalAmount)}</dd>
-                      <dt className="text-muted-foreground">Paid</dt>
-                      <dd className="text-foreground min-w-0 tabular-nums">₹{money(b.paidAmount)}</dd>
-                    </dl>
+                      <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                        <dt className="text-muted-foreground">Due</dt>
+                        <dd className="text-foreground min-w-0">
+                          {b.dueDate ? (
+                            formatDate(b.dueDate)
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </dd>
+                        <dt className="text-muted-foreground">Bill total</dt>
+                        <dd className="text-foreground min-w-0 tabular-nums">
+                          ₹{money(b.totalAmount)}
+                        </dd>
+                        <dt className="text-muted-foreground">Paid</dt>
+                        <dd className="text-foreground min-w-0 tabular-nums">
+                          ₹{money(b.paidAmount)}
+                        </dd>
+                      </dl>
 
-                    <div className="mt-3 flex justify-end">
-                      <button
-                        type="button"
-                        className="btn-primary h-7 px-2.5 text-xs"
-                        onClick={() => setPaying(b)}
-                      >
-                        Pay
-                      </button>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <button
+                          onClick={() => setExpanded(bOpen ? null : b.id)}
+                          disabled={grns.length === 0 && !b.po?.attachments?.length}
+                          className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                            grns.length === 0 && !b.po?.attachments?.length
+                              ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                              : 'bg-primary/10 text-primary hover:bg-primary/20'
+                          }`}
+                          aria-expanded={bOpen}
+                        >
+                          {bOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                          {bOpen ? 'Hide receipts' : 'Receipts & files'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary h-7 px-2.5 text-xs"
+                          onClick={() => setPaying(b)}
+                        >
+                          Pay
+                        </button>
+                      </div>
+
+                      {bOpen && (
+                        <div className="mt-2.5">
+                          <BillTrailPanel billNumber={b.billNumber} po={b.po} lines={b.lines} />
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
 
               <div className="hidden w-full overflow-x-auto xl:block">
-                <table className="data-table w-full min-w-[900px]">
+                <table className="data-table w-full min-w-[960px]">
                   <thead>
                     <tr>
+                      <th style={{ width: 30 }} />
                       <th>Supplier</th>
                       <th>Bill</th>
                       <th>Due</th>
@@ -308,42 +522,84 @@ export default function SupplierPaymentsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleBills.map((b) => (
-                      <tr key={b.id}>
-                        <td className="text-foreground">{b.supplier.name}</td>
-                        <td>
-                          <span className="text-foreground font-mono text-xs">{b.billNumber}</span>
-                          {b.supplierInvoiceNo && (
-                            <div className="text-muted-foreground text-[10px]">
-                              Theirs: {b.supplierInvoiceNo}
-                            </div>
+                    {visibleBills.map((b) => {
+                      const grns = grnsOn(b)
+                      const bOpen = expanded === b.id
+                      const canExpand = grns.length > 0 || Boolean(b.po?.attachments?.length)
+                      return (
+                        <Fragment key={b.id}>
+                          <tr>
+                            <td>
+                              <button
+                                className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                  !canExpand
+                                    ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                    : 'bg-primary/10 text-primary hover:bg-primary/20'
+                                }`}
+                                onClick={() => setExpanded(bOpen ? null : b.id)}
+                                disabled={!canExpand}
+                                title={bOpen ? 'Hide receipts' : 'Show receipts and files'}
+                                aria-label={`${bOpen ? 'Hide' : 'Show'} receipts on ${b.billNumber}`}
+                                aria-expanded={bOpen}
+                              >
+                                {bOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                              </button>
+                            </td>
+                            <td className="text-foreground">{b.supplier.name}</td>
+                            <td className="whitespace-nowrap">
+                              <a
+                                href={`/print/purchase-bill/${b.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-mono text-xs text-teal-400 hover:underline"
+                                title="Open this bill to print or save"
+                              >
+                                {b.billNumber}
+                              </a>
+                              {b.supplierInvoiceNo && (
+                                <div className="text-muted-foreground text-[10px]">
+                                  Theirs: {b.supplierInvoiceNo}
+                                </div>
+                              )}
+                            </td>
+                            <td className="text-xs">
+                              {b.dueDate ? (
+                                formatDate(b.dueDate)
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </td>
+                            <td className="text-right tabular-nums">₹{money(b.totalAmount)}</td>
+                            <td className="text-right tabular-nums">₹{money(b.paidAmount)}</td>
+                            <td className="text-foreground text-right font-medium tabular-nums">
+                              ₹{money(b.balanceAmount)}
+                            </td>
+                            <td>
+                              <span className={bucketClass(b.bucket)}>
+                                {b.bucket}
+                                {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap text-right">
+                              <button
+                                type="button"
+                                className="btn-primary h-7 px-2.5 text-xs"
+                                onClick={() => setPaying(b)}
+                              >
+                                Pay
+                              </button>
+                            </td>
+                          </tr>
+                          {bOpen && canExpand && (
+                            <tr>
+                              <td colSpan={9} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                <BillTrailPanel billNumber={b.billNumber} po={b.po} lines={b.lines} />
+                              </td>
+                            </tr>
                           )}
-                        </td>
-                        <td className="text-xs">
-                          {b.dueDate ? formatDate(b.dueDate) : <span className="text-muted-foreground">—</span>}
-                        </td>
-                        <td className="text-right tabular-nums">₹{money(b.totalAmount)}</td>
-                        <td className="text-right tabular-nums">₹{money(b.paidAmount)}</td>
-                        <td className="text-foreground text-right font-medium tabular-nums">
-                          ₹{money(b.balanceAmount)}
-                        </td>
-                        <td>
-                          <span className={bucketClass(b.bucket)}>
-                            {b.bucket}
-                            {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
-                          </span>
-                        </td>
-                        <td className="whitespace-nowrap text-right">
-                          <button
-                            type="button"
-                            className="btn-primary h-7 px-2.5 text-xs"
-                            onClick={() => setPaying(b)}
-                          >
-                            Pay
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                        </Fragment>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -364,45 +620,87 @@ export default function SupplierPaymentsPage() {
         ) : (
           <>
             <div className="divide-border divide-y xl:hidden">
-              {visiblePayments.map((p) => (
-                <div key={p.id} className="p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <span className="text-foreground font-mono text-xs font-semibold">
-                        {p.paymentNumber}
+              {visiblePayments.map((p) => {
+                const grns = p.invoice ? grnsOn(p.invoice) : []
+                const canExpand = grns.length > 0 || Boolean(p.invoice?.po?.attachments?.length)
+                const pOpen = expanded === p.id
+                return (
+                  <div key={p.id} className="p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <span className="text-foreground font-mono text-xs font-semibold">
+                          {p.paymentNumber}
+                        </span>
+                        <p className="text-foreground mt-1 font-medium leading-snug">
+                          {p.supplier.name}
+                        </p>
+                      </div>
+                      <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
+                        ₹{money(p.amount)}
                       </span>
-                      <p className="text-foreground mt-1 font-medium leading-snug">
-                        {p.supplier.name}
-                      </p>
                     </div>
-                    <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
-                      ₹{money(p.amount)}
-                    </span>
-                  </div>
 
-                  <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-                    <dt className="text-muted-foreground">Date</dt>
-                    <dd className="text-foreground min-w-0">{formatDate(p.paymentDate)}</dd>
-                    <dt className="text-muted-foreground">Against</dt>
-                    <dd className="text-foreground min-w-0">{p.invoice?.billNumber ?? '—'}</dd>
-                    <dt className="text-muted-foreground">How</dt>
-                    <dd className="text-foreground min-w-0">
-                      {MODE_LABEL[p.mode] ?? p.mode}
-                      {p.referenceNo && (
-                        <span className="text-muted-foreground"> · {p.referenceNo}</span>
-                      )}
-                    </dd>
-                    <dt className="text-muted-foreground">Recorded by</dt>
-                    <dd className="text-foreground min-w-0">{p.createdBy?.name ?? '—'}</dd>
-                  </dl>
-                </div>
-              ))}
+                    <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-muted-foreground">Date</dt>
+                      <dd className="text-foreground min-w-0">{formatDate(p.paymentDate)}</dd>
+                      <dt className="text-muted-foreground">Against</dt>
+                      <dd className="text-foreground min-w-0">
+                        {p.invoice ? (
+                          <a
+                            href={`/print/purchase-bill/${p.invoice.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-teal-400 underline-offset-2 hover:underline"
+                            title="Open this bill to print or save"
+                          >
+                            {p.invoice.billNumber}
+                          </a>
+                        ) : (
+                          '—'
+                        )}
+                      </dd>
+                      <dt className="text-muted-foreground">How</dt>
+                      <dd className="text-foreground min-w-0">
+                        {MODE_LABEL[p.mode] ?? p.mode}
+                        {p.referenceNo && (
+                          <span className="text-muted-foreground"> · {p.referenceNo}</span>
+                        )}
+                      </dd>
+                      <dt className="text-muted-foreground">Recorded by</dt>
+                      <dd className="text-foreground min-w-0">{p.createdBy?.name ?? '—'}</dd>
+                    </dl>
+
+                    {canExpand && (
+                      <div className="mt-3">
+                        <button
+                          onClick={() => setExpanded(pOpen ? null : p.id)}
+                          className="bg-primary/10 text-primary hover:bg-primary/20 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors"
+                          aria-expanded={pOpen}
+                        >
+                          {pOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                          {pOpen ? 'Hide receipts' : 'Receipts & files'}
+                        </button>
+                        {pOpen && p.invoice && (
+                          <div className="mt-2.5">
+                            <BillTrailPanel
+                              billNumber={p.invoice.billNumber}
+                              po={p.invoice.po}
+                              lines={p.invoice.lines}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
 
             <div className="hidden w-full overflow-x-auto xl:block">
-              <table className="data-table w-full min-w-[900px]">
+              <table className="data-table w-full min-w-[960px]">
                 <thead>
                   <tr>
+                    <th style={{ width: 30 }} />
                     <th>Payment</th>
                     <th>Date</th>
                     <th>Supplier</th>
@@ -413,26 +711,76 @@ export default function SupplierPaymentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visiblePayments.map((p) => (
-                    <tr key={p.id}>
-                      <td className="font-mono text-xs text-teal-400">{p.paymentNumber}</td>
-                      <td className="text-xs">{formatDate(p.paymentDate)}</td>
-                      <td className="text-foreground">{p.supplier.name}</td>
-                      <td className="text-xs">{p.invoice?.billNumber ?? '—'}</td>
-                      <td>
-                        <span className="text-foreground text-xs">
-                          {MODE_LABEL[p.mode] ?? p.mode}
-                        </span>
-                        {p.referenceNo && (
-                          <div className="text-muted-foreground text-[10px]">{p.referenceNo}</div>
+                  {visiblePayments.map((p) => {
+                    const grns = p.invoice ? grnsOn(p.invoice) : []
+                    const canExpand = grns.length > 0 || Boolean(p.invoice?.po?.attachments?.length)
+                    const pOpen = expanded === p.id
+                    return (
+                      <Fragment key={p.id}>
+                        <tr>
+                          <td>
+                            <button
+                              className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                !canExpand
+                                  ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+                              }`}
+                              onClick={() => setExpanded(pOpen ? null : p.id)}
+                              disabled={!canExpand}
+                              title={pOpen ? 'Hide receipts' : 'Show receipts and files'}
+                              aria-label={`${pOpen ? 'Hide' : 'Show'} receipts on ${p.paymentNumber}`}
+                              aria-expanded={pOpen}
+                            >
+                              {pOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </td>
+                          <td className="font-mono text-xs text-teal-400">{p.paymentNumber}</td>
+                          <td className="text-xs">{formatDate(p.paymentDate)}</td>
+                          <td className="text-foreground">{p.supplier.name}</td>
+                          <td className="text-xs">
+                            {p.invoice ? (
+                              <a
+                                href={`/print/purchase-bill/${p.invoice.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-mono text-teal-400 hover:underline"
+                                title="Open this bill to print or save"
+                              >
+                                {p.invoice.billNumber}
+                              </a>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
+                          <td>
+                            <span className="text-foreground text-xs">
+                              {MODE_LABEL[p.mode] ?? p.mode}
+                            </span>
+                            {p.referenceNo && (
+                              <div className="text-muted-foreground text-[10px]">
+                                {p.referenceNo}
+                              </div>
+                            )}
+                          </td>
+                          <td className="text-foreground text-right font-medium tabular-nums">
+                            ₹{money(p.amount)}
+                          </td>
+                          <td className="text-xs">{p.createdBy?.name ?? '—'}</td>
+                        </tr>
+                        {pOpen && canExpand && p.invoice && (
+                          <tr>
+                            <td colSpan={8} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <BillTrailPanel
+                                billNumber={p.invoice.billNumber}
+                                po={p.invoice.po}
+                                lines={p.invoice.lines}
+                              />
+                            </td>
+                          </tr>
                         )}
-                      </td>
-                      <td className="text-foreground text-right font-medium tabular-nums">
-                        ₹{money(p.amount)}
-                      </td>
-                      <td className="text-xs">{p.createdBy?.name ?? '—'}</td>
-                    </tr>
-                  ))}
+                      </Fragment>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

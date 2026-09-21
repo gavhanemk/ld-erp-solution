@@ -136,8 +136,8 @@ function BlockHead({ children }: { children: React.ReactNode }) {
       style={{
         background: TINT,
         borderBottom: `1px solid ${RULE}`,
-        padding: '5px 9px',
-        fontSize: '10px',
+        padding: '7px 11px',
+        fontSize: '11px',
         fontWeight: 700,
         color: NAVY,
       }}
@@ -255,16 +255,16 @@ export default function PurchaseBillPrintPage() {
   const th: React.CSSProperties = {
     background: NAVY,
     color: '#fff',
-    fontSize: '9.5px',
+    fontSize: '10.5px',
     fontWeight: 700,
-    padding: '7px 8px',
+    padding: '10px 9px',
     border: `1px solid ${NAVY}`,
     textAlign: 'left',
   }
 
   const td: React.CSSProperties = {
-    fontSize: '10px',
-    padding: '7px 8px',
+    fontSize: '11px',
+    padding: '10px 9px',
     border: `1px solid ${RULE}`,
     color: INK,
     verticalAlign: 'top',
@@ -273,20 +273,39 @@ export default function PurchaseBillPrintPage() {
   const sumTh: React.CSSProperties = {
     background: TINT,
     color: NAVY,
-    fontSize: '9px',
+    fontSize: '10px',
     fontWeight: 700,
-    padding: '5px 6px',
+    padding: '8px 7px',
     border: `1px solid ${RULE}`,
     textAlign: 'center',
   }
 
   const sumTd: React.CSSProperties = {
-    fontSize: '9.5px',
-    padding: '5px 6px',
+    fontSize: '10.5px',
+    padding: '8px 7px',
     border: `1px solid ${RULE}`,
     color: INK,
     textAlign: 'center',
   }
+
+  /*
+   * Blank rows under a short bill.
+   *
+   * A one-line bill on A4 otherwise leaves the grid floating with a hand's
+   * width of nothing under it before the totals. Every printed invoice book
+   * rules its rows to the foot of the page for the same reason — the ruled
+   * space is what says "nothing was added after this was signed".
+   */
+  const usedRows = bill.lines.length + bill.charges.length
+  /*
+   * Five, measured rather than chosen.
+   *
+   * Eight looked better on screen and took a one-line bill onto a second
+   * sheet — the type on this rebuild is larger than it was, and the ruled
+   * space has to fit in what the larger type left over. Verified by PDF page
+   * count at 1, 2 and 5 lines; it is the only test that counts.
+   */
+  const fillerRows = Math.max(0, 5 - usedRows)
 
   const taxCols = taxMode === 'IGST' ? ['IGST'] : taxMode === 'NONE' ? [] : ['SGST', 'CGST']
 
@@ -304,37 +323,40 @@ export default function PurchaseBillPrintPage() {
           background: '#fff',
           color: INK,
           fontFamily: SANS,
-          padding: '12mm 10mm',
+          padding: '14mm 12mm',
           boxSizing: 'border-box',
         }}
       >
         {/* ── Masthead: the mill on the left, the BILL block boxed right ── */}
         <div style={{ display: 'flex', gap: '10px', alignItems: 'stretch' }}>
           <div style={{ flex: 1, minWidth: 0, paddingBottom: '8px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '13px' }}>
               {company.logoUrl && (
+                // The mill's mark, at a size somebody can actually see. It was
+                // 34px, which on A4 is a thumbnail — the letterhead of a
+                // company that is not sure it wants to be on the paper.
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={company.logoUrl}
                   alt=""
-                  style={{ height: '34px', width: 'auto', objectFit: 'contain' }}
+                  style={{ height: '58px', width: 'auto', objectFit: 'contain', flexShrink: 0 }}
                 />
               )}
               <div
                 style={{
-                  fontSize: '20px',
+                  fontSize: '22px',
                   fontWeight: 800,
                   color: NAVY,
                   letterSpacing: '0.2px',
                   textTransform: 'uppercase',
-                  lineHeight: 1.1,
+                  lineHeight: 1.08,
                 }}
               >
                 {companyName}
               </div>
             </div>
 
-            <div style={{ marginTop: '6px', fontSize: '10px', color: GREY, lineHeight: 1.5 }}>
+            <div style={{ marginTop: '9px', fontSize: '10.5px', color: GREY, lineHeight: 1.65 }}>
               {addressLines(company).map((l) => (
                 <div key={l} style={{ textTransform: 'uppercase' }}>
                   {l}
@@ -344,12 +366,13 @@ export default function PurchaseBillPrintPage() {
 
             <div
               style={{
-                marginTop: '6px',
-                fontSize: '10px',
+                marginTop: '8px',
+                fontSize: '10.5px',
                 color: GREY,
                 display: 'flex',
                 flexWrap: 'wrap',
-                gap: '4px 14px',
+                alignItems: 'center',
+                gap: '4px 12px',
               }}
             >
               {company.phone && <span>{company.phone}</span>}
@@ -357,7 +380,7 @@ export default function PurchaseBillPrintPage() {
               {company.email && <span>{company.email}</span>}
             </div>
             {company.gstin && (
-              <div style={{ marginTop: '3px', fontSize: '10px', fontWeight: 700, color: NAVY }}>
+              <div style={{ marginTop: '5px', fontSize: '11px', fontWeight: 700, color: NAVY }}>
                 GSTIN: {company.gstin}
               </div>
             )}
@@ -365,20 +388,21 @@ export default function PurchaseBillPrintPage() {
 
           <div
             style={{
-              width: '74mm',
+              width: '73mm',
               flexShrink: 0,
               background: TINT_SOFT,
               border: `1px solid ${RULE}`,
-              padding: '9px 11px',
+              padding: '13px 15px',
             }}
           >
             <div
               style={{
-                fontSize: '22px',
+                fontSize: '27px',
                 fontWeight: 800,
                 color: NAVY,
                 lineHeight: 1,
-                marginBottom: '7px',
+                marginBottom: '11px',
+                textTransform: 'uppercase',
               }}
             >
               {template.title || 'BILL'}
@@ -389,21 +413,31 @@ export default function PurchaseBillPrintPage() {
                   <tr key={m.label}>
                     <td
                       style={{
-                        fontSize: '9.5px',
+                        fontSize: '10.5px',
                         color: GREY,
-                        padding: '2px 0',
+                        padding: '3px 0',
                         whiteSpace: 'nowrap',
+                        verticalAlign: 'top',
                       }}
                     >
                       {m.label}
                     </td>
-                    <td style={{ fontSize: '9.5px', color: GREY, padding: '2px 5px' }}>:</td>
                     <td
                       style={{
-                        fontSize: '9.5px',
+                        fontSize: '10.5px',
+                        color: GREY,
+                        padding: '3px 6px',
+                        verticalAlign: 'top',
+                      }}
+                    >
+                      :
+                    </td>
+                    <td
+                      style={{
+                        fontSize: '10.5px',
                         fontWeight: 700,
                         color: INK,
-                        padding: '2px 0',
+                        padding: '3px 0',
                         wordBreak: 'break-word',
                         ...NUM,
                       }}
@@ -433,13 +467,14 @@ export default function PurchaseBillPrintPage() {
               style={{ flex: 1, minWidth: 0, border: `1px solid ${RULE}`, background: '#fff' }}
             >
               <BlockHead>{box.head}</BlockHead>
-              <div style={{ padding: '8px 9px', fontSize: '10px', lineHeight: 1.55 }}>
+              <div style={{ padding: '11px 12px', fontSize: '10.5px', lineHeight: 1.65 }}>
                 <div
                   style={{
+                    fontSize: '12px',
                     fontWeight: 800,
                     color: NAVY,
                     textTransform: 'uppercase',
-                    marginBottom: '2px',
+                    marginBottom: '4px',
                   }}
                 >
                   {box.name}
@@ -450,7 +485,7 @@ export default function PurchaseBillPrintPage() {
                   </div>
                 ))}
                 {box.party.gstin && (
-                  <div style={{ marginTop: '3px', color: INK, fontWeight: 700 }}>
+                  <div style={{ marginTop: '5px', color: INK, fontWeight: 700 }}>
                     GSTIN: {box.party.gstin}
                   </div>
                 )}
@@ -465,11 +500,11 @@ export default function PurchaseBillPrintPage() {
         >
           <colgroup>
             <col style={{ width: '5%' }} />
-            <col style={{ width: '33%' }} />
+            <col style={{ width: '31%' }} />
             <col style={{ width: '13%' }} />
             <col style={{ width: '13%' }} />
             <col style={{ width: '12%' }} />
-            <col style={{ width: '11%' }} />
+            <col style={{ width: '13%' }} />
             <col style={{ width: '13%' }} />
           </colgroup>
           <thead>
@@ -525,6 +560,18 @@ export default function PurchaseBillPrintPage() {
                 </td>
               </tr>
             ))}
+
+            {Array.from({ length: fillerRows }, (_, i) => (
+              <tr key={`filler-${i}`}>
+                <td style={{ ...td, height: '22px' }} />
+                <td style={td} />
+                <td style={td} />
+                <td style={td} />
+                <td style={td} />
+                <td style={td} />
+                <td style={td} />
+              </tr>
+            ))}
           </tbody>
         </table>
 
@@ -534,10 +581,10 @@ export default function PurchaseBillPrintPage() {
             {template.showAmountInWords && (
               <div style={{ border: `1px solid ${RULE}`, background: TINT_SOFT }}>
                 <div style={{ padding: '7px 9px' }}>
-                  <div style={{ fontSize: '9.5px', fontWeight: 700, color: NAVY }}>
+                  <div style={{ fontSize: '10.5px', fontWeight: 700, color: NAVY }}>
                     Amount In Words
                   </div>
-                  <div style={{ fontSize: '10.5px', fontWeight: 700, marginTop: '2px' }}>
+                  <div style={{ fontSize: '12px', fontWeight: 700, marginTop: '3px' }}>
                     {data.totalInWords}
                   </div>
                 </div>
@@ -546,7 +593,7 @@ export default function PurchaseBillPrintPage() {
 
             <div style={{ border: `1px solid ${RULE}`, marginTop: '8px' }}>
               <div style={{ padding: '7px 9px' }}>
-                <div style={{ fontSize: '9.5px', fontWeight: 700, color: NAVY }}>Notes</div>
+                <div style={{ fontSize: '10.5px', fontWeight: 700, color: NAVY }}>Notes</div>
                 <div
                   style={{
                     fontSize: '9.5px',
@@ -562,7 +609,7 @@ export default function PurchaseBillPrintPage() {
 
             <div style={{ border: `1px solid ${RULE}`, marginTop: '8px' }}>
               <div style={{ padding: '7px 9px' }}>
-                <div style={{ fontSize: '9.5px', fontWeight: 700, color: NAVY }}>
+                <div style={{ fontSize: '10.5px', fontWeight: 700, color: NAVY }}>
                   Terms &amp; Conditions
                 </div>
                 <div
@@ -579,16 +626,16 @@ export default function PurchaseBillPrintPage() {
             </div>
           </div>
 
-          <div style={{ width: '74mm', flexShrink: 0 }}>
+          <div style={{ width: '78mm', flexShrink: 0 }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <tbody>
                 {totals.map((t, i) => (
                   <tr key={t.label} style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
                     <td
                       style={{
-                        fontSize: '10px',
+                        fontSize: '11px',
                         color: GREY,
-                        padding: '6px 9px',
+                        padding: '8px 11px',
                         border: `1px solid ${RULE}`,
                       }}
                     >
@@ -596,10 +643,10 @@ export default function PurchaseBillPrintPage() {
                     </td>
                     <td
                       style={{
-                        fontSize: '10px',
+                        fontSize: '11px',
                         fontWeight: 700,
                         textAlign: 'right',
-                        padding: '6px 9px',
+                        padding: '8px 11px',
                         border: `1px solid ${RULE}`,
                         ...NUM,
                       }}
@@ -613,9 +660,9 @@ export default function PurchaseBillPrintPage() {
                     style={{
                       background: NAVY,
                       color: '#fff',
-                      fontSize: '12px',
+                      fontSize: '13.5px',
                       fontWeight: 800,
-                      padding: '9px',
+                      padding: '11px',
                       border: `1px solid ${NAVY}`,
                     }}
                   >
@@ -625,10 +672,10 @@ export default function PurchaseBillPrintPage() {
                     style={{
                       background: NAVY,
                       color: '#fff',
-                      fontSize: '13px',
+                      fontSize: '15px',
                       fontWeight: 800,
                       textAlign: 'right',
-                      padding: '9px',
+                      padding: '11px',
                       border: `1px solid ${NAVY}`,
                       ...NUM,
                     }}
@@ -645,9 +692,9 @@ export default function PurchaseBillPrintPage() {
                     <tr>
                       <td
                         style={{
-                          fontSize: '10px',
+                          fontSize: '11px',
                           color: GREY,
-                          padding: '6px 9px',
+                          padding: '8px 11px',
                           border: `1px solid ${RULE}`,
                         }}
                       >
@@ -655,10 +702,10 @@ export default function PurchaseBillPrintPage() {
                       </td>
                       <td
                         style={{
-                          fontSize: '10px',
+                          fontSize: '11px',
                           fontWeight: 700,
                           textAlign: 'right',
-                          padding: '6px 9px',
+                          padding: '8px 11px',
                           border: `1px solid ${RULE}`,
                           ...NUM,
                         }}
@@ -669,10 +716,10 @@ export default function PurchaseBillPrintPage() {
                     <tr style={{ background: TINT }}>
                       <td
                         style={{
-                          fontSize: '10px',
+                          fontSize: '11px',
                           fontWeight: 700,
                           color: NAVY,
-                          padding: '6px 9px',
+                          padding: '8px 11px',
                           border: `1px solid ${RULE}`,
                         }}
                       >
@@ -684,7 +731,7 @@ export default function PurchaseBillPrintPage() {
                           fontWeight: 800,
                           color: NAVY,
                           textAlign: 'right',
-                          padding: '6px 9px',
+                          padding: '8px 11px',
                           border: `1px solid ${RULE}`,
                           ...NUM,
                         }}
@@ -777,7 +824,7 @@ export default function PurchaseBillPrintPage() {
         {/* A bill where the tax is ours to pay, or where there is none at all,
           has to say so on the paper — a reader cannot infer it from a blank. */}
         {(bill.isReverseCharge || taxMode === 'NONE') && (
-          <div style={{ marginTop: '8px', fontSize: '9.5px', fontWeight: 700, color: NAVY }}>
+          <div style={{ marginTop: '8px', fontSize: '10.5px', fontWeight: 700, color: NAVY }}>
             {bill.isReverseCharge
               ? 'Reverse charge — GST on this bill is payable by the recipient, not by the supplier.'
               : 'Supplier is not registered under GST. No tax charged on this bill.'}

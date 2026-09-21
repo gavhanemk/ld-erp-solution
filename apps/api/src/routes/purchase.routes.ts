@@ -3945,6 +3945,7 @@ router.get('/payments/outstanding', requirePermission(MODULE, 'view'), async (re
       balanceAmount: true,
       status: true,
       supplier: { select: { id: true, code: true, name: true } },
+      ...billTrailSelect,
     },
     orderBy: [{ dueDate: 'asc' }, { billDate: 'asc' }],
   })
