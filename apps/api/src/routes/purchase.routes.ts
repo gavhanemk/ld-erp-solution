@@ -2828,6 +2828,39 @@ const billInclude = {
     },
   },
   charges: { include: { chargeType: { select: { id: true, name: true } } } },
+  /*
+   * What has been paid against the bill, and what has been claimed back from
+   * the supplier on it.
+   *
+   * Both belong here rather than on a screen of their own. A bill is only
+   * half a story without them — the question anybody actually asks is "what
+   * do we still owe on this, and did we dispute any of it".
+   */
+  payments: {
+    orderBy: { paymentDate: 'desc' as const },
+    select: {
+      id: true,
+      paymentNumber: true,
+      paymentDate: true,
+      amount: true,
+      mode: true,
+      referenceNo: true,
+      chequeDate: true,
+      createdBy: { select: { id: true, name: true } },
+    },
+  },
+  debitNotes: {
+    orderBy: { noteDate: 'desc' as const },
+    select: {
+      id: true,
+      noteNumber: true,
+      noteDate: true,
+      reason: true,
+      subtotal: true,
+      totalAmount: true,
+      status: true,
+    },
+  },
 }
 
 /** One rate, split the way the two state codes say it must be split. */

@@ -58,8 +58,54 @@ export interface PurchaseBill {
   notes: string | null
   supplier?: { id: string; name: string; code: string; gstin: string | null; stateCode: string | null; isMsme?: boolean; creditDays?: number }
   po?: { id: string; poNumber: string } | null
-  lines?: Array<BillLine & { id: string; grnLine?: { id: string; acceptedQty: string; grn: { grnNumber: string } } | null }>
-  charges?: Array<BillCharge & { id: string }>
+  createdBy?: { id: string; name: string } | null
+  createdAt?: string
+  lines?: Array<
+    BillLine & {
+      id: string
+      item?: { id: string; code: string; name: string; hsnCode: string | null; uom?: { symbol: string } | null }
+      hsnCode?: string | null
+      taxableValue?: string | number
+      cgst?: string | number
+      sgst?: string | number
+      igst?: string | number
+      amount?: string | number
+      grnLine?: {
+        id: string
+        acceptedQty: string
+        unitRate?: string | number
+        grn: { id: string; grnNumber: string }
+      } | null
+    }
+  >
+  charges?: Array<
+    BillCharge & {
+      id: string
+      chargeType?: { id: string; name: string } | null
+      cgst?: string | number
+      sgst?: string | number
+      igst?: string | number
+    }
+  >
+  payments?: Array<{
+    id: string
+    paymentNumber: string
+    paymentDate: string
+    amount: string | number
+    mode: string
+    referenceNo: string | null
+    chequeDate: string | null
+    createdBy?: { id: string; name: string } | null
+  }>
+  debitNotes?: Array<{
+    id: string
+    noteNumber: string
+    noteDate: string
+    reason: string | null
+    subtotal: string | number
+    totalAmount: string | number
+    status: string
+  }>
 }
 
 interface Option {

@@ -1,11 +1,22 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useState } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Ban } from 'lucide-react'
+import {
+  Plus,
+  Pencil,
+  Printer,
+  Search,
+  RefreshCw,
+  AlertCircle,
+  Ban,
+  ChevronDown,
+  ChevronRight,
+} from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
+import { BillDetail } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
@@ -54,6 +65,8 @@ function PurchaseBillsTable() {
     open: false,
     record: null,
   })
+  /** The one bill whose full detail is open. One at a time, so the list stays a list. */
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   /*
    * Arriving from "Book a bill for this" on a goods receipt.
@@ -374,9 +387,19 @@ function PurchaseBillsTable() {
                   {rows.map((bill) => {
                     const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                     const overdue = isOverdue(bill)
+                    const open = expanded === bill.id
                     return (
-                      <tr key={bill.id}>
-                        <td className="font-mono text-xs text-teal-400">{bill.billNumber}</td>
+                      <Fragment key={bill.id}>
+                      <tr
+                        className="cursor-pointer"
+                        onClick={() => setExpanded(open ? null : bill.id)}
+                      >
+                        <td className="font-mono text-xs text-teal-400">
+                          <span className="inline-flex items-center gap-1">
+                            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                            {bill.billNumber}
+                          </span>
+                        </td>
                         <td>
                           {bill.supplierInvoiceNo ? (
                             <>
@@ -446,7 +469,12 @@ function PurchaseBillsTable() {
                           <span className={s.cls}>{s.label}</span>
                         </td>
                         <td className="whitespace-nowrap text-right">
-                          <div className="flex justify-end gap-1">
+                          {/* The row opens the detail panel; these do their own
+                            jobs and must not also open it. */}
+                          <div
+                            className="flex justify-end gap-1"
+                            onClick={(e) => e.stopPropagation()}
+                          >
                             <Link
                               href={`/print/purchase-bill/${bill.id}`}
                               target="_blank"
@@ -480,6 +508,16 @@ function PurchaseBillsTable() {
                           </div>
                         </td>
                       </tr>
+                      {open && (
+                        <tr>
+                          {/* The panel spans the table rather than sitting in a
+                            cell, so its own columns are free of the list's. */}
+                          <td colSpan={9} className="p-0">
+                            <BillDetail bill={bill} />
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     )
                   })}
                 </tbody>
