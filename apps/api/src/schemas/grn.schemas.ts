@@ -91,12 +91,12 @@ const grnFields = {
   shippingWarehouseId: z.string().optional().nullable(),
 
   /*
-   * Why this receipt books in more than the order's own balance.
+   * A note on why this receipt books in more than the order's own balance.
    *
-   * Left out on an ordinary receipt. Required only when some line's excess
-   * runs past the mill's configured tolerance — checked and enforced
-   * server-side, not here, because that check needs the order and the
-   * tolerance setting, neither of which this schema can see.
+   * Always optional. A delivery may run over or short by any amount and
+   * still save — fabric arrives in the lengths the supplier sends it in.
+   * This is somewhere to record the reason when there is one worth keeping,
+   * never a condition of saving.
    */
   overReceiptReason: z.string().max(500).optional().nullable(),
 

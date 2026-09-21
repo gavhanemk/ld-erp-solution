@@ -251,13 +251,14 @@ export function ReceiveGoodsDialog({
   const [error, setError] = useState<string | null>(null)
 
   /*
-   * Why this receipt books in more than the order's own balance, past the
-   * mill's configured tolerance. Left alone on an ordinary receipt — the box
-   * only appears once the server has actually asked for one, so a store
-   * keeper booking a normal delivery never sees it.
+   * A note on why this receipt books in more than the order asked for.
+   *
+   * Never required and never demanded — a delivery can run over or short by
+   * any amount and still save. The box appears on its own once the numbers
+   * typed exceed the order, as somewhere to put the explanation if there is
+   * one worth keeping.
    */
   const [overReceiptReason, setOverReceiptReason] = useState('')
-  const [needsOverReceiptReason, setNeedsOverReceiptReason] = useState(false)
 
   /** Why an already-booked receipt is being corrected. Required on every edit. */
   const [editReason, setEditReason] = useState('')
@@ -297,10 +298,8 @@ export function ReceiveGoodsDialog({
   }, [])
 
   useEffect(() => {
-    // A fresh order deserves a fresh answer to "does this need a reason" —
-    // carrying it over from whatever order was open before would either
-    // demand a reason nobody needs yet or hide one this order does need.
-    setNeedsOverReceiptReason(false)
+    // A fresh order starts with a blank note — carrying one over from
+    // whatever order was open before would attach it to the wrong receipt.
     setOverReceiptReason('')
 
     // A receipt being corrected loads through the effect below instead —
@@ -639,9 +638,6 @@ export function ReceiveGoodsDialog({
           : base
       )
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'OVER_RECEIPT_REASON_REQUIRED') {
-        setNeedsOverReceiptReason(true)
-      }
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {
       setSaving(false)
@@ -668,6 +664,21 @@ export function ReceiveGoodsDialog({
       )}
     </label>
   )
+
+  /*
+   * Whether anything on this receipt books in more than the order still has
+   * outstanding. Nothing is refused on the strength of it — it only decides
+   * whether to offer the note box, so a delivery that ran over has somewhere
+   * to say why while an ordinary one stays out of the way.
+   */
+  const booksOverOrder = (order?.lines ?? []).some((line) => {
+    const pending = num(line.qty) - num(line.receivedQty)
+    const taking = (entries[line.id] ?? []).reduce(
+      (sum, a) => sum + (num(a.received) - num(a.rejected)),
+      0
+    )
+    return taking > pending
+  })
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
@@ -728,32 +739,23 @@ export function ReceiveGoodsDialog({
         {/* Body — the only thing that scrolls */}
         <div className="flex-1 space-y-2 overflow-y-auto px-4 py-2.5">
           {error && (
-            <div
-              className={`flex items-start gap-3 rounded-lg border p-3 ${
-                needsOverReceiptReason
-                  ? 'border-amber-500/40 bg-amber-500/5'
-                  : 'border-red-500/40 bg-red-500/5'
-              }`}
-            >
-              <AlertCircle
-                size={16}
-                className={`mt-0.5 shrink-0 ${needsOverReceiptReason ? 'text-amber-400' : 'text-red-400'}`}
-              />
-              <p className={`text-sm ${needsOverReceiptReason ? 'text-amber-400' : 'text-red-400'}`}>
-                {error}
-              </p>
+            <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+              <p className="text-sm text-red-400">{error}</p>
             </div>
           )}
 
-          {needsOverReceiptReason && (
+          {booksOverOrder && (
             <label className="block">
-              <span className="form-label">Why more than ordered (required to save)</span>
+              <span className="form-label">
+                Why more than ordered{' '}
+                <span className="text-muted-foreground font-normal">(optional)</span>
+              </span>
               <input
                 className="form-input h-9"
                 value={overReceiptReason}
                 onChange={(e) => setOverReceiptReason(e.target.value)}
                 placeholder="e.g. supplier combined this with next month's delivery"
-                autoFocus
               />
             </label>
           )}
@@ -1047,9 +1049,9 @@ export function ReceiveGoodsDialog({
                                     )}
                                   </div>
                                   {over && (
-                                    <div className="mt-1 text-[11px] text-amber-400">
+                                    <div className="text-muted-foreground mt-1 text-[11px]">
                                       {Number((lineAccepted - pending).toFixed(3))} {unit} more than
-                                      is still due — saving may ask why.
+                                      is still due.
                                     </div>
                                   )}
                                   {line.shortClosed && (

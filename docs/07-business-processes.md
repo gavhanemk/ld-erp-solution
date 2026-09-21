@@ -159,20 +159,27 @@ today:
 | **Short close** | 500 m | 400 m | Vendor cannot supply the last 100 m. Storekeeper ticks **Short Close**; pending goes to 0 and the line reads **completed** so it leaves the pending lists |
 | **Full** | 1,500 m | 1,500 m | Pending 0, line **completed** automatically |
 | **Skipped** | 2,000 m | 0 m | Left at 0 on this receipt; 2,000 stays pending for a future truck |
-| **Excess** | 450 m | 500 m | Over-delivery — handled by tolerance, below |
+| **Excess** | 450 m | 500 m | Booked straight in. No limit, no question asked |
 
-#### Excess receipts and tolerance
+#### Excess and short receipts — no limit at all
 
-Fabric rolls cannot be cut to exact lengths, so a tolerance limit applies:
+**Decided: a receipt may book in any quantity, over or short, and it saves
+without being questioned.** Fabric arrives in the lengths the supplier
+sends it in, and a lorry at the gate is not the place to argue about it.
 
-- **Within tolerance** — booked straight into stock.
-- **Above tolerance** — the storekeeper must type a reason, and the stock
-  books in. **Decided: it stays this way.** No hold status, no Purchase
-  Manager approval step. A lorry at the gate is not worth queuing behind
-  an approval, and the typed reason is the trace.
+A percentage allowance was built and then removed. It had two settings —
+2% by default, configurable — and past it the storekeeper was refused
+until a reason was typed. In practice that only teaches whoever is
+receiving to type a number the scale did not show, which is worse than the
+over-delivery it was guarding against. There is now no tolerance
+percentage, no refusal, and no setting.
 
-The tolerance is configurable in Settings → Preferences → Purchase
-(`grnOverReceiptTolerancePercent`), currently 2%.
+What remains: a note box appears on its own once the quantities typed
+exceed what the order still has outstanding, as somewhere to record why if
+there is a reason worth keeping. It is never required.
+
+The order's own quantity is still what the **bill** is matched against, so
+nothing gets paid for twice.
 
 #### Damaged goods (QC rejection)
 
