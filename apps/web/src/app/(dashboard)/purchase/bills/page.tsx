@@ -271,9 +271,14 @@ function PurchaseBillsTable() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-foreground font-mono text-xs font-semibold">
+                          <Link
+                            href={`/print/purchase-bill/${bill.id}`}
+                            target="_blank"
+                            className="font-mono text-xs font-semibold text-teal-400 underline-offset-2 hover:underline"
+                            title={`Open ${bill.billNumber} to print or save`}
+                          >
                             {bill.billNumber}
-                          </span>
+                          </Link>
                           <span className={s.cls}>{s.label}</span>
                           {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
                         </div>
@@ -428,10 +433,23 @@ function PurchaseBillsTable() {
                         className="cursor-pointer"
                         onClick={() => setExpanded(open ? null : bill.id)}
                       >
-                        <td className="font-mono text-xs text-teal-400">
+                        <td className="font-mono text-xs">
                           <span className="inline-flex items-center gap-1">
-                            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                            {bill.billNumber}
+                            <span className="text-muted-foreground">
+                              {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                            </span>
+                            {/* The number opens the printable bill, the way the
+                              old ERP's invoice number did. The rest of the row
+                              still expands to the items. */}
+                            <Link
+                              href={`/print/purchase-bill/${bill.id}`}
+                              target="_blank"
+                              className="text-teal-400 underline-offset-2 hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                              title={`Open ${bill.billNumber} to print or save`}
+                            >
+                              {bill.billNumber}
+                            </Link>
                           </span>
                         </td>
                         <td>

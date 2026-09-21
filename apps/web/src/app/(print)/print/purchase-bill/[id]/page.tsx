@@ -56,6 +56,11 @@ interface PrintPayload {
       unitPrice: string
       discount: string
       gstRate: string
+      /** The four the HSN summary is built from. */
+      taxableValue: string
+      cgst: string
+      sgst: string
+      igst: string
       amount: string
       item: { code: string; name: string; uom?: { symbol: string } | null }
       grnLine?: { grn: { grnNumber: string } } | null
@@ -113,6 +118,11 @@ export default function PrintPurchaseBill() {
   const { company, template, bill, taxMode } = data
   const showDiscountColumn = bill.lines.some((l) => Number(l.discount) > 0)
   const showReceiptColumn = bill.lines.some((l) => l.grnLine)
+
+  /** The receipts this bill settles, for the header block. */
+  const receiptRefs = [
+    ...new Set(bill.lines.map((l) => l.grnLine?.grn.grnNumber).filter(Boolean)),
+  ] as string[]
 
   const columns = [
     { key: 'sr', label: '#', weight: 5, align: 'right' as const },
@@ -207,7 +217,57 @@ export default function PrintPurchaseBill() {
     { label: 'Booked', value: shortDate(bill.billDate) },
     { label: 'Due', value: bill.dueDate ? shortDate(bill.dueDate) : '—' },
     ...(bill.po ? [{ label: 'Against Order', value: bill.po.poNumber }] : []),
+    // The mill's old sheet puts the receipt in its header and calls it the
+    // order number, because the receipt is what a supplier's bill is checked
+    // against. Named honestly here, but kept on the paper.
+    ...(receiptRefs.length
+      ? [{ label: receiptRefs.length > 1 ? 'Against Receipts' : 'Against Receipt', value: receiptRefs.join(', ') }]
+      : []),
   ]
+
+  /*
+   * The HSN-wise tax summary, as every supplier's invoice carries it.
+   *
+   * Grouped by HSN and rate together rather than by HSN alone: one code can
+   * legitimately carry two rates on one bill, and merging them would print a
+   * rate that applies to neither half.
+   *
+   * The amounts are summed from the lines rather than recalculated, so this
+   * block and the totals above it can never disagree — a summary that does
+   * not tie to the invoice it summarises is worse than no summary.
+   */
+  const hsnSummary = (() => {
+    if (taxMode === 'NONE') return []
+
+    const groups = new Map<
+      string,
+      { hsn: string; rate: number; taxable: number; cgst: number; sgst: number; igst: number }
+    >()
+
+    for (const line of bill.lines) {
+      const hsn = line.hsnCode || '—'
+      const rate = Number(line.gstRate)
+      const key = `${hsn}|${rate}`
+      const g = groups.get(key) ?? { hsn, rate, taxable: 0, cgst: 0, sgst: 0, igst: 0 }
+      g.taxable += Number(line.taxableValue)
+      g.cgst += Number(line.cgst)
+      g.sgst += Number(line.sgst)
+      g.igst += Number(line.igst)
+      groups.set(key, g)
+    }
+
+    return [...groups.values()].sort((a, b) => a.hsn.localeCompare(b.hsn) || a.rate - b.rate)
+  })()
+
+  const hsnTotals = hsnSummary.reduce(
+    (t, g) => ({
+      taxable: t.taxable + g.taxable,
+      cgst: t.cgst + g.cgst,
+      sgst: t.sgst + g.sgst,
+      igst: t.igst + g.igst,
+    }),
+    { taxable: 0, cgst: 0, sgst: 0, igst: 0 }
+  )
 
   const taxNote = bill.isReverseCharge
     ? 'Reverse charge — GST on this bill is payable by the recipient, not by the supplier.'
@@ -236,6 +296,81 @@ export default function PrintPurchaseBill() {
         showSignature={template.showSignature}
         preparedBy={bill.createdBy?.name ?? null}
         footerNote={template.footerNote}
+        afterTotals={
+          hsnSummary.length > 0 ? (
+            <table className="grid hsn" style={{ width: '100%' }}>
+              <thead>
+                <tr>
+                  <th rowSpan={2}>HSN/SAC</th>
+                  <th rowSpan={2} className="num">
+                    Taxable
+                  </th>
+                  {taxMode === 'IGST' ? (
+                    <th colSpan={2}>IGST</th>
+                  ) : (
+                    <>
+                      <th colSpan={2}>CGST</th>
+                      <th colSpan={2}>SGST</th>
+                    </>
+                  )}
+                </tr>
+                <tr>
+                  {taxMode === 'IGST' ? (
+                    <>
+                      <th className="num">%</th>
+                      <th className="num">Amount</th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="num">%</th>
+                      <th className="num">Amount</th>
+                      <th className="num">%</th>
+                      <th className="num">Amount</th>
+                    </>
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {hsnSummary.map((g) => (
+                  <tr key={`${g.hsn}-${g.rate}`}>
+                    <td>{g.hsn}</td>
+                    <td className="num">{money(g.taxable)}</td>
+                    {taxMode === 'IGST' ? (
+                      <>
+                        <td className="num">{g.rate}</td>
+                        <td className="num">{money(g.igst)}</td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="num">{g.rate / 2}</td>
+                        <td className="num">{money(g.cgst)}</td>
+                        <td className="num">{g.rate / 2}</td>
+                        <td className="num">{money(g.sgst)}</td>
+                      </>
+                    )}
+                  </tr>
+                ))}
+                <tr className="grand">
+                  <td>Total</td>
+                  <td className="num">{money(hsnTotals.taxable)}</td>
+                  {taxMode === 'IGST' ? (
+                    <>
+                      <td />
+                      <td className="num">{money(hsnTotals.igst)}</td>
+                    </>
+                  ) : (
+                    <>
+                      <td />
+                      <td className="num">{money(hsnTotals.cgst)}</td>
+                      <td />
+                      <td className="num">{money(hsnTotals.sgst)}</td>
+                    </>
+                  )}
+                </tr>
+              </tbody>
+            </table>
+          ) : null
+        }
       >
         <DocumentTable columns={columns} rows={rows} minRows={8} />
       </PrintSheet>
