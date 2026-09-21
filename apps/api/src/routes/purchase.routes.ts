@@ -17,7 +17,6 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
-import { getNumericPreference } from '../lib/preferences'
 import {
   cancelGrnSchema,
   createGrnSchema,
@@ -30,6 +29,7 @@ import {
   type BillChargeInput,
   type BillLineInput,
 } from '../schemas/bill.schemas'
+import { createPaymentSchema } from '../schemas/payment.schemas'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -1774,7 +1774,7 @@ async function acceptedByPoLine(
   return new Map(sums.map((s) => [s.poLineId as string, Number(s._sum.acceptedQty ?? 0)]))
 }
 
-/** The one order line a receipt line is booking against, plus what the tolerance check needs. */
+/** The one order line a receipt line is booking against. */
 interface BookablePoLine {
   id: string
   itemId: string
@@ -1798,16 +1798,23 @@ interface GrnLineInput {
  *
  * Shared between raising a receipt and correcting one already on the books —
  * both are "here is what this receipt now says", and the checks (a line still
- * on the order, not closed short, not past the tolerance without a reason)
- * apply exactly the same either way. `already` is the order's own running
- * total *excluding this receipt's own current lines* — the caller works that
- * out, because only it knows whether there is a "this receipt" to exclude.
+ * on the order, and not closed short) apply exactly the same either way.
+ * `already` is the order's own running total *excluding this receipt's own
+ * current lines* — the caller works that out, because only it knows whether
+ * there is a "this receipt" to exclude.
+ *
+ * **There is no limit on how much a receipt may book in.** A delivery can be
+ * short or over by any amount and it saves without being questioned: fabric
+ * comes in the lengths the mill sends, and a lorry at the gate is not the
+ * place to argue about it. An allowance of a few per cent was tried and
+ * removed — it only taught the store keeper to type a number the scale did
+ * not show. The order's own quantity is still what the bill is matched
+ * against, so nothing is paid for twice.
  */
 function prepareGrnLines(
   poLines: Map<string, BookablePoLine>,
   already: Map<string, number>,
-  lines: GrnLineInput[],
-  tolerancePercent: number
+  lines: GrnLineInput[]
 ) {
   const bookingByPoLine = new Map<string, number>()
   for (const line of lines) {
@@ -1815,7 +1822,6 @@ function prepareGrnLines(
     bookingByPoLine.set(line.poLineId, round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted))
   }
 
-  const overTolerance: string[] = []
   const prepared = lines.map((line) => {
     const poLine = poLines.get(line.poLineId)
     if (!poLine) {
@@ -1834,17 +1840,6 @@ function prepareGrnLines(
     const rejected = round3(line.rejectedQty ?? 0)
     const accepted = round3(received - rejected)
     const ordered = Number(poLine.qty)
-    const soFar = already.get(poLine.id) ?? 0
-
-    const booking = bookingByPoLine.get(poLine.id) ?? accepted
-    const total = round3(soFar + booking)
-
-    const allowed = round3(ordered * (1 + tolerancePercent / 100))
-    if (total > allowed) {
-      overTolerance.push(
-        `${poLine.item.name}: ${total} against ${ordered} ordered (${tolerancePercent}% allowed without a reason)`
-      )
-    }
 
     return {
       poLine,
@@ -1858,7 +1853,7 @@ function prepareGrnLines(
     }
   })
 
-  return { prepared, overTolerance }
+  return { prepared }
 }
 
 /** Refuses a store that does not exist, or is no longer in use. */
@@ -2202,29 +2197,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       po.lines.map((l) => l.id)
     )
 
-    /*
-     * How far over the ordered quantity a delivery may run before someone has
-     * to say why — a roll or a bale routinely lands a fraction over, and
-     * refusing that outright just sends the store keeper to type a slightly
-     * smaller number than the scale actually showed. Configured in Settings →
-     * Preferences → Purchase; 2% until a mill says otherwise.
-     */
-    const tolerancePercent = await getNumericPreference('grnOverReceiptTolerancePercent', 2)
-
-    const { prepared, overTolerance } = prepareGrnLines(
-      poLines,
-      already,
-      data.lines,
-      tolerancePercent
-    )
-
-    if (overTolerance.length > 0 && !data.overReceiptReason?.trim()) {
-      throw new AppError(
-        `This books in more than ordered, past the usual allowance — say why before saving: ${overTolerance.join('; ')}.`,
-        400,
-        'OVER_RECEIPT_REASON_REQUIRED'
-      )
-    }
+    const { prepared } = prepareGrnLines(poLines, already, data.lines)
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
 
@@ -2260,9 +2233,10 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
         // would be a receipt claiming stock the ledger does not have.
         status: 'ACCEPTED',
         notes: data.notes ?? null,
-        // Only ever set when overTolerance actually found something —
-        // otherwise this is an ordinary receipt and the field stays null.
-        overReceiptReason: overTolerance.length > 0 ? (data.overReceiptReason?.trim() ?? null) : null,
+        // Nothing forces this any more. It is kept because a store keeper who
+        // wants to note why a delivery ran over should have somewhere to put
+        // it — not because anybody is stopped until they do.
+        overReceiptReason: data.overReceiptReason?.trim() || null,
 
         // The delivery's own paperwork, exactly as it was handed over.
         gateEntryNo: data.gateEntryNo ?? null,
@@ -2424,16 +2398,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       already.set(line.poLineId, round3((already.get(line.poLineId) ?? 0) - Number(line.acceptedQty)))
     }
 
-    const tolerancePercent = await getNumericPreference('grnOverReceiptTolerancePercent', 2)
-    const { prepared, overTolerance } = prepareGrnLines(poLines, already, data.lines, tolerancePercent)
-
-    if (overTolerance.length > 0 && !data.overReceiptReason?.trim()) {
-      throw new AppError(
-        `This books in more than ordered, past the usual allowance — say why before saving: ${overTolerance.join('; ')}.`,
-        400,
-        'OVER_RECEIPT_REASON_REQUIRED'
-      )
-    }
+    const { prepared } = prepareGrnLines(poLines, already, data.lines)
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
 
@@ -2458,7 +2423,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
         notes: data.notes
           ? `${data.notes}\n(corrected: ${data.editReason})`
           : `(corrected: ${data.editReason})`,
-        overReceiptReason: overTolerance.length > 0 ? (data.overReceiptReason?.trim() ?? null) : null,
+        overReceiptReason: data.overReceiptReason?.trim() || null,
         gateEntryNo: data.gateEntryNo ?? null,
         gateEntryDate: data.gateEntryDate ?? null,
         challanNo: data.challanNo ?? null,
@@ -3530,18 +3495,287 @@ router.get('/bills/:id/print', requirePermission(MODULE, 'view'), async (req, re
   })
 })
 
-// ── Not built yet ───────────────────────────────────────────────────────────
+// ── Supplier payments ───────────────────────────────────────────────────────
 //
-// These used to return an empty list, which made the screens look as though
-// they worked and simply had no data. Saying so plainly is more honest.
+// What finally settles a bill. Until this existed a bill could be raised and
+// matched against its receipts but never paid, so the purchase chain stopped
+// one step from the end and every supplier stayed permanently outstanding.
 
-const notBuilt = (what: string) => (_req: unknown, res: import('express').Response) =>
-  res.status(501).json({
-    success: false,
-    message: `${what} has not been built yet.`,
-    code: 'NOT_IMPLEMENTED',
+const paymentInclude = {
+  supplier: { select: { id: true, code: true, name: true } },
+  invoice: {
+    select: {
+      id: true,
+      billNumber: true,
+      supplierInvoiceNo: true,
+      billDate: true,
+      dueDate: true,
+      totalAmount: true,
+      paidAmount: true,
+      balanceAmount: true,
+      status: true,
+    },
+  },
+  createdBy: { select: { id: true, name: true } },
+} satisfies Prisma.SupplierPaymentInclude
+
+/**
+ * Re-reads a bill's paid total from its own payments and writes the balance
+ * and status to match.
+ *
+ * Derived rather than incremented, for the same reason stock balances are
+ * summed from movements: a running total that is added to on every payment
+ * drifts the first time one is entered twice or removed, and then nobody can
+ * say which number is true. The payments are the record; this is just their
+ * sum written where a list screen can sort on it.
+ */
+async function syncBillFromPayments(tx: Prisma.TransactionClient, billId: string) {
+  const bill = await tx.purchaseInvoice.findUnique({
+    where: { id: billId },
+    select: { id: true, totalAmount: true, tdsAmount: true, status: true },
+  })
+  if (!bill) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
+
+  const paid = await tx.supplierPayment.aggregate({
+    where: { invoiceId: billId },
+    _sum: { amount: true },
+  })
+  const paidAmount = round2(Number(paid._sum.amount ?? 0))
+
+  // TDS is withheld from the supplier rather than paid to them, so the bill is
+  // settled in full by the smaller payment. Counting it as outstanding would
+  // leave a stub against every contractor forever.
+  const settleable = round2(Number(bill.totalAmount) - Number(bill.tdsAmount))
+  const balanceAmount = round2(Math.max(0, settleable - paidAmount))
+
+  // A cancelled bill keeps its own status — money against it is a separate
+  // problem and silently reopening it would hide that.
+  const status =
+    bill.status === 'CANCELLED'
+      ? 'CANCELLED'
+      : balanceAmount <= 0
+        ? 'PAID'
+        : paidAmount > 0
+          ? 'PARTIAL'
+          : 'UNPAID'
+
+  return tx.purchaseInvoice.update({
+    where: { id: billId },
+    data: { paidAmount, balanceAmount, status },
+    include: billInclude,
+  })
+}
+
+router.get('/payments', requirePermission(MODULE, 'view'), async (req, res) => {
+  const { supplierId, billId, mode, from, to } = req.query as Record<string, string | undefined>
+
+  const where: Prisma.SupplierPaymentWhereInput = {
+    ...(supplierId ? { supplierId } : {}),
+    ...(billId ? { invoiceId: billId } : {}),
+    ...(mode ? { mode: mode as Prisma.EnumPaymentModeFilter['equals'] } : {}),
+    ...(from || to
+      ? {
+          paymentDate: {
+            ...(from ? { gte: new Date(from) } : {}),
+            ...(to ? { lte: new Date(to) } : {}),
+          },
+        }
+      : {}),
+  }
+
+  const payments = await prisma.supplierPayment.findMany({
+    where,
+    include: paymentInclude,
+    orderBy: { paymentDate: 'desc' },
   })
 
-router.get('/payments', notBuilt('Supplier payments'))
+  res.json({ success: true, data: payments })
+})
+
+/**
+ * What is still owed, oldest first.
+ *
+ * The one screen the teardown of the old system said was missing and worth
+ * most: three buyers accounted for the bulk of what was outstanding, and
+ * nobody could see it without adding up a ledger by hand.
+ */
+router.get('/payments/outstanding', requirePermission(MODULE, 'view'), async (req, res) => {
+  const { supplierId } = req.query as Record<string, string | undefined>
+
+  const bills = await prisma.purchaseInvoice.findMany({
+    where: {
+      status: { in: ['UNPAID', 'PARTIAL'] },
+      ...(supplierId ? { supplierId } : {}),
+    },
+    select: {
+      id: true,
+      billNumber: true,
+      supplierInvoiceNo: true,
+      billDate: true,
+      dueDate: true,
+      totalAmount: true,
+      tdsAmount: true,
+      paidAmount: true,
+      balanceAmount: true,
+      status: true,
+      supplier: { select: { id: true, code: true, name: true } },
+    },
+    orderBy: [{ dueDate: 'asc' }, { billDate: 'asc' }],
+  })
+
+  // Ageing is counted from the due date where the supplier gave terms, and
+  // from the bill date where they did not — an undated bill is not "not yet
+  // due", it is due now.
+  const today = new Date()
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+  const data = bills.map((b) => {
+    const reference = b.dueDate ?? b.billDate
+    const refDay = new Date(
+      reference.getFullYear(),
+      reference.getMonth(),
+      reference.getDate()
+    )
+    const daysOverdue = Math.floor((startOfToday.getTime() - refDay.getTime()) / 86_400_000)
+
+    return {
+      ...b,
+      daysOverdue: daysOverdue > 0 ? daysOverdue : 0,
+      bucket:
+        daysOverdue <= 0
+          ? 'Not yet due'
+          : daysOverdue <= 30
+            ? '1-30 days'
+            : daysOverdue <= 60
+              ? '31-60 days'
+              : daysOverdue <= 90
+                ? '61-90 days'
+                : 'Over 90 days',
+    }
+  })
+
+  res.json({
+    success: true,
+    data,
+    summary: {
+      billCount: data.length,
+      totalOutstanding: round2(data.reduce((s, b) => s + Number(b.balanceAmount), 0)),
+      overdueCount: data.filter((b) => b.daysOverdue > 0).length,
+      overdueAmount: round2(
+        data.filter((b) => b.daysOverdue > 0).reduce((s, b) => s + Number(b.balanceAmount), 0)
+      ),
+    },
+  })
+})
+
+router.get('/payments/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  const payment = await prisma.supplierPayment.findUnique({
+    where: { id: req.params.id },
+    include: paymentInclude,
+  })
+  if (!payment) throw new AppError('Payment not found', 404, 'NOT_FOUND')
+
+  res.json({ success: true, data: payment })
+})
+
+router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createPaymentSchema.parse(req.body)
+
+  const payment = await prisma.$transaction(async (tx) => {
+    const bill = await tx.purchaseInvoice.findUnique({
+      where: { id: data.billId },
+      select: {
+        id: true,
+        billNumber: true,
+        supplierId: true,
+        status: true,
+        totalAmount: true,
+        tdsAmount: true,
+        billDate: true,
+        supplier: { select: { name: true } },
+      },
+    })
+    if (!bill) throw new AppError('That bill no longer exists', 404, 'NOT_FOUND')
+
+    if (bill.status === 'CANCELLED') {
+      throw new AppError(
+        `${bill.billNumber} is cancelled. Nothing is owed on it.`,
+        409,
+        'BILL_CANCELLED'
+      )
+    }
+
+    const when = data.paymentDate ?? new Date()
+
+    // Paying before the bill was raised is somebody typing the wrong year, and
+    // it puts the two documents in different periods.
+    if (when < new Date(bill.billDate.getFullYear(), bill.billDate.getMonth(), bill.billDate.getDate())) {
+      throw new AppError(
+        `${bill.billNumber} is dated after this payment. Check the date.`,
+        400,
+        'PAYMENT_BEFORE_BILL'
+      )
+    }
+
+    // What earlier payments already settled. Summed rather than read off the
+    // bill so two clerks paying at the same moment cannot both pass the check
+    // against a stale figure.
+    const paid = await tx.supplierPayment.aggregate({
+      where: { invoiceId: bill.id },
+      _sum: { amount: true },
+    })
+    const alreadyPaid = round2(Number(paid._sum.amount ?? 0))
+    const settleable = round2(Number(bill.totalAmount) - Number(bill.tdsAmount))
+    const owing = round2(settleable - alreadyPaid)
+
+    if (owing <= 0) {
+      throw new AppError(`${bill.billNumber} is already paid in full.`, 409, 'BILL_ALREADY_PAID')
+    }
+
+    if (round2(data.amount) > owing) {
+      throw new AppError(
+        `That is more than is owed — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`,
+        400,
+        'OVERPAYMENT'
+      )
+    }
+
+    const paymentNumber = await nextDocumentNumber(tx, 'SP', when)
+
+    const created = await tx.supplierPayment.create({
+      data: {
+        paymentNumber,
+        supplierId: bill.supplierId,
+        invoiceId: bill.id,
+        paymentDate: when,
+        amount: round2(data.amount),
+        mode: data.mode,
+        referenceNo: data.referenceNo?.trim() || null,
+        chequeDate: data.chequeDate ?? null,
+        notes: data.notes ?? null,
+        createdById: req.user!.id,
+      },
+      include: paymentInclude,
+    })
+
+    await syncBillFromPayments(tx, bill.id)
+
+    return created
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'SupplierPayment',
+    entityId: payment.id,
+    after: payment,
+  })
+
+  res.status(201).json({
+    success: true,
+    data: payment,
+    message: `${payment.paymentNumber} recorded against ${payment.invoice?.billNumber}.`,
+  })
+})
 
 export default router
