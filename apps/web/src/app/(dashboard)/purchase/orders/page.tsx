@@ -1,8 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
-import Link from 'next/link'
-import { createPortal } from 'react-dom'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
   Plus,
   Pencil,
@@ -21,18 +19,18 @@ import {
   Undo2,
   PackageCheck,
   History,
-  MoreHorizontal,
   Paperclip,
 } from 'lucide-react'
-import { api, ApiError, type Paginated } from '@/lib/api'
+import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import {
   PurchaseOrderDialog,
   type PurchaseOrder,
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
 import { Pagination } from '@/components/tables/Pagination'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { useAppSettings } from '@/lib/appSettings'
-import { formatDate } from '@/lib/utils'
+import { formatDate, itemsPreview } from '@/lib/utils'
 
 /*
  * The columns of the panel that opens under an order.
@@ -42,175 +40,26 @@ import { formatDate } from '@/lib/utils'
  * while the quantity, rate and amount were squeezed into the last third.
  */
 const INNER_COLS: Array<{ label: string; width: string }> = [
-  { label: 'Item code', width: '9%' },
-  { label: 'Item', width: '21%' },
+  { label: 'Item code', width: '10%' },
+  { label: 'Item', width: '24%' },
   /* The style the item was bought for. Typed as free text on the form and
      matched against the style master where it can be, so a line can carry a
      style number that is not a style yet — which is the ordinary case when the
      buying runs ahead of the master. */
-  { label: 'Style no', width: '9%' },
-  { label: 'Category', width: '12%' },
-  { label: 'Subcategory', width: '12%' },
+  { label: 'Style no', width: '10%' },
+  /* Category and subcategory in one column, the subcategory underneath — an
+     item filed with no parent has nothing to put there and the column would
+     otherwise sit empty as often as the category column has something in it. */
+  { label: 'Category', width: '18%' },
   { label: 'Qty', width: '9%' },
   { label: 'Rate', width: '8%' },
   { label: 'Disc', width: '6%' },
   { label: 'GST', width: '5%' },
-  { label: 'Amount', width: '9%' },
+  { label: 'Amount', width: '10%' },
 ]
 
 /** The inner columns whose figures line up on the right. */
 const INNER_NUMERIC = ['Qty', 'Rate', 'Disc', 'GST', 'Amount']
-
-/** One line of the actions menu. */
-interface RowAction {
-  key: string
-  label: string
-  icon: React.ReactNode
-  /** A link opens a screen; a press does something to the order. */
-  href?: string
-  newTab?: boolean
-  onClick?: () => void
-  danger?: boolean
-}
-
-/**
- * What can be done to one order, in words.
- *
- * This row used to carry six bare icons. Printer and bin are read at a glance;
- * a box, a clock and a curved arrow are not, and Mahesh said so — nobody
- * should have to hover six squares to find out which one books in a delivery.
- * Words cost one press and remove the guessing.
- *
- * The panel is positioned `fixed` off the button's own rectangle rather than
- * absolutely inside the row, because the table sits in a card that clips its
- * overflow and the last row's menu would be cut in half by it. It closes on a
- * press outside, on Escape, and on a scroll — a menu that floats away from
- * the row it belongs to is worse than one that shuts.
- */
-function ActionMenu({ label, items }: { label: string; items: RowAction[] }) {
-  const [open, setOpen] = useState(false)
-  const btnRef = useRef<HTMLButtonElement>(null)
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
-
-  /**
-   * Where the panel goes, measured off the button's own rectangle.
-   *
-   * Taken at the moment of the press rather than in an effect afterwards. An
-   * effect runs a render later, by which time the row can have moved — and a
-   * menu that opens a hand's width away from the button nobody pressed is
-   * worse than no menu.
-   *
-   * Flipped above the button when the row is near the foot of the window, so
-   * the last order on a full page is not the one whose menu runs off screen.
-   */
-  const place = () => {
-    const r = btnRef.current?.getBoundingClientRect()
-    if (!r) return
-    const needed = items.length * 38 + 16
-    const below = window.innerHeight - r.bottom - 12
-    setPos({
-      top: below < needed && r.top > needed ? r.top - needed - 6 : r.bottom + 6,
-      right: Math.max(8, window.innerWidth - r.right),
-    })
-  }
-
-  // A menu anchored to a row must not float away from it. Anything that moves
-  // the row under it — a scroll, a resize — shuts it, and so does Escape.
-  useEffect(() => {
-    if (!open) return
-    const shut = () => setOpen(false)
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    window.addEventListener('resize', shut)
-    window.addEventListener('scroll', shut, true)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('resize', shut)
-      window.removeEventListener('scroll', shut, true)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  const ITEM =
-    'flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors hover:bg-secondary disabled:cursor-not-allowed disabled:opacity-50'
-
-  return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={() => {
-          if (open) {
-            setOpen(false)
-            return
-          }
-          place()
-          setOpen(true)
-        }}
-        className="border-border text-muted-foreground hover:bg-secondary hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-      >
-        Actions
-        <MoreHorizontal size={14} />
-      </button>
-
-      {/* Rendered into the body, not into the row.
-          `.glass-card` carries a `backdrop-filter`, and that makes the card a
-          containing block for anything positioned `fixed` inside it — so the
-          panel took its coordinates from the card's corner rather than the
-          window's and opened a couple of hundred pixels below the button. A
-          portal puts it back on the viewport, and clears the card's
-          `overflow-hidden` at the same time. */}
-      {open &&
-        pos &&
-        createPortal(
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
-            <div
-              role="menu"
-              aria-label={label}
-              className="border-border bg-card fixed z-50 min-w-[14rem] overflow-hidden rounded-xl border py-1 shadow-xl"
-              style={{ top: pos.top, right: pos.right }}
-            >
-              {items.map((it) =>
-                it.href ? (
-                  <Link
-                    key={it.key}
-                    href={it.href}
-                    target={it.newTab ? '_blank' : undefined}
-                    role="menuitem"
-                    className={`${ITEM} text-foreground`}
-                    onClick={() => setOpen(false)}
-                  >
-                    {it.icon}
-                    {it.label}
-                  </Link>
-                ) : (
-                  <button
-                    key={it.key}
-                    type="button"
-                    role="menuitem"
-                    className={`${ITEM} ${it.danger ? 'text-red-400' : 'text-foreground'}`}
-                    onClick={() => {
-                      setOpen(false)
-                      it.onClick?.()
-                    }}
-                  >
-                    {it.icon}
-                    {it.label}
-                  </button>
-                )
-              )}
-            </div>
-          </>,
-          document.body
-        )}
-    </>
-  )
-}
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   DRAFT: { label: 'Draft', cls: 'badge-neutral' },
@@ -232,6 +81,10 @@ export default function PurchaseOrdersPage() {
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
+  const [supplierId, setSupplierId] = useState('')
+  const [itemId, setItemId] = useState('')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
   const [page, setPage] = useState(1)
   const [busy, setBusy] = useState(false)
   // Which order has its items open. One at a time, as on the receipt screen.
@@ -240,6 +93,39 @@ export default function PurchaseOrdersPage() {
     open: false,
     record: null,
   })
+
+  /*
+   * Every supplier and every item, for the two filter dropdowns.
+   *
+   * The receipt screen scopes these to what is actually on a waiting order,
+   * because that list was already sitting in the browser fully loaded. This
+   * list is paginated at the server, so there is no free set of "suppliers on
+   * this page" worth building — the master list is what a filter needs here,
+   * fetched once rather than on every keystroke.
+   */
+  const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
+  const [items, setItems] = useState<Array<{ id: string; name: string }>>([])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [s, i] = await Promise.all([
+          masterResource<{ id: string; name: string }>('suppliers').list({ limit: 500 }),
+          masterResource<{ id: string; name: string }>('items').list({ limit: 500 }),
+        ])
+        if (cancelled) return
+        setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
+        setItems([...i.data].sort((a, b) => a.name.localeCompare(b.name)))
+      } catch {
+        // The filters just come up empty — the list itself still loads and
+        // still works without them.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
@@ -253,6 +139,10 @@ export default function PurchaseOrdersPage() {
       const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
       if (debounced) qs.set('q', debounced)
       if (status) qs.set('status', status)
+      if (supplierId) qs.set('supplierId', supplierId)
+      if (itemId) qs.set('itemId', itemId)
+      if (fromDate) qs.set('from', fromDate)
+      if (toDate) qs.set('to', toDate)
       const res = await api.get<Paginated<PurchaseOrder>>(`/purchase/orders?${qs}`)
       setRows(res.data)
       setTotal(res.pagination.total)
@@ -268,17 +158,28 @@ export default function PurchaseOrdersPage() {
     } finally {
       setLoading(false)
     }
-  }, [debounced, status, page, rowsPerPage])
+  }, [debounced, status, supplierId, itemId, fromDate, toDate, page, rowsPerPage])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  // Narrowing the search while on page 3 would show an empty page 3 of a
+  // Narrowing a filter while on page 3 would show an empty page 3 of a
   // shorter list, which reads as "nothing found" rather than "you moved".
   useEffect(() => {
     setPage(1)
-  }, [debounced, status])
+  }, [debounced, status, supplierId, itemId, fromDate, toDate])
+
+  const anyFilter = Boolean(search || status || supplierId || itemId || fromDate || toDate)
+
+  const clearFilters = () => {
+    setSearch('')
+    setStatus('')
+    setSupplierId('')
+    setItemId('')
+    setFromDate('')
+    setToDate('')
+  }
 
   const act = async (po: PurchaseOrder, what: 'send' | 'cancel' | 'reopen') => {
     if (what === 'cancel' && !confirm(`Cancel ${po.poNumber}?`)) return
@@ -307,53 +208,6 @@ export default function PurchaseOrdersPage() {
       if (res.message) setMessage(res.message)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  /*
-   * Tells one line that the rest of it is not coming, instead of leaving the
-   * order "Partially Received" forever waiting on a delivery that will not
-   * arrive. Reversible — `reopenLine` below undoes it — so this is a decision
-   * recorded with a reason, not a deletion.
-   */
-  const shortCloseLine = async (po: PurchaseOrder, line: PoLine) => {
-    const reason = prompt(
-      `Why is ${line.item?.name ?? 'this line'} on ${po.poNumber} being closed short?\n\n` +
-        'This says the rest of it is not coming — it does not touch what has already been received.'
-    )
-    if (!reason || !reason.trim()) return
-    setBusy(true)
-    setMessage(null)
-    try {
-      const res = await api.patch<{ message?: string }>(
-        `/purchase/orders/${po.id}/lines/${line.id}/short-close`,
-        { reason: reason.trim() }
-      )
-      await load()
-      if (res.message) setMessage(res.message)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not close that line.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const reopenLine = async (po: PurchaseOrder, line: PoLine) => {
-    if (!confirm(`Reopen ${line.item?.name ?? 'this line'} on ${po.poNumber}? It will count as pending again.`))
-      return
-    setBusy(true)
-    setMessage(null)
-    try {
-      const res = await api.patch<{ message?: string }>(
-        `/purchase/orders/${po.id}/lines/${line.id}/reopen`,
-        {}
-      )
-      await load()
-      if (res.message) setMessage(res.message)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not reopen that line.')
     } finally {
       setBusy(false)
     }
@@ -518,19 +372,73 @@ export default function PurchaseOrdersPage() {
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-2.5">
-          <div className="bg-secondary border-border flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:min-w-[220px] sm:max-w-sm">
-            <Search size={14} className="text-muted-foreground" />
+        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
+          {/* One box for words. It reaches the supplier as well as the order
+            number, so typing "ambika" finds every order raised against them
+            just as typing "PO-0006" finds the one order. */}
+          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px]">
+            <Search size={14} className="text-muted-foreground shrink-0" />
             <input
-              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Search order number or supplier..."
+              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+              placeholder="Order number or supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search purchase orders"
             />
           </div>
+
           <select
-            className="form-input h-9 w-full sm:w-44"
+            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-32"
+            value={supplierId}
+            onChange={(e) => setSupplierId(e.target.value)}
+            aria-label="Filter by supplier"
+          >
+            <option value="">All suppliers</option>
+            {suppliers.map((sup) => (
+              <option key={sup.id} value={sup.id}>
+                {sup.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
+            value={itemId}
+            onChange={(e) => setItemId(e.target.value)}
+            aria-label="Filter by item"
+          >
+            <option value="">All items</option>
+            {items.map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.name}
+              </option>
+            ))}
+          </select>
+
+          {/* Two dates, not a preset list — the order date, so "what did we
+            place between the 3rd and the 11th" is answered directly. */}
+          <div className="flex shrink-0 items-center gap-1">
+            <input
+              type="date"
+              className="form-input h-8 w-[7.5rem] py-0 text-xs"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(e) => setFromDate(e.target.value)}
+              aria-label="From date"
+            />
+            <span className="text-muted-foreground text-xs">to</span>
+            <input
+              type="date"
+              className="form-input h-8 w-[7.5rem] py-0 text-xs"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(e) => setToDate(e.target.value)}
+              aria-label="To date"
+            />
+          </div>
+
+          <select
+            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
             value={status}
             onChange={(e) => setStatus(e.target.value)}
             aria-label="Filter by status"
@@ -542,7 +450,16 @@ export default function PurchaseOrdersPage() {
               </option>
             ))}
           </select>
-          <span className="text-muted-foreground ml-auto text-xs">
+
+          {/* Only when it is doing something. A permanent Clear is a control
+            that does nothing on the screen somebody usually sees. */}
+          {anyFilter && (
+            <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
+              Clear
+            </button>
+          )}
+
+          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
             {total} {total === 1 ? 'order' : 'orders'}
           </span>
         </div>
@@ -633,9 +550,18 @@ export default function PurchaseOrdersPage() {
                         ) : (
                           <>
                             {lines.length} {lines.length === 1 ? 'item' : 'items'}
-                            {lines[0].item?.name && (
-                              <span className="text-muted-foreground"> · {lines[0].item.name}</span>
-                            )}
+                            {(() => {
+                              const p = itemsPreview(lines.map((l) => l.item?.name))
+                              return (
+                                p.shown && (
+                                  <span className="text-muted-foreground" title={p.full}>
+                                    {' '}
+                                    · {p.shown}
+                                    {p.extra}
+                                  </span>
+                                )
+                              )
+                            })()}
                           </>
                         )}
                       </dd>
@@ -662,7 +588,7 @@ export default function PurchaseOrdersPage() {
                     </div>
 
                     {expanded && lines.length > 0 && (
-                      <div className="border-border bg-secondary/40 mt-2.5 space-y-2 rounded-lg border p-2">
+                      <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] space-y-2 overflow-y-auto rounded-lg border p-2">
                         {lines.map((line, i) => {
                           const cat = line.item?.category
                           const parent = cat?.parent
@@ -721,7 +647,7 @@ export default function PurchaseOrdersPage() {
               })}
             </div>
             <div className="hidden w-full overflow-x-auto xl:block">
-              <table className="data-table table-compact w-full min-w-[960px] table-fixed">
+              <table className="data-table w-full min-w-[960px] table-fixed">
                 <thead>
                   {/* Filled, not just underlined. Nine columns of small grey
                   capitals over white read as another row of data; a tint says
@@ -752,31 +678,29 @@ export default function PurchaseOrdersPage() {
                   nothing hidden. */}
                   <tr className="bg-secondary">
                     <th style={{ width: '3.8%' }} />
-                    <th style={{ width: '8%' }}>Order</th>
-                    <th style={{ width: '16%' }}>Supplier</th>
-                    <th style={{ width: '10%' }}>Date</th>
-                    {/* 9%, not 7.5%. An enquiry number is thirteen mono
-                    characters — ENQ-2026-0187 — and narrower than this it
-                    broke across two lines, which made every row on the screen
-                    taller for it. */}
-                    <th style={{ width: '9%' }}>Enquiry</th>
+                    <th style={{ width: '9%' }}>Order</th>
+                    <th style={{ width: '18%' }}>Supplier</th>
+                    <th style={{ width: '9%' }}>Date</th>
                     {/* Where the goods are to land. A warehouse of ours most
                     of the time, a customer when the supplier ships straight to
                     them — which also decides the tax, so it is not a detail. */}
-                    <th style={{ width: '10%' }}>Location</th>
-                    <th style={{ width: '8%' }}>Reference</th>
-                    <th style={{ width: '10%' }}>Items</th>
-                    <th style={{ width: '8%', textAlign: 'right' }}>Total</th>
-                    <th style={{ width: '7%' }}>Status</th>
-                    {/* Attachments hang off the order, not off a line, so the
-                    paperclip belongs here rather than in the item table. */}
-                    <th style={{ width: '4%', textAlign: 'center' }}>Files</th>
-                    {/* 16.3%, because a draft row carries five of them — print,
+                    <th style={{ width: '11%' }}>Location</th>
+                    {/* Reference and enquiry are both somebody else's paperwork
+                    this order answers to, so they read as one column — the
+                    enquiry underneath, the way an item's HSN sits under its
+                    name. Two columns that are each empty as often as not read
+                    as gaps in the table; one column that is sometimes short
+                    and sometimes two lines reads as an ordinary column. */}
+                    <th style={{ width: '13%' }}>Reference</th>
+                    <th style={{ width: '12%' }}>Items</th>
+                    <th style={{ width: '9%', textAlign: 'right' }}>Total</th>
+                    <th style={{ width: '8%' }}>Status</th>
+                    {/* 15.2%, because a draft row carries five of them — print,
                     edit, send, cancel, delete. Five 28px buttons with 4px
-                    between come to 156px, and 16.3% of the 1040px floor is
-                    170. At 10% they were 104px and spilled out of the cell on
+                    between come to 156px, and 15.2% of the 1040px floor is
+                    158. At 10% they were 104px and spilled out of the cell on
                     every laptop. */}
-                    <th style={{ width: '14.2%' }} />
+                    <th style={{ width: '15.2%' }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -807,8 +731,26 @@ export default function PurchaseOrdersPage() {
                               {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             </button>
                           </td>
-                          <td className="text-foreground font-mono text-xs font-semibold">
-                            {po.poNumber}
+                          <td>
+                            <div className="text-foreground font-mono text-xs font-semibold">
+                              {po.poNumber}
+                            </div>
+                            {/* Attachments hang off the order, not off a
+                              line, so the paperclip sits with the order's own
+                              identity rather than claiming a column that is
+                              empty on every order nobody has scanned a bill
+                              onto yet. */}
+                            {po._count?.attachments ? (
+                              <div
+                                className="text-muted-foreground mt-0.5 inline-flex items-center gap-0.5 text-[10px]"
+                                title={`${po._count.attachments} file${
+                                  po._count.attachments === 1 ? '' : 's'
+                                } attached`}
+                              >
+                                <Paperclip size={10} />
+                                {po._count.attachments}
+                              </div>
+                            ) : null}
                           </td>
                           <td>
                             <div className="text-foreground font-medium">{po.supplier?.name}</div>
@@ -823,20 +765,6 @@ export default function PurchaseOrdersPage() {
                               <CalendarDays size={13} className="text-muted-foreground shrink-0" />
                               {formatDate(po.poDate)}
                             </span>
-                          </td>
-                          <td className="text-xs">
-                            {po.enquiryNo ? (
-                              <>
-                                <div className="text-foreground font-mono">{po.enquiryNo}</div>
-                                {po.enquiryDate && (
-                                  <div className="text-muted-foreground text-[10px]">
-                                    {formatDate(po.enquiryDate)}
-                                  </div>
-                                )}
-                              </>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
                           </td>
                           <td className="text-xs">
                             {po.deliveryWarehouse || po.deliveryCustomer ? (
@@ -857,8 +785,17 @@ export default function PurchaseOrdersPage() {
                             )}
                           </td>
                           <td className="text-xs">
-                            {po.reference ? (
-                              po.reference
+                            {po.reference || po.enquiryNo ? (
+                              <>
+                                <div className="text-foreground truncate">
+                                  {po.reference || <span className="font-mono">{po.enquiryNo}</span>}
+                                </div>
+                                {po.reference && po.enquiryNo && (
+                                  <div className="text-muted-foreground truncate font-mono text-[10px] leading-tight">
+                                    Enq: {po.enquiryNo}
+                                  </div>
+                                )}
+                              </>
                             ) : (
                               <span className="text-muted-foreground">—</span>
                             )}
@@ -871,10 +808,18 @@ export default function PurchaseOrdersPage() {
                                 <div className="text-foreground">
                                   {lines.length} {lines.length === 1 ? 'item' : 'items'}
                                 </div>
-                                <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                  {lines[0].item?.name}
-                                  {lines.length > 1 ? ` +${lines.length - 1} more` : ''}
-                                </div>
+                                {(() => {
+                                  const p = itemsPreview(lines.map((l) => l.item?.name))
+                                  return (
+                                    <div
+                                      className="text-muted-foreground truncate text-[10px] leading-tight"
+                                      title={p.full}
+                                    >
+                                      {p.shown}
+                                      {p.extra}
+                                    </div>
+                                  )
+                                })()}
                               </>
                             )}
                           </td>
@@ -883,21 +828,6 @@ export default function PurchaseOrdersPage() {
                           </td>
                           <td>
                             <span className={s.cls}>{s.label}</span>
-                          </td>
-                          <td className="text-center">
-                            {po._count?.attachments ? (
-                              <span
-                                className="text-muted-foreground inline-flex items-center gap-0.5 text-xs"
-                                title={`${po._count.attachments} file${
-                                  po._count.attachments === 1 ? '' : 's'
-                                } attached`}
-                              >
-                                <Paperclip size={12} />
-                                {po._count.attachments}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
                           </td>
                           <td className="whitespace-nowrap text-right">
                             <div className="flex justify-end">
@@ -916,7 +846,7 @@ export default function PurchaseOrdersPage() {
                             inset the inner table's first row sat flush
                             against the order above it and read as a tenth
                             column of that row. */}
-                            <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <div className="border-border bg-card overflow-hidden rounded-lg border">
                                 <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
                                   <FileText size={13} className="text-muted-foreground shrink-0" />
@@ -928,24 +858,32 @@ export default function PurchaseOrdersPage() {
                                     {po.poNumber}
                                   </span>
                                 </div>
-                                <table className="w-full table-fixed text-sm">
-                                  <thead>
-                                    <tr className="bg-secondary border-border border-b">
-                                      {INNER_COLS.map(({ label: h, width }) => (
-                                        <th
-                                          key={h}
-                                          style={width ? { width } : undefined}
-                                          className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                            INNER_NUMERIC.includes(h) ? 'text-right' : 'text-left'
-                                          }`}
-                                        >
-                                          {h}
-                                        </th>
-                                      ))}
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {lines.map((line, i) => {
+                                {/* Capped and scrollable, not left to grow with
+                                  the order. A kit's worth of trims can run to
+                                  thirty lines, and without this the panel would
+                                  push everything below it — the next order, the
+                                  pager — halfway down the screen. The header
+                                  stays pinned so a long list never loses its
+                                  column names. */}
+                                <div className="max-h-[22rem] overflow-y-auto">
+                                  <table className="w-full table-fixed text-sm">
+                                    <thead className="sticky top-0 z-10">
+                                      <tr className="bg-secondary border-border border-b">
+                                        {INNER_COLS.map(({ label: h, width }) => (
+                                          <th
+                                            key={h}
+                                            style={width ? { width } : undefined}
+                                            className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                              INNER_NUMERIC.includes(h) ? 'text-right' : 'text-left'
+                                            }`}
+                                          >
+                                            {h}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {lines.map((line, i) => {
                                       // An item is filed under one category, which may
                                       // itself sit under a parent. Where it does, the
                                       // parent is the category and the item's own is the
@@ -994,13 +932,17 @@ export default function PurchaseOrdersPage() {
                                             )}
                                           </td>
                                           <td className="px-3 py-1.5 text-xs">
-                                            {parent?.name ?? cat?.name ?? (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-xs">
-                                            {parent ? (
-                                              cat?.name
+                                            {parent?.name ?? cat?.name ? (
+                                              <>
+                                                <div className="text-foreground truncate">
+                                                  {parent?.name ?? cat?.name}
+                                                </div>
+                                                {parent && cat?.name && (
+                                                  <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                    {cat.name}
+                                                  </div>
+                                                )}
+                                              </>
                                             ) : (
                                               <span className="text-muted-foreground">—</span>
                                             )}
@@ -1008,31 +950,17 @@ export default function PurchaseOrdersPage() {
                                           <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
                                             {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
                                             {line.shortClosed ? (
-                                              <div className="mt-0.5 flex items-center justify-end gap-1 whitespace-normal text-[10px] font-normal normal-case text-amber-500">
-                                                <span title={line.shortCloseReason ?? undefined}>
-                                                  Closed short
-                                                </span>
-                                                <button
-                                                  type="button"
-                                                  className="text-primary underline"
-                                                  onClick={() => void reopenLine(po, line)}
-                                                >
-                                                  Reopen
-                                                </button>
+                                              <div
+                                                className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
+                                                title={line.shortCloseReason ?? undefined}
+                                              >
+                                                Closed short
                                               </div>
                                             ) : (
                                               (po.status === 'SENT' || po.status === 'PARTIALLY_RECEIVED') &&
                                               Number(line.pendingQty) > 0 && (
-                                                <div className="text-muted-foreground mt-0.5 flex items-center justify-end gap-1 whitespace-normal text-[10px] font-normal normal-case">
-                                                  <span>{Number(line.pendingQty)} pending</span>
-                                                  <span>·</span>
-                                                  <button
-                                                    type="button"
-                                                    className="text-primary underline"
-                                                    onClick={() => void shortCloseLine(po, line)}
-                                                  >
-                                                    Close short
-                                                  </button>
+                                                <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
+                                                  {Number(line.pendingQty)} pending
                                                 </div>
                                               )
                                             )}
@@ -1064,8 +992,9 @@ export default function PurchaseOrdersPage() {
                                         </tr>
                                       )
                                     })}
-                                  </tbody>
-                                </table>
+                                    </tbody>
+                                  </table>
+                                </div>
                               </div>
                             </td>
                           </tr>

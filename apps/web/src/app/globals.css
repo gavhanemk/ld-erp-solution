@@ -341,15 +341,22 @@
      10px of padding, inside a 1px border. The filter row above every list sets
      `h-9` to line the control up with the buttons beside it, which leaves 14px
      of content box for that 20px line. A text field simply overflows its box
-     and the browser still centres the caret, so nobody noticed. A select clips
-     its label against the padding box instead, and the words sit half-buried
-     along the bottom edge.
+     and the browser still centres the caret, so nobody noticed.
 
-     Padding is therefore dropped for a select and the centring left to the
-     height, which is what a select does well — the label ends up centred in
-     whatever height it is given, 36px in a filter row or the full 42px in a
-     form. The height below is deliberately not `min-height`: a minimum would
-     win against `h-9` and defeat the whole filter row.
+     A select cannot be left to do the same thing, and for a reason that only
+     showed up once `appearance: none` was added below. With the native
+     control drawn, height alone was enough — a select centres its own label
+     top to bottom regardless of padding, which is what let padding be dropped
+     here in the first place. Strip the native appearance away, as the arrow
+     below has to, and that centring goes with it: the label reverts to a
+     plain inline box sitting at the top of whatever height it is given, which
+     read as the text clipped against the bottom edge on anything shorter than
+     the default 42px. `display: grid; align-items: center` replaces the
+     centring the native control used to do for free — a single grid item
+     filling the row and centred on the cross axis, which is the standard fix
+     for exactly this once `appearance: none` is in play. The height below is
+     deliberately not `min-height`: a minimum would win against `h-9` and
+     defeat the whole filter row.
 
      The arrow used to be left to the browser, on the reasoning that drawing
      our own meant choosing a colour twice — once per theme. That reasoning
@@ -372,6 +379,8 @@
   :where(select).form-input {
     @apply appearance-none bg-no-repeat py-0 pr-9;
     height: 2.625rem;
+    display: grid;
+    align-items: center;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     background-position: right 0.7rem center;
     background-size: 0.85rem;

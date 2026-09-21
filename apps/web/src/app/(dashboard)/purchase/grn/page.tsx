@@ -11,12 +11,16 @@ import {
   ChevronRight,
   Printer,
   PackageCheck,
+  Pencil,
+  Trash2,
+  FileText,
 } from 'lucide-react'
-import Link from 'next/link'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
 import { Pagination } from '@/components/tables/Pagination'
-import { formatDate } from '@/lib/utils'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { formatDate, itemsPreview } from '@/lib/utils'
 
 /**
  * What has actually turned up against the purchase orders.
@@ -61,6 +65,26 @@ interface Receipt {
  * belongs to. A list of receipts already made answers a question they are not
  * asking, and on a system with nothing received yet it is simply blank.
  */
+interface WaitingLine {
+  id: string
+  qty: string | number
+  receivedQty: string | number
+  pendingQty: string | number
+  shortClosed: boolean
+  shortCloseReason: string | null
+  styleNo?: string | null
+  style?: { id: string; code: string; name: string } | null
+  item?:
+    | {
+        id: string
+        code: string
+        name: string
+        uom?: { symbol: string } | null
+        category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
+      }
+    | null
+}
+
 interface WaitingOrder {
   id: string
   poNumber: string
@@ -69,16 +93,57 @@ interface WaitingOrder {
   reference: string | null
   totalAmount: string | number
   supplier?: { id: string; name: string } | null
-  lines?: Array<{
-    id: string
-    qty: string | number
-    receivedQty: string | number
-    item?: { id: string; code: string; name: string } | null
-  }>
+  lines?: WaitingLine[]
 }
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
+
+/**
+ * An order's lines added up by unit, not blindly added up together.
+ *
+ * A single-item order is one group and the sum is just its quantity. A
+ * multi-item order almost never shares one unit — metres of fabric next to
+ * pieces of button next to rolls of tape — and adding those raw numbers
+ * together produces a total that is not wrong so much as meaningless. Each
+ * unit gets its own running total instead, in the order its first line was
+ * seen, so Total/Received/Pending line up group-for-group across the row.
+ */
+function qtyByUnit(lines: WaitingLine[]) {
+  const groups = new Map<string, { unit: string; ordered: number; received: number; pending: number }>()
+  for (const l of lines) {
+    const unit = l.item?.uom?.symbol ?? ''
+    const g = groups.get(unit) ?? { unit, ordered: 0, received: 0, pending: 0 }
+    g.ordered += Number(l.qty)
+    g.received += Number(l.receivedQty)
+    g.pending += Number(l.pendingQty)
+    groups.set(unit, g)
+  }
+  return [...groups.values()]
+}
+
+/** The columns of the panel that opens under a waiting order — the same shape as the order screen's own, so a line reads the same wherever it is looked at from. */
+const WAITING_COLS: Array<{ label: string; width: string; numeric?: boolean }> = [
+  { label: 'Item code', width: '10%' },
+  { label: 'Item', width: '22%' },
+  { label: 'Style no', width: '9%' },
+  { label: 'Category', width: '12%' },
+  { label: 'Subcategory', width: '12%' },
+  { label: 'Qty', width: '9%', numeric: true },
+  { label: 'Received qty', width: '10%', numeric: true },
+  { label: 'Pending qty', width: '16%', numeric: true },
+]
+
+/** One of the three qty columns, condensed the same way an item list is. */
+function qtyPreview(
+  groups: Array<{ unit: string; ordered: number; received: number; pending: number }>,
+  field: 'ordered' | 'received' | 'pending'
+): { shown: string; extra: string; full: string } {
+  const parts = groups.map((g) => `${qty(g[field])}${g.unit ? ` ${g.unit}` : ''}`)
+  const shown = parts.slice(0, 2).join(', ')
+  const extra = parts.length > 2 ? ` +${parts.length - 2} more` : ''
+  return { shown, extra, full: parts.join(', ') }
+}
 
 /** The word a store keeper would use, not the word in the database. */
 function stage(status: Receipt['status']): { label: string; cls: string } {
@@ -118,6 +183,14 @@ export default function GoodsReceiptPage() {
   const [page, setPage] = useState(1)
   const [open, setOpen] = useState<string | null>(null)
 
+  /** Which waiting order has its lines open — a store keeper checks one at a time. */
+  const [openOrder, setOpenOrder] = useState<string | null>(null)
+
+  /** A line being closed short or reopened — the reason box (if any) asks once both are known. */
+  const [lineConfirm, setLineConfirm] = useState<
+    { type: 'close' | 'reopen'; po: WaitingOrder; line: WaitingLine } | null
+  >(null)
+
   /**
    * The receiving form, and the order it should open on.
    *
@@ -125,6 +198,14 @@ export default function GoodsReceiptPage() {
    * is the plain "Receive goods" button with nothing chosen yet.
    */
   const [dialog, setDialog] = useState<string | null>(null)
+
+  /** The receipt being corrected, or null when the form above is closed. */
+  const [editGrnId, setEditGrnId] = useState<string | null>(null)
+
+  /** Which receipt is being cancelled or deleted, and which — the reason box asks once both are known. */
+  const [confirmAction, setConfirmAction] = useState<{ type: 'cancel' | 'delete'; grn: Receipt } | null>(
+    null
+  )
 
   /**
    * Which of the two lists is showing.
@@ -337,19 +418,15 @@ export default function GoodsReceiptPage() {
     setStatus('')
   }
 
-  const cancel = async (grn: Receipt) => {
-    const reason = prompt(
-      `Why is ${grn.grnNumber} being cancelled?\n\nThe stock it brought in will be taken back out.`
-    )
-    if (!reason || reason.trim().length < 5) return
-
+  const cancel = async (grn: Receipt, reason: string) => {
     setBusy(grn.id)
     setError(null)
     setMessage(null)
     try {
       const res = await api.patch<{ message?: string }>(`/purchase/grn/${grn.id}/cancel`, {
-        reason: reason.trim(),
+        reason,
       })
+      setConfirmAction(null)
       await load()
       // Cancelling hands the quantity back to the order, which can put it back
       // on the waiting list or move it off completed.
@@ -360,6 +437,111 @@ export default function GoodsReceiptPage() {
     } finally {
       setBusy(null)
     }
+  }
+
+  /*
+   * Removing a receipt for good, not the ordinary undo. If it is still live,
+   * the server reverses its stock first — refusing outright if any of that
+   * stock has already left the warehouse — so this can never delete a
+   * receipt while leaving its movement sitting unexplained on the ledger.
+   */
+  const remove = async (grn: Receipt, reason: string) => {
+    setBusy(grn.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.delete<{ message?: string }>(`/purchase/grn/${grn.id}`, { reason })
+      setConfirmAction(null)
+      await load()
+      void loadWaiting()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete it.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /*
+   * Tells one line that the rest of it is not coming, instead of leaving the
+   * order "Part received" forever waiting on a delivery that will not arrive.
+   * Reversible — `reopenLine` below undoes it — so this is a decision recorded
+   * with a reason, not a deletion.
+   */
+  const closeLineShort = async (po: WaitingOrder, line: WaitingLine, reason: string) => {
+    setBusy(line.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${line.id}/short-close`,
+        { reason }
+      )
+      setLineConfirm(null)
+      void loadWaiting()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not close that line.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const reopenLine = async (po: WaitingOrder, line: WaitingLine) => {
+    setBusy(line.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${line.id}/reopen`,
+        {}
+      )
+      setLineConfirm(null)
+      void loadWaiting()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reopen that line.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** What can be done to one receipt, in words, behind a single Actions button. */
+  const rowActions = (grn: Receipt): RowAction[] => {
+    const items: RowAction[] = [
+      {
+        key: 'view',
+        label: 'View / print',
+        icon: <Printer size={14} />,
+        href: `/print/goods-receipt/${grn.id}`,
+        newTab: true,
+      },
+    ]
+    if (grn.status !== 'CANCELLED') {
+      items.push(
+        {
+          key: 'edit',
+          label: 'Correct this receipt',
+          icon: <Pencil size={14} />,
+          onClick: () => setEditGrnId(grn.id),
+        },
+        {
+          key: 'cancel',
+          label: 'Cancel',
+          icon: <Ban size={14} />,
+          onClick: () => setConfirmAction({ type: 'cancel', grn }),
+          danger: true,
+        }
+      )
+    }
+    items.push({
+      key: 'delete',
+      label: 'Delete for good',
+      icon: <Trash2 size={14} />,
+      onClick: () => setConfirmAction({ type: 'delete', grn }),
+      danger: true,
+    })
+    return items
   }
 
   return (
@@ -575,54 +757,124 @@ export default function GoodsReceiptPage() {
               </p>
             ) : (
               <div className="w-full overflow-x-auto">
-                <table className="data-table table-compact w-full min-w-[860px]">
+                <table className="data-table table-compact w-full min-w-[1080px]">
                   <thead>
                     <tr className="bg-secondary">
-                      <th style={{ width: '11%' }}>Order</th>
-                      <th style={{ width: '25%' }}>Supplier</th>
-                      <th style={{ width: '12%' }}>Date</th>
-                      <th style={{ width: '12%' }}>Reference</th>
-                      <th style={{ width: '10%' }}>Items</th>
-                      <th style={{ width: '11%', textAlign: 'right' }}>Total</th>
-                      <th style={{ width: '10%', textAlign: 'right' }}>Still due</th>
-                      <th style={{ width: '9%' }}>Status</th>
+                      <th style={{ width: 30 }} />
+                      <th style={{ width: '10%' }}>Order</th>
+                      <th style={{ width: '17%' }}>Supplier</th>
+                      <th style={{ width: '9%' }}>Date</th>
+                      <th style={{ width: '8%' }}>Reference</th>
+                      <th style={{ width: '14%' }}>Items</th>
+                      <th style={{ width: '11%', textAlign: 'right' }}>Total qty</th>
+                      <th style={{ width: '11%', textAlign: 'right' }}>Received qty</th>
+                      <th style={{ width: '11%', textAlign: 'right' }}>Pending qty</th>
+                      <th style={{ width: '7%' }}>Status</th>
                       <th style={{ width: '14%' }} />
                     </tr>
                   </thead>
                   <tbody>
                     {waitingShown.map((po) => {
-                      const ordered = (po.lines ?? []).reduce((t, l) => t + Number(l.qty), 0)
-                      const got = (po.lines ?? []).reduce((t, l) => t + Number(l.receivedQty), 0)
-                      const due = Math.max(0, ordered - got)
                       const part = po.status === 'PARTIALLY_RECEIVED'
+                      const lines = po.lines ?? []
+                      const groups = qtyByUnit(lines)
+                      const anyPending = groups.some((g) => g.pending > 0)
+                      const expanded = openOrder === po.id
                       return (
-                        <tr key={po.id}>
-                          <td className="whitespace-nowrap font-mono text-xs font-semibold">
-                            {po.poNumber}
+                        <Fragment key={po.id}>
+                        <tr>
+                          <td>
+                            <button
+                              className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                lines.length === 0
+                                  ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+                              }`}
+                              onClick={() => setOpenOrder(expanded ? null : po.id)}
+                              disabled={lines.length === 0}
+                              title={expanded ? 'Hide items' : 'Show items'}
+                              aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
+                              aria-expanded={expanded}
+                            >
+                              {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </td>
+                          <td className="whitespace-nowrap">
+                            <a
+                              href={`/print/purchase-order/${po.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              title="Open this order's PDF"
+                            >
+                              {po.poNumber}
+                            </a>
                           </td>
                           <td className="text-sm">{po.supplier?.name ?? '—'}</td>
                           <td className="whitespace-nowrap text-xs">{formatDate(po.poDate)}</td>
                           <td className="text-xs">
                             {po.reference || <span className="text-muted-foreground">—</span>}
                           </td>
-                          <td className="whitespace-nowrap text-xs">
-                            {(po.lines ?? []).length}{' '}
-                            {(po.lines ?? []).length === 1 ? 'item' : 'items'}
-                          </td>
-                          <td className="whitespace-nowrap text-right text-sm font-semibold tabular-nums">
-                            ₹
-                            {Number(po.totalAmount).toLocaleString('en-IN', {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 2,
-                            })}
-                          </td>
-                          {/* Of the ordered quantity, not of the money. What a
-                            store keeper checks off a challan is pieces. */}
-                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                            {qty(due)}
-                            {part && (
-                              <span className="text-muted-foreground"> of {qty(ordered)}</span>
+                          <td className="text-xs">
+                            {lines.length === 0 ? (
+                              <span className="text-muted-foreground">—</span>
+                            ) : (
+                              <>
+                                <div className="text-foreground whitespace-nowrap">
+                                  {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                                </div>
+                                {(() => {
+                                  const p = itemsPreview(lines.map((l) => l.item?.name))
+                                  return (
+                                    <div
+                                      className="text-muted-foreground truncate text-[10px] leading-tight"
+                                      title={p.full}
+                                    >
+                                      {p.shown}
+                                      {p.extra}
+                                    </div>
+                                  )
+                                })()}
+                              </>
                             )}
+                          </td>
+                          {/* Three columns, not one net figure — a mixed-unit
+                            order cannot be netted into a single "still due"
+                            without pretending metres and pieces are the same
+                            thing. Grouped by unit and truncated the same way
+                            the item list above is, with every group on hover. */}
+                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                            {(() => {
+                              const p = qtyPreview(groups, 'ordered')
+                              return (
+                                <span title={p.full}>
+                                  {p.shown}
+                                  {p.extra}
+                                </span>
+                              )
+                            })()}
+                          </td>
+                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                            {(() => {
+                              const p = qtyPreview(groups, 'received')
+                              return (
+                                <span title={p.full}>
+                                  {p.shown}
+                                  {p.extra}
+                                </span>
+                              )
+                            })()}
+                          </td>
+                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                            {(() => {
+                              const p = qtyPreview(groups, 'pending')
+                              return (
+                                <span className={anyPending ? 'font-medium text-amber-500' : 'text-muted-foreground'} title={p.full}>
+                                  {p.shown}
+                                  {p.extra}
+                                </span>
+                              )
+                            })()}
                           </td>
                           <td>
                             <span className={part ? 'badge-warning' : 'badge-info'}>
@@ -651,6 +903,125 @@ export default function GoodsReceiptPage() {
                             </div>
                           </td>
                         </tr>
+
+                        {expanded && lines.length > 0 && (
+                          <tr>
+                            <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <div className="border-border bg-card overflow-hidden rounded-lg border">
+                                <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
+                                  <FileText size={13} className="text-muted-foreground shrink-0" />
+                                  <h4 className="text-foreground text-[11px] font-semibold">
+                                    Item Details
+                                  </h4>
+                                  <span className="text-muted-foreground ml-auto text-[10px]">
+                                    {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
+                                    {po.poNumber}
+                                  </span>
+                                </div>
+                                {/* Capped and scrollable — an order with
+                                  thirty trims on it would otherwise push the
+                                  next order, and the pager, halfway down the
+                                  screen. */}
+                                <div className="max-h-[22rem] overflow-y-auto">
+                                <table className="w-full table-fixed text-sm">
+                                  <thead className="sticky top-0 z-10">
+                                    <tr className="bg-secondary border-border border-b">
+                                      {WAITING_COLS.map(({ label: h, width, numeric }) => (
+                                        <th
+                                          key={h}
+                                          style={{ width }}
+                                          className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                            numeric ? 'text-right' : 'text-left'
+                                          }`}
+                                        >
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {lines.map((line) => {
+                                      const cat = line.item?.category
+                                      const parent = cat?.parent
+                                      return (
+                                        <tr key={line.id} className="border-border/40 border-b last:border-0">
+                                          <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                            {line.item?.code ?? '—'}
+                                          </td>
+                                          <td className="px-3 py-1.5">
+                                            <div className="text-foreground truncate text-xs">
+                                              {line.item?.name ?? '—'}
+                                            </div>
+                                          </td>
+                                          <td className="px-3 py-1.5 text-xs">
+                                            {line.style?.code || line.styleNo ? (
+                                              <div className="text-foreground truncate font-mono text-xs">
+                                                {line.style?.code ?? line.styleNo}
+                                              </div>
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-1.5 text-xs">
+                                            {parent?.name ?? cat?.name ?? (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-1.5 text-xs">
+                                            {parent ? (
+                                              cat?.name
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                            {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                            {qty(line.receivedQty)}
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                            {line.shortClosed ? (
+                                              <div className="flex items-center justify-end gap-1 whitespace-normal text-amber-500">
+                                                <span title={line.shortCloseReason ?? undefined}>
+                                                  Closed short
+                                                </span>
+                                                <span className="text-muted-foreground">·</span>
+                                                <button
+                                                  type="button"
+                                                  className="text-primary underline"
+                                                  onClick={() => setLineConfirm({ type: 'reopen', po, line })}
+                                                >
+                                                  Reopen
+                                                </button>
+                                              </div>
+                                            ) : Number(line.pendingQty) > 0 ? (
+                                              <div className="flex items-center justify-end gap-1 whitespace-normal">
+                                                <span>{qty(line.pendingQty)}</span>
+                                                <span className="text-muted-foreground">·</span>
+                                                <button
+                                                  type="button"
+                                                  className="text-primary underline"
+                                                  onClick={() => setLineConfirm({ type: 'close', po, line })}
+                                                >
+                                                  Close short
+                                                </button>
+                                              </div>
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      )
+                                    })}
+                                  </tbody>
+                                </table>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
                       )
                     })}
                   </tbody>
@@ -710,7 +1081,27 @@ export default function GoodsReceiptPage() {
 
                         <dl className="mt-2.5 grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
                           <dt className="text-muted-foreground">Against order</dt>
-                          <dd className="text-foreground min-w-0 font-mono">{grn.po.poNumber}</dd>
+                          <dd className="min-w-0">
+                            <a
+                              href={`/print/purchase-order/${grn.po.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-teal-400 hover:underline"
+                              title="Open this order's PDF"
+                            >
+                              {grn.po.poNumber}
+                            </a>
+                          </dd>
+                          <dt className="text-muted-foreground">Items</dt>
+                          {(() => {
+                            const p = itemsPreview(grn.lines.map((l) => l.item?.name))
+                            return (
+                              <dd className="text-foreground min-w-0 truncate" title={p.full}>
+                                {p.shown}
+                                {p.extra}
+                              </dd>
+                            )
+                          })()}
                           <dt className="text-muted-foreground">Received</dt>
                           <dd className="text-foreground min-w-0">
                             {formatDate(grn.grnDate)}
@@ -729,35 +1120,11 @@ export default function GoodsReceiptPage() {
                             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             {expanded ? 'Hide items' : 'What arrived'}
                           </button>
-                          <div className="flex gap-1">
-                            {/* Printable even once cancelled. A cancelled receipt
-                          is still the record of a delivery that happened, and
-                          somebody will need the paper for it. */}
-                            <Link
-                              href={`/print/goods-receipt/${grn.id}`}
-                              target="_blank"
-                              className="btn-ghost border-border rounded-lg border p-1.5"
-                              title="Print the goods receipt note"
-                              aria-label={`Print ${grn.grnNumber}`}
-                            >
-                              <Printer size={15} />
-                            </Link>
-                            {grn.status !== 'CANCELLED' && (
-                              <button
-                                className="btn-ghost border-border rounded-lg border p-1.5 hover:text-red-400"
-                                onClick={() => void cancel(grn)}
-                                disabled={busy === grn.id}
-                                title="Cancel this receipt"
-                                aria-label={`Cancel ${grn.grnNumber}`}
-                              >
-                                <Ban size={15} />
-                              </button>
-                            )}
-                          </div>
+                          <ActionMenu label={`Actions for ${grn.grnNumber}`} items={rowActions(grn)} />
                         </div>
 
                         {expanded && (
-                          <div className="border-border bg-secondary/40 mt-2.5 space-y-2 rounded-lg border p-2">
+                          <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] space-y-2 overflow-y-auto rounded-lg border p-2">
                             {grn.lines.map((l) => (
                               <div
                                 key={l.id}
@@ -815,7 +1182,7 @@ export default function GoodsReceiptPage() {
                         <th>Against order</th>
                         <th>Supplier</th>
                         <th>Received</th>
-                        <th style={{ textAlign: 'right' }}>Items</th>
+                        <th>Items</th>
                         <th>Status</th>
                         <th />
                       </tr>
@@ -842,7 +1209,17 @@ export default function GoodsReceiptPage() {
                                 </button>
                               </td>
                               <td className="font-mono text-xs text-teal-400">{grn.grnNumber}</td>
-                              <td className="font-mono text-xs">{grn.po.poNumber}</td>
+                              <td className="whitespace-nowrap">
+                                <a
+                                  href={`/print/purchase-order/${grn.po.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-xs text-teal-400 hover:underline"
+                                  title="Open this order's PDF"
+                                >
+                                  {grn.po.poNumber}
+                                </a>
+                              </td>
                               <td className="text-sm">{grn.po.supplier?.name ?? '—'}</td>
                               <td className="text-xs">
                                 {formatDate(grn.grnDate)}
@@ -852,42 +1229,43 @@ export default function GoodsReceiptPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="text-right text-sm tabular-nums">
-                                {grn.lines.length}
+                              <td className="text-xs">
+                                <div className="text-foreground whitespace-nowrap text-sm tabular-nums">
+                                  {grn.lines.length}
+                                </div>
+                                {(() => {
+                                  const p = itemsPreview(grn.lines.map((l) => l.item?.name))
+                                  return (
+                                    <div
+                                      className="text-muted-foreground truncate text-[10px] leading-tight"
+                                      title={p.full}
+                                    >
+                                      {p.shown}
+                                      {p.extra}
+                                    </div>
+                                  )
+                                })()}
                               </td>
                               <td>
                                 <span className={s.cls}>{s.label}</span>
                               </td>
                               <td className="whitespace-nowrap text-right">
-                                <Link
-                                  href={`/print/goods-receipt/${grn.id}`}
-                                  target="_blank"
-                                  className="btn-ghost p-1.5"
-                                  title="Print the goods receipt note"
-                                  aria-label={`Print ${grn.grnNumber}`}
-                                >
-                                  <Printer size={15} />
-                                </Link>
-                                {grn.status !== 'CANCELLED' && (
-                                  <button
-                                    className="btn-ghost p-1.5 hover:text-red-400"
-                                    onClick={() => void cancel(grn)}
-                                    disabled={busy === grn.id}
-                                    title="Cancel this receipt"
-                                    aria-label={`Cancel ${grn.grnNumber}`}
-                                  >
-                                    <Ban size={15} />
-                                  </button>
-                                )}
+                                <div className="flex justify-end">
+                                  <ActionMenu
+                                    label={`Actions for ${grn.grnNumber}`}
+                                    items={rowActions(grn)}
+                                  />
+                                </div>
                               </td>
                             </tr>
 
                             {expanded && (
                               <tr>
                                 <td colSpan={8} className="bg-secondary/40 p-0">
+                                  <div className="max-h-[22rem] overflow-y-auto">
                                   <table className="data-table w-full">
-                                    <thead>
-                                      <tr>
+                                    <thead className="sticky top-0 z-10">
+                                      <tr className="bg-secondary">
                                         <th>Item</th>
                                         <th>Store</th>
                                         <th style={{ textAlign: 'right' }}>Ordered</th>
@@ -929,6 +1307,7 @@ export default function GoodsReceiptPage() {
                                       ))}
                                     </tbody>
                                   </table>
+                                  </div>
                                   {grn.notes && (
                                     <p className="text-muted-foreground px-4 py-2 text-xs">
                                       {grn.notes}
@@ -968,6 +1347,71 @@ export default function GoodsReceiptPage() {
             // dropped to part received. Either way the list above is stale.
             void loadWaiting()
           }}
+        />
+      )}
+
+      {editGrnId !== null && (
+        <ReceiveGoodsDialog
+          grnId={editGrnId}
+          onClose={() => setEditGrnId(null)}
+          onSaved={(msg) => {
+            setEditGrnId(null)
+            setMessage(msg)
+            void load()
+            void loadWaiting()
+          }}
+        />
+      )}
+
+      {confirmAction && (
+        <ReasonDialog
+          title={
+            confirmAction.type === 'cancel'
+              ? `Cancel ${confirmAction.grn.grnNumber}?`
+              : `Delete ${confirmAction.grn.grnNumber} for good?`
+          }
+          description={
+            confirmAction.type === 'cancel'
+              ? 'The stock it brought in will be taken back out.'
+              : 'This removes the receipt entirely — it will not show up anywhere, not even as ' +
+                'cancelled. If its stock is still on the shelf, that stock is taken back out first.'
+          }
+          confirmLabel={confirmAction.type === 'cancel' ? 'Cancel receipt' : 'Delete for good'}
+          danger
+          requireReason={confirmAction.type === 'cancel'}
+          busy={busy === confirmAction.grn.id}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={(reason) =>
+            void (confirmAction.type === 'cancel'
+              ? cancel(confirmAction.grn, reason)
+              : remove(confirmAction.grn, reason))
+          }
+        />
+      )}
+
+      {lineConfirm && (
+        <ReasonDialog
+          title={
+            lineConfirm.type === 'close'
+              ? `Close ${lineConfirm.line.item?.name ?? 'this line'} short?`
+              : `Reopen ${lineConfirm.line.item?.name ?? 'this line'}?`
+          }
+          description={
+            lineConfirm.type === 'close'
+              ? `This says the rest of it is not coming — it does not touch what has already ` +
+                `been received against ${lineConfirm.po.poNumber}.`
+              : `It will count as pending again on ${lineConfirm.po.poNumber}.`
+          }
+          confirmLabel={lineConfirm.type === 'close' ? 'Close short' : 'Reopen'}
+          danger={lineConfirm.type === 'close'}
+          requireReason={lineConfirm.type === 'close'}
+          busy={busy === lineConfirm.line.id}
+          onCancel={() => setLineConfirm(null)}
+          onConfirm={(reason) =>
+            void (lineConfirm.type === 'close'
+              ? closeLineShort(lineConfirm.po, lineConfirm.line, reason)
+              : reopenLine(lineConfirm.po, lineConfirm.line))
+          }
         />
       )}
     </div>

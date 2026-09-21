@@ -18,7 +18,12 @@ import {
 } from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
 import { getNumericPreference } from '../lib/preferences'
-import { cancelGrnSchema, createGrnSchema } from '../schemas/grn.schemas'
+import {
+  cancelGrnSchema,
+  createGrnSchema,
+  deleteGrnSchema,
+  updateGrnSchema,
+} from '../schemas/grn.schemas'
 import {
   createBillSchema,
   updateBillSchema,
@@ -724,14 +729,38 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
-  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
+  const q = text(req.query.q)
+  const itemId = text(req.query.itemId)
+  const from = text(req.query.from)
+  const to = text(req.query.to)
 
   // Binned orders are not in any list. The recycle bin has a route of its
   // own, so no screen can show them by forgetting to pass something.
-  const where: Record<string, unknown> = { deletedAt: null }
-  if (typeof req.query.status === 'string' && req.query.status) where.status = req.query.status
+  const where: Prisma.PurchaseOrderWhereInput = { deletedAt: null }
+  if (typeof req.query.status === 'string' && req.query.status) {
+    where.status = req.query.status as Prisma.PurchaseOrderWhereInput['status']
+  }
   if (typeof req.query.supplierId === 'string' && req.query.supplierId) {
     where.supplierId = req.query.supplierId
+  }
+  // `some`, not `every`: a ten-line order with thread on it somewhere is
+  // still an order with thread on it.
+  if (itemId) where.lines = { some: { itemId } }
+
+  /*
+   * A day range, inclusive at both ends.
+   *
+   * `to` is pushed to the end of its day. An order raised at four in the
+   * afternoon on the 19th belongs to the 19th, and a range ending on the
+   * 19th that left it out would be a filter quietly losing the day asked for.
+   */
+  if (from || to) {
+    const range: Prisma.DateTimeFilter = {}
+    if (from) range.gte = new Date(`${from}T00:00:00`)
+    if (to) range.lte = new Date(`${to}T23:59:59.999`)
+    where.poDate = range
   }
   if (q) {
     where.OR = [
@@ -1745,6 +1774,115 @@ async function acceptedByPoLine(
   return new Map(sums.map((s) => [s.poLineId as string, Number(s._sum.acceptedQty ?? 0)]))
 }
 
+/** The one order line a receipt line is booking against, plus what the tolerance check needs. */
+interface BookablePoLine {
+  id: string
+  itemId: string
+  qty: Prisma.Decimal | number | string
+  unitRate: Prisma.Decimal | number | string
+  shortClosed: boolean
+  item: { name: string }
+}
+
+interface GrnLineInput {
+  poLineId: string
+  warehouseId: string
+  receivedQty: number
+  rejectedQty?: number
+  batchNumber?: string | null
+}
+
+/**
+ * Checks a receipt's lines against the order they book against, and works out
+ * what each one will actually put into stock.
+ *
+ * Shared between raising a receipt and correcting one already on the books —
+ * both are "here is what this receipt now says", and the checks (a line still
+ * on the order, not closed short, not past the tolerance without a reason)
+ * apply exactly the same either way. `already` is the order's own running
+ * total *excluding this receipt's own current lines* — the caller works that
+ * out, because only it knows whether there is a "this receipt" to exclude.
+ */
+function prepareGrnLines(
+  poLines: Map<string, BookablePoLine>,
+  already: Map<string, number>,
+  lines: GrnLineInput[],
+  tolerancePercent: number
+) {
+  const bookingByPoLine = new Map<string, number>()
+  for (const line of lines) {
+    const accepted = round3(round3(line.receivedQty) - round3(line.rejectedQty ?? 0))
+    bookingByPoLine.set(line.poLineId, round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted))
+  }
+
+  const overTolerance: string[] = []
+  const prepared = lines.map((line) => {
+    const poLine = poLines.get(line.poLineId)
+    if (!poLine) {
+      throw new AppError('One of those lines is not on this order. Reopen it and try again.', 400, 'LINE_NOT_ON_ORDER')
+    }
+
+    if (poLine.shortClosed) {
+      throw new AppError(
+        `${poLine.item.name} was closed short — reopen that line on the order before receiving more against it.`,
+        400,
+        'LINE_SHORT_CLOSED'
+      )
+    }
+
+    const received = round3(line.receivedQty)
+    const rejected = round3(line.rejectedQty ?? 0)
+    const accepted = round3(received - rejected)
+    const ordered = Number(poLine.qty)
+    const soFar = already.get(poLine.id) ?? 0
+
+    const booking = bookingByPoLine.get(poLine.id) ?? accepted
+    const total = round3(soFar + booking)
+
+    const allowed = round3(ordered * (1 + tolerancePercent / 100))
+    if (total > allowed) {
+      overTolerance.push(
+        `${poLine.item.name}: ${total} against ${ordered} ordered (${tolerancePercent}% allowed without a reason)`
+      )
+    }
+
+    return {
+      poLine,
+      warehouseId: line.warehouseId,
+      batchNumber: line.batchNumber ?? null,
+      orderedQty: ordered,
+      received,
+      rejected,
+      accepted,
+      unitRate: Number(poLine.unitRate),
+    }
+  })
+
+  return { prepared, overTolerance }
+}
+
+/** Refuses a store that does not exist, or is no longer in use. */
+async function assertWarehousesUsable(
+  tx: Prisma.TransactionClient,
+  warehouseIds: string[]
+): Promise<void> {
+  const warehouses = await tx.warehouse.findMany({
+    where: { id: { in: warehouseIds } },
+    select: { id: true, name: true, isActive: true },
+  })
+  if (warehouses.length !== warehouseIds.length) {
+    throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+  }
+  const closed = warehouses.find((w) => !w.isActive)
+  if (closed) {
+    throw new AppError(
+      `${closed.name} is no longer in use. Pick another store for these goods.`,
+      400,
+      'WAREHOUSE_INACTIVE'
+    )
+  }
+}
+
 /**
  * Puts the order back in step with what has been received.
  *
@@ -1981,6 +2119,35 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
 router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const grn = await prisma.gRN.findUnique({ where: { id: req.params.id }, include: grnInclude })
   if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+
+  // The edit screen needs more than the receipt itself: the order's own
+  // lines (an item this receipt never touched can still be added), and how
+  // much of each line other receipts already account for — the "still due"
+  // a correction is checked against has to leave this receipt's own current
+  // lines out of that arithmetic, the same as saving the correction does.
+  if (req.query.view === 'editing') {
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: grn.poId },
+      include: poReceivingInclude,
+    })
+    const acceptedElsewhere = await acceptedByPoLine(
+      prisma,
+      (po?.lines ?? []).map((l) => l.id)
+    )
+    for (const line of grn.lines) {
+      if (!line.poLineId) continue
+      acceptedElsewhere.set(
+        line.poLineId,
+        round3((acceptedElsewhere.get(line.poLineId) ?? 0) - Number(line.acceptedQty))
+      )
+    }
+    res.json({
+      success: true,
+      data: { ...grn, po, otherAccepted: Object.fromEntries(acceptedElsewhere) },
+    })
+    return
+  }
+
   res.json({ success: true, data: grn })
 })
 
@@ -2036,24 +2203,6 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     )
 
     /*
-     * What this receipt is booking against each order line, added up first.
-     *
-     * One order line may be split across stores — 500kg to the godown and
-     * 300kg to the works is one delivery, not two — so the quantity that has
-     * to be checked against the order is the sum of this receipt's rows, not
-     * any single row. Checking them one at a time would let two rows of 500
-     * through against an order for 800.
-     */
-    const bookingByPoLine = new Map<string, number>()
-    for (const line of data.lines) {
-      const accepted = round3(round3(line.receivedQty) - round3(line.rejectedQty ?? 0))
-      bookingByPoLine.set(
-        line.poLineId,
-        round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted)
-      )
-    }
-
-    /*
      * How far over the ordered quantity a delivery may run before someone has
      * to say why — a roll or a bale routinely lands a fraction over, and
      * refusing that outright just sends the store keeper to type a slightly
@@ -2062,64 +2211,12 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
      */
     const tolerancePercent = await getNumericPreference('grnOverReceiptTolerancePercent', 2)
 
-    // Every line is checked before anything is written. A receipt that books
-    // three items in and then refuses the fourth would leave the store keeper
-    // guessing which ones landed.
-    const overTolerance: string[] = []
-    const prepared = data.lines.map((line) => {
-      const poLine = poLines.get(line.poLineId)
-      if (!poLine) {
-        throw new AppError(
-          `One of those lines is not on ${po.poNumber}. Reopen the order and try again.`,
-          400,
-          'LINE_NOT_ON_ORDER'
-        )
-      }
-
-      if (poLine.shortClosed) {
-        throw new AppError(
-          `${poLine.item.name} was closed short — reopen that line on the order before receiving more against it.`,
-          400,
-          'LINE_SHORT_CLOSED'
-        )
-      }
-
-      const received = round3(line.receivedQty)
-      const rejected = round3(line.rejectedQty ?? 0)
-      const accepted = round3(received - rejected)
-      const ordered = Number(poLine.qty)
-      const soFar = already.get(poLine.id) ?? 0
-
-      const booking = bookingByPoLine.get(poLine.id) ?? accepted
-      const total = round3(soFar + booking)
-
-      /*
-       * Past the tolerance is not refused, only asked about — `overTolerance`
-       * collects what to name in that ask, and receiving still goes ahead
-       * once `overReceiptReason` is on the payload. A hard refusal here would
-       * be the same problem the tolerance exists to solve, just moved a
-       * percentage point further out.
-       */
-      const allowed = round3(ordered * (1 + tolerancePercent / 100))
-      if (total > allowed) {
-        overTolerance.push(
-          `${poLine.item.name}: ${total} against ${ordered} ordered (${tolerancePercent}% allowed without a reason)`
-        )
-      }
-
-      return {
-        poLine,
-        warehouseId: line.warehouseId,
-        batchNumber: line.batchNumber ?? null,
-        orderedQty: ordered,
-        received,
-        rejected,
-        accepted,
-        // The rate comes off the order rather than being typed again. It is
-        // what was agreed, and what the supplier's bill gets checked against.
-        unitRate: Number(poLine.unitRate),
-      }
-    })
+    const { prepared, overTolerance } = prepareGrnLines(
+      poLines,
+      already,
+      data.lines,
+      tolerancePercent
+    )
 
     if (overTolerance.length > 0 && !data.overReceiptReason?.trim()) {
       throw new AppError(
@@ -2129,23 +2226,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       )
     }
 
-    const warehouseIds = [...new Set(prepared.map((p) => p.warehouseId))]
-    const warehouses = await tx.warehouse.findMany({
-      where: { id: { in: warehouseIds } },
-      select: { id: true, name: true, isActive: true },
-    })
-
-    if (warehouses.length !== warehouseIds.length) {
-      throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
-    }
-    const closed = warehouses.find((w) => !w.isActive)
-    if (closed) {
-      throw new AppError(
-        `${closed.name} is no longer in use. Pick another store for these goods.`,
-        400,
-        'WAREHOUSE_INACTIVE'
-      )
-    }
+    await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
 
     const grnNumber = await nextDocumentNumber(tx, 'GRN', when)
 
@@ -2263,6 +2344,253 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
         : `${grn.grnNumber} saved and the stock is in.`,
     data: grn,
   })
+})
+
+/**
+ * Correcting a receipt already on the books — quantities, stores and all.
+ *
+ * Every line is replaced outright: the receipt's own current stock movements
+ * are reversed first (an OUT for whatever they put IN), the new lines are
+ * checked against the order exactly as a fresh receipt would be, and new
+ * movements are recorded for them. Reversing first is also the safety check —
+ * `recordMovement` refuses to take stock below zero, so correcting a line
+ * down is refused outright if that stock has already left the warehouse,
+ * and the whole correction rolls back untouched. Nothing here can leave the
+ * ledger holding a movement the document no longer explains.
+ */
+router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = updateGrnSchema.parse(req.body)
+  const when = data.grnDate ?? new Date()
+
+  const grn = await prisma.$transaction(async (tx) => {
+    const before = await tx.gRN.findUnique({
+      where: { id: req.params.id },
+      include: { lines: true },
+    })
+    if (!before) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+    if (before.status === 'CANCELLED') {
+      throw new AppError(
+        `${before.grnNumber} is cancelled — raise a fresh receipt rather than correcting this one.`,
+        400,
+        'ALREADY_CANCELLED'
+      )
+    }
+
+    const po = await tx.purchaseOrder.findUnique({
+      where: { id: before.poId },
+      include: {
+        lines: { include: { item: { select: { name: true } } } },
+        deliveryWarehouse: { select: { id: true, name: true, address: true } },
+      },
+    })
+    if (!po || po.deletedAt) {
+      throw new AppError('The purchase order this receipt is against no longer exists', 404, 'NOT_FOUND')
+    }
+    if (po.status === 'CANCELLED') {
+      throw new AppError(
+        `${po.poNumber} was cancelled — this receipt can no longer be corrected against it.`,
+        400,
+        'PO_CANCELLED'
+      )
+    }
+
+    for (const line of before.lines) {
+      const accepted = Number(line.acceptedQty)
+      if (accepted <= 0) continue
+      await recordMovement(tx, {
+        itemId: line.itemId,
+        warehouseId: line.warehouseId,
+        transactionType: 'RETURN',
+        direction: 'OUT',
+        qty: accepted,
+        referenceType: 'GRN_EDITED',
+        referenceId: before.id,
+        transactionDate: new Date(),
+        notes: `${before.grnNumber} corrected: ${data.editReason}`,
+      })
+    }
+
+    const poLines = new Map(po.lines.map((l) => [l.id, l]))
+
+    // This receipt's own old lines must not count against themselves when
+    // the new ones are checked against the order's balance — they are the
+    // thing being replaced, not a second delivery on top of it.
+    const already = await acceptedByPoLine(
+      tx,
+      po.lines.map((l) => l.id)
+    )
+    for (const line of before.lines) {
+      if (!line.poLineId) continue
+      already.set(line.poLineId, round3((already.get(line.poLineId) ?? 0) - Number(line.acceptedQty)))
+    }
+
+    const tolerancePercent = await getNumericPreference('grnOverReceiptTolerancePercent', 2)
+    const { prepared, overTolerance } = prepareGrnLines(poLines, already, data.lines, tolerancePercent)
+
+    if (overTolerance.length > 0 && !data.overReceiptReason?.trim()) {
+      throw new AppError(
+        `This books in more than ordered, past the usual allowance — say why before saving: ${overTolerance.join('; ')}.`,
+        400,
+        'OVER_RECEIPT_REASON_REQUIRED'
+      )
+    }
+
+    await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
+
+    const supplierAddress = data.supplierAddressId
+      ? await supplierBillingAddress(tx, po.supplierId, data.supplierAddressId)
+      : (po.supplierAddress ?? null)
+    const shippingAddress = data.shippingWarehouseId
+      ? await shippingAddressFor(tx, data.shippingWarehouseId)
+      : (po.deliveryWarehouse?.address ?? null)
+
+    // Replaced outright rather than diffed — a line missing from the new
+    // payload is a line no longer on this receipt, full stop.
+    await tx.gRNLine.deleteMany({ where: { grnId: before.id } })
+
+    await tx.gRN.update({
+      where: { id: before.id },
+      data: {
+        grnDate: when,
+        vehicleNo: data.vehicleNo ?? null,
+        supplierAddress,
+        shippingAddress,
+        notes: data.notes
+          ? `${data.notes}\n(corrected: ${data.editReason})`
+          : `(corrected: ${data.editReason})`,
+        overReceiptReason: overTolerance.length > 0 ? (data.overReceiptReason?.trim() ?? null) : null,
+        gateEntryNo: data.gateEntryNo ?? null,
+        gateEntryDate: data.gateEntryDate ?? null,
+        challanNo: data.challanNo ?? null,
+        challanDate: data.challanDate ?? null,
+        supplierBillNo: data.supplierBillNo ?? null,
+        supplierInvoiceNo: data.supplierInvoiceNo ?? null,
+        supplierInvoiceDate: data.supplierInvoiceDate ?? null,
+        packageCount: data.packageCount ?? null,
+        driverName: data.driverName ?? null,
+        formNo: data.formNo ?? null,
+        clientName: data.clientName ?? null,
+        orderedBy: data.orderedBy ?? null,
+        referenceNo: data.referenceNo ?? null,
+        lines: {
+          create: prepared.map((p) => ({
+            poLineId: p.poLine.id,
+            itemId: p.poLine.itemId,
+            warehouseId: p.warehouseId,
+            orderedQty: p.orderedQty,
+            receivedQty: p.received,
+            rejectedQty: p.rejected,
+            acceptedQty: p.accepted,
+            batchNumber: p.batchNumber,
+            unitRate: p.unitRate,
+            amount: round2(p.accepted * p.unitRate),
+          })),
+        },
+      },
+    })
+
+    for (const p of prepared) {
+      if (p.accepted <= 0) continue
+      await recordMovement(tx, {
+        itemId: p.poLine.itemId,
+        warehouseId: p.warehouseId,
+        transactionType: 'PURCHASE',
+        direction: 'IN',
+        qty: p.accepted,
+        unitRate: p.unitRate,
+        batchNumber: p.batchNumber,
+        referenceType: 'GRN',
+        referenceId: before.id,
+        transactionDate: when,
+        notes: `${before.grnNumber} against ${po.poNumber} (corrected)`,
+      })
+    }
+
+    await syncOrderFromReceipts(tx, po.id)
+
+    return tx.gRN.findUniqueOrThrow({ where: { id: before.id }, include: grnInclude })
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'GRN',
+    entityId: grn.id,
+    after: grn,
+  })
+
+  res.json({ success: true, message: `${grn.grnNumber} corrected.`, data: grn })
+})
+
+/**
+ * Removing a receipt for good — not the ordinary undo.
+ *
+ * Cancelling reverses the stock and keeps the document, which is what a
+ * stock audit wants to find later. This is for the receipt that should not
+ * exist at all — a duplicate, a test row, an order picked by mistake — and it
+ * takes the stock movement with it if one was ever made, the same reversal
+ * `recordMovement` enforces everywhere else: if that stock has already left
+ * the warehouse, the reversal is refused and nothing is deleted.
+ *
+ * Refused outright if a purchase bill has been matched against this receipt —
+ * the bill's own line still needs something to point at, and the fix there is
+ * to unmatch it first, not to have the receipt vanish out from under it.
+ */
+router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const { reason } = deleteGrnSchema.parse(req.body ?? {})
+
+  const before = await prisma.$transaction(async (tx) => {
+    const grn = await tx.gRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
+    if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
+
+    if (grn.status !== 'CANCELLED') {
+      for (const line of grn.lines) {
+        const accepted = Number(line.acceptedQty)
+        if (accepted <= 0) continue
+        await recordMovement(tx, {
+          itemId: line.itemId,
+          warehouseId: line.warehouseId,
+          transactionType: 'RETURN',
+          direction: 'OUT',
+          qty: accepted,
+          referenceType: 'GRN_DELETED',
+          referenceId: grn.id,
+          transactionDate: new Date(),
+          notes: reason ? `${grn.grnNumber} deleted: ${reason}` : `${grn.grnNumber} deleted`,
+        })
+      }
+    }
+
+    try {
+      await tx.gRN.delete({ where: { id: grn.id } })
+    } catch (err) {
+      if (err instanceof Error && err.name === 'PrismaClientKnownRequestError') {
+        const code = (err as unknown as { code?: string }).code
+        if (code === 'P2003') {
+          throw new AppError(
+            `${grn.grnNumber} has a bill matched against it — remove it from that bill first.`,
+            400,
+            'GRN_BILLED'
+          )
+        }
+      }
+      throw err
+    }
+
+    await syncOrderFromReceipts(tx, grn.poId)
+
+    return grn
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'DELETE',
+    entityType: 'GRN',
+    entityId: before.id,
+    before,
+  })
+
+  res.json({ success: true, message: `${before.grnNumber} deleted for good.` })
 })
 
 // —— Files kept against a receipt ——
