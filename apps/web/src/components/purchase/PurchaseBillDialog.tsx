@@ -16,6 +16,12 @@ export interface BillLine {
   acceptedQty?: number
   pendingQty?: number
   orderedRate?: number
+  /**
+   * What to do about a rate that does not match the order. Only ever set on a
+   * line where the two actually differ; the API refuses the bill until every
+   * such line carries one.
+   */
+  rateAction?: 'ACCEPT' | 'DEBIT_NOTE' | null
   grnNumber?: string
 }
 
@@ -151,6 +157,8 @@ export function PurchaseBillDialog({
   const [tdsSection, setTdsSection] = useState('')
   const [tdsRate, setTdsRate] = useState('')
   const [notes, setNotes] = useState('')
+  /** Why a rate above the order was agreed. Asked for once, not per line. */
+  const [rateVarianceReason, setRateVarianceReason] = useState('')
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
 
@@ -172,6 +180,7 @@ export function PurchaseBillDialog({
     setTdsSection(record?.tdsSection ?? '')
     setTdsRate(num(record?.tdsRate) > 0 ? String(record?.tdsRate) : '')
     setNotes(record?.notes ?? '')
+    setRateVarianceReason('')
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
@@ -354,6 +363,16 @@ export function PurchaseBillDialog({
   const setLine = (index: number, patch: Partial<BillLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
 
+  /**
+   * Clears a rate decision the moment the rate it was made about changes.
+   *
+   * Somebody who picks "book at the order's rate" and then retypes the rate
+   * is answering a different question, and carrying the old answer forward
+   * would raise a debit note for a difference nobody is looking at any more.
+   */
+  const setLineRate = (index: number, unitPrice: string) =>
+    setLine(index, { unitPrice, rateAction: null })
+
   const pickItem = (index: number, itemId: string) => {
     const item = itemById.get(itemId)
     setLine(index, {
@@ -507,7 +526,9 @@ export function PurchaseBillDialog({
         unitPrice: num(l.unitPrice),
         discount: num(l.discount),
         gstRate: num(l.gstRate),
+        rateAction: l.rateAction ?? null,
       })),
+      rateVarianceReason: rateVarianceReason.trim() || null,
       charges: charges
         .filter((c) => c.chargeTypeId && num(c.amount) > 0)
         .map((c) => ({
@@ -532,15 +553,30 @@ export function PurchaseBillDialog({
     }
   }
 
-  const incomplete = !supplierId || lines.some((l) => !l.itemId || num(l.qty) <= 0)
-
-  // Differences worth a word before saving. Neither blocks the save: a rate can
-  // legitimately change, and the API refuses the one case that must not pass —
-  // billing more than was accepted.
+  // Over-billing is shown but not blocked here — the API refuses it, and its
+  // message says exactly how much is left on which receipt. A rate mismatch
+  // does block, because the answer is a choice only a person can make.
   const overBilled = lines.filter((l) => l.pendingQty != null && num(l.qty) > l.pendingQty)
   const rateDrift = lines.filter(
     (l) => l.orderedRate != null && Math.abs(num(l.unitPrice) - l.orderedRate) > 0.005,
   )
+
+  /** Every mismatch has to be answered — the API refuses the bill otherwise. */
+  const undecidedRates = rateDrift.filter((l) => !l.rateAction)
+
+  /**
+   * A reason is owed only for agreeing to pay *more*. Accepting a rate below
+   * the order costs the mill nothing and needs no explaining.
+   */
+  const needsRateReason = rateDrift.some(
+    (l) => l.rateAction === 'ACCEPT' && num(l.unitPrice) - (l.orderedRate ?? 0) > 0.005,
+  )
+
+  const incomplete =
+    !supplierId ||
+    lines.some((l) => !l.itemId || num(l.qty) <= 0) ||
+    undecidedRates.length > 0 ||
+    (needsRateReason && !rateVarianceReason.trim())
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
@@ -731,13 +767,104 @@ export function PurchaseBillDialog({
                     {l.pendingQty} is left to bill on {l.grnNumber}. Saving this will be refused.
                   </p>
                 ))}
-                {rateDrift.map((l, i) => (
-                  <p key={`r${i}`}>
-                    {itemById.get(l.itemId)?.name ?? 'A line'}: billed at ₹{inr(num(l.unitPrice))} but
-                    ordered at ₹{inr(l.orderedRate!)}. Check this is agreed before you save.
-                  </p>
-                ))}
               </div>
+            </div>
+          )}
+
+          {/*
+            The rate half of the three-way match.
+
+            Quantity has always been checked against the receipt. The rate was
+            not, so a supplier could bill the goods that did arrive at any
+            price. Each mismatch now has to be answered before the bill saves:
+            take their rate, with a reason, or hold them to the order's and
+            claim the difference back.
+          */}
+          {rateDrift.length > 0 && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-3">
+              <div className="flex items-start gap-2">
+                <TriangleAlert size={15} className="mt-0.5 shrink-0 text-amber-400" />
+                <p className="text-sm text-amber-300">
+                  {rateDrift.length === 1
+                    ? 'One line is billed at a different rate than the order agreed.'
+                    : `${rateDrift.length} lines are billed at a different rate than the order agreed.`}{' '}
+                  Say what to do with each before saving.
+                </p>
+              </div>
+
+              {rateDrift.map((l) => {
+                const index = lines.indexOf(l)
+                const billed = num(l.unitPrice)
+                const ordered = l.orderedRate!
+                const diff = billed - ordered
+                const totalDiff = diff * num(l.qty)
+                const higher = diff > 0
+
+                return (
+                  <div
+                    key={`rv${index}`}
+                    className="rounded-md border border-border bg-secondary/40 p-2.5"
+                  >
+                    <p className="text-sm text-foreground">
+                      {itemById.get(l.itemId)?.name ?? 'A line'}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Order ₹{inr(ordered)} · billed ₹{inr(billed)} ·{' '}
+                      <span className={higher ? 'text-amber-400' : 'text-emerald-400'}>
+                        {higher ? '+' : ''}
+                        {inr(diff)} each, {higher ? '+' : ''}
+                        {inr(totalDiff)} on this line
+                      </span>
+                    </p>
+
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setLine(index, { rateAction: 'ACCEPT' })}
+                        className={`rounded-md border px-2.5 py-1.5 text-xs transition ${
+                          l.rateAction === 'ACCEPT'
+                            ? 'border-amber-500/60 bg-amber-500/15 text-amber-300'
+                            : 'border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        Accept ₹{inr(billed)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLine(index, { rateAction: 'DEBIT_NOTE' })}
+                        className={`rounded-md border px-2.5 py-1.5 text-xs transition ${
+                          l.rateAction === 'DEBIT_NOTE'
+                            ? 'border-teal-500/60 bg-teal-500/15 text-teal-300'
+                            : 'border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {higher
+                          ? `Book ₹${inr(ordered)} and claim the difference`
+                          : `Book ₹${inr(ordered)}`}
+                      </button>
+                    </div>
+
+                    {l.rateAction === 'DEBIT_NOTE' && higher && (
+                      <p className="mt-1.5 text-[11px] text-muted-foreground">
+                        A debit note for ₹{inr(totalDiff)} plus tax is raised in draft. Nothing is
+                        sent to the supplier until somebody sends it.
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
+
+              {needsRateReason && (
+                <label className="block">
+                  <span className="form-label">Why the higher rate was agreed</span>
+                  <input
+                    className="form-input h-9"
+                    value={rateVarianceReason}
+                    onChange={(e) => setRateVarianceReason(e.target.value)}
+                    placeholder="e.g. yarn price rose, agreed with the supplier on the phone"
+                  />
+                </label>
+              )}
             </div>
           )}
 
@@ -838,7 +965,7 @@ export function PurchaseBillDialog({
                             min={0}
                             className="form-input h-9 text-right"
                             value={String(line.unitPrice)}
-                            onChange={(e) => setLine(i, { unitPrice: e.target.value })}
+                            onChange={(e) => setLineRate(i, e.target.value)}
                             aria-label={`Line ${i + 1} rate`}
                           />
                           {line.orderedRate != null && (

@@ -3146,6 +3146,141 @@ router.get('/bills/match/:grnId', requirePermission(MODULE, 'view'), async (req,
   })
 })
 
+/**
+ * A bill line whose rate does not match what the order agreed.
+ *
+ * The rate is the one thing on a purchase bill nobody was checking. Quantity
+ * has been matched against the receipt since bills existed, so a supplier
+ * could not bill for goods that never arrived — but they could bill the goods
+ * that did arrive at any price they liked, and it would post.
+ */
+interface RateVariance {
+  lineIndex: number
+  itemName: string
+  /** What the order agreed, carried on the receipt line the bill settles. */
+  poRate: number
+  /** What the supplier has actually charged. */
+  billedRate: number
+  qty: number
+  /** Positive when the supplier charged more than agreed. */
+  difference: number
+  gstRate: number
+  itemId: string
+}
+
+/** A paise of drift is rounding, not a dispute. */
+const RATE_EPSILON = 0.01
+
+/**
+ * Finds every line billed at a rate the order did not agree to.
+ *
+ * Only lines that settle a receipt can be checked — a transporter's bill or a
+ * service has no order rate to compare against, and inventing one would turn
+ * a legitimate bill into an argument.
+ */
+async function findRateVariances(
+  tx: Prisma.TransactionClient,
+  lines: Array<{ grnLineId?: string | null; unitPrice: number; qty: number; gstRate?: number; itemId: string }>
+): Promise<RateVariance[]> {
+  const grnLineIds = lines
+    .map((l) => l.grnLineId)
+    .filter((v): v is string => typeof v === 'string' && v.length > 0)
+
+  if (!grnLineIds.length) return []
+
+  const receiptLines = await tx.gRNLine.findMany({
+    where: { id: { in: grnLineIds } },
+    select: { id: true, unitRate: true, item: { select: { id: true, name: true } } },
+  })
+  const byId = new Map(receiptLines.map((r) => [r.id, r]))
+
+  const out: RateVariance[] = []
+  lines.forEach((line, lineIndex) => {
+    if (!line.grnLineId) return
+    const receipt = byId.get(line.grnLineId)
+    if (!receipt) return
+
+    const poRate = round2(Number(receipt.unitRate))
+    const billedRate = round2(line.unitPrice)
+    const difference = round2(billedRate - poRate)
+
+    // A rate of zero on the order means none was ever agreed — an order
+    // raised without prices. There is nothing to compare against.
+    if (poRate <= 0) return
+    if (Math.abs(difference) < RATE_EPSILON) return
+
+    out.push({
+      lineIndex,
+      itemName: receipt.item.name,
+      itemId: receipt.item.id,
+      poRate,
+      billedRate,
+      qty: round3(line.qty),
+      difference,
+      gstRate: line.gstRate ?? 0,
+    })
+  })
+
+  return out
+}
+
+/**
+ * Refuses a bill whose rates have not been reconciled, and works out what
+ * each line should actually be booked at.
+ *
+ * Nothing is decided on the mill's behalf. A rate that does not match is put
+ * in front of whoever is booking the bill with both numbers on it, and they
+ * say which one stands — the supplier's, with a reason, or the order's, with
+ * a debit note for the difference.
+ */
+function resolveRateVariances(
+  variances: RateVariance[],
+  lines: Array<{ rateAction?: 'ACCEPT' | 'DEBIT_NOTE' | null }>,
+  reason: string | null | undefined
+) {
+  if (!variances.length) return { effectiveRates: new Map<number, number>(), toDebitNote: [] }
+
+  const undecided = variances.filter((v) => !lines[v.lineIndex]?.rateAction)
+  if (undecided.length) {
+    throw new AppError(
+      `The supplier has billed a different rate than the order agreed — say what to do with each: ${undecided
+        .map(
+          (v) =>
+            `${v.itemName} ordered at ₹${v.poRate.toFixed(2)}, billed at ₹${v.billedRate.toFixed(2)}`
+        )
+        .join('; ')}.`,
+      400,
+      'RATE_VARIANCE_UNRESOLVED'
+    )
+  }
+
+  const accepted = variances.filter(
+    (v) => lines[v.lineIndex]?.rateAction === 'ACCEPT' && v.difference > 0
+  )
+  if (accepted.length && !reason?.trim()) {
+    throw new AppError(
+      'Say why the higher rate was agreed before booking it.',
+      400,
+      'RATE_VARIANCE_REASON_REQUIRED'
+    )
+  }
+
+  // A line taken back to the order's rate is booked at that rate; the gap is
+  // claimed from the supplier on a debit note rather than silently paid.
+  const effectiveRates = new Map<number, number>()
+  const toDebitNote: RateVariance[] = []
+  for (const v of variances) {
+    if (lines[v.lineIndex]?.rateAction !== 'DEBIT_NOTE') continue
+    effectiveRates.set(v.lineIndex, v.poRate)
+    // Only an overcharge is worth claiming back. A supplier who billed less
+    // than agreed is booked at their own lower figure, which is already what
+    // accepting does.
+    if (v.difference > 0) toDebitNote.push(v)
+  }
+
+  return { effectiveRates, toDebitNote }
+}
+
 router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createBillSchema.parse(req.body)
 
@@ -3171,6 +3306,22 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
 
     await checkAgainstReceipts(tx, data.lines, data.supplierId)
 
+    // The rate half of the match. Quantity was already checked above; this is
+    // what stops a supplier billing the goods that did arrive at their own
+    // price.
+    const variances = await findRateVariances(tx, data.lines)
+    const { effectiveRates, toDebitNote } = resolveRateVariances(
+      variances,
+      data.lines,
+      data.rateVarianceReason
+    )
+
+    // Lines taken back to the order's rate are priced at it, so the bill's
+    // own total, its tax and what the supplier is paid all agree.
+    const effectiveLines = data.lines.map((l, i) =>
+      effectiveRates.has(i) ? { ...l, unitPrice: effectiveRates.get(i)! } : l
+    )
+
     const tax = await purchaseTaxContext(tx, data.supplierId)
     const billNumber = await nextDocumentNumber(tx, 'PB', billDate)
 
@@ -3185,7 +3336,7 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
 
     const charges = data.charges ?? []
     const priced = priceBill({
-      lines: data.lines,
+      lines: effectiveLines,
       charges,
       discountAmount: data.discountAmount ?? 0,
       isIntraState: tax.isIntraState,
@@ -3194,7 +3345,7 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
       tdsRate: data.tdsRate ?? 0,
     })
 
-    return tx.purchaseInvoice.create({
+    const created = await tx.purchaseInvoice.create({
       data: {
         billNumber,
         supplierId: data.supplierId,
@@ -3217,10 +3368,16 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
         totalAmount: priced.total,
         paidAmount: 0,
         balanceAmount: priced.balance,
-        notes: data.notes ?? null,
+        // The reason a higher rate was agreed belongs on the bill itself. It
+        // is the only place it survives — the line stores the figure that was
+        // booked, not the argument behind it.
+        notes:
+          variances.length && data.rateVarianceReason?.trim()
+            ? `${data.notes ? data.notes + '\n' : ''}Rate agreed: ${data.rateVarianceReason.trim()}`
+            : (data.notes ?? null),
         createdById: req.user!.id,
         lines: {
-          create: data.lines.map((l, i) => ({
+          create: effectiveLines.map((l, i) => ({
             itemId: l.itemId,
             grnLineId: l.grnLineId || null,
             description: l.description ?? null,
@@ -3252,17 +3409,79 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
       },
       include: billInclude,
     })
+
+    /*
+     * The claim back, for every line booked at the order's rate rather than
+     * the supplier's.
+     *
+     * Raised as a draft, never sent. A debit note is a demand for money from
+     * somebody the mill trades with, and it should leave the building because
+     * a person decided it should — not because a rate comparison did.
+     *
+     * Its own tax follows the goods it corrects: the difference is a change
+     * to what was supplied, so it carries the line's GST rate and the same
+     * intra- or inter-state split the bill was worked out on.
+     */
+    if (toDebitNote.length) {
+      const noteNumber = await nextDocumentNumber(tx, 'DN', billDate)
+
+      const noteLines = toDebitNote.map((v, i) => {
+        const taxableValue = round2(v.difference * v.qty)
+        const taxAmount = round2(taxableValue * (v.gstRate / 100))
+        return {
+          itemId: v.itemId,
+          description: `Billed at ${v.billedRate.toFixed(2)} against ${v.poRate.toFixed(2)} on the order`,
+          hsnCode: hsnById.get(v.itemId) ?? null,
+          qty: v.qty,
+          unitPrice: v.difference,
+          taxableValue,
+          gstRate: v.gstRate,
+          amount: round2(taxableValue + taxAmount),
+          sortOrder: i,
+        }
+      })
+
+      const subtotal = round2(noteLines.reduce((s, l) => s + l.taxableValue, 0))
+      const taxTotal = round2(noteLines.reduce((s, l) => s + (l.amount - l.taxableValue), 0))
+      const { rounded, roundOff } = applyRoundOff(subtotal + taxTotal)
+
+      await tx.debitNote.create({
+        data: {
+          noteNumber,
+          supplierId: data.supplierId,
+          billId: created.id,
+          noteDate: billDate,
+          reason: `Rate difference on ${created.billNumber}`,
+          subtotal,
+          cgst: tax.isIntraState ? round2(taxTotal / 2) : 0,
+          sgst: tax.isIntraState ? round2(taxTotal / 2) : 0,
+          igst: tax.isIntraState ? 0 : taxTotal,
+          roundOff,
+          totalAmount: rounded,
+          status: 'DRAFT',
+          lines: { create: noteLines },
+        },
+      })
+    }
+
+    return { bill: created, debitNoteRaised: toDebitNote.length > 0 }
   })
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
     entityType: 'PurchaseInvoice',
-    entityId: bill.id,
-    after: bill,
+    entityId: bill.bill.id,
+    after: bill.bill,
   })
 
-  res.status(201).json({ success: true, data: bill })
+  res.status(201).json({
+    success: true,
+    data: bill.bill,
+    message: bill.debitNoteRaised
+      ? `${bill.bill.billNumber} booked at the order's rate. A debit note is waiting in draft for the difference.`
+      : undefined,
+  })
 })
 
 router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {

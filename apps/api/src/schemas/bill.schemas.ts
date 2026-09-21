@@ -55,6 +55,16 @@ export const billLineSchema = z.object({
   unitPrice: rate,
   discount: percent('Discount').optional(),
   gstRate: percent('GST rate').optional(),
+  /**
+   * What to do when the supplier has billed a different rate than the order
+   * agreed. Required only on a line where the two actually differ — an
+   * ordinary line never carries it.
+   *
+   * `ACCEPT` books the supplier's rate, and the bill needs a reason saying
+   * why it was agreed. `DEBIT_NOTE` books the order's rate and raises a draft
+   * debit note to the supplier for the difference.
+   */
+  rateAction: z.enum(['ACCEPT', 'DEBIT_NOTE']).optional().nullable(),
 })
 
 /**
@@ -87,6 +97,12 @@ const billBase = z.object({
   tdsSection: z.string().max(20).optional().nullable(),
   tdsRate: percent('TDS rate').optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
+  /**
+   * Why a rate higher than the order was agreed to. Asked for once per bill
+   * rather than per line, because a supplier who raised their price raised it
+   * for one reason and typing it four times helps nobody.
+   */
+  rateVarianceReason: z.string().max(300).optional().nullable(),
   lines: z.array(billLineSchema).min(1, 'A bill needs at least one line'),
   charges: z.array(billChargeSchema).optional(),
 })

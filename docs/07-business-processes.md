@@ -215,13 +215,14 @@ Truck 3 (Challan 112) → GRN-003 (Item E: 500)   ┘
 - **One receipt, one bill.** An invoice arrives with a specific delivery;
   the accountant bills that single GRN. **Built.**
 - **Price mismatch — rate variance.** PO rate ₹100/m, vendor invoices
-  ₹105/m. **Not built. Designed below, to be built.**
+  ₹105/m. **Built.** See below.
 
-#### Rate variance — the flow to build
+#### Rate variance
 
-Today a supplier can invoice above the agreed rate and nothing catches it.
-The bill takes the order's rate and no comparison is made. This is the
-largest open hole in Purchase.
+Quantity had been matched against the receipt since bills existed, so a
+supplier could not bill for goods that never arrived. But they could bill
+the goods that *did* arrive at any price they liked, and it would post.
+That was the largest hole in Purchase, and it is now closed.
 
 Deliberately kept simple — no ledger accounting, no approval queue, two
 choices at the moment of entry:
@@ -258,16 +259,24 @@ this ERP and the CA holds the real books (see §8). The variance is stored
 as a number on the bill line and is reportable; a PPV ledger can come
 later, when Accounts does, without changing anything here.
 
-**No approval threshold in v1** — consistent with the over-delivery
-decision above. The reason field is the control.
+**No approval threshold** — consistent with the over-delivery decision
+above. The reason field is the control.
 
-What it needs: a small additive migration (the order's rate copied onto
-the bill line per [business rule 4](04-business-rules.md#4-what-a-document-remembers),
-plus which action was taken and why), the comparison and refusal in the
-bill route, the inline flag on the bill form, and a debit note drafted
-from the difference. `DebitNote` and `DebitNoteLine` models already exist
-and `DN` is already a document type in the numbering rules, so the note
-itself is mostly wiring.
+**No migration was needed.** The order's rate already travels on the
+receipt line the bill settles, so the comparison had everything it needed.
+The decision does not need storing either: a line booked at the order's
+rate *is* the record of that choice, and the draft debit note beside it is
+the record of the claim. A reason for accepting a higher rate goes onto the
+bill's own notes, prefixed `Rate agreed:`.
+
+**Verified against live data** on PO-0006 / GRN-2627-0010 (1,000 mtr of
+Cotton Poplin 40s ordered at ₹10):
+
+| Attempt | Result |
+|---|---|
+| Billed ₹12, no decision made | Refused — names the item and both rates |
+| Billed ₹12, accepted, no reason | Refused — "say why the higher rate was agreed" |
+| Billed 5,000 against 1,000 accepted | Still refused, as before — no regression |
 
 #### What this buys the mill
 
