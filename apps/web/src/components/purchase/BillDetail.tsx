@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Download, Loader2, Paperclip, X } from 'lucide-react'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
@@ -258,7 +258,24 @@ function Heading({ children }: { children: React.ReactNode }) {
  * "what is on this list". Nothing in here is a control — somebody who came to
  * check a figure should not be one slip away from changing it.
  */
-export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClose: () => void }) {
+export function BillDetailDialog({
+  bill,
+  onClose,
+  focus,
+}: {
+  bill: PurchaseBill
+  onClose: () => void
+  /** Opened from the paperclip — land on the files rather than at the top. */
+  focus?: 'attachments'
+}) {
+  const filesRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (focus === 'attachments') {
+      filesRef.current?.scrollIntoView({ block: 'center' })
+    }
+  }, [focus])
+
   const receipts = [
     ...new Set((bill.lines ?? []).map((l) => l.grnLine?.grn?.grnNumber).filter(Boolean)),
   ] as string[]
@@ -310,11 +327,10 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
         <div className="border-border flex items-start justify-between gap-4 border-b px-6 py-4">
           <div className="min-w-0">
             <h2 id="bill-detail-title" className="text-foreground text-lg font-semibold">
-              {bill.billNumber}
+              {bill.supplierInvoiceNo || bill.billNumber}
             </h2>
             <p className="text-muted-foreground mt-0.5 text-sm">
-              {bill.supplier?.name}
-              {bill.supplierInvoiceNo ? ` · their invoice ${bill.supplierInvoiceNo}` : ''}
+              {bill.supplier?.name} · our reference {bill.billNumber}
             </p>
           </div>
           <button className="btn-ghost p-1.5" onClick={onClose} aria-label="Close">
@@ -328,21 +344,17 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             <Heading>The bill</Heading>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
               <Field
-                label="Our number"
-                value={<span className="font-mono text-teal-400">{bill.billNumber}</span>}
-              />
-              <Field
-                label="Their invoice"
+                label="Bill no. (the supplier's)"
                 value={
                   bill.supplierInvoiceNo ? (
-                    <span className="font-mono">{bill.supplierInvoiceNo}</span>
+                    <span className="font-mono text-teal-400">{bill.supplierInvoiceNo}</span>
                   ) : (
-                    <span className="text-muted-foreground">Not given</span>
+                    <span className="text-muted-foreground">Not given yet</span>
                   )
                 }
               />
               <Field
-                label="Their invoice date"
+                label="Bill date"
                 value={
                   bill.supplierInvoiceDate ? (
                     formatDate(bill.supplierInvoiceDate)
@@ -350,6 +362,10 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
                     <span className="text-muted-foreground">—</span>
                   )
                 }
+              />
+              <Field
+                label="Our reference"
+                value={<span className="font-mono">{bill.billNumber}</span>}
               />
               <Field label="Booked on" value={formatDate(bill.billDate)} />
               <Field
@@ -644,7 +660,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             </section>
           )}
 
-          <section>
+          <section ref={filesRef}>
             <Heading>Attachments ({files.length})</Heading>
             <Attachments files={files} />
           </section>

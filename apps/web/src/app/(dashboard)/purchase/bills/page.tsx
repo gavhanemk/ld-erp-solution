@@ -85,8 +85,11 @@ function PurchaseBillsTable() {
   })
   /** The one bill whose items are showing. One at a time, so the list stays a list. */
   const [expanded, setExpanded] = useState<string | null>(null)
-  /** The bill open in the full detail window, if any. */
-  const [detail, setDetail] = useState<PurchaseBill | null>(null)
+  /** The bill open in the full detail window, and where to land in it. */
+  const [detail, setDetail] = useState<{
+    bill: PurchaseBill
+    focus?: 'attachments'
+  } | null>(null)
 
   /*
    * Arriving from "Book a bill for this" on a goods receipt.
@@ -275,10 +278,13 @@ function PurchaseBillsTable() {
                             href={`/print/purchase-bill/${bill.id}`}
                             target="_blank"
                             className="font-mono text-xs font-semibold text-teal-400 underline-offset-2 hover:underline"
-                            title={`Open ${bill.billNumber} to print or save`}
+                            title="Open this bill to print or save"
                           >
-                            {bill.billNumber}
+                            {bill.supplierInvoiceNo || bill.billNumber}
                           </Link>
+                          <span className="text-muted-foreground font-mono text-[10px]">
+                            {bill.billNumber}
+                          </span>
                           <span className={s.cls}>{s.label}</span>
                           {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
                         </div>
@@ -354,7 +360,7 @@ function PurchaseBillsTable() {
                     <div className="mt-3 flex justify-end gap-1">
                       <button
                         className="btn-ghost border-border rounded-lg border p-1.5"
-                        onClick={() => setDetail(bill)}
+                        onClick={() => setDetail({ bill })}
                         title="View full detail"
                         aria-label={`View details of ${bill.billNumber}`}
                       >
@@ -406,8 +412,12 @@ function PurchaseBillsTable() {
               <table className="data-table w-full min-w-[1020px]">
                 <thead>
                   <tr>
+                    {/* The supplier's own number leads, because that is the one
+                      both sides quote. Ours is the book reference beside it —
+                      the old ERP printed one value in both places and lost the
+                      distinction entirely. */}
+                    <th>Bill no.</th>
                     <th>Our ref</th>
-                    <th>Their invoice</th>
                     {/* The receipts this bill settles. The old ERP called it
                       Reference# and put a GRN number in it, because that is
                       what the accounts team reconciles against — the bill's
@@ -446,27 +456,27 @@ function PurchaseBillsTable() {
                               target="_blank"
                               className="text-teal-400 underline-offset-2 hover:underline"
                               onClick={(e) => e.stopPropagation()}
-                              title={`Open ${bill.billNumber} to print or save`}
+                              title={`Open this bill to print or save`}
                             >
-                              {bill.billNumber}
+                              {bill.supplierInvoiceNo || bill.billNumber}
                             </Link>
                           </span>
-                        </td>
-                        <td>
-                          {bill.supplierInvoiceNo ? (
-                            <>
-                              <div className="text-foreground font-mono text-xs">
-                                {bill.supplierInvoiceNo}
-                              </div>
-                              {bill.supplierInvoiceDate && (
-                                <div className="text-muted-foreground text-[10px]">
-                                  {formatDate(bill.supplierInvoiceDate)}
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
+                          {bill.supplierInvoiceDate && (
+                            <div className="text-muted-foreground pl-[18px] text-[10px]">
+                              {formatDate(bill.supplierInvoiceDate)}
+                            </div>
                           )}
+                          {!bill.supplierInvoiceNo && (
+                            <div
+                              className="text-muted-foreground pl-[18px] text-[10px]"
+                              title="The supplier's invoice number has not been entered — our own reference stands in until it is"
+                            >
+                              their number not given
+                            </div>
+                          )}
+                        </td>
+                        <td className="text-muted-foreground font-mono text-xs">
+                          {bill.billNumber}
                         </td>
                         <td>
                           <div className="flex items-center gap-2">
@@ -483,15 +493,23 @@ function PurchaseBillsTable() {
                               </span>
                             )}
                             {fileCountOn(bill) > 0 && (
-                              <span
-                                className="text-muted-foreground inline-flex shrink-0 items-center gap-0.5 text-[10px]"
-                                title={`${fileCountOn(bill)} file${
+                              // A paperclip that cannot be pressed is a tease.
+                              // It opens the detail window at its attachments,
+                              // which is where the files are listed and signed.
+                              <button
+                                type="button"
+                                className="text-muted-foreground hover:text-foreground inline-flex shrink-0 items-center gap-0.5 text-[10px] transition"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setDetail({ bill, focus: 'attachments' })
+                                }}
+                                title={`Open the ${fileCountOn(bill)} file${
                                   fileCountOn(bill) === 1 ? '' : 's'
-                                } on the order and its receipts — open View details to read them`}
+                                } on this bill's order and receipts`}
                               >
                                 <Paperclip size={11} />
                                 {fileCountOn(bill)}
-                              </span>
+                              </button>
                             )}
                           </div>
                         </td>
@@ -545,7 +563,7 @@ function PurchaseBillsTable() {
                           >
                             <button
                               className="btn-ghost p-1.5"
-                              onClick={() => setDetail(bill)}
+                              onClick={() => setDetail({ bill })}
                               title="View full detail"
                               aria-label={`View details of ${bill.billNumber}`}
                             >
@@ -624,7 +642,13 @@ function PurchaseBillsTable() {
         onSaved={() => void load()}
       />
 
-      {detail && <BillDetailDialog bill={detail} onClose={() => setDetail(null)} />}
+      {detail && (
+        <BillDetailDialog
+          bill={detail.bill}
+          focus={detail.focus}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   )
 }

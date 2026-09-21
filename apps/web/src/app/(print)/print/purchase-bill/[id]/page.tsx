@@ -208,12 +208,25 @@ export default function PrintPurchaseBill() {
   ]
 
   const meta = [
-    { label: 'Our Ref', value: bill.billNumber, strong: true },
-    { label: 'Their Invoice', value: bill.supplierInvoiceNo || '—' },
+    /*
+     * The supplier's own number leads the sheet.
+     *
+     * It is the number both sides quote — theirs on the paper that arrived,
+     * ours only in our books. The mill's old sheet printed the same value in
+     * both BILL No. and SUPPLIER BILL NO, which reads as two facts and is one;
+     * here they are two fields because they are genuinely two numbers, and the
+     * one that matters to the supplier is first.
+     */
     {
-      label: 'Their Date',
-      value: bill.supplierInvoiceDate ? shortDate(bill.supplierInvoiceDate) : '—',
+      label: 'Bill No.',
+      value: bill.supplierInvoiceNo || bill.billNumber,
+      strong: true,
     },
+    {
+      label: 'Bill Date',
+      value: bill.supplierInvoiceDate ? shortDate(bill.supplierInvoiceDate) : shortDate(bill.billDate),
+    },
+    { label: 'Our Reference', value: bill.billNumber },
     { label: 'Booked', value: shortDate(bill.billDate) },
     { label: 'Due', value: bill.dueDate ? shortDate(bill.dueDate) : '—' },
     ...(bill.po ? [{ label: 'Against Order', value: bill.po.poNumber }] : []),
