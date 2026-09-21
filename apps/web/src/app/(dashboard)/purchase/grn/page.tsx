@@ -14,6 +14,7 @@ import {
   Pencil,
   Trash2,
   FileText,
+  ReceiptIndianRupee,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
@@ -519,6 +520,16 @@ export default function GoodsReceiptPage() {
     ]
     if (grn.status !== 'CANCELLED') {
       items.push(
+        {
+          // The old ERP's "Add Bill From GRN", in the same place: beside the
+          // receipt, where somebody holding the supplier's invoice is already
+          // looking. It opens the bill form with this receipt's lines already
+          // gathered, rather than making them find it from the other end.
+          key: 'bill',
+          label: 'Book a bill for this',
+          icon: <ReceiptIndianRupee size={14} />,
+          href: `/purchase/bills?fromGrn=${grn.id}`,
+        },
         {
           key: 'edit',
           label: 'Correct this receipt',

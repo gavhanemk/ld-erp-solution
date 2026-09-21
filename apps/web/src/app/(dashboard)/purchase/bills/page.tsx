@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { Suspense, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Ban } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
@@ -19,7 +20,7 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 const money = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-export default function PurchaseBillsPage() {
+function PurchaseBillsTable() {
   const { rowsPerPage } = useAppSettings()
 
   const [rows, setRows] = useState<PurchaseBill[]>([])
@@ -38,6 +39,21 @@ export default function PurchaseBillsPage() {
     open: false,
     record: null,
   })
+
+  /*
+   * Arriving from "Book a bill for this" on a goods receipt.
+   *
+   * The receipt's id travels in the address rather than in shared state so the
+   * link is an ordinary link — it survives a new tab, a refresh and the back
+   * button, none of which a click handler would.
+   */
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const fromGrn = searchParams.get('fromGrn')
+
+  useEffect(() => {
+    if (fromGrn) setDialog({ open: true, record: null })
+  }, [fromGrn])
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
@@ -445,9 +461,25 @@ export default function PurchaseBillsPage() {
       <PurchaseBillDialog
         open={dialog.open}
         record={dialog.record}
-        onClose={() => setDialog({ open: false, record: null })}
+        initialGrnId={fromGrn}
+        onClose={() => {
+          setDialog({ open: false, record: null })
+          // The receipt has been dealt with one way or another; leaving it in
+          // the address would reopen the form on the next visit to this page.
+          if (fromGrn) router.replace('/purchase/bills')
+        }}
         onSaved={() => void load()}
       />
     </div>
+  )
+}
+
+export default function PurchaseBillsPage() {
+  // useSearchParams needs a Suspense boundary or the whole route opts out of
+  // static rendering and Next refuses to build.
+  return (
+    <Suspense fallback={<p className="text-muted-foreground text-sm">Loading...</p>}>
+      <PurchaseBillsTable />
+    </Suspense>
   )
 }

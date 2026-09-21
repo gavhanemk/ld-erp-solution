@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { X, Loader2, AlertCircle, Plus, Trash2, Download, TriangleAlert } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 
@@ -76,7 +76,20 @@ interface GrnOption {
   id: string
   grnNumber: string
   status: string
-  po?: { poNumber: string; supplierId: string } | null
+  /**
+   * Shaped exactly as `/purchase/grn` returns it — the supplier arrives
+   * nested inside the order, not flattened onto it.
+   *
+   * This was written as `supplierId` once, which is not a field the API has
+   * ever sent. Nothing failed loudly: the filter below read `undefined`,
+   * compared it against the chosen supplier, and quietly offered no receipts
+   * at all, so a bill could never be started from one.
+   */
+  po?: {
+    id: string
+    poNumber: string
+    supplier?: { id: string; name: string; code?: string } | null
+  } | null
 }
 
 const emptyLine = (): BillLine => ({
@@ -101,11 +114,23 @@ export function PurchaseBillDialog({
   onClose,
   onSaved,
   record,
+  initialGrnId,
 }: {
   open: boolean
   onClose: () => void
   onSaved: () => void
   record?: PurchaseBill | null
+  /**
+   * A receipt to gather onto the bill the moment the form opens, for the
+   * "Book a bill for this" shortcut on the goods receipt screen.
+   *
+   * The old ERP put an "Add Bill From GRN" button beside every receipt, which
+   * is how the accounts team thinks about it — the receipt is on the desk and
+   * the bill is raised against it. Reaching the same place by opening Bills,
+   * pressing Book Bill, picking the supplier and then finding the receipt is
+   * four steps to arrive where the button already was.
+   */
+  initialGrnId?: string | null
 }) {
   const isEdit = Boolean(record)
 
@@ -173,6 +198,39 @@ export function PurchaseBillDialog({
     setError(null)
   }, [open, record])
 
+  /*
+   * Gathers the receipt the shortcut arrived with, once and once only.
+   *
+   * Waits for the receipt list to load, because the picker below is driven by
+   * it and a bill that filled itself in while the box beside it still read
+   * "choose a receipt" would look broken. The ref stops a re-render pulling
+   * the same receipt twice, which the form would rightly refuse as a
+   * duplicate.
+   */
+  const autoPulled = useRef<string | null>(null)
+  useEffect(() => {
+    if (!open || record || !initialGrnId) return
+    if (autoPulled.current === initialGrnId) return
+    if (!grns.length) return
+
+    autoPulled.current = initialGrnId
+    setPullGrnId(initialGrnId)
+  }, [open, record, initialGrnId, grns])
+
+  useEffect(() => {
+    if (!open) autoPulled.current = null
+  }, [open])
+
+  // Separated from setting the id above so the pull runs with `pullGrnId`
+  // already committed — `pullFromGrn` reads it rather than taking an argument.
+  useEffect(() => {
+    if (!open || record || !initialGrnId) return
+    if (pullGrnId !== initialGrnId) return
+    if (lines.some((l) => l.grnLineId)) return
+    void pullFromGrn()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pullGrnId])
+
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -227,7 +285,7 @@ export function PurchaseBillDialog({
   const pullable = useMemo(
     () =>
       grns.filter(
-        (g) => g.status !== 'CANCELLED' && (!supplierId || g.po?.supplierId === supplierId),
+        (g) => g.status !== 'CANCELLED' && (!supplierId || g.po?.supplier?.id === supplierId),
       ),
     [grns, supplierId],
   )
