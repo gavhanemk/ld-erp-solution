@@ -12,8 +12,16 @@ import {
   TriangleAlert,
   Receipt,
   Info,
+  FileText,
+  Package,
+  Percent,
+  MessageSquare,
+  Calculator,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+// The same panel the order and receipt forms are built from, so all three
+// read as one module rather than three people's ideas of a form.
+import { Section } from '@/components/purchase/PurchaseOrderDialog'
 
 export interface BillLine {
   itemId: string
@@ -698,12 +706,26 @@ export function PurchaseBillDialog({
               </p>
             </div>
           </div>
-          <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
-            <X size={18} />
-          </button>
+          {/* The primary action sits in the header as well as the footer, as
+            it does on the order and receipt forms. On a long form the footer
+            is a scroll away from wherever somebody happens to be. */}
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="submit"
+              form="bill-form"
+              className="btn-primary"
+              disabled={saving || incomplete}
+            >
+              {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
+              {isEdit ? 'Save changes' : 'Book bill'}
+            </button>
+            <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
-        <form onSubmit={submit} className="flex flex-1 flex-col overflow-hidden">
+        <form id="bill-form" onSubmit={submit} className="flex flex-1 flex-col overflow-hidden">
           {/* The same rhythm as the goods receipt and purchase order forms:
             px-4 py-2.5 and a tight gap between blocks. This was px-6 py-5 with
             space-y-5, which on a form this tall reads as a different app —
@@ -718,12 +740,17 @@ export function PurchaseBillDialog({
           )}
 
           {!isEdit && (
-            <div className="rounded-lg border border-border bg-secondary/30 p-2.5">
+            <Section icon={Download} title="Start from a goods receipt">
               <div className="flex flex-wrap items-end gap-3">
                 <div className="flex-1 min-w-[240px]">
-                  <label className="form-label" htmlFor="bill-grn">
-                    {billedReceipts.length ? 'Add another goods receipt' : 'Start from a goods receipt'}
-                  </label>
+                  {/* Only once the bill has receipts on it does this box say
+                    something the panel's own heading does not. Before that the
+                    two would read the same thing twice over. */}
+                  {billedReceipts.length > 0 && (
+                    <label className="form-label" htmlFor="bill-grn">
+                      Add another goods receipt
+                    </label>
+                  )}
                   <select
                     id="bill-grn"
                     className="form-input"
@@ -763,9 +790,10 @@ export function PurchaseBillDialog({
                       ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
                       : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
               </p>
-            </div>
+            </Section>
           )}
 
+          <Section icon={FileText} title="The bill">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
             <div className="md:col-span-2">
               <label className="form-label" htmlFor="bill-supplier">
@@ -893,6 +921,7 @@ export function PurchaseBillDialog({
               </label>
             </div>
           </div>
+          </Section>
 
           {(overBilled.length > 0 || rateDrift.length > 0) && (
             <div className="flex items-start gap-3 p-3 rounded-lg border border-amber-500/40 bg-amber-500/5">
@@ -1006,11 +1035,10 @@ export function PurchaseBillDialog({
           )}
 
           {/* Lines */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                What the supplier has charged for
-              </h3>
+          <Section
+            icon={Package}
+            title="What the supplier has charged for"
+            actions={
               <button
                 type="button"
                 onClick={() => setLines((p) => [...p, emptyLine()])}
@@ -1018,8 +1046,8 @@ export function PurchaseBillDialog({
               >
                 <Plus size={14} /> Add line
               </button>
-            </div>
-
+            }
+          >
             <div className="overflow-x-auto border border-border rounded-lg">
               <table className="w-full text-sm min-w-[900px]">
                 <thead>
@@ -1158,15 +1186,14 @@ export function PurchaseBillDialog({
                 </tbody>
               </table>
             </div>
-          </div>
+          </Section>
 
           {/* Charges — freight, transport, dyeing. Own GST rate each. */}
           {chargeTypes.length > 0 && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Extras at the foot of the bill
-                </h3>
+            <Section
+              icon={Percent}
+              title="Extras at the foot of the bill"
+              actions={
                 <button
                   type="button"
                   onClick={() =>
@@ -1176,7 +1203,8 @@ export function PurchaseBillDialog({
                 >
                   <Plus size={14} /> Add charge
                 </button>
-              </div>
+              }
+            >
 
               {charges.length > 0 && (
                 <div className="border border-border rounded-lg divide-y divide-border/50">
@@ -1258,18 +1286,12 @@ export function PurchaseBillDialog({
                   ))}
                 </div>
               )}
-            </div>
+            </Section>
           )}
 
-          {/* Totals, TDS and notes.
-            Two boxes, shoulder to shoulder, each ruled off — what is typed on
-            the left, what it comes to on the right. Loose on the page they
-            read as four unrelated fields floating under the grid. */}
+          {/* What is typed on the left, what it comes to on the right. */}
           <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
-            <div className="border-border space-y-2.5 rounded-lg border p-2.5">
-              <h3 className="text-muted-foreground text-xs font-semibold uppercase tracking-wide">
-                Deducted at source, and anything worth noting
-              </h3>
+            <Section icon={MessageSquare} title="Deducted at source, and anything worth noting">
               <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 <div>
                   <label className="form-label" htmlFor="bill-tds-section">
@@ -1312,8 +1334,9 @@ export function PurchaseBillDialog({
                   onChange={(e) => setNotes(e.target.value)}
                 />
               </div>
-            </div>
+            </Section>
 
+            <Section icon={Calculator} title="Totals">
             <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
               <Row label="Goods subtotal" value={totals.subtotal} />
               <div className="flex items-center justify-between gap-4">
@@ -1381,6 +1404,7 @@ export function PurchaseBillDialog({
                 </>
               )}
             </div>
+            </Section>
           </div>
 
           </div>

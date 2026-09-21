@@ -950,6 +950,15 @@ export function ReceiveGoodsDialog({
             </p>
           )}
 
+          {/* Otherwise the form ends after two short boxes and leaves the rest
+              of the card empty — reading as broken rather than as waiting on
+              a choice only the store keeper can make. */}
+          {!loadingLists && !editing && orders.length > 0 && !poId && (
+            <p className="text-muted-foreground py-10 text-center text-sm">
+              Pick a purchase order above to see what&rsquo;s due.
+            </p>
+          )}
+
           {loadingOrder && <p className="text-muted-foreground py-6 text-sm">Opening the order…</p>}
 
           {order && !loadingOrder && (

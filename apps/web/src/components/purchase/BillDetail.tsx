@@ -324,12 +324,16 @@ export function BillDetailDialog({
   })()
 
   return createPortal(
+    // The same shell the order, receipt and bill forms use: offset past the
+    // sidebar, filling the height, header and footer fixed with only the
+    // middle scrolling. This was a centred 5xl card with its own 75vh cap,
+    // which is a fourth idea of a dialog in a module that already had three.
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm sm:p-8"
+      className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3"
       onClick={onClose}
     >
       <div
-        className="glass-card my-auto w-full max-w-5xl"
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="bill-detail-title"
@@ -338,14 +342,14 @@ export function BillDetailDialog({
           if (e.key === 'Escape') onClose()
         }}
       >
-        <div className="border-border flex items-start justify-between gap-4 border-b px-6 py-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <div className="bg-primary/10 border-primary/20 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
-              <Receipt size={17} className="text-primary" />
+        <div className="border-border flex shrink-0 items-start justify-between gap-4 border-b px-4 py-2.5">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
+              <Receipt size={16} className="text-primary" />
             </div>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h2 id="bill-detail-title" className="text-foreground text-lg font-semibold">
+                <h2 id="bill-detail-title" className="text-foreground text-base font-semibold">
                   {bill.supplierInvoiceNo || bill.billNumber}
                 </h2>
                 <span className={(STATUS[bill.status] ?? { cls: 'badge-neutral' }).cls}>
@@ -353,7 +357,7 @@ export function BillDetailDialog({
                 </span>
                 {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
               </div>
-              <p className="text-muted-foreground mt-0.5 text-sm">
+              <p className="text-muted-foreground mt-0.5 text-xs">
                 {bill.supplier?.name} · our reference {bill.billNumber}
               </p>
             </div>
@@ -363,7 +367,7 @@ export function BillDetailDialog({
           </button>
         </div>
 
-        <div className="max-h-[75vh] space-y-6 overflow-y-auto px-6 py-5">
+        <div className="flex-1 space-y-2.5 overflow-y-auto px-4 py-2.5">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {[
               { label: 'Bill total', value: `₹${inr(bill.totalAmount)}`, color: 'text-foreground' },
@@ -707,7 +711,7 @@ export function BillDetailDialog({
           )}
         </div>
 
-        <div className="border-border flex justify-end border-t px-6 py-3">
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
           <button className="btn-secondary" onClick={onClose}>
             Close
           </button>

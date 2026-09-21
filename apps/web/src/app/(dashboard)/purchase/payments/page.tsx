@@ -455,6 +455,27 @@ export default function SupplierPaymentsPage() {
                       </div>
 
                       <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                        <dt className="text-muted-foreground">PO</dt>
+                        <dd className="text-foreground min-w-0">
+                          {b.po ? (
+                            <a
+                              href={`/print/purchase-order/${b.po.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-teal-400 underline-offset-2 hover:underline"
+                              title="Open this order to print or save"
+                            >
+                              {b.po.poNumber}
+                            </a>
+                          ) : (
+                            <span
+                              className="text-muted-foreground"
+                              title="Typed by hand, or it gathers receipts from more than one order"
+                            >
+                              Not one order
+                            </span>
+                          )}
+                        </dd>
                         <dt className="text-muted-foreground">Due</dt>
                         <dd className="text-foreground min-w-0">
                           {b.dueDate ? (
@@ -513,6 +534,7 @@ export default function SupplierPaymentsPage() {
                       <th style={{ width: 30 }} />
                       <th>Supplier</th>
                       <th>Bill</th>
+                      <th>PO</th>
                       <th>Due</th>
                       <th style={{ textAlign: 'right' }}>Bill total</th>
                       <th style={{ textAlign: 'right' }}>Paid</th>
@@ -562,6 +584,26 @@ export default function SupplierPaymentsPage() {
                                 </div>
                               )}
                             </td>
+                            <td className="whitespace-nowrap text-xs">
+                              {b.po ? (
+                                <a
+                                  href={`/print/purchase-order/${b.po.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-teal-400 hover:underline"
+                                  title="Open this order to print or save"
+                                >
+                                  {b.po.poNumber}
+                                </a>
+                              ) : (
+                                <span
+                                  className="text-muted-foreground"
+                                  title="Typed by hand, or it gathers receipts from more than one order"
+                                >
+                                  Not one order
+                                </span>
+                              )}
+                            </td>
                             <td className="text-xs">
                               {b.dueDate ? (
                                 formatDate(b.dueDate)
@@ -592,7 +634,7 @@ export default function SupplierPaymentsPage() {
                           </tr>
                           {bOpen && canExpand && (
                             <tr>
-                              <td colSpan={9} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                                 <BillTrailPanel billNumber={b.billNumber} po={b.po} lines={b.lines} />
                               </td>
                             </tr>
@@ -659,6 +701,24 @@ export default function SupplierPaymentsPage() {
                           '—'
                         )}
                       </dd>
+                      <dt className="text-muted-foreground">PO</dt>
+                      <dd className="text-foreground min-w-0">
+                        {p.invoice?.po ? (
+                          <a
+                            href={`/print/purchase-order/${p.invoice.po.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-teal-400 underline-offset-2 hover:underline"
+                            title="Open this order to print or save"
+                          >
+                            {p.invoice.po.poNumber}
+                          </a>
+                        ) : (
+                          <span className="text-muted-foreground">
+                            {p.invoice ? 'Not one order' : '—'}
+                          </span>
+                        )}
+                      </dd>
                       <dt className="text-muted-foreground">How</dt>
                       <dd className="text-foreground min-w-0">
                         {MODE_LABEL[p.mode] ?? p.mode}
@@ -705,6 +765,7 @@ export default function SupplierPaymentsPage() {
                     <th>Date</th>
                     <th>Supplier</th>
                     <th>Against</th>
+                    <th>PO</th>
                     <th>How</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
                     <th>Recorded by</th>
@@ -752,6 +813,23 @@ export default function SupplierPaymentsPage() {
                               <span className="text-muted-foreground">—</span>
                             )}
                           </td>
+                          <td className="whitespace-nowrap text-xs">
+                            {p.invoice?.po ? (
+                              <a
+                                href={`/print/purchase-order/${p.invoice.po.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-mono text-teal-400 hover:underline"
+                                title="Open this order to print or save"
+                              >
+                                {p.invoice.po.poNumber}
+                              </a>
+                            ) : (
+                              <span className="text-muted-foreground">
+                                {p.invoice ? 'Not one order' : '—'}
+                              </span>
+                            )}
+                          </td>
                           <td>
                             <span className="text-foreground text-xs">
                               {MODE_LABEL[p.mode] ?? p.mode}
@@ -769,7 +847,7 @@ export default function SupplierPaymentsPage() {
                         </tr>
                         {pOpen && canExpand && p.invoice && (
                           <tr>
-                            <td colSpan={8} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={9} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <BillTrailPanel
                                 billNumber={p.invoice.billNumber}
                                 po={p.invoice.po}
