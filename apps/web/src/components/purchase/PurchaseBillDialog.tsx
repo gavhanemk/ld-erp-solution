@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { X, Loader2, AlertCircle, Plus, Trash2, Download, TriangleAlert } from 'lucide-react'
+import { X, Loader2, AlertCircle, Plus, Trash2, Download, TriangleAlert, Receipt } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 
 export interface BillLine {
@@ -343,16 +343,25 @@ export function PurchaseBillDialog({
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
 
-  // Receipts worth offering: this supplier's, and not cancelled. A cancelled
-  // receipt is refused by the API anyway, so offering it would only waste a
-  // save.
-  const pullable = useMemo(
-    () =>
-      grns.filter(
-        (g) => g.status !== 'CANCELLED' && (!supplierId || g.po?.supplier?.id === supplierId),
-      ),
-    [grns, supplierId],
-  )
+  /*
+   * Receipts worth offering: this supplier's, not cancelled, and not already
+   * gathered onto this bill.
+   *
+   * The last of those was missing, and it made the picker read as broken.
+   * A receipt already on the bill stayed in the list, so somebody looking for
+   * a second delivery to add saw the one they had just added, picked it, and
+   * was told it was already there. Where a supplier has only the one receipt,
+   * the list then looked full and behaved empty.
+   */
+  const pullable = useMemo(() => {
+    const already = new Set(lines.map((l) => l.grnNumber).filter(Boolean))
+    return grns.filter(
+      (g) =>
+        g.status !== 'CANCELLED' &&
+        !already.has(g.grnNumber) &&
+        (!supplierId || g.po?.supplier?.id === supplierId),
+    )
+  }, [grns, supplierId, lines])
 
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
@@ -638,25 +647,48 @@ export function PurchaseBillDialog({
     (needsRateReason && !rateVarianceReason.trim())
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div className="glass-card w-full max-w-6xl my-auto" role="dialog" aria-modal="true">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <div>
-            <h2 className="text-lg font-semibold text-foreground">
-              {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
-            </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {isEdit
-                ? 'A bill can be changed until a payment is made against it'
-                : 'Our reference number is given when you save. Type the supplier’s own number below.'}
-            </p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      {/* `h-full`, not a cap — see PurchaseOrderDialog for why: a cap only
+        says how tall the card may not be, so a form shorter than the screen
+        hugs its content and the leftover is split above and below as
+        centring slack, which is the whitespace that used to show over the
+        top of this one. Filling the height makes the margin the padding and
+        nothing else. */}
+      <div
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bill-dialog-title"
+      >
+        {/* Header — stays put while the body scrolls. */}
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
+          <div className="flex items-center gap-2.5">
+            <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
+              <Receipt size={16} className="text-primary" />
+            </div>
+            <div>
+              <h2 id="bill-dialog-title" className="text-foreground text-base font-semibold">
+                {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
+              </h2>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                {isEdit
+                  ? 'A bill can be changed until a payment is made against it'
+                  : 'Our reference number is given when you save. Type the supplier’s own number below.'}
+              </p>
+            </div>
           </div>
-          <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
+          <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
             <X size={18} />
           </button>
         </div>
 
-        <form onSubmit={submit} className="px-6 py-5 space-y-5">
+        <form onSubmit={submit} className="flex flex-1 flex-col overflow-hidden">
+          {/* The same rhythm as the goods receipt and purchase order forms:
+            px-4 py-2.5 and a tight gap between blocks. This was px-6 py-5 with
+            space-y-5, which on a form this tall reads as a different app —
+            twice the air of every other dialog, and a band of nothing under
+            the header before anything to fill in. */}
+          <div className="flex-1 space-y-2.5 overflow-y-auto px-4 py-2.5">
           {error && (
             <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
               <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
@@ -665,7 +697,7 @@ export function PurchaseBillDialog({
           )}
 
           {!isEdit && (
-            <div className="rounded-lg border border-border bg-secondary/30 p-3">
+            <div className="rounded-lg border border-border bg-secondary/30 p-2.5">
               <div className="flex flex-wrap items-end gap-3">
                 <div className="flex-1 min-w-[240px]">
                   <label className="form-label" htmlFor="bill-grn">
@@ -696,17 +728,19 @@ export function PurchaseBillDialog({
                   {billedReceipts.length ? 'Add lines' : 'Pull lines'}
                 </button>
               </div>
-              <p className="text-xs text-muted-foreground mt-2">
-                {pullable.length === 0
-                  ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
+              <p className="text-xs text-muted-foreground mt-1.5">
+                {billedReceipts.length > 0 && pullable.length === 0
+                  ? `On this bill: ${billedReceipts.join(', ')}. That is every receipt this supplier has waiting — add more lines by hand if their invoice covers anything else.`
                   : billedReceipts.length
-                    ? `On this bill: ${billedReceipts.join(', ')}. Pick another receipt to add it — one bill can settle as many deliveries as the supplier invoiced together.`
-                    : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
+                    ? `On this bill: ${billedReceipts.join(', ')}. Pick another to add it — one bill can settle as many deliveries as the supplier invoiced together.`
+                    : pullable.length === 0
+                      ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
+                      : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
               </p>
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
             <div className="md:col-span-2">
               <label className="form-label" htmlFor="bill-supplier">
                 Supplier<span className="text-red-400 ml-0.5">*</span>
@@ -1313,7 +1347,10 @@ export function PurchaseBillDialog({
             </div>
           </div>
 
-          <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
+          </div>
+
+          {/* Footer — stays put, so Save is always one press away. */}
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
             <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
               Cancel
             </button>

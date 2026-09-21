@@ -2,7 +2,22 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Download, Loader2, Paperclip, X } from 'lucide-react'
+import {
+  Building2,
+  Calculator,
+  Download,
+  FileText,
+  Loader2,
+  MessageSquare,
+  Package,
+  Paperclip,
+  Percent,
+  Receipt,
+  Undo2,
+  Wallet,
+  X,
+  type LucideIcon,
+} from 'lucide-react'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
@@ -26,6 +41,15 @@ const NOTE_STATUS: Record<string, { label: string; cls: string }> = {
   DRAFT: { label: 'Draft', cls: 'badge-warning' },
   ISSUED: { label: 'Issued', cls: 'badge-info' },
   SETTLED: { label: 'Settled', cls: 'badge-success' },
+  CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
+}
+
+// Kept in step with the same map on the bills list, so a bill reads the same
+// badge whether it is glanced at in the table or opened in full.
+const STATUS: Record<string, { label: string; cls: string }> = {
+  UNPAID: { label: 'Unpaid', cls: 'badge-warning' },
+  PARTIAL: { label: 'Part paid', cls: 'badge-info' },
+  PAID: { label: 'Paid', cls: 'badge-success' },
   CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
 }
 
@@ -182,7 +206,7 @@ function Attachments({
           {error}
         </div>
       )}
-      <div className="border-border overflow-x-auto rounded-lg border">
+      <div className="border-border bg-card overflow-x-auto rounded-lg border">
         <table className="w-full text-xs">
           <thead>
             <tr className="border-border text-muted-foreground border-b text-left">
@@ -240,12 +264,25 @@ function Field({ label, value }: { label: React.ReactNode; value: React.ReactNod
   )
 }
 
-function Heading({ children }: { children: React.ReactNode }) {
+function Heading({
+  icon: Icon,
+  children,
+}: {
+  icon?: LucideIcon
+  children: React.ReactNode
+}) {
   return (
-    <h3 className="text-muted-foreground mb-2 text-[11px] font-semibold uppercase tracking-wide">
+    <h3 className="text-muted-foreground mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide">
+      {Icon && <Icon size={12} className="shrink-0" />}
       {children}
     </h3>
   )
+}
+
+/** A section's content, boxed the same way a table's already is — so the
+    dl-only sections stop reading as loose text next to the boxed ones. */
+function Card({ children }: { children: React.ReactNode }) {
+  return <div className="border-border bg-card rounded-lg border p-4">{children}</div>
 }
 
 /**
@@ -323,143 +360,178 @@ export function BillDetailDialog({
         }}
       >
         <div className="border-border flex items-start justify-between gap-4 border-b px-6 py-4">
-          <div className="min-w-0">
-            <h2 id="bill-detail-title" className="text-foreground text-lg font-semibold">
-              {bill.supplierInvoiceNo || bill.billNumber}
-            </h2>
-            <p className="text-muted-foreground mt-0.5 text-sm">
-              {bill.supplier?.name} · our reference {bill.billNumber}
-            </p>
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="bg-primary/10 border-primary/20 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+              <Receipt size={17} className="text-primary" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 id="bill-detail-title" className="text-foreground text-lg font-semibold">
+                  {bill.supplierInvoiceNo || bill.billNumber}
+                </h2>
+                <span className={(STATUS[bill.status] ?? { cls: 'badge-neutral' }).cls}>
+                  {STATUS[bill.status]?.label ?? bill.status}
+                </span>
+                {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
+              </div>
+              <p className="text-muted-foreground mt-0.5 text-sm">
+                {bill.supplier?.name} · our reference {bill.billNumber}
+              </p>
+            </div>
           </div>
-          <button className="btn-ghost p-1.5" onClick={onClose} aria-label="Close">
+          <button className="btn-ghost shrink-0 p-1.5" onClick={onClose} aria-label="Close">
             <X size={18} />
           </button>
         </div>
 
         <div className="max-h-[75vh] space-y-6 overflow-y-auto px-6 py-5">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[
+              { label: 'Bill total', value: `₹${inr(bill.totalAmount)}`, color: 'text-foreground' },
+              { label: 'Paid so far', value: `₹${inr(paid)}`, color: 'text-emerald-400' },
+              {
+                label: 'Still owed',
+                value: `₹${inr(balance)}`,
+                color: balance > 0 ? 'text-amber-400' : 'text-emerald-400',
+              },
+              { label: 'Items', value: String(bill.lines?.length ?? 0), color: 'text-teal-400' },
+            ].map((s) => (
+              <div key={s.label} className="border-border bg-card rounded-lg border p-3 text-center">
+                <p className={`text-lg font-bold tabular-nums ${s.color}`}>{s.value}</p>
+                <p className="text-muted-foreground mt-0.5 text-[11px] uppercase tracking-wide">
+                  {s.label}
+                </p>
+              </div>
+            ))}
+          </div>
+
           {/* The paperwork, and the trail behind it. */}
           <section>
-            <Heading>The bill</Heading>
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-              <Field
-                label="Bill no. (the supplier's)"
-                value={
-                  <span className="font-mono text-teal-400">
-                    {bill.supplierInvoiceNo || bill.billNumber}
-                  </span>
-                }
-              />
-              <Field
-                label="Bill date"
-                value={
-                  bill.supplierInvoiceDate ? (
-                    formatDate(bill.supplierInvoiceDate)
-                  ) : (
-                    <span className="text-muted-foreground">—</span>
-                  )
-                }
-              />
-              <Field
-                label="Our reference"
-                value={<span className="font-mono">{bill.billNumber}</span>}
-              />
-              <Field label="Booked on" value={formatDate(bill.billDate)} />
-              <Field
-                label="Payment due"
-                value={
-                  bill.dueDate ? (
-                    formatDate(bill.dueDate)
-                  ) : (
-                    <span className="text-muted-foreground">No terms given</span>
-                  )
-                }
-              />
-              <Field
-                label="Against order"
-                value={
-                  bill.po ? (
-                    <span className="font-mono">{bill.po.poNumber}</span>
-                  ) : (
-                    <span
-                      className="text-muted-foreground"
-                      title="Typed by hand, or it gathers receipts from more than one order — the header cannot honestly name one then"
-                    >
-                      Not one order
+            <Heading icon={FileText}>The bill</Heading>
+            <Card>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+                <Field
+                  label="Bill no. (the supplier's)"
+                  value={
+                    <span className="font-mono text-teal-400">
+                      {bill.supplierInvoiceNo || bill.billNumber}
                     </span>
-                  )
-                }
-              />
-              <Field
-                label="Against receipts"
-                value={
-                  receipts.length ? (
-                    <span className="font-mono">{receipts.join(', ')}</span>
-                  ) : (
-                    <span className="text-muted-foreground">Direct, no receipt</span>
-                  )
-                }
-              />
-              <Field label="Entered by" value={bill.createdBy?.name ?? '—'} />
-            </dl>
+                  }
+                />
+                <Field
+                  label="Bill date"
+                  value={
+                    bill.supplierInvoiceDate ? (
+                      formatDate(bill.supplierInvoiceDate)
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )
+                  }
+                />
+                <Field
+                  label="Our reference"
+                  value={<span className="font-mono">{bill.billNumber}</span>}
+                />
+                <Field label="Booked on" value={formatDate(bill.billDate)} />
+                <Field
+                  label="Payment due"
+                  value={
+                    bill.dueDate ? (
+                      formatDate(bill.dueDate)
+                    ) : (
+                      <span className="text-muted-foreground">No terms given</span>
+                    )
+                  }
+                />
+                <Field
+                  label="Against order"
+                  value={
+                    bill.po ? (
+                      <span className="font-mono">{bill.po.poNumber}</span>
+                    ) : (
+                      <span
+                        className="text-muted-foreground"
+                        title="Typed by hand, or it gathers receipts from more than one order — the header cannot honestly name one then"
+                      >
+                        Not one order
+                      </span>
+                    )
+                  }
+                />
+                <Field
+                  label="Against receipts"
+                  value={
+                    receipts.length ? (
+                      <span className="font-mono">{receipts.join(', ')}</span>
+                    ) : (
+                      <span className="text-muted-foreground">Direct, no receipt</span>
+                    )
+                  }
+                />
+                <Field label="Entered by" value={bill.createdBy?.name ?? '—'} />
+              </dl>
+            </Card>
           </section>
 
           <section>
-            <Heading>The supplier</Heading>
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-              <Field label="Name" value={bill.supplier?.name ?? '—'} />
-              <Field
-                label="GSTIN"
-                value={
-                  bill.supplier?.gstin ? (
-                    <span className="font-mono text-xs">{bill.supplier.gstin}</span>
-                  ) : (
-                    <span
-                      className="text-muted-foreground"
-                      title="An unregistered supplier — there is no tax split to make and none is charged"
-                    >
-                      Unregistered
-                    </span>
-                  )
-                }
-              />
-              <Field
-                label="Tax"
-                value={
-                  bill.isReverseCharge ? (
-                    <span className="text-amber-400">Reverse charge — we pay the GST</span>
-                  ) : Number(bill.igst ?? 0) > 0 ? (
-                    'IGST — across states'
-                  ) : Number(bill.cgst ?? 0) > 0 ? (
-                    'CGST + SGST — inside the state'
-                  ) : (
-                    <span className="text-muted-foreground">No tax on this bill</span>
-                  )
-                }
-              />
-              <Field
-                label="TDS"
-                value={
-                  bill.tdsSection ? (
-                    `${bill.tdsSection} at ${Number(bill.tdsRate ?? 0)}% — ₹${inr(tds)} withheld`
-                  ) : (
-                    <span className="text-muted-foreground">None</span>
-                  )
-                }
-              />
-            </dl>
+            <Heading icon={Building2}>The supplier</Heading>
+            <Card>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+                <Field label="Name" value={bill.supplier?.name ?? '—'} />
+                <Field
+                  label="GSTIN"
+                  value={
+                    bill.supplier?.gstin ? (
+                      <span className="font-mono text-xs">{bill.supplier.gstin}</span>
+                    ) : (
+                      <span
+                        className="text-muted-foreground"
+                        title="An unregistered supplier — there is no tax split to make and none is charged"
+                      >
+                        Unregistered
+                      </span>
+                    )
+                  }
+                />
+                <Field
+                  label="Tax"
+                  value={
+                    bill.isReverseCharge ? (
+                      <span className="text-amber-400">Reverse charge — we pay the GST</span>
+                    ) : Number(bill.igst ?? 0) > 0 ? (
+                      'IGST — across states'
+                    ) : Number(bill.cgst ?? 0) > 0 ? (
+                      'CGST + SGST — inside the state'
+                    ) : (
+                      <span className="text-muted-foreground">No tax on this bill</span>
+                    )
+                  }
+                />
+                <Field
+                  label="TDS"
+                  value={
+                    bill.tdsSection ? (
+                      `${bill.tdsSection} at ${Number(bill.tdsRate ?? 0)}% — ₹${inr(tds)} withheld`
+                    ) : (
+                      <span className="text-muted-foreground">None</span>
+                    )
+                  }
+                />
+              </dl>
+            </Card>
           </section>
 
           <section>
-            <Heading>Items ({bill.lines?.length ?? 0})</Heading>
-            <div className="border-border overflow-hidden rounded-lg border">
+            <Heading icon={Package}>Items ({bill.lines?.length ?? 0})</Heading>
+            <div className="border-border bg-card overflow-hidden rounded-lg border">
               <BillItems bill={bill} />
             </div>
           </section>
 
           {bill.charges && bill.charges.length > 0 && (
             <section>
-              <Heading>Extra charges</Heading>
-              <div className="border-border overflow-x-auto rounded-lg border">
+              <Heading icon={Percent}>Extra charges</Heading>
+              <div className="border-border bg-card overflow-x-auto rounded-lg border">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-border text-muted-foreground border-b text-left">
@@ -488,10 +560,10 @@ export function BillDetailDialog({
             </section>
           )}
 
-          <div className="grid gap-6 lg:grid-cols-2">
+          <div className="grid gap-4 lg:grid-cols-2">
             <section>
-              <Heading>What it adds up to</Heading>
-              <dl className="space-y-1.5 text-sm">
+              <Heading icon={Calculator}>What it adds up to</Heading>
+              <dl className="border-border bg-card space-y-1.5 rounded-lg border p-4 text-sm">
                 {[
                   ['Goods', inr(bill.subtotal)],
                   ...(Number(bill.discountAmount ?? 0) > 0
@@ -548,9 +620,9 @@ export function BillDetailDialog({
             </section>
 
             <section>
-              <Heading>Payment history ({payments.length})</Heading>
+              <Heading icon={Wallet}>Payment history ({payments.length})</Heading>
               {payments.length ? (
-                <div className="border-border overflow-x-auto rounded-lg border">
+                <div className="border-border bg-card overflow-x-auto rounded-lg border">
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-border text-muted-foreground border-b text-left">
@@ -602,7 +674,7 @@ export function BillDetailDialog({
                   </table>
                 </div>
               ) : (
-                <p className="text-muted-foreground text-sm">
+                <p className="text-muted-foreground border-border bg-card rounded-lg border p-4 text-sm">
                   Nothing has been paid against this bill yet.
                 </p>
               )}
@@ -611,8 +683,8 @@ export function BillDetailDialog({
 
           {notes.length > 0 && (
             <section>
-              <Heading>Claimed back from the supplier ({notes.length})</Heading>
-              <div className="border-border overflow-x-auto rounded-lg border">
+              <Heading icon={Undo2}>Claimed back from the supplier ({notes.length})</Heading>
+              <div className="border-border bg-card overflow-x-auto rounded-lg border">
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="border-border text-muted-foreground border-b text-left">
@@ -657,14 +729,16 @@ export function BillDetailDialog({
           )}
 
           <section ref={filesRef}>
-            <Heading>Attachments ({files.length})</Heading>
+            <Heading icon={Paperclip}>Attachments ({files.length})</Heading>
             <Attachments files={files} />
           </section>
 
           {bill.notes && (
             <section>
-              <Heading>Notes</Heading>
-              <p className="text-foreground whitespace-pre-wrap text-sm">{bill.notes}</p>
+              <Heading icon={MessageSquare}>Notes</Heading>
+              <p className="text-foreground border-border bg-card rounded-lg border p-4 text-sm whitespace-pre-wrap">
+                {bill.notes}
+              </p>
             </section>
           )}
         </div>
