@@ -41,8 +41,7 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
   const lines = bill.lines ?? []
 
   return (
-    <div className="border-border bg-secondary/30 border-t px-4 py-3">
-      <div className="overflow-x-auto">
+    <div className="overflow-x-auto">
         <table className="w-full min-w-[880px] text-xs">
           <thead>
             <tr className="border-border text-muted-foreground border-b text-left">
@@ -121,7 +120,6 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
             </tr>
           </tfoot>
         </table>
-      </div>
     </div>
   )
 }

@@ -15,11 +15,13 @@ import {
   ChevronRight,
   Eye,
   Paperclip,
+  FileText,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
 import { BillItems, BillDetailDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 
@@ -173,6 +175,46 @@ function PurchaseBillsTable() {
     new Date(b.dueDate) < new Date() &&
     (b.status === 'UNPAID' || b.status === 'PARTIAL')
 
+  /** What can be done to one bill, in words, behind a single Actions button. */
+  const billActions = (bill: PurchaseBill): RowAction[] => {
+    const items: RowAction[] = [
+      {
+        key: 'view',
+        label: 'View full detail',
+        icon: <Eye size={14} />,
+        onClick: () => setDetail({ bill }),
+      },
+      {
+        key: 'print',
+        label: 'Print',
+        icon: <Printer size={14} />,
+        href: `/print/purchase-bill/${bill.id}`,
+        newTab: true,
+      },
+    ]
+    // A bill can be corrected right up until a payment lands against it —
+    // after that it is part of the payment record, and cancelling or a debit
+    // note is how it is undone instead.
+    if (bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0) {
+      items.push(
+        {
+          key: 'edit',
+          label: 'Edit',
+          icon: <Pencil size={14} />,
+          onClick: () => setDialog({ open: true, record: bill }),
+        },
+        {
+          key: 'cancel',
+          label: 'Cancel',
+          icon: <Ban size={14} />,
+          onClick: () => void cancel(bill),
+          danger: true,
+        }
+      )
+    }
+    return items
+  }
+
   return (
     <div className="space-y-5">
       <div className="page-header flex-wrap gap-3">
@@ -205,19 +247,19 @@ function PurchaseBillsTable() {
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
-          <div className="bg-secondary border-border flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:min-w-[220px] sm:max-w-sm">
-            <Search size={14} className="text-muted-foreground" />
+        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
+          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[220px]">
+            <Search size={14} className="text-muted-foreground shrink-0" />
             <input
-              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Search our number, theirs, or supplier..."
+              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+              placeholder="Our number, theirs, or supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search purchase bills"
             />
           </div>
           <select
-            className="form-input h-9 w-full sm:w-40"
+            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
             value={status}
             onChange={(e) => setStatus(e.target.value)}
             aria-label="Filter by status"
@@ -229,7 +271,7 @@ function PurchaseBillsTable() {
               </option>
             ))}
           </select>
-          <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-xs">
+          <label className="text-muted-foreground flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
             <input
               type="checkbox"
               checked={overdueOnly}
@@ -237,7 +279,21 @@ function PurchaseBillsTable() {
             />
             Overdue only
           </label>
-          <span className="text-muted-foreground ml-auto text-xs">{total} bills</span>
+          {(search || status || overdueOnly) && (
+            <button
+              className="btn-ghost h-8 shrink-0 px-2 text-xs"
+              onClick={() => {
+                setSearch('')
+                setStatus('')
+                setOverdueOnly(false)
+              }}
+            >
+              Clear
+            </button>
+          )}
+          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+            {total} {total === 1 ? 'bill' : 'bills'}
+          </span>
         </div>
 
         {loading && rows.length === 0 ? (
@@ -269,6 +325,7 @@ function PurchaseBillsTable() {
                   bill.status !== 'PAID' &&
                   bill.status !== 'CANCELLED' &&
                   new Date(bill.dueDate) < new Date()
+                const open = expanded === bill.id
                 return (
                   <div key={bill.id} className="p-3">
                     <div className="flex items-start justify-between gap-3">
@@ -357,46 +414,31 @@ function PurchaseBillsTable() {
                       </dd>
                     </dl>
 
-                    <div className="mt-3 flex justify-end gap-1">
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                       <button
-                        className="btn-ghost border-border rounded-lg border p-1.5"
-                        onClick={() => setDetail({ bill })}
-                        title="View full detail"
-                        aria-label={`View details of ${bill.billNumber}`}
+                        onClick={() => setExpanded(open ? null : bill.id)}
+                        disabled={!bill.lines?.length}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                          !bill.lines?.length
+                            ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                            : 'bg-primary/10 text-primary hover:bg-primary/20'
+                        }`}
+                        aria-expanded={open}
                       >
-                        <Eye size={15} />
+                        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {open ? 'Hide items' : 'Bill items'}
                       </button>
-                      <Link
-                        href={`/print/purchase-bill/${bill.id}`}
-                        target="_blank"
-                        className="btn-ghost border-border rounded-lg border p-1.5"
-                        title="Print"
-                        aria-label={`Print ${bill.billNumber}`}
-                      >
-                        <Printer size={15} />
-                      </Link>
-                      {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
-                        <>
-                          <button
-                            className="btn-ghost border-border rounded-lg border p-1.5"
-                            onClick={() => setDialog({ open: true, record: bill })}
-                            title="Edit"
-                            aria-label={`Edit ${bill.billNumber}`}
-                          >
-                            <Pencil size={15} />
-                          </button>
-                          <button
-                            className="btn-ghost border-border text-muted-foreground rounded-lg border p-1.5 hover:text-red-400"
-                            onClick={() => void cancel(bill)}
-                            disabled={busy}
-                            title="Cancel"
-                            aria-label={`Cancel ${bill.billNumber}`}
-                          >
-                            <Ban size={15} />
-                          </button>
-                        </>
-                      )}
+                      <ActionMenu
+                        label={`Actions for ${bill.billNumber}`}
+                        items={billActions(bill)}
+                      />
                     </div>
+
+                    {open && (
+                      <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] overflow-y-auto rounded-lg border p-2">
+                        <BillItems bill={bill} />
+                      </div>
+                    )}
                   </div>
                 )
               })}
@@ -409,27 +451,28 @@ function PurchaseBillsTable() {
               characters wide over four lines. 900px is under the 1058px a
               1366px laptop has to give, so the commonest screen still shows
               the whole table without scrolling. */}
-              <table className="data-table w-full min-w-[1020px]">
+              <table className="data-table w-full min-w-[1080px] table-fixed">
                 <thead>
-                  <tr>
+                  <tr className="bg-secondary">
+                    <th style={{ width: 30 }} />
                     {/* The supplier's own number leads, because that is the one
                       both sides quote. Ours is the book reference beside it —
                       the old ERP printed one value in both places and lost the
                       distinction entirely. */}
-                    <th>Bill no.</th>
-                    <th>Our ref</th>
+                    <th style={{ width: '11%' }}>Bill no.</th>
+                    <th style={{ width: '9%' }}>Our ref</th>
                     {/* The receipts this bill settles. The old ERP called it
                       Reference# and put a GRN number in it, because that is
                       what the accounts team reconciles against — the bill's
                       own number means nothing to the store. */}
-                    <th>Against receipt</th>
-                    <th>Supplier</th>
-                    <th>Booked</th>
-                    <th>Due</th>
-                    <th style={{ textAlign: 'right' }}>Total</th>
-                    <th style={{ textAlign: 'right' }}>Outstanding</th>
-                    <th>Status</th>
-                    <th />
+                    <th style={{ width: '13%' }}>Against receipt</th>
+                    <th style={{ width: '15%' }}>Supplier</th>
+                    <th style={{ width: '8%' }}>Booked</th>
+                    <th style={{ width: '8%' }}>Due</th>
+                    <th style={{ width: '9%', textAlign: 'right' }}>Total</th>
+                    <th style={{ width: '10%', textAlign: 'right' }}>Outstanding</th>
+                    <th style={{ width: '7%' }}>Status</th>
+                    <th style={{ width: '10%' }} />
                   </tr>
                 </thead>
                 <tbody>
@@ -437,32 +480,39 @@ function PurchaseBillsTable() {
                     const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                     const overdue = isOverdue(bill)
                     const open = expanded === bill.id
+                    const lines = bill.lines ?? []
                     return (
                       <Fragment key={bill.id}>
-                      <tr
-                        className="cursor-pointer"
-                        onClick={() => setExpanded(open ? null : bill.id)}
-                      >
-                        <td className="font-mono text-xs">
-                          <span className="inline-flex items-center gap-1">
-                            <span className="text-muted-foreground">
-                              {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                            </span>
-                            {/* The number opens the printable bill, the way the
-                              old ERP's invoice number did. The rest of the row
-                              still expands to the items. */}
-                            <Link
-                              href={`/print/purchase-bill/${bill.id}`}
-                              target="_blank"
-                              className="text-teal-400 underline-offset-2 hover:underline"
-                              onClick={(e) => e.stopPropagation()}
-                              title="Open this bill to print or save"
-                            >
-                              {bill.supplierInvoiceNo || bill.billNumber}
-                            </Link>
-                          </span>
+                      <tr>
+                        <td>
+                          <button
+                            className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                              lines.length === 0
+                                ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                : 'bg-primary/10 text-primary hover:bg-primary/20'
+                            }`}
+                            onClick={() => setExpanded(open ? null : bill.id)}
+                            disabled={lines.length === 0}
+                            title={open ? 'Hide items' : 'Show items'}
+                            aria-label={`${open ? 'Hide' : 'Show'} items on ${bill.billNumber}`}
+                            aria-expanded={open}
+                          >
+                            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                          </button>
+                        </td>
+                        <td className="whitespace-nowrap font-mono text-xs">
+                          {/* The number opens the printable bill, the way the
+                            old ERP's invoice number did. */}
+                          <Link
+                            href={`/print/purchase-bill/${bill.id}`}
+                            target="_blank"
+                            className="text-teal-400 underline-offset-2 hover:underline"
+                            title="Open this bill to print or save"
+                          >
+                            {bill.supplierInvoiceNo || bill.billNumber}
+                          </Link>
                           {bill.supplierInvoiceDate && (
-                            <div className="text-muted-foreground pl-[18px] text-[10px]">
+                            <div className="text-muted-foreground text-[10px]">
                               {formatDate(bill.supplierInvoiceDate)}
                             </div>
                           )}
@@ -470,10 +520,10 @@ function PurchaseBillsTable() {
                         <td className="text-muted-foreground font-mono text-xs">
                           {bill.billNumber}
                         </td>
-                        <td>
+                        <td className="text-xs">
                           <div className="flex items-center gap-2">
                             {receiptsOn(bill).length ? (
-                              <span className="text-foreground font-mono text-xs">
+                              <span className="text-foreground truncate font-mono">
                                 {receiptsOn(bill).join(', ')}
                               </span>
                             ) : (
@@ -490,11 +540,8 @@ function PurchaseBillsTable() {
                               // which is where the files are listed and signed.
                               <button
                                 type="button"
-                                className="text-muted-foreground hover:text-foreground inline-flex shrink-0 items-center gap-0.5 text-[10px] transition"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setDetail({ bill, focus: 'attachments' })
-                                }}
+                                className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] underline transition"
+                                onClick={() => setDetail({ bill, focus: 'attachments' })}
                                 title={`Open the ${fileCountOn(bill)} file${
                                   fileCountOn(bill) === 1 ? '' : 's'
                                 } on this bill's order and receipts`}
@@ -506,7 +553,9 @@ function PurchaseBillsTable() {
                           </div>
                         </td>
                         <td>
-                          <div className="text-foreground font-medium">{bill.supplier?.name}</div>
+                          <div className="text-foreground truncate font-medium">
+                            {bill.supplier?.name}
+                          </div>
                           <div className="mt-0.5 flex items-center gap-1.5">
                             {bill.supplier?.gstin && (
                               <span className="text-muted-foreground font-mono text-[10px]">
@@ -516,8 +565,8 @@ function PurchaseBillsTable() {
                             {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
                           </div>
                         </td>
-                        <td className="text-xs">{formatDate(bill.billDate)}</td>
-                        <td className="text-xs">
+                        <td className="whitespace-nowrap text-xs">{formatDate(bill.billDate)}</td>
+                        <td className="whitespace-nowrap text-xs">
                           {bill.dueDate ? (
                             <span className={overdue ? 'font-medium text-red-400' : undefined}>
                               {formatDate(bill.dueDate)}
@@ -526,10 +575,10 @@ function PurchaseBillsTable() {
                             <span className="text-muted-foreground">—</span>
                           )}
                         </td>
-                        <td className="text-right font-semibold tabular-nums">
+                        <td className="whitespace-nowrap text-right font-semibold tabular-nums">
                           ₹{money(bill.totalAmount)}
                         </td>
-                        <td className="text-right tabular-nums">
+                        <td className="whitespace-nowrap text-right tabular-nums">
                           {bill.status === 'CANCELLED' ? (
                             <span className="text-muted-foreground">—</span>
                           ) : (
@@ -547,59 +596,32 @@ function PurchaseBillsTable() {
                           <span className={s.cls}>{s.label}</span>
                         </td>
                         <td className="whitespace-nowrap text-right">
-                          {/* The row opens the detail panel; these do their own
-                            jobs and must not also open it. */}
-                          <div
-                            className="flex justify-end gap-1"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              className="btn-ghost p-1.5"
-                              onClick={() => setDetail({ bill })}
-                              title="View full detail"
-                              aria-label={`View details of ${bill.billNumber}`}
-                            >
-                              <Eye size={15} />
-                            </button>
-                            <Link
-                              href={`/print/purchase-bill/${bill.id}`}
-                              target="_blank"
-                              className="btn-ghost p-1.5"
-                              title="Print"
-                              aria-label={`Print ${bill.billNumber}`}
-                            >
-                              <Printer size={15} />
-                            </Link>
-                            {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
-                              <>
-                                <button
-                                  className="btn-ghost p-1.5"
-                                  onClick={() => setDialog({ open: true, record: bill })}
-                                  title="Edit"
-                                  aria-label={`Edit ${bill.billNumber}`}
-                                >
-                                  <Pencil size={15} />
-                                </button>
-                                <button
-                                  className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                                  onClick={() => void cancel(bill)}
-                                  disabled={busy}
-                                  title="Cancel"
-                                  aria-label={`Cancel ${bill.billNumber}`}
-                                >
-                                  <Ban size={15} />
-                                </button>
-                              </>
-                            )}
+                          <div className="flex justify-end">
+                            <ActionMenu
+                              label={`Actions for ${bill.billNumber}`}
+                              items={billActions(bill)}
+                            />
                           </div>
                         </td>
                       </tr>
-                      {open && (
+                      {open && lines.length > 0 && (
                         <tr>
-                          {/* The panel spans the table rather than sitting in a
-                            cell, so its own columns are free of the list's. */}
-                          <td colSpan={9} className="p-0">
-                            <BillItems bill={bill} />
+                          <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <div className="border-border bg-card overflow-hidden rounded-lg border">
+                              <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
+                                <FileText size={13} className="text-muted-foreground shrink-0" />
+                                <h4 className="text-foreground text-[11px] font-semibold">
+                                  Bill Items
+                                </h4>
+                                <span className="text-muted-foreground ml-auto text-[10px]">
+                                  {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
+                                  {bill.billNumber}
+                                </span>
+                              </div>
+                              <div className="max-h-[22rem] overflow-y-auto">
+                                <BillItems bill={bill} />
+                              </div>
+                            </div>
                           </td>
                         </tr>
                       )}

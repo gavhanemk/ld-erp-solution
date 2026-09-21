@@ -119,30 +119,26 @@ export default function SupplierPaymentsPage() {
     : payments
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-5">
+      <div className="page-header flex-wrap gap-3">
         <div>
-          <h1 className="text-foreground text-xl font-semibold">Supplier payments</h1>
-          <p className="text-muted-foreground text-sm">
-            What is owed, and what has been paid against it.
-          </p>
+          <h1 className="page-title">Supplier Payments</h1>
+          <p className="page-subtitle">What is owed, and what has been paid against it</p>
         </div>
-        <button type="button" className="btn-secondary" onClick={() => void load()}>
-          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
-          Refresh
+        <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
         </button>
       </div>
 
-      {message && (
-        <div className="rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-sm text-teal-300">
-          {message}
+      {error && (
+        <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+          <p className="text-sm text-red-400">{error}</p>
         </div>
       )}
-
-      {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-          <AlertCircle size={16} className="mt-0.5 shrink-0" />
-          <span>{error}</span>
+      {message && (
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
+          <p className="text-sm text-emerald-400">{message}</p>
         </div>
       )}
 
@@ -171,166 +167,278 @@ export default function SupplierPaymentsPage() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-lg border border-white/10 p-0.5">
-          {(['outstanding', 'history'] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={`rounded-md px-3 py-1.5 text-sm transition ${
-                tab === t
-                  ? 'bg-white/10 text-foreground font-medium'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t === 'outstanding' ? 'Outstanding' : 'Payments made'}
-            </button>
-          ))}
-        </div>
-
-        <div className="relative min-w-[200px] flex-1">
-          <Search
-            size={15}
-            className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 -translate-y-1/2"
-          />
-          <input
-            className="form-input h-9 pl-9"
-            placeholder={
-              tab === 'outstanding'
-                ? 'Supplier, our bill number, or theirs'
-                : 'Supplier, payment number, bill, or reference'
-            }
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
-      </div>
-
-      {loading ? (
-        <div className="glass-card text-muted-foreground p-8 text-center text-sm">Loading…</div>
-      ) : tab === 'outstanding' ? (
-        visibleBills.length === 0 ? (
-          <div className="glass-card p-8 text-center">
-            <IndianRupee size={22} className="text-muted-foreground mx-auto" />
-            <p className="text-foreground mt-2 text-sm font-medium">
-              {bills.length === 0 ? 'Nothing is outstanding' : 'Nothing matches that'}
-            </p>
-            <p className="text-muted-foreground mt-1 text-sm">
-              {bills.length === 0
-                ? 'Every purchase bill on the system is paid in full.'
-                : 'Try a different supplier or bill number.'}
-            </p>
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
+          <div className="bg-secondary/60 flex shrink-0 gap-1 rounded-lg p-0.5" role="tablist">
+            {(
+              [
+                ['outstanding', 'Outstanding', bills.length],
+                ['history', 'Payments made', payments.length],
+              ] as const
+            ).map(([key, label, count]) => (
+              <button
+                key={key}
+                type="button"
+                role="tab"
+                aria-selected={tab === key}
+                onClick={() => setTab(key)}
+                className={`whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  tab === key
+                    ? 'bg-primary/15 text-primary'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {label}
+                <span
+                  className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[11px] tabular-nums ${
+                    tab === key ? 'bg-primary/20' : 'bg-secondary'
+                  }`}
+                >
+                  {count}
+                </span>
+              </button>
+            ))}
           </div>
-        ) : (
-          <div className="glass-card overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-white/10 text-left">
-                  <th className="text-muted-foreground p-3 font-medium">Supplier</th>
-                  <th className="text-muted-foreground p-3 font-medium">Bill</th>
-                  <th className="text-muted-foreground p-3 font-medium">Due</th>
-                  <th className="text-muted-foreground p-3 text-right font-medium">Bill total</th>
-                  <th className="text-muted-foreground p-3 text-right font-medium">Paid</th>
-                  <th className="text-muted-foreground p-3 text-right font-medium">Outstanding</th>
-                  <th className="text-muted-foreground p-3 font-medium">Ageing</th>
-                  <th className="p-3" />
-                </tr>
-              </thead>
-              <tbody>
+
+          <span className="bg-border hidden h-6 w-px shrink-0 lg:block" />
+
+          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[260px]">
+            <Search size={14} className="text-muted-foreground shrink-0" />
+            <input
+              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+              placeholder={
+                tab === 'outstanding'
+                  ? 'Supplier, our bill number, or theirs...'
+                  : 'Supplier, payment number, bill, or reference...'
+              }
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Search"
+            />
+          </div>
+
+          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+            {tab === 'outstanding'
+              ? `${visibleBills.length} ${visibleBills.length === 1 ? 'bill' : 'bills'}`
+              : `${visiblePayments.length} ${visiblePayments.length === 1 ? 'payment' : 'payments'}`}
+          </span>
+        </div>
+
+        {loading ? (
+          <p className="text-muted-foreground px-4 py-8 text-sm">Loading...</p>
+        ) : tab === 'outstanding' ? (
+          visibleBills.length === 0 ? (
+            <div className="px-4 py-10 text-center">
+              <IndianRupee size={22} className="text-muted-foreground mx-auto" />
+              <p className="text-foreground mt-2 text-sm font-medium">
+                {bills.length === 0 ? 'Nothing is outstanding' : 'Nothing matches that'}
+              </p>
+              <p className="text-muted-foreground mt-1 text-sm">
+                {bills.length === 0
+                  ? 'Every purchase bill on the system is paid in full.'
+                  : 'Try a different supplier or bill number.'}
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="divide-border divide-y xl:hidden">
                 {visibleBills.map((b) => (
-                  <tr key={b.id} className="border-b border-white/5 last:border-0">
-                    <td className="text-foreground p-3">{b.supplier.name}</td>
-                    <td className="p-3">
-                      <span className="text-foreground">{b.billNumber}</span>
-                      {b.supplierInvoiceNo && (
-                        <span className="text-muted-foreground block text-xs">
-                          Theirs: {b.supplierInvoiceNo}
-                        </span>
-                      )}
-                    </td>
-                    <td className="text-muted-foreground p-3">
-                      {b.dueDate ? formatDate(b.dueDate) : '—'}
-                    </td>
-                    <td className="text-muted-foreground p-3 text-right">
-                      ₹{money(b.totalAmount)}
-                    </td>
-                    <td className="text-muted-foreground p-3 text-right">
-                      ₹{money(b.paidAmount)}
-                    </td>
-                    <td className="text-foreground p-3 text-right font-medium">
-                      ₹{money(b.balanceAmount)}
-                    </td>
-                    <td className="p-3">
-                      <span className={bucketClass(b.bucket)}>
-                        {b.bucket}
-                        {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
+                  <div key={b.id} className="p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-foreground font-medium leading-snug">
+                          {b.supplier.name}
+                        </p>
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <span className="text-foreground font-mono text-xs">
+                            {b.billNumber}
+                          </span>
+                          <span className={bucketClass(b.bucket)}>
+                            {b.bucket}
+                            {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
+                          </span>
+                        </div>
+                        {b.supplierInvoiceNo && (
+                          <p className="text-muted-foreground mt-0.5 text-[10px]">
+                            Theirs: {b.supplierInvoiceNo}
+                          </p>
+                        )}
+                      </div>
+                      <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
+                        ₹{money(b.balanceAmount)}
                       </span>
-                    </td>
-                    <td className="p-3 text-right">
+                    </div>
+
+                    <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-muted-foreground">Due</dt>
+                      <dd className="text-foreground min-w-0">
+                        {b.dueDate ? formatDate(b.dueDate) : <span className="text-muted-foreground">—</span>}
+                      </dd>
+                      <dt className="text-muted-foreground">Bill total</dt>
+                      <dd className="text-foreground min-w-0 tabular-nums">₹{money(b.totalAmount)}</dd>
+                      <dt className="text-muted-foreground">Paid</dt>
+                      <dd className="text-foreground min-w-0 tabular-nums">₹{money(b.paidAmount)}</dd>
+                    </dl>
+
+                    <div className="mt-3 flex justify-end">
                       <button
                         type="button"
-                        className="btn-primary h-8 px-3 text-xs"
+                        className="btn-primary h-7 px-2.5 text-xs"
                         onClick={() => setPaying(b)}
                       >
                         Pay
                       </button>
-                    </td>
-                  </tr>
+                    </div>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+              </div>
+
+              <div className="hidden w-full overflow-x-auto xl:block">
+                <table className="data-table w-full min-w-[900px]">
+                  <thead>
+                    <tr>
+                      <th>Supplier</th>
+                      <th>Bill</th>
+                      <th>Due</th>
+                      <th style={{ textAlign: 'right' }}>Bill total</th>
+                      <th style={{ textAlign: 'right' }}>Paid</th>
+                      <th style={{ textAlign: 'right' }}>Outstanding</th>
+                      <th>Ageing</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleBills.map((b) => (
+                      <tr key={b.id}>
+                        <td className="text-foreground">{b.supplier.name}</td>
+                        <td>
+                          <span className="text-foreground font-mono text-xs">{b.billNumber}</span>
+                          {b.supplierInvoiceNo && (
+                            <div className="text-muted-foreground text-[10px]">
+                              Theirs: {b.supplierInvoiceNo}
+                            </div>
+                          )}
+                        </td>
+                        <td className="text-xs">
+                          {b.dueDate ? formatDate(b.dueDate) : <span className="text-muted-foreground">—</span>}
+                        </td>
+                        <td className="text-right tabular-nums">₹{money(b.totalAmount)}</td>
+                        <td className="text-right tabular-nums">₹{money(b.paidAmount)}</td>
+                        <td className="text-foreground text-right font-medium tabular-nums">
+                          ₹{money(b.balanceAmount)}
+                        </td>
+                        <td>
+                          <span className={bucketClass(b.bucket)}>
+                            {b.bucket}
+                            {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
+                          </span>
+                        </td>
+                        <td className="whitespace-nowrap text-right">
+                          <button
+                            type="button"
+                            className="btn-primary h-7 px-2.5 text-xs"
+                            onClick={() => setPaying(b)}
+                          >
+                            Pay
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )
+        ) : visiblePayments.length === 0 ? (
+          <div className="px-4 py-10 text-center">
+            <IndianRupee size={22} className="text-muted-foreground mx-auto" />
+            <p className="text-foreground mt-2 text-sm font-medium">
+              {payments.length === 0 ? 'No payments yet' : 'Nothing matches that'}
+            </p>
+            <p className="text-muted-foreground mt-1 text-sm">
+              {payments.length === 0
+                ? 'Payments recorded against a purchase bill will appear here.'
+                : 'Try a different supplier, bill, or reference.'}
+            </p>
           </div>
-        )
-      ) : visiblePayments.length === 0 ? (
-        <div className="glass-card p-8 text-center">
-          <IndianRupee size={22} className="text-muted-foreground mx-auto" />
-          <p className="text-foreground mt-2 text-sm font-medium">
-            {payments.length === 0 ? 'No payments yet' : 'Nothing matches that'}
-          </p>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {payments.length === 0
-              ? 'Payments recorded against a purchase bill will appear here.'
-              : 'Try a different supplier, bill, or reference.'}
-          </p>
-        </div>
-      ) : (
-        <div className="glass-card overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-white/10 text-left">
-                <th className="text-muted-foreground p-3 font-medium">Payment</th>
-                <th className="text-muted-foreground p-3 font-medium">Date</th>
-                <th className="text-muted-foreground p-3 font-medium">Supplier</th>
-                <th className="text-muted-foreground p-3 font-medium">Against</th>
-                <th className="text-muted-foreground p-3 font-medium">How</th>
-                <th className="text-muted-foreground p-3 text-right font-medium">Amount</th>
-                <th className="text-muted-foreground p-3 font-medium">Recorded by</th>
-              </tr>
-            </thead>
-            <tbody>
+        ) : (
+          <>
+            <div className="divide-border divide-y xl:hidden">
               {visiblePayments.map((p) => (
-                <tr key={p.id} className="border-b border-white/5 last:border-0">
-                  <td className="text-foreground p-3">{p.paymentNumber}</td>
-                  <td className="text-muted-foreground p-3">{formatDate(p.paymentDate)}</td>
-                  <td className="text-foreground p-3">{p.supplier.name}</td>
-                  <td className="text-muted-foreground p-3">{p.invoice?.billNumber ?? '—'}</td>
-                  <td className="p-3">
-                    <span className="text-foreground">{MODE_LABEL[p.mode] ?? p.mode}</span>
-                    {p.referenceNo && (
-                      <span className="text-muted-foreground block text-xs">{p.referenceNo}</span>
-                    )}
-                  </td>
-                  <td className="text-foreground p-3 text-right font-medium">
-                    ₹{money(p.amount)}
-                  </td>
-                  <td className="text-muted-foreground p-3">{p.createdBy?.name ?? '—'}</td>
-                </tr>
+                <div key={p.id} className="p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="text-foreground font-mono text-xs font-semibold">
+                        {p.paymentNumber}
+                      </span>
+                      <p className="text-foreground mt-1 font-medium leading-snug">
+                        {p.supplier.name}
+                      </p>
+                    </div>
+                    <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
+                      ₹{money(p.amount)}
+                    </span>
+                  </div>
+
+                  <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                    <dt className="text-muted-foreground">Date</dt>
+                    <dd className="text-foreground min-w-0">{formatDate(p.paymentDate)}</dd>
+                    <dt className="text-muted-foreground">Against</dt>
+                    <dd className="text-foreground min-w-0">{p.invoice?.billNumber ?? '—'}</dd>
+                    <dt className="text-muted-foreground">How</dt>
+                    <dd className="text-foreground min-w-0">
+                      {MODE_LABEL[p.mode] ?? p.mode}
+                      {p.referenceNo && (
+                        <span className="text-muted-foreground"> · {p.referenceNo}</span>
+                      )}
+                    </dd>
+                    <dt className="text-muted-foreground">Recorded by</dt>
+                    <dd className="text-foreground min-w-0">{p.createdBy?.name ?? '—'}</dd>
+                  </dl>
+                </div>
               ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+            </div>
+
+            <div className="hidden w-full overflow-x-auto xl:block">
+              <table className="data-table w-full min-w-[900px]">
+                <thead>
+                  <tr>
+                    <th>Payment</th>
+                    <th>Date</th>
+                    <th>Supplier</th>
+                    <th>Against</th>
+                    <th>How</th>
+                    <th style={{ textAlign: 'right' }}>Amount</th>
+                    <th>Recorded by</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visiblePayments.map((p) => (
+                    <tr key={p.id}>
+                      <td className="font-mono text-xs text-teal-400">{p.paymentNumber}</td>
+                      <td className="text-xs">{formatDate(p.paymentDate)}</td>
+                      <td className="text-foreground">{p.supplier.name}</td>
+                      <td className="text-xs">{p.invoice?.billNumber ?? '—'}</td>
+                      <td>
+                        <span className="text-foreground text-xs">
+                          {MODE_LABEL[p.mode] ?? p.mode}
+                        </span>
+                        {p.referenceNo && (
+                          <div className="text-muted-foreground text-[10px]">{p.referenceNo}</div>
+                        )}
+                      </td>
+                      <td className="text-foreground text-right font-medium tabular-nums">
+                        ₹{money(p.amount)}
+                      </td>
+                      <td className="text-xs">{p.createdBy?.name ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
 
       {paying && (
         <RecordPaymentDialog

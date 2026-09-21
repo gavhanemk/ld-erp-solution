@@ -27,10 +27,32 @@ import {
   type PurchaseOrder,
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
+import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, itemsPreview } from '@/lib/utils'
+
+const qty = (v: string | number) =>
+  Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
+
+/**
+ * A line-by-line total is only honest when every line shares a unit.
+ * Fabric in metres next to buttons in pieces cannot be added into one
+ * number, so each unit gets its own running total — grouped and truncated
+ * the same way the item list is, in the order its first line was seen.
+ */
+function totalQtyByUnit(lines: PoLine[]): { shown: string; extra: string; full: string } {
+  const groups = new Map<string, number>()
+  for (const l of lines) {
+    const unit = l.item?.uom?.symbol ?? ''
+    groups.set(unit, (groups.get(unit) ?? 0) + Number(l.qty))
+  }
+  const parts = [...groups.entries()].map(([unit, sum]) => `${qty(sum)}${unit ? ` ${unit}` : ''}`)
+  const shown = parts.slice(0, 2).join(', ')
+  const extra = parts.length > 2 ? ` +${parts.length - 2} more` : ''
+  return { shown, extra, full: parts.join(', ') }
+}
 
 /*
  * The columns of the panel that opens under an order.
@@ -93,6 +115,8 @@ export default function PurchaseOrdersPage() {
     open: false,
     record: null,
   })
+  /** Which order's files are open in the read-only viewer, or null when closed. */
+  const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
 
   /*
    * Every supplier and every item, for the two filter dropdowns.
@@ -518,6 +542,16 @@ export default function PurchaseOrdersPage() {
                             {po.poNumber}
                           </span>
                           <span className={s.cls}>{s.label}</span>
+                          {po._count?.attachments ? (
+                            <button
+                              type="button"
+                              className="text-primary inline-flex items-center gap-0.5 text-[10px] underline"
+                              onClick={() => setFilesFor(po)}
+                            >
+                              <Paperclip size={10} />
+                              {po._count.attachments}
+                            </button>
+                          ) : null}
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">
                           {po.supplier?.name ?? '—'}
@@ -565,6 +599,22 @@ export default function PurchaseOrdersPage() {
                           </>
                         )}
                       </dd>
+                      {lines.length > 0 && (
+                        <>
+                          <dt className="text-muted-foreground">Total qty</dt>
+                          <dd className="text-foreground min-w-0">
+                            {(() => {
+                              const p = totalQtyByUnit(lines)
+                              return (
+                                <span title={p.full}>
+                                  {p.shown}
+                                  {p.extra}
+                                </span>
+                              )
+                            })()}
+                          </dd>
+                        </>
+                      )}
                     </dl>
 
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
@@ -679,20 +729,23 @@ export default function PurchaseOrdersPage() {
                   <tr className="bg-secondary">
                     <th style={{ width: '3.8%' }} />
                     <th style={{ width: '9%' }}>Order</th>
-                    <th style={{ width: '18%' }}>Supplier</th>
+                    <th style={{ width: '16%' }}>Supplier</th>
                     <th style={{ width: '9%' }}>Date</th>
-                    {/* Where the goods are to land. A warehouse of ours most
-                    of the time, a customer when the supplier ships straight to
-                    them — which also decides the tax, so it is not a detail. */}
-                    <th style={{ width: '11%' }}>Location</th>
                     {/* Reference and enquiry are both somebody else's paperwork
                     this order answers to, so they read as one column — the
                     enquiry underneath, the way an item's HSN sits under its
                     name. Two columns that are each empty as often as not read
                     as gaps in the table; one column that is sometimes short
                     and sometimes two lines reads as an ordinary column. */}
-                    <th style={{ width: '13%' }}>Reference</th>
-                    <th style={{ width: '12%' }}>Items</th>
+                    <th style={{ width: '11%' }}>Reference</th>
+                    <th style={{ width: '13%' }}>Items</th>
+                    {/* The quantity, not just the count — grouped by unit,
+                    because metres of fabric and pieces of button cannot be
+                    added into one figure. Where "Location" sat before: a
+                    warehouse or customer name is on the printed order and the
+                    item table below, and was empty on every order that had
+                    nothing filled in for it, which is most of them. */}
+                    <th style={{ width: '13%', textAlign: 'right' }}>Total qty</th>
                     <th style={{ width: '9%', textAlign: 'right' }}>Total</th>
                     <th style={{ width: '8%' }}>Status</th>
                     {/* 15.2%, because a draft row carries five of them — print,
@@ -739,17 +792,22 @@ export default function PurchaseOrdersPage() {
                               line, so the paperclip sits with the order's own
                               identity rather than claiming a column that is
                               empty on every order nobody has scanned a bill
-                              onto yet. */}
+                              onto yet. Clickable, because a sent order has no
+                              edit screen to open otherwise — this count was
+                              previously the only trace a file existed, with
+                              no way to actually see it. */}
                             {po._count?.attachments ? (
-                              <div
-                                className="text-muted-foreground mt-0.5 inline-flex items-center gap-0.5 text-[10px]"
-                                title={`${po._count.attachments} file${
+                              <button
+                                type="button"
+                                className="text-primary mt-0.5 inline-flex items-center gap-0.5 text-[10px] underline"
+                                onClick={() => setFilesFor(po)}
+                                title={`Open the ${po._count.attachments} file${
                                   po._count.attachments === 1 ? '' : 's'
-                                } attached`}
+                                } attached to ${po.poNumber}`}
                               >
                                 <Paperclip size={10} />
                                 {po._count.attachments}
-                              </div>
+                              </button>
                             ) : null}
                           </td>
                           <td>
@@ -765,24 +823,6 @@ export default function PurchaseOrdersPage() {
                               <CalendarDays size={13} className="text-muted-foreground shrink-0" />
                               {formatDate(po.poDate)}
                             </span>
-                          </td>
-                          <td className="text-xs">
-                            {po.deliveryWarehouse || po.deliveryCustomer ? (
-                              <>
-                                <div className="text-foreground truncate">
-                                  {po.deliveryWarehouse?.name ?? po.deliveryCustomer?.name}
-                                </div>
-                                {/* Named, because the two are not the same thing.
-                                  Goods going to a customer are taxed where the
-                                  customer is, and a row that only said the name
-                                  would leave somebody guessing which it was. */}
-                                <div className="text-muted-foreground text-[10px] leading-tight">
-                                  {po.deliveryWarehouse ? 'Our store' : 'Customer'}
-                                </div>
-                              </>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
                           </td>
                           <td className="text-xs">
                             {po.reference || po.enquiryNo ? (
@@ -821,6 +861,21 @@ export default function PurchaseOrdersPage() {
                                   )
                                 })()}
                               </>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                            {lines.length === 0 ? (
+                              <span className="text-muted-foreground">—</span>
+                            ) : (
+                              (() => {
+                                const p = totalQtyByUnit(lines)
+                                return (
+                                  <span title={p.full}>
+                                    {p.shown}
+                                    {p.extra}
+                                  </span>
+                                )
+                              })()
                             )}
                           </td>
                           <td className="text-right font-semibold tabular-nums">
@@ -1031,6 +1086,14 @@ export default function PurchaseOrdersPage() {
         onClose={() => setDialog({ open: false, record: null })}
         onSaved={() => void load()}
       />
+
+      {filesFor && (
+        <OrderAttachmentsDialog
+          poId={filesFor.id}
+          poNumber={filesFor.poNumber}
+          onClose={() => setFilesFor(null)}
+        />
+      )}
     </div>
   )
 }

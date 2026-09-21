@@ -3783,6 +3783,49 @@ router.get('/bills/:id/print', requirePermission(MODULE, 'view'), async (req, re
 // matched against its receipts but never paid, so the purchase chain stopped
 // one step from the end and every supplier stayed permanently outstanding.
 
+/**
+ * The receipts behind one bill, and the files on the order and on each —
+ * the same trail the bill's own detail view carries, shared here so the
+ * payments screens can show it without opening the bill.
+ */
+const billTrailSelect = {
+  po: {
+    select: {
+      id: true,
+      poNumber: true,
+      attachments: {
+        select: { id: true, fileName: true, mimeType: true, sizeBytes: true, createdAt: true },
+      },
+    },
+  },
+  lines: {
+    select: {
+      id: true,
+      grnLine: {
+        select: {
+          id: true,
+          grn: {
+            select: {
+              id: true,
+              grnNumber: true,
+              grnDate: true,
+              attachments: {
+                select: {
+                  id: true,
+                  fileName: true,
+                  mimeType: true,
+                  sizeBytes: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 const paymentInclude = {
   supplier: { select: { id: true, code: true, name: true } },
   invoice: {
@@ -3796,6 +3839,7 @@ const paymentInclude = {
       paidAmount: true,
       balanceAmount: true,
       status: true,
+      ...billTrailSelect,
     },
   },
   createdBy: { select: { id: true, name: true } },
