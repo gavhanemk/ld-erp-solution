@@ -371,7 +371,10 @@ export default function PurchaseOrdersPage() {
       <div className="page-header flex-wrap gap-3">
         <div>
           <h1 className="page-title">Purchase Orders</h1>
-          <p className="page-subtitle">What you have ordered from your suppliers</p>
+          {/* Desk only. On a phone the screen is short and the heading
+            already says what this is — the sentence under it cost a line of
+            a list somebody is scrolling. */}
+          <p className="page-subtitle hidden sm:block">What you have ordered from your suppliers</p>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
@@ -396,96 +399,119 @@ export default function PurchaseOrdersPage() {
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
-          {/* One box for words. It reaches the supplier as well as the order
-            number, so typing "ambika" finds every order raised against them
-            just as typing "PO-0006" finds the one order. */}
-          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0">
-            <Search size={14} className="text-muted-foreground shrink-0" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Order number or supplier..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label="Search purchase orders"
-            />
+        {/* ── Two rows on a phone, one flowing row at a desk ─────────────
+
+          Five full-width controls stacked five deep took a third of a phone
+          screen before a single order showed. Grouped, they take two rows:
+          what you type and when, then the three things you pick.
+
+          The grouping wrappers are `sm:contents`, so above a phone they stop
+          existing and their children rejoin the one wrapping row they were
+          always in. That keeps a single set of controls rather than one set
+          per layout, which is how these bars end up disagreeing with
+          themselves. */}
+        <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <div className="flex items-center gap-2 sm:contents">
+            {/* One box for words. It reaches the supplier as well as the order
+              number, so typing "ambika" finds every order raised against them
+              just as typing "PO-0006" finds the one order. */}
+            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+              {/* The glass costs 22px of a row that has two date boxes in it
+                already, and a box you type into needs no icon to explain
+                itself. Desk only. */}
+              <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder="Search..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search purchase orders"
+                title="Reaches the supplier as well as the order number"
+              />
+            </div>
+
+            {/* Two dates, not a preset list — the order date, so "what did we
+              place between the 3rd and the 11th" is answered directly. The
+              word between them is a desk luxury; on a phone the two boxes
+              sitting against each other say the same thing for 18px less. */}
+            <div className="flex shrink-0 items-center gap-1">
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="From date"
+              />
+              <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="To date"
+              />
+            </div>
           </div>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-32"
-            value={supplierId}
-            onChange={(e) => setSupplierId(e.target.value)}
-            aria-label="Filter by supplier"
-          >
-            <option value="">All suppliers</option>
-            {suppliers.map((sup) => (
-              <option key={sup.id} value={sup.id}>
-                {sup.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2 sm:contents">
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
+            >
+              <option value="">All suppliers</option>
+              {suppliers.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
+                </option>
+              ))}
+            </select>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-            value={itemId}
-            onChange={(e) => setItemId(e.target.value)}
-            aria-label="Filter by item"
-          >
-            <option value="">All items</option>
-            {items.map((it) => (
-              <option key={it.id} value={it.id}>
-                {it.name}
-              </option>
-            ))}
-          </select>
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={itemId}
+              onChange={(e) => setItemId(e.target.value)}
+              aria-label="Filter by item"
+            >
+              <option value="">All items</option>
+              {items.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.name}
+                </option>
+              ))}
+            </select>
 
-          {/* Two dates, not a preset list — the order date, so "what did we
-            place between the 3rd and the 11th" is answered directly. */}
-          <div className="flex shrink-0 items-center gap-1">
-            <input
-              type="date"
-              className="form-input h-8 w-[7.5rem] py-0 text-xs"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(e) => setFromDate(e.target.value)}
-              aria-label="From date"
-            />
-            <span className="text-muted-foreground text-xs">to</span>
-            <input
-              type="date"
-              className="form-input h-8 w-[7.5rem] py-0 text-xs"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(e) => setToDate(e.target.value)}
-              aria-label="To date"
-            />
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              aria-label="Filter by status"
+            >
+              <option value="">All statuses</option>
+              {Object.entries(STATUS).map(([v, s]) => (
+                <option key={v} value={v}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
           </div>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            aria-label="Filter by status"
-          >
-            <option value="">All statuses</option>
-            {Object.entries(STATUS).map(([v, s]) => (
-              <option key={v} value={v}>
-                {s.label}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2 sm:contents">
+            {/* Only when it is doing something. A permanent Clear is a control
+              that does nothing on the screen somebody usually sees. */}
+            {anyFilter && (
+              <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
+                Clear
+              </button>
+            )}
 
-          {/* Only when it is doing something. A permanent Clear is a control
-            that does nothing on the screen somebody usually sees. */}
-          {anyFilter && (
-            <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
-              Clear
-            </button>
-          )}
-
-          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-            {total} {total === 1 ? 'order' : 'orders'}
-          </span>
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {total} {total === 1 ? 'order' : 'orders'}
+            </span>
+          </div>
         </div>
 
         {loading && rows.length === 0 ? (
