@@ -472,7 +472,12 @@ export default function SupplierPaymentsPage() {
       <div className="page-header flex-wrap gap-3">
         <div>
           <h1 className="page-title">Supplier Payments</h1>
-          <p className="page-subtitle">What is owed, and what has been paid against it</p>
+          {/* Desk only — on a phone the heading already says what this is,
+            and the sentence under it cost a line of a list somebody is
+            scrolling. */}
+          <p className="page-subtitle hidden sm:block">
+            What is owed, and what has been paid against it
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
@@ -520,7 +525,11 @@ export default function SupplierPaymentsPage() {
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
+        {/* Paired rows on a phone, one flowing row at a desk. The grouping
+          wrappers are `sm:contents` above a phone, so their children rejoin
+          the one wrapping row they were always in — see the same technique
+          on Purchase Orders and Purchase Bills. */}
+        <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
           <div className="bg-secondary/60 flex shrink-0 gap-1 rounded-lg p-0.5" role="tablist">
             {(
               [
@@ -554,109 +563,112 @@ export default function SupplierPaymentsPage() {
 
           <span className="bg-border hidden h-6 w-px shrink-0 lg:block" />
 
-          {/* A whole line to itself on a phone. Sharing the row with the two
-            tab buttons left it 20px wide — narrower than its own magnifying
-            glass and padding, so the icon spilled out of its border. The row
-            already wraps; it just needed telling to. */}
-          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[260px] sm:basis-0">
-            <Search size={14} className="text-muted-foreground shrink-0" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder={
-                tab === 'outstanding'
-                  ? 'Supplier, our bill number, or theirs...'
-                  : 'Supplier, payment number, bill, or reference...'
-              }
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label="Search"
-            />
+          {/* Row: what you type, and when. */}
+          <div className="flex items-center gap-2 sm:contents">
+            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[260px] sm:basis-0 sm:px-2.5">
+              <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder={tab === 'outstanding' ? 'Supplier, bill no...' : 'Supplier, payment...'}
+                title={
+                  tab === 'outstanding'
+                    ? 'Supplier, our bill number, or theirs'
+                    : 'Supplier, payment number, bill, or reference'
+                }
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search"
+              />
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1">
+              <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline">
+                {tab === 'outstanding' ? 'Billed' : 'Paid'}
+              </span>
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[8.5rem] sm:px-3 sm:text-xs"
+                value={from}
+                max={to || undefined}
+                onChange={(e) => setFrom(e.target.value)}
+                aria-label={tab === 'outstanding' ? 'Billed on or after' : 'Paid on or after'}
+              />
+              <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[8.5rem] sm:px-3 sm:text-xs"
+                value={to}
+                min={from || undefined}
+                onChange={(e) => setTo(e.target.value)}
+                aria-label={tab === 'outstanding' ? 'Billed on or before' : 'Paid on or before'}
+              />
+            </div>
           </div>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-44"
-            value={supplierId}
-            onChange={(e) => setSupplierId(e.target.value)}
-            aria-label="Filter by supplier"
-          >
-            <option value="">All suppliers</option>
-            {supplierOptions.map((sup) => (
-              <option key={sup.id} value={sup.id}>
-                {sup.name}
-              </option>
-            ))}
-          </select>
-
-          {/* One dropdown, two meanings — an ageing bucket is nothing on the
-            history tab, and how the money left is nothing on a bill nobody
-            has paid. Rendering both at once would put a permanently useless
-            control in front of somebody on every tab. */}
-          {tab === 'outstanding' ? (
+          {/* Row: the two things you pick. */}
+          <div className="flex items-center gap-2 sm:contents">
             <select
-              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-              value={bucket}
-              onChange={(e) => setBucket(e.target.value)}
-              aria-label="Filter by ageing"
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-44 sm:flex-none sm:px-3 sm:text-xs"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
             >
-              <option value="">Any ageing</option>
-              {BUCKETS.map((b) => (
-                <option key={b} value={b}>
-                  {b}
+              <option value="">All suppliers</option>
+              {supplierOptions.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
                 </option>
               ))}
             </select>
-          ) : (
-            <select
-              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-              value={payMode}
-              onChange={(e) => setPayMode(e.target.value)}
-              aria-label="Filter by how it was paid"
-            >
-              <option value="">Any way paid</option>
-              {Object.entries(MODE_LABEL).map(([v, label]) => (
-                <option key={v} value={v}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          )}
 
-          {/* A line of its own on a phone: two date boxes and the words either
-            side of them do not share a row with a search box at 360px. */}
-          <div className="flex w-full min-w-0 shrink-0 items-center gap-1.5 sm:w-auto">
-            <span className="text-muted-foreground shrink-0 text-xs">
-              {tab === 'outstanding' ? 'Billed' : 'Paid'}
+            {/* One dropdown, two meanings — an ageing bucket is nothing on
+              the history tab, and how the money left is nothing on a bill
+              nobody has paid. Rendering both at once would put a permanently
+              useless control in front of somebody on every tab. */}
+            {tab === 'outstanding' ? (
+              <select
+                className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+                value={bucket}
+                onChange={(e) => setBucket(e.target.value)}
+                aria-label="Filter by ageing"
+              >
+                <option value="">Any ageing</option>
+                {BUCKETS.map((b) => (
+                  <option key={b} value={b}>
+                    {b}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <select
+                className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+                value={payMode}
+                onChange={(e) => setPayMode(e.target.value)}
+                aria-label="Filter by how it was paid"
+              >
+                <option value="">Any way paid</option>
+                {Object.entries(MODE_LABEL).map(([v, label]) => (
+                  <option key={v} value={v}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 sm:contents">
+            {filtersOn && (
+              <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
+                Clear
+              </button>
+            )}
+
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {tab === 'outstanding'
+                ? `${visibleBills.length} ${visibleBills.length === 1 ? 'bill' : 'bills'}`
+                : `${visiblePayments.length} ${visiblePayments.length === 1 ? 'payment' : 'payments'}`}
             </span>
-            <input
-              type="date"
-              className="form-input h-8 min-w-0 flex-1 py-0 text-xs sm:w-[8.5rem] sm:flex-none"
-              value={from}
-              max={to || undefined}
-              onChange={(e) => setFrom(e.target.value)}
-              aria-label={tab === 'outstanding' ? 'Billed on or after' : 'Paid on or after'}
-            />
-            <span className="text-muted-foreground shrink-0 text-xs">to</span>
-            <input
-              type="date"
-              className="form-input h-8 min-w-0 flex-1 py-0 text-xs sm:w-[8.5rem] sm:flex-none"
-              value={to}
-              min={from || undefined}
-              onChange={(e) => setTo(e.target.value)}
-              aria-label={tab === 'outstanding' ? 'Billed on or before' : 'Paid on or before'}
-            />
           </div>
-
-          {filtersOn && (
-            <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
-              Clear
-            </button>
-          )}
-
-          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-            {tab === 'outstanding'
-              ? `${visibleBills.length} ${visibleBills.length === 1 ? 'bill' : 'bills'}`
-              : `${visiblePayments.length} ${visiblePayments.length === 1 ? 'payment' : 'payments'}`}
-          </span>
         </div>
 
         {loading ? (
