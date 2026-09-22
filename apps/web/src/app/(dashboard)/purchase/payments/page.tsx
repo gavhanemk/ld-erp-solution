@@ -18,6 +18,7 @@ import { BillFilesDialog, billFiles } from '@/components/purchase/BillDetail'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
 import { formatDate } from '@/lib/utils'
 
@@ -306,10 +307,9 @@ export default function SupplierPaymentsPage() {
     setBusy(true)
     setError(null)
     try {
-      const res = await api.post<{ message?: string }>(
-        `/purchase/payments/${p.id}/reverse`,
-        { reason: reason.trim() }
-      )
+      const res = await api.post<{ message?: string }>(`/purchase/payments/${p.id}/reverse`, {
+        reason: reason.trim(),
+      })
       await load()
       if (res.message) setMessage(res.message)
     } catch (err) {
@@ -474,6 +474,33 @@ export default function SupplierPaymentsPage() {
    * the server again would only risk handing over a different set than the one
    * being looked at.
    */
+  /**
+   * The outstanding tab, built as a report rather than as a grid.
+   *
+   * Offered on that tab only. The history tab lists payments that have gone
+   * out, which is a different subject with no report behind it yet — and one
+   * button that quietly changed what it reported on between two tabs would be
+   * the least findable mistake on this screen.
+   *
+   * Every filter goes up with it. The search box, the ageing band and the
+   * dates are all things the outstanding report learned to take for exactly
+   * this, so the file answers the question the screen is showing.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const params: Record<string, string> = {}
+      if (search.trim()) params.q = search.trim()
+      if (supplierId) params.supplierId = supplierId
+      if (bucket) params.bucket = bucket
+      if (from) params.from = from
+      if (to) params.to = to
+      setMessage(describeReport(await downloadReport('supplier-outstanding', 'xlsx', params)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
+
   const exportList = async (format: ExportFormat) => {
     setError(null)
     try {
@@ -529,7 +556,11 @@ export default function SupplierPaymentsPage() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportList} disabled={loading} />
+          <ExportButton
+            onExport={exportList}
+            onReport={tab === 'outstanding' ? exportReport : undefined}
+            disabled={loading}
+          />
         </div>
       </div>
 
@@ -615,7 +646,9 @@ export default function SupplierPaymentsPage() {
               <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
               <input
                 className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-                placeholder={tab === 'outstanding' ? 'Supplier, bill no...' : 'Supplier, payment...'}
+                placeholder={
+                  tab === 'outstanding' ? 'Supplier, bill no...' : 'Supplier, payment...'
+                }
                 title={
                   tab === 'outstanding'
                     ? 'Supplier, our bill number, or theirs'
@@ -1226,10 +1259,7 @@ export default function SupplierPaymentsPage() {
                               than every other on the list. */}
                             {(p.chequeNo || p.referenceNo || p.bankAccount) && (
                               <div className="text-muted-foreground text-[10px]">
-                                {[
-                                  p.chequeNo || p.referenceNo,
-                                  p.bankAccount?.accountName,
-                                ]
+                                {[p.chequeNo || p.referenceNo, p.bankAccount?.accountName]
                                   .filter(Boolean)
                                   .join(' · ')}
                               </div>

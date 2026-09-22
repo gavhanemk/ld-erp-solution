@@ -135,6 +135,35 @@ export interface Panel {
   note?: string
 }
 
+/**
+ * The PivotTable a report offers.
+ *
+ * Declared by the report, for the same reason a panel declares its question:
+ * a builder that picked the row field by counting distinct values would group
+ * one report by supplier and the next by GSTIN, and the reader would have to
+ * work out each time what they were looking at.
+ *
+ * A report with no `pivot` gets no Pivot sheet. That is the right answer for
+ * anything whose rows are already one-per-thing — a pivot over a list with no
+ * repeating key is the list again, with a Grand Total nobody asked for.
+ */
+export interface PivotSpec {
+  /** Column key down the left. A `text` or `badge` column. */
+  rows: string
+  /** Column keys totalled in the body, in order. Each becomes a "Sum of …". */
+  values: string[]
+  /**
+   * Column keys the reader can filter by.
+   *
+   * These become slicers — the button panels beside the table. Keep it to
+   * three or four: a slicer for every column is a wall of buttons that hides
+   * the figures it was meant to sit beside.
+   */
+  slicers?: string[]
+  /** One sentence above the table saying what it is for. */
+  note?: string
+}
+
 /** A grid of figures, drawn as cells rather than as a chart. */
 export interface Matrix {
   title: string
@@ -199,6 +228,8 @@ export interface ReportDefinition {
   description: string
   columns: ReportColumn[]
   filters: ReportFilter[]
+  /** The Pivot sheet, where the rows repeat a key worth grouping by. */
+  pivot?: PivotSpec
   run: (ctx: ReportContext) => Promise<ReportResult>
 }
 

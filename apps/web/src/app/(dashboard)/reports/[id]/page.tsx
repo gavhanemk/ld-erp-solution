@@ -6,7 +6,7 @@ import { AlertCircle, ArrowLeft, Play, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, type Analysis } from '@/components/reports/Dashboard'
-import { downloadReport } from '@/lib/reportDownload'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { formatDate } from '@/lib/utils'
 
 interface Filter {
@@ -127,13 +127,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const exportFile = async (format: 'xlsx' | 'csv') => {
     setError(null)
     try {
-      const { fileName, bytes, charts } = await downloadReport(id, format, applied)
-      setMessage(
-        `${fileName} — ${(bytes / 1024).toFixed(0)} KB` +
-          (charts != null && charts > 0
-            ? `, ${charts} ${charts === 1 ? 'chart' : 'charts'} on the Dashboard sheet.`
-            : '.')
-      )
+      setMessage(describeReport(await downloadReport(id, format, applied)))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'The report could not be built.')
     }

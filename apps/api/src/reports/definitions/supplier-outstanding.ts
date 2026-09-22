@@ -1,6 +1,14 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { mean, round2, supplierFilter, topWithRest } from './shared'
+import {
+  dateRangeFilters,
+  dayRange,
+  mean,
+  round2,
+  searchFilter,
+  supplierFilter,
+  topWithRest,
+} from './shared'
 
 /**
  * What is still owed to suppliers, aged.
@@ -28,13 +36,21 @@ export const supplierOutstanding: ReportDefinition = {
   description:
     'Every bill still owed, aged from its due date. A snapshot of today, not of a period — a payables ageing with a date range on it is true of no moment at all.',
   filters: [
+    ...dateRangeFilters,
     supplierFilter,
+    {
+      key: 'bucket',
+      label: 'Ageing',
+      type: 'select',
+      options: BUCKETS.map((b) => ({ value: b, label: b })),
+    },
     {
       key: 'overdueOnly',
       label: 'Overdue only',
       type: 'boolean',
       help: 'Leave off to include bills that are not yet due',
     },
+    searchFilter,
   ],
   columns: [
     { key: 'supplier', label: 'Supplier', type: 'text', width: 30 },
@@ -50,10 +66,37 @@ export const supplierOutstanding: ReportDefinition = {
     { key: 'isMsme', label: 'MSME', type: 'text', width: 8 },
   ],
 
+  /**
+   * By supplier, with ageing and MSME on slicers.
+   *
+   * Those two are what turn this from a list into a decision: the ageing band
+   * says which money has waited longest, and MSME says which of it carries a
+   * statutory clock rather than a conversation.
+   */
+  pivot: {
+    rows: 'supplier',
+    values: ['balance', 'total', 'paid'],
+    slicers: ['bucket', 'isMsme'],
+    note: 'What is still owed, by supplier. Ageing narrows it to one band; MSME to the suppliers with a statutory payment clock.',
+  },
+
   async run({ tx, params, rowCap }) {
+    const range = dayRange(params)
     const where: Prisma.PurchaseInvoiceWhereInput = {
       status: { in: ['UNPAID', 'PARTIAL'] },
       ...(params.supplierId ? { supplierId: params.supplierId } : {}),
+      // The same clauses the Supplier Payments screen runs, so the Export
+      // button there reports on exactly the bills it is showing.
+      ...(range ? { billDate: range } : {}),
+      ...(params.q
+        ? {
+            OR: [
+              { billNumber: { contains: params.q, mode: 'insensitive' as const } },
+              { supplierInvoiceNo: { contains: params.q, mode: 'insensitive' as const } },
+              { supplier: { name: { contains: params.q, mode: 'insensitive' as const } } },
+            ],
+          }
+        : {}),
     }
 
     const totalRows = await tx.purchaseInvoice.count({ where })
@@ -99,6 +142,10 @@ export const supplierOutstanding: ReportDefinition = {
     })
 
     if (params.overdueOnly === 'true') rows = rows.filter((r) => r.daysOverdue > 0)
+    // The band is worked out from the due date after the rows come back, so
+    // it is filtered here rather than in SQL — the same place `overdueOnly`
+    // has always been applied, and for the same reason.
+    if (params.bucket) rows = rows.filter((r) => r.bucket === params.bucket)
 
     const owed = round2(rows.reduce((s, r) => s + r.balance, 0))
     const overdue = rows.filter((r) => r.daysOverdue > 0)
@@ -140,7 +187,18 @@ export const supplierOutstanding: ReportDefinition = {
 
     return {
       rows,
-      totalRows,
+      /*
+       * Only when the cap actually bit.
+       *
+       * `totalRows` counts what the query matched; the overdue and ageing
+       * filters run afterwards, on the mapped rows, because the band is
+       * worked out from the due date rather than stored. So `rows.length` is
+       * routinely below `totalRows` with nothing having been truncated — and
+       * the engine reads a gap between those two as truncation and puts
+       * _PARTIAL in the file name. Asking whether the fetch hit the ceiling
+       * is the question that was actually meant.
+       */
+      totalRows: bills.length >= rowCap ? totalRows : undefined,
       analysis: {
         headline:
           rows.length === 0

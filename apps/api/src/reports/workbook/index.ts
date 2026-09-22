@@ -3,7 +3,8 @@ import type { ReportAnalysis, ReportDefinition, ReportParams, ReportResult } fro
 import { buildDashboard } from './dashboard'
 import { buildData } from './data'
 import { buildNotes } from './notes'
-import { injectCharts } from '../ooxml/inject'
+import { buildPivot } from './pivot'
+import { injectOoxml } from '../ooxml/inject'
 
 /**
  * Turns one report's result into a workbook.
@@ -20,7 +21,7 @@ export async function buildWorkbook(opts: {
   params: ReportParams
   runBy: string
   periodLabel: string
-}): Promise<{ buffer: Buffer; chartCount: number; partial: boolean }> {
+}): Promise<{ buffer: Buffer; chartCount: number; pivotCount: number; partial: boolean }> {
   const { def, result, params, runBy, periodLabel } = opts
   const meta = {
     runBy,
@@ -35,18 +36,29 @@ export async function buildWorkbook(opts: {
   wb.creator = 'LD Cotton Mills ERP'
   wb.created = meta.runAt
 
-  // 1 — ordinary workbook building. Dashboard first, so it opens on it.
+  // 1 — ordinary workbook building. Dashboard first, so it opens on it, then
+  //     the Pivot to work in, then the rows it all comes from, then Notes.
   const specs = buildDashboard(wb, def, result.analysis, params, meta)
+  const pivot = buildPivot(wb, def, result.rows)
   buildData(wb, def, result.rows)
   buildNotes(wb, def, result.analysis, params, meta)
 
   // 2 — a real .xlsx buffer
   const serialised = Buffer.from(await wb.xlsx.writeBuffer())
 
-  // 3 — open THAT zip and add the chart parts
-  const buffer = await injectCharts(serialised, 'Dashboard', specs)
+  // 3 — open THAT zip and add the parts no library here can write
+  const buffer = await injectOoxml(serialised, {
+    chartSheet: 'Dashboard',
+    charts: specs,
+    pivots: pivot ? [pivot] : [],
+  })
 
-  return { buffer, chartCount: specs.length, partial: Boolean(meta.truncatedFrom) }
+  return {
+    buffer,
+    chartCount: specs.length,
+    pivotCount: pivot ? 1 : 0,
+    partial: Boolean(meta.truncatedFrom),
+  }
 }
 
 /**

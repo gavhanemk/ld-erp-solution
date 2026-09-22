@@ -54,6 +54,14 @@ const SYNTHETIC: { def: ReportDefinition; result: ReportResult } = {
       { key: 'value', label: 'Value', type: 'money', total: 'sum' },
       { key: 'when', label: 'Booked', type: 'date' },
     ],
+    // A supplier name here carries a comma and an ampersand, so the pivot's
+    // shared items exercise XML escaping on the axis as well as in the rows.
+    pivot: {
+      rows: 'supplier',
+      values: ['value', 'qty'],
+      slicers: ['month'],
+      note: 'Every supplier against every month, to prove the cache indexes both.',
+    },
     run: async () => ({ rows: [], analysis: { kpis: [], panels: [], insights: [], caveats: [] } }),
   },
   result: (() => {
@@ -200,7 +208,7 @@ async function main() {
       async (tx) => def.run({ prisma, tx, params, rowCap: ROW_CAP }),
       { timeout: 120_000, maxWait: 15_000 }
     )
-    const { buffer, chartCount, partial } = await buildWorkbook({
+    const { buffer, chartCount, pivotCount, partial } = await buildWorkbook({
       def,
       result,
       params,
@@ -211,13 +219,13 @@ async function main() {
     const chartable = result.analysis.panels.filter((p) => p.points.length >= 2).length
     console.log(
       `${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}` +
-        `charts=${chartCount}  panels=${result.analysis.panels.length} (${chartable} chartable)  ` +
+        `charts=${chartCount} pivots=${pivotCount}  panels=${result.analysis.panels.length} (${chartable} chartable)  ` +
         `partial=${partial}  ${(buffer.length / 1024).toFixed(0)}KB`
     )
   }
 
   if (process.argv.includes('--synthetic')) {
-    const { buffer, chartCount } = await buildWorkbook({
+    const { buffer, chartCount, pivotCount } = await buildWorkbook({
       def: SYNTHETIC.def,
       result: SYNTHETIC.result,
       params: { from: '2026-04-01', to: '2026-09-22' },
@@ -227,7 +235,7 @@ async function main() {
     writeFileSync(`${out}/every-chart-kind.xlsx`, buffer)
     console.log(
       `${'every-chart-kind'.padEnd(26)} rows=${String(SYNTHETIC.result.rows.length).padEnd(6)}` +
-        `charts=${chartCount}  (line, bar, doughnut, column, bar)  ${(buffer.length / 1024).toFixed(0)}KB`
+        `charts=${chartCount} pivots=${pivotCount}  (line, bar, doughnut, column, bar)  ${(buffer.length / 1024).toFixed(0)}KB`
     )
   }
 

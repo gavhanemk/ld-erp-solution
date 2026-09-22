@@ -22,6 +22,7 @@ import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/Pur
 import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
 import {
   asDate,
   asNumber,
@@ -219,6 +220,31 @@ function PurchaseBillsTable() {
     { header: 'Notes', value: (b) => b.notes ?? '' },
   ]
 
+  /**
+   * The same filters, built as a report rather than as a grid.
+   *
+   * Every filter on this screen goes up with it, the search box and the
+   * overdue switch included — the purchase register learned to take both for
+   * exactly this. A report answering a different question from the one on
+   * screen, and saying nothing about it, would be worse than no button.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const params: Record<string, string> = {}
+      if (debounced) params.q = debounced
+      if (status) params.status = status
+      if (supplierId) params.supplierId = supplierId
+      if (itemId) params.itemId = itemId
+      if (fromDate) params.from = fromDate
+      if (toDate) params.to = toDate
+      if (overdueOnly) params.overdue = 'true'
+      setMessage(describeReport(await downloadReport('purchase-register', 'xlsx', params)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
+
   const exportList = async (format: ExportFormat) => {
     setError(null)
     try {
@@ -368,7 +394,7 @@ function PurchaseBillsTable() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportList} disabled={loading} />
+          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
           <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
             <Plus size={15} /> Book Bill
           </button>

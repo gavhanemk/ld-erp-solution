@@ -7,6 +7,8 @@ import {
   mean,
   round2,
   supplierFilter,
+  searchFilter,
+  itemFilter,
   topWithRest,
 } from './shared'
 
@@ -34,12 +36,14 @@ export const goodsReceiptRegister: ReportDefinition = {
   filters: [
     ...dateRangeFilters,
     supplierFilter,
+    itemFilter,
     {
       key: 'status',
       label: 'Status',
       type: 'select',
       options: Object.entries(STATUS_WORDS).map(([value, label]) => ({ value, label })),
     },
+    searchFilter,
   ],
   columns: [
     { key: 'grnDate', label: 'Received On', type: 'date', width: 14 },
@@ -58,12 +62,39 @@ export const goodsReceiptRegister: ReportDefinition = {
     { key: 'status', label: 'Status', type: 'badge', badges: STATUS_WORDS, width: 18 },
   ],
 
+  /**
+   * By supplier, with the unit on a slicer.
+   *
+   * Receipts are the one register whose quantities genuinely cannot be added
+   * down a column — metres and pieces sit in the same one. A slicer is the
+   * fix rather than a caveat: pick a UOM and every total under it is in that
+   * unit.
+   */
+  pivot: {
+    rows: 'supplier',
+    values: ['received', 'rejected', 'accepted'],
+    slicers: ['status', 'store', 'uom'],
+    note: 'Quantities in different units share these columns. Pick a UOM before reading a total.',
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const where: Prisma.GRNWhereInput = {
       ...(params.status ? { status: params.status as Prisma.EnumGRNStatusFilter['equals'] } : {}),
       ...(params.supplierId ? { po: { supplierId: params.supplierId } } : {}),
       ...(range ? { grnDate: range } : {}),
+      // The same two clauses the Goods Receipt list runs, so the Export button
+      // on that screen reports on exactly the rows it is showing.
+      ...(params.itemId ? { lines: { some: { itemId: params.itemId } } } : {}),
+      ...(params.q
+        ? {
+            OR: [
+              { grnNumber: { contains: params.q, mode: 'insensitive' as const } },
+              { po: { poNumber: { contains: params.q, mode: 'insensitive' as const } } },
+              { po: { supplier: { name: { contains: params.q, mode: 'insensitive' as const } } } },
+            ],
+          }
+        : {}),
     }
 
     // The cap counts receipts, since that is what is fetched; the rows it

@@ -15,7 +15,7 @@ export async function downloadReport(
   reportId: string,
   format: 'xlsx' | 'csv',
   params: Record<string, string>
-): Promise<{ fileName: string; bytes: number; charts: number | null }> {
+): Promise<{ fileName: string; bytes: number; charts: number | null; pivots: number | null }> {
   const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:5000/api'
   const qs = new URLSearchParams({ ...params, format })
   const res = await fetch(`${base}/reports/${reportId}/export?${qs}`, {
@@ -48,6 +48,35 @@ export async function downloadReport(
   // browsers before they have read the blob.
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 
+  // Counted off the finished file by the server, not predicted here — the
+  // whole point of saying "4 charts" is that something measured them.
   const charts = res.headers.get('X-Report-Charts')
-  return { fileName, bytes: blob.size, charts: charts == null ? null : Number(charts) }
+  const pivots = res.headers.get('X-Report-Pivots')
+  return {
+    fileName,
+    bytes: blob.size,
+    charts: charts == null ? null : Number(charts),
+    pivots: pivots == null ? null : Number(pivots),
+  }
+}
+
+/**
+ * What the file turned out to hold, as a sentence.
+ *
+ * Shared by the report screen and the four purchase lists so they describe
+ * the same file the same way.
+ */
+export function describeReport(r: {
+  fileName: string
+  bytes: number
+  charts: number | null
+  pivots: number | null
+}): string {
+  const parts: string[] = []
+  if (r.charts) parts.push(`${r.charts} ${r.charts === 1 ? 'chart' : 'charts'}`)
+  if (r.pivots) parts.push(`${r.pivots === 1 ? 'a pivot table' : `${r.pivots} pivot tables`}`)
+  const size = `${(r.bytes / 1024).toFixed(0)} KB`
+  if (parts.length === 0) return `${r.fileName} — ${size}.`
+  const list = parts.length === 1 ? parts[0] : `${parts[0]} and ${parts[1]}`
+  return `${r.fileName} — ${size}, with ${list}.`
 }

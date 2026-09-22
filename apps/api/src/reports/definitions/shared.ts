@@ -14,6 +14,30 @@ export const supplierFilter: ReportFilter = {
 }
 
 /**
+ * The two filters the purchase list screens carry that a report used not to.
+ *
+ * They exist because the Export button on those screens now builds a report
+ * rather than a bare grid, and a report that quietly ignored the search box
+ * would hand back a different list than the one on screen — filtered to
+ * nothing the person could see, with nothing in the file to say so. A filter
+ * the report cannot honour has to be a filter it refuses, not one it drops.
+ */
+export const searchFilter: ReportFilter = {
+  key: 'q',
+  label: 'Search',
+  type: 'text',
+  help: 'Document number, reference or supplier name',
+}
+
+export const itemFilter: ReportFilter = {
+  key: 'itemId',
+  label: 'Item',
+  type: 'select',
+  optionsFrom: 'items',
+  help: 'Only documents with a line for this item',
+}
+
+/**
  * A day range, inclusive at both ends.
  *
  * `to` is pushed to the last millisecond of its day. Read as midnight it

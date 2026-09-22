@@ -3,6 +3,12 @@ import type { ReportColumn, ReportDefinition } from '../types'
 import { FMT, INK, PAPER, numberFormatFor } from './theme'
 
 /**
+ * The name the pivot cache looks this sheet up by, so the two cannot drift
+ * apart over a rename.
+ */
+export const DATA_SHEET = 'Data'
+
+/**
  * Every row, one header, an autofilter.
  *
  * This is the sheet somebody opens to check a figure they doubt, so nothing
@@ -14,7 +20,7 @@ export function buildData(
   def: ReportDefinition,
   rows: Array<Record<string, unknown>>
 ) {
-  const ws = wb.addWorksheet('Data', {
+  const ws = wb.addWorksheet(DATA_SHEET, {
     views: [{ state: 'frozen', ySplit: 1 }],
   })
 
@@ -91,14 +97,25 @@ export function buildData(
  * the cell is still the number 1250, sums correctly, and still reads with its
  * unit — which is the whole reason for wanting the unit there.
  */
-function formatFor(c: ReportColumn): string | undefined {
+export function formatFor(c: ReportColumn): string | undefined {
   const base = numberFormatFor(c.type)
   if (!base) return undefined
   if (c.type === 'qty' && c.unit) return `${base}" ${c.unit}"`
   return base
 }
 
-function cellValue(c: ReportColumn, v: unknown): ExcelJS.CellValue {
+export type PlainCell = string | number | Date | null
+
+/**
+ * One value as this workbook holds it.
+ *
+ * Exported because the pivot cache has to agree with the Data sheet about
+ * every cell it indexes — a badge stored raw in the cache and printed as its
+ * word on the sheet gives a pivot whose row labels are `PARTIAL` and `POSTED`
+ * beside a sheet that says "Part paid" and "Paid", and the two look like
+ * different reports.
+ */
+export function plainCell(c: ReportColumn, v: unknown): PlainCell {
   if (v == null || v === '') return null
   if (c.type === 'date') {
     const d = v instanceof Date ? v : new Date(String(v))
@@ -110,6 +127,10 @@ function cellValue(c: ReportColumn, v: unknown): ExcelJS.CellValue {
     return Number.isNaN(n) ? null : n
   }
   return String(v)
+}
+
+function cellValue(c: ReportColumn, v: unknown): ExcelJS.CellValue {
+  return plainCell(c, v)
 }
 
 function colLetter(n: number): string {

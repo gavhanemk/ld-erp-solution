@@ -29,6 +29,7 @@ import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDi
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
 import {
   asDate,
   asNumber,
@@ -294,6 +295,34 @@ export default function PurchaseOrdersPage() {
     }
   }
 
+  /**
+   * The same filters, built as a report rather than as a grid.
+   *
+   * Every filter on this screen goes up with it — the search box and the item
+   * picker included, which the report learned to take for exactly this. A
+   * report that answered a different question from the one on screen, and
+   * said nothing about it, would be worse than no button.
+   *
+   * The server does the work: it reads inside one transaction, so the file is
+   * one moment rather than a stitch of several, and it is the only thing that
+   * can count the charts in the finished file.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const params: Record<string, string> = {}
+      if (debounced) params.q = debounced
+      if (status) params.status = status
+      if (supplierId) params.supplierId = supplierId
+      if (itemId) params.itemId = itemId
+      if (fromDate) params.from = fromDate
+      if (toDate) params.to = toDate
+      setMessage(describeReport(await downloadReport('purchase-order-status', 'xlsx', params)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
+
   const act = async (po: PurchaseOrder, what: 'cancel') => {
     if (!confirm(`Cancel ${po.poNumber}?`)) return
     setBusy(true)
@@ -459,7 +488,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportList} disabled={loading} />
+          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
           <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
             <Plus size={15} /> New Purchase Order
           </button>

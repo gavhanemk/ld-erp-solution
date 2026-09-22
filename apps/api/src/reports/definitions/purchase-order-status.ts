@@ -1,6 +1,15 @@
 import type { Prisma } from '@prisma/client'
 import type { Panel, ReportDefinition } from '../types'
-import { dateRangeFilters, dayRange, ratio, round2, supplierFilter, topWithRest } from './shared'
+import {
+  dateRangeFilters,
+  dayRange,
+  itemFilter,
+  ratio,
+  round2,
+  searchFilter,
+  supplierFilter,
+  topWithRest,
+} from './shared'
 
 const STATUS_WORDS: Record<string, string> = {
   DRAFT: 'Draft',
@@ -27,12 +36,14 @@ export const purchaseOrderStatus: ReportDefinition = {
   filters: [
     ...dateRangeFilters,
     supplierFilter,
+    itemFilter,
     {
       key: 'status',
       label: 'Status',
       type: 'select',
       options: Object.entries(STATUS_WORDS).map(([value, label]) => ({ value, label })),
     },
+    searchFilter,
   ],
   columns: [
     { key: 'poDate', label: 'Order Date', type: 'date', width: 14 },
@@ -50,6 +61,21 @@ export const purchaseOrderStatus: ReportDefinition = {
     { key: 'daysOpen', label: 'Days Open', type: 'integer', width: 11 },
   ],
 
+  /**
+   * By supplier, because a late order is chased with a supplier.
+   *
+   * Money only. The quantity columns add metres to pieces to kilograms, and
+   * while the Data sheet totals them the same way, a pivot invites the reader
+   * to trust a subtotal it puts in front of them — so this one does not offer
+   * a figure that cannot be trusted.
+   */
+  pivot: {
+    rows: 'supplier',
+    values: ['orderValue', 'billedValue'],
+    slicers: ['status'],
+    note: 'Ordered against billed, by supplier. Use the Status buttons to see only what is still open.',
+  },
+
   async run({ tx, params, rowCap }) {
     const range = dayRange(params)
     const where: Prisma.PurchaseOrderWhereInput = {
@@ -59,6 +85,17 @@ export const purchaseOrderStatus: ReportDefinition = {
         ? { status: params.status as Prisma.EnumPurchaseOrderStatusFilter['equals'] }
         : {}),
       ...(range ? { poDate: range } : {}),
+      // The same two clauses the Purchase Orders list runs, so the Export
+      // button on that screen reports on exactly the rows it is showing.
+      ...(params.itemId ? { lines: { some: { itemId: params.itemId } } } : {}),
+      ...(params.q
+        ? {
+            OR: [
+              { poNumber: { contains: params.q, mode: 'insensitive' as const } },
+              { supplier: { name: { contains: params.q, mode: 'insensitive' as const } } },
+            ],
+          }
+        : {}),
     }
 
     const totalRows = await tx.purchaseOrder.count({ where })

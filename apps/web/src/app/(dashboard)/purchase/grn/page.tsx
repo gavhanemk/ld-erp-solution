@@ -25,6 +25,7 @@ import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
 import {
   asDate,
   asNumber,
@@ -400,6 +401,30 @@ export default function GoodsReceiptPage() {
     { header: 'Notes', value: ({ g }) => g.notes ?? '' },
   ]
 
+  /**
+   * The same filters, built as a report rather than as a grid.
+   *
+   * Receipts, whichever tab is showing — the same subject the plain export
+   * has always had. The waiting list is a view of orders, not of receipts,
+   * and a button that silently changed what it reported on between two tabs
+   * would be the least findable bug on this screen.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const params: Record<string, string> = {}
+      if (debounced) params.q = debounced
+      if (status) params.status = status
+      if (supplierId) params.supplierId = supplierId
+      if (itemId) params.itemId = itemId
+      if (fromDate) params.from = fromDate
+      if (toDate) params.to = toDate
+      setMessage(describeReport(await downloadReport('goods-receipt-register', 'xlsx', params)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
+
   const exportList = async (format: ExportFormat) => {
     setError(null)
     try {
@@ -719,7 +744,7 @@ export default function GoodsReceiptPage() {
           >
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <ExportButton onExport={exportList} disabled={loading} />
+          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
           <button className="btn-primary" onClick={() => setDialog('')}>
             <Plus size={15} /> Receive goods
           </button>

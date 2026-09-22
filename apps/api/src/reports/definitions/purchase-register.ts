@@ -7,6 +7,8 @@ import {
   mean,
   round2,
   supplierFilter,
+  searchFilter,
+  itemFilter,
   topWithRest,
 } from './shared'
 
@@ -33,12 +35,20 @@ export const purchaseRegister: ReportDefinition = {
   filters: [
     ...dateRangeFilters,
     supplierFilter,
+    itemFilter,
     {
       key: 'status',
       label: 'Status',
       type: 'select',
       options: Object.entries(STATUS_WORDS).map(([value, label]) => ({ value, label })),
     },
+    {
+      key: 'overdue',
+      label: 'Overdue only',
+      type: 'boolean',
+      help: 'Only bills past their due date and not settled',
+    },
+    searchFilter,
   ],
   columns: [
     { key: 'billDate', label: 'Booked On', type: 'date', width: 14 },
@@ -60,6 +70,19 @@ export const purchaseRegister: ReportDefinition = {
     { key: 'dueDate', label: 'Due', type: 'date', width: 14 },
   ],
 
+  /**
+   * By supplier: billed, settled, and what is left of it.
+   *
+   * Taxable rather than the bill total leads, because that is the figure the
+   * purchase ledger and the GST return both work from.
+   */
+  pivot: {
+    rows: 'supplier',
+    values: ['taxable', 'total', 'paid', 'balance'],
+    slicers: ['status'],
+    note: 'What each supplier billed, what has gone out to them, and what is still to go.',
+  },
+
   async run({ tx, params, rowCap }) {
     const where: Prisma.PurchaseInvoiceWhereInput = {
       ...(params.supplierId ? { supplierId: params.supplierId } : {}),
@@ -70,6 +93,31 @@ export const purchaseRegister: ReportDefinition = {
         const range = dayRange(params)
         return range ? { billDate: range } : {}
       })(),
+      // The same clauses the Purchase Bills list runs, so the Export button on
+      // that screen reports on exactly the rows it is showing.
+      ...(params.itemId ? { lines: { some: { itemId: params.itemId } } } : {}),
+      // An AND rather than two more top-level keys: `status` is already set
+      // above when the picker chose one, and a second `status` in the same
+      // object silently replaces the first. Under AND, asking for PAID and
+      // overdue at once correctly returns nothing instead of quietly
+      // returning one of the two filters the reader did not ask for.
+      ...(params.overdue === 'true'
+        ? {
+            AND: [
+              { dueDate: { lt: new Date() } },
+              { status: { in: ['UNPAID', 'PARTIAL'] as const } },
+            ],
+          }
+        : {}),
+      ...(params.q
+        ? {
+            OR: [
+              { billNumber: { contains: params.q, mode: 'insensitive' as const } },
+              { supplierInvoiceNo: { contains: params.q, mode: 'insensitive' as const } },
+              { supplier: { name: { contains: params.q, mode: 'insensitive' as const } } },
+            ],
+          }
+        : {}),
     }
 
     // Counted before the rows are fetched, so the cap can be reported against

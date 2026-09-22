@@ -105,7 +105,7 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
     return
   }
 
-  const { buffer, chartCount } = await buildWorkbook({
+  const { buffer, chartCount, pivotCount } = await buildWorkbook({
     def,
     result,
     params,
@@ -118,6 +118,7 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
   // Measured off the finished file, not predicted from the row count.
   res.setHeader('Content-Length', String(buffer.length))
   res.setHeader('X-Report-Charts', String(chartCount))
+  res.setHeader('X-Report-Pivots', String(pivotCount))
   res.setHeader('X-Report-Rows', String(result.rows.length))
   res.send(buffer)
 })
