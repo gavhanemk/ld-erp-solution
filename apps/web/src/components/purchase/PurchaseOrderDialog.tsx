@@ -2517,9 +2517,13 @@ export function PurchaseOrderDialog({
                           </td>
 
                           <td className={COL.qty}>
+                            {/* The wheel and the arrow keys move this by whole units.
+                             Not 0.001, which moved it by a thousandth of a piece; and not 1,
+                             which would refuse 1500.5 metres of fabric outright. "any" steps
+                             by one while still accepting a decimal that is typed. */}
                             <input
                               type="number"
-                              step="0.001"
+                              step="any"
                               min={0}
                               className={`${cell} text-right ${needsQty ? 'border-amber-500/70' : ''}`}
                               placeholder="0"

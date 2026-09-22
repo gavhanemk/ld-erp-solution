@@ -1200,9 +1200,13 @@ export function PurchaseBillDialog({
                           )}
                         </td>
                         <td className="py-2 px-3 w-28">
+                          {/* The wheel and the arrow keys move this by whole units.
+                           Not 0.001, which moved it by a thousandth of a piece; and not 1,
+                           which would refuse 1500.5 metres of fabric outright. "any" steps
+                           by one while still accepting a decimal that is typed. */}
                           <input
                             type="number"
-                            step="0.001"
+                            step="any"
                             min={0}
                             className="form-input h-9 text-right"
                             value={String(line.qty)}
