@@ -236,7 +236,15 @@ export default function PurchaseOrdersPage() {
     const warning =
       `Delete ${po.poNumber} for good? This removes the order, its lines and anything ` +
       'attached to it, and is not the same as cancelling — nothing will be left saying ' +
-      `it was called off. The number ${po.poNumber} will not be reused.`
+      `it was called off. The number ${po.poNumber} will not be reused.` +
+      // Deleting one the supplier holds leaves them working from paper for an
+      // order that is no longer on the list. Cancelling is usually what was
+      // meant, so the prompt says so rather than quietly allowing it.
+      (po.status === 'SENT'
+        ? `
+
+The supplier already has this order. If it was real and fell through, cancel it instead so the file still shows what happened.`
+        : '')
     if (!confirm(warning)) return
     setBusy(true)
     setMessage(null)
@@ -251,16 +259,13 @@ export default function PurchaseOrdersPage() {
     }
   }
 
-  /**
-   * What can be done to one order.
+  /*
+   * What can be done to one order — five things, in the order somebody
+   * reaches for them.
    *
    * Shared by the table and the phone cards. Written once because these
-   * conditions are the rules — only a draft may be edited or sent, only a
-   * draft or a cancelled order may be deleted — and a second copy would
-   * eventually disagree with this one about a live document.
-   */
-  /*
-   * Five things, in the order somebody reaches for them.
+   * conditions are the rules, and a second copy would eventually disagree
+   * with this one about a live document.
    *
    * "Reopen as a draft" is gone. Correcting an order the supplier already had
    * used to mean pulling it back to a draft first, then editing, then sending
@@ -317,9 +322,11 @@ export default function PurchaseOrdersPage() {
       })
     }
 
-    // The server allows this only while nothing has been received or billed,
-    // so offering it anywhere else would be a button that always failed.
-    if (po.status === 'DRAFT' || po.status === 'CANCELLED') {
+    // The server allows this only while nothing has been received or billed
+    // against the order, and those two are exactly the statuses that can still
+    // be true. Offering it on a partly or fully received order would be a
+    // button that always failed.
+    if (po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CANCELLED') {
       items.push({
         key: 'delete',
         label: 'Delete order',

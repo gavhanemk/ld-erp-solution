@@ -1404,13 +1404,15 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
   })
   if (!order || order.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
-  if (order.status !== 'DRAFT' && order.status !== 'CANCELLED') {
-    throw new AppError(
-      `${order.poNumber} has gone to the supplier. Cancel it instead — deleting it here would leave them holding paper for an order that no longer exists.`,
-      400,
-      'PO_SENT'
-    )
-  }
+  // No status check here any more. An order the supplier holds used to be
+  // refused outright, but the check below is the one that actually protects
+  // anything: an order nothing has arrived against and nothing has been
+  // billed against holds no history worth keeping. This is a soft delete —
+  // the order goes to the recycle bin and its number is still never reused —
+  // so an order sent by mistake can be taken off the list, and recovered if
+  // that turns out to be wrong. Cancelling stays the right answer for an
+  // order that was real and fell through, and the wording on the button says
+  // which is which.
 
   if (order._count.grns > 0 || order._count.invoices > 0) {
     const against = [
