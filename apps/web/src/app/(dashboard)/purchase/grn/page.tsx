@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
+import { FilesCell } from '@/components/tables/FilesCell'
 import {
   Plus,
   Search,
@@ -123,6 +124,7 @@ interface WaitingOrder {
   totalAmount: string | number
   supplier?: { id: string; name: string } | null
   lines?: WaitingLine[]
+  _count?: { attachments: number }
 }
 
 const qty = (v: string | number) =>
@@ -236,7 +238,11 @@ export default function GoodsReceiptPage() {
   /** The receipt being corrected, or null when the form above is closed. */
   const [editGrnId, setEditGrnId] = useState<string | null>(null)
   /** The receipt whose files are open, off the paperclip on its row. */
-  const [filesFor, setFilesFor] = useState<Receipt | null>(null)
+  const [filesFor, setFilesFor] = useState<{
+    id: string
+    number: string
+    kind: 'order' | 'receipt'
+  } | null>(null)
 
   /** Which receipt is being cancelled or deleted, and which — the reason box asks once both are known. */
   const [confirmAction, setConfirmAction] = useState<{
@@ -878,6 +884,28 @@ export default function GoodsReceiptPage() {
                               <span className={part ? 'badge-warning' : 'badge-info'}>
                                 {part ? 'Part received' : 'Sent'}
                               </span>
+                              {/* The card carries what the table's files
+                                column carries, so the two views agree on
+                                whether anything is scanned onto the order. */}
+                              {po._count?.attachments ? (
+                                <button
+                                  type="button"
+                                  className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5 text-[10px] underline transition"
+                                  onClick={() =>
+                                    setFilesFor({
+                                      id: po.id,
+                                      number: po.poNumber,
+                                      kind: 'order',
+                                    })
+                                  }
+                                  title={`Open the ${po._count.attachments} file${
+                                    po._count.attachments === 1 ? '' : 's'
+                                  } attached to ${po.poNumber}`}
+                                >
+                                  <Paperclip size={10} />
+                                  {po._count.attachments}
+                                </button>
+                              ) : null}
                             </div>
                             <p className="text-foreground mt-1 font-medium leading-snug">
                               {po.supplier?.name ?? '—'}
@@ -1055,6 +1083,7 @@ export default function GoodsReceiptPage() {
                         </th>
                         <th style={{ textAlign: 'right' }}>Pending qty</th>
                         <th>Status</th>
+                        <th className="col-roomy">Files</th>
                         <th />
                       </tr>
                     </thead>
@@ -1183,6 +1212,19 @@ export default function GoodsReceiptPage() {
                                   {part ? 'Part received' : 'Sent'}
                                 </span>
                               </td>
+                              <td className="col-roomy whitespace-nowrap">
+                                <FilesCell
+                                  count={po._count?.attachments ?? 0}
+                                  onOpen={() =>
+                                    setFilesFor({
+                                      id: po.id,
+                                      number: po.poNumber,
+                                      kind: 'order',
+                                    })
+                                  }
+                                  what={`attached to ${po.poNumber}`}
+                                />
+                              </td>
                               <td className="whitespace-nowrap text-right">
                                 <div className="flex justify-end gap-1.5">
                                   <button
@@ -1208,7 +1250,7 @@ export default function GoodsReceiptPage() {
 
                             {expanded && lines.length > 0 && (
                               <tr>
-                                <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                                   <div className="border-border bg-card overflow-hidden rounded-lg border">
                                     <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
                                       <FileText
@@ -1405,7 +1447,13 @@ export default function GoodsReceiptPage() {
                                 <button
                                   type="button"
                                   className="text-muted-foreground hover:text-foreground inline-flex items-center gap-0.5 text-[10px] transition"
-                                  onClick={() => setFilesFor(grn)}
+                                  onClick={() =>
+                                    setFilesFor({
+                                      id: grn.id,
+                                      number: grn.grnNumber,
+                                      kind: 'receipt',
+                                    })
+                                  }
                                   title="Open the files on this receipt"
                                 >
                                   <Paperclip size={10} />
@@ -1552,13 +1600,14 @@ export default function GoodsReceiptPage() {
                           argue about a delivery. It was on the receipt all
                           along and not on the screen. */}
                         <th className="col-full">Challan</th>
-                        <th className="col-roomy">Received</th>
+                        <th className="col-wide">Received</th>
                         <th className="col-full">Items</th>
                         <th className="col-full" style={{ textAlign: 'right' }}>
                           Accepted
                         </th>
                         <th>Status</th>
                         <th className="col-roomy">Billing</th>
+                        <th className="col-roomy">Files</th>
                         <th />
                       </tr>
                     </thead>
@@ -1583,28 +1632,7 @@ export default function GoodsReceiptPage() {
                                   )}
                                 </button>
                               </td>
-                              <td className="font-mono text-xs text-teal-400">
-                                {grn.grnNumber}
-                                {/* The challan that came off the lorry is
-                                  scanned onto the receipt, so the paperclip
-                                  belongs with the receipt's own number. */}
-                                {grn._count?.attachments ? (
-                                  // A paperclip that cannot be pressed is a
-                                  // tease: it says a file exists and offers no
-                                  // way to see it.
-                                  <button
-                                    type="button"
-                                    className="text-muted-foreground hover:text-foreground mt-0.5 inline-flex items-center gap-0.5 text-[10px] transition"
-                                    onClick={() => setFilesFor(grn)}
-                                    title={`Open the ${grn._count.attachments} file${
-                                      grn._count.attachments === 1 ? '' : 's'
-                                    } on this receipt`}
-                                  >
-                                    <Paperclip size={10} />
-                                    {grn._count.attachments}
-                                  </button>
-                                ) : null}
-                              </td>
+                              <td className="font-mono text-xs text-teal-400">{grn.grnNumber}</td>
                               <td className="col-wide whitespace-nowrap">
                                 <a
                                   href={`/print/purchase-order/${grn.po.id}`}
@@ -1643,7 +1671,7 @@ export default function GoodsReceiptPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="col-roomy text-xs">
+                              <td className="col-wide text-xs">
                                 {formatDate(grn.grnDate)}
                                 {grn.vehicleNo && (
                                   <div className="text-muted-foreground text-[10px]">
@@ -1694,6 +1722,19 @@ export default function GoodsReceiptPage() {
                                   )
                                 })()}
                               </td>
+                              <td className="col-roomy whitespace-nowrap">
+                                <FilesCell
+                                  count={grn._count?.attachments ?? 0}
+                                  onOpen={() =>
+                                    setFilesFor({
+                                      id: grn.id,
+                                      number: grn.grnNumber,
+                                      kind: 'receipt',
+                                    })
+                                  }
+                                  what="on this receipt"
+                                />
+                              </td>
                               <td className="whitespace-nowrap text-right">
                                 <div className="flex items-center justify-end gap-1.5">
                                   {/* The old ERP puts Add Bill From GRN on the
@@ -1727,7 +1768,7 @@ export default function GoodsReceiptPage() {
 
                             {expanded && (
                               <tr>
-                                <td colSpan={8} className="bg-secondary/40 p-0">
+                                <td colSpan={12} className="bg-secondary/40 p-0">
                                   <div className="max-h-[22rem] overflow-y-auto">
                                     <table className="data-table w-full">
                                       <thead className="sticky top-0 z-10">
@@ -1883,9 +1924,9 @@ export default function GoodsReceiptPage() {
 
       {filesFor && (
         <OrderAttachmentsDialog
-          kind="receipt"
+          kind={filesFor.kind}
           docId={filesFor.id}
-          docNumber={filesFor.grnNumber}
+          docNumber={filesFor.number}
           onClose={() => setFilesFor(null)}
         />
       )}

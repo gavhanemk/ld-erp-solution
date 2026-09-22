@@ -13,6 +13,8 @@ import {
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { RecordPaymentDialog, type PayableBill } from '@/components/purchase/RecordPaymentDialog'
+import { BillFilesDialog, billFiles } from '@/components/purchase/BillDetail'
+import { FilesCell } from '@/components/tables/FilesCell'
 import { formatDate } from '@/lib/utils'
 
 /** A file hanging off an order or a receipt — a bill and a payment hold none of their own. */
@@ -234,6 +236,8 @@ function BillTrailPanel({ billNumber, po, lines }: { billNumber: string } & Bill
 
 export default function SupplierPaymentsPage() {
   const [tab, setTab] = useState<'outstanding' | 'history'>('outstanding')
+  /** The trail whose files are open, and the number to show them under. */
+  const [filesFor, setFilesFor] = useState<{ trail: BillTrail; label: string } | null>(null)
 
   const [bills, setBills] = useState<OutstandingBill[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
@@ -551,6 +555,7 @@ export default function SupplierPaymentsPage() {
                       </th>
                       <th style={{ textAlign: 'right' }}>Outstanding</th>
                       <th>Ageing</th>
+                      <th className="col-roomy">Files</th>
                       <th />
                     </tr>
                   </thead>
@@ -641,6 +646,13 @@ export default function SupplierPaymentsPage() {
                                 {b.daysOverdue > 0 ? ` · ${b.daysOverdue}d` : ''}
                               </span>
                             </td>
+                            <td className="col-roomy whitespace-nowrap">
+                              <FilesCell
+                                count={billFiles(b).length}
+                                onOpen={() => setFilesFor({ trail: b, label: b.billNumber })}
+                                what="on this bill's order and receipts"
+                              />
+                            </td>
                             <td className="whitespace-nowrap text-right">
                               <button
                                 type="button"
@@ -653,7 +665,7 @@ export default function SupplierPaymentsPage() {
                           </tr>
                           {bOpen && canExpand && (
                             <tr>
-                              <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                                 <BillTrailPanel
                                   billNumber={b.billNumber}
                                   po={b.po}
@@ -792,6 +804,7 @@ export default function SupplierPaymentsPage() {
                     <th className="col-wide">How</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
                     <th className="col-full">Recorded by</th>
+                    <th className="col-roomy">Files</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -871,10 +884,23 @@ export default function SupplierPaymentsPage() {
                             ₹{money(p.amount)}
                           </td>
                           <td className="col-full text-xs">{p.createdBy?.name ?? '—'}</td>
+                          <td className="col-roomy whitespace-nowrap">
+                            <FilesCell
+                              count={p.invoice ? billFiles(p.invoice).length : 0}
+                              onOpen={() =>
+                                p.invoice &&
+                                setFilesFor({
+                                  trail: p.invoice,
+                                  label: p.invoice.billNumber,
+                                })
+                              }
+                              what="on this bill's order and receipts"
+                            />
+                          </td>
                         </tr>
                         {pOpen && canExpand && p.invoice && (
                           <tr>
-                            <td colSpan={9} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <BillTrailPanel
                                 billNumber={p.invoice.billNumber}
                                 po={p.invoice.po}
@@ -892,6 +918,14 @@ export default function SupplierPaymentsPage() {
           </div>
         )}
       </div>
+
+      {filesFor && (
+        <BillFilesDialog
+          trail={filesFor.trail}
+          label={filesFor.label}
+          onClose={() => setFilesFor(null)}
+        />
+      )}
 
       {paying && (
         <RecordPaymentDialog

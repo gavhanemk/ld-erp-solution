@@ -155,7 +155,14 @@ export type BillFile = BillAttachment & { kind: 'order' | 'receipt'; source: str
  * attached. A receipt reached through several bill lines would otherwise
  * contribute its files once per line, so they are gathered by id.
  */
-export function billFiles(bill: PurchaseBill): BillFile[] {
+export interface FileTrail {
+  po?: { poNumber: string; attachments?: BillAttachment[] } | null
+  lines?: Array<{
+    grnLine?: { grn: { grnNumber: string; attachments?: BillAttachment[] } } | null
+  }>
+}
+
+export function billFiles(bill: FileTrail): BillFile[] {
   const seen = new Map<string, BillFile>()
 
   for (const f of bill.po?.attachments ?? []) {
@@ -712,8 +719,17 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
  * since a bill's files come from more than one document and so carry a
  * column saying which.
  */
-export function BillFilesDialog({ bill, onClose }: { bill: PurchaseBill; onClose: () => void }) {
-  const files = billFiles(bill)
+export function BillFilesDialog({
+  trail,
+  label,
+  onClose,
+}: {
+  trail: FileTrail
+  /** The document number this is shown under — a bill number, usually. */
+  label: string
+  onClose: () => void
+}) {
+  const files = billFiles(trail)
 
   return createPortal(
     <div
@@ -742,9 +758,9 @@ export function BillFilesDialog({ bill, onClose }: { bill: PurchaseBill; onClose
               <p className="text-muted-foreground mt-0.5 text-xs">
                 {files.length === 0
                   ? 'Nothing scanned onto this bill’s order or its receipts'
-                  : `${files.length} ${files.length === 1 ? 'file' : 'files'} on ${
-                      bill.supplierInvoiceNo || bill.billNumber
-                    } — from its order and its receipts`}
+                  : `${files.length} ${
+                      files.length === 1 ? 'file' : 'files'
+                    } on ${label} — from its order and its receipts`}
               </p>
             </div>
           </div>

@@ -22,6 +22,7 @@ import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/Pur
 import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { FilesCell } from '@/components/tables/FilesCell'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 
@@ -502,12 +503,13 @@ function PurchaseBillsTable() {
                     <th className="col-wide">Against receipt</th>
                     <th>Supplier</th>
                     <th className="col-full">Booked</th>
-                    <th className="col-wide">Due</th>
+                    <th className="col-full">Due</th>
                     <th style={{ textAlign: 'right' }}>Total</th>
                     <th className="col-roomy" style={{ textAlign: 'right' }}>
                       Outstanding
                     </th>
                     <th>Status</th>
+                    <th className="col-roomy">Files</th>
                     <th />
                   </tr>
                 </thead>
@@ -570,26 +572,6 @@ function PurchaseBillsTable() {
                                   Direct
                                 </span>
                               )}
-                              {fileCountOn(bill) > 0 && (
-                                // A paperclip opens the files, and only the
-                                // files. It used to open the whole detail
-                                // window scrolled down to its attachments
-                                // panel — which answers "tell me everything
-                                // about this bill" when the question asked was
-                                // "let me see the challan", and is the same
-                                // window the Actions menu already opens.
-                                <button
-                                  type="button"
-                                  className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] underline transition"
-                                  onClick={() => setFilesFor(bill)}
-                                  title={`Open the ${fileCountOn(bill)} file${
-                                    fileCountOn(bill) === 1 ? '' : 's'
-                                  } on this bill's order and receipts`}
-                                >
-                                  <Paperclip size={11} />
-                                  {fileCountOn(bill)}
-                                </button>
-                              )}
                             </div>
                           </td>
                           <td>
@@ -613,7 +595,7 @@ function PurchaseBillsTable() {
                           <td className="col-full whitespace-nowrap text-xs">
                             {formatDate(bill.billDate)}
                           </td>
-                          <td className="col-wide whitespace-nowrap text-xs">
+                          <td className="col-full whitespace-nowrap text-xs">
                             {bill.dueDate ? (
                               <span className={overdue ? 'font-medium text-red-400' : undefined}>
                                 {formatDate(bill.dueDate)}
@@ -642,6 +624,19 @@ function PurchaseBillsTable() {
                           <td>
                             <span className={s.cls}>{s.label}</span>
                           </td>
+                          <td className="col-roomy whitespace-nowrap">
+                            {/* A paperclip opens the files, and only the
+                              files. It used to open the whole detail window
+                              scrolled down to its attachments panel — which
+                              answers "tell me everything about this bill"
+                              when the question asked was "let me see the
+                              challan". */}
+                            <FilesCell
+                              count={fileCountOn(bill)}
+                              onOpen={() => setFilesFor(bill)}
+                              what="on this bill's order and receipts"
+                            />
+                          </td>
                           <td className="whitespace-nowrap text-right">
                             <div className="flex justify-end">
                               <ActionMenu
@@ -653,7 +648,7 @@ function PurchaseBillsTable() {
                         </tr>
                         {open && lines.length > 0 && (
                           <tr>
-                            <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <div className="border-border bg-card overflow-hidden rounded-lg border">
                                 <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
                                   <FileText size={13} className="text-muted-foreground shrink-0" />
@@ -703,7 +698,13 @@ function PurchaseBillsTable() {
         onSaved={() => void load()}
       />
 
-      {filesFor && <BillFilesDialog bill={filesFor} onClose={() => setFilesFor(null)} />}
+      {filesFor && (
+        <BillFilesDialog
+          trail={filesFor}
+          label={filesFor.supplierInvoiceNo || filesFor.billNumber}
+          onClose={() => setFilesFor(null)}
+        />
+      )}
 
       {detail && <BillDetailDialog bill={detail} onClose={() => setDetail(null)} />}
     </div>

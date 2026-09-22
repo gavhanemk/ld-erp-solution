@@ -360,32 +360,33 @@
     display: table-cell;
   }
 
-  /* 1320 clears the widest full tier, the goods receipt list at 1302px. It
+  /* 1390 clears the widest full tier, the goods receipt list at 1369px. It
      wants a real desk: a 1920px screen, or a 1600px one with the sidebar
      collapsed. That is the honest answer for the least-scanned columns in
-     each list, and it is the only tier that no laptop reaches — it was set
-     at 1240 first, which a 1366px laptop cleared with the sidebar collapsed
-     and then overflowed by 18px, because the widest table underneath it
-     needs 1267. */
-  @container (max-width: 1319px) {
+     each list, and it is the only tier no laptop reaches. */
+  @container (max-width: 1389px) {
     .col-full {
       display: none;
     }
   }
 
-  /* 1040 sits in a 22px window: above the widest wide tier (the bill list at
-     1011px) and below the 1056px a 1366px laptop has with the sidebar open,
-     which is the commonest screen in the office and the one this whole
-     arrangement exists to serve. Anything added to a wide tier has to be
-     measured against that 1040, not guessed at. */
-  @container (max-width: 1039px) {
+  /* 1010 has a ceiling as well as a floor, and it is the only tier that
+     does. The floor is the widest wide tier, the goods receipt list at
+     1000px. The ceiling is the 1056px a 1366px laptop has with the sidebar
+     open — the commonest screen in the office, and the one this whole
+     arrangement exists to serve. Above 1056 that screen loses the tier
+     entirely, so anything added to a wide tier has to be measured against
+     1010 and not guessed at. When the files column pushed the bill list's
+     wide tier to 1053 there was nowhere left to raise the number to, and
+     its due date moved up a tier instead. */
+  @container (max-width: 1009px) {
     .col-wide {
       display: none;
     }
   }
 
-  /* 860 clears the widest roomy tier, the goods receipt list at 843px. */
-  @container (max-width: 859px) {
+  /* 890 clears the widest roomy tier, the bill list at 876px. */
+  @container (max-width: 889px) {
     .col-roomy {
       display: none;
     }

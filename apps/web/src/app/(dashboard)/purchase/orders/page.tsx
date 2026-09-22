@@ -30,6 +30,7 @@ import {
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { FilesCell } from '@/components/tables/FilesCell'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, itemsPreview } from '@/lib/utils'
 
@@ -770,6 +771,7 @@ export default function PurchaseOrdersPage() {
                     </th>
                     <th style={{ textAlign: 'right' }}>Total</th>
                     <th>Status</th>
+                    <th className="col-roomy">Files</th>
                     <th />
                   </tr>
                 </thead>
@@ -805,27 +807,6 @@ export default function PurchaseOrdersPage() {
                             <div className="text-foreground font-mono text-xs font-semibold">
                               {po.poNumber}
                             </div>
-                            {/* Attachments hang off the order, not off a
-                              line, so the paperclip sits with the order's own
-                              identity rather than claiming a column that is
-                              empty on every order nobody has scanned a bill
-                              onto yet. Clickable, because a sent order has no
-                              edit screen to open otherwise — this count was
-                              previously the only trace a file existed, with
-                              no way to actually see it. */}
-                            {po._count?.attachments ? (
-                              <button
-                                type="button"
-                                className="text-primary mt-0.5 inline-flex items-center gap-0.5 text-[10px] underline"
-                                onClick={() => setFilesFor(po)}
-                                title={`Open the ${po._count.attachments} file${
-                                  po._count.attachments === 1 ? '' : 's'
-                                } attached to ${po.poNumber}`}
-                              >
-                                <Paperclip size={10} />
-                                {po._count.attachments}
-                              </button>
-                            ) : null}
                           </td>
                           <td>
                             {/* Capped, because nothing else caps it. Under
@@ -910,6 +891,13 @@ export default function PurchaseOrdersPage() {
                           <td>
                             <span className={s.cls}>{s.label}</span>
                           </td>
+                          <td className="col-roomy whitespace-nowrap">
+                            <FilesCell
+                              count={po._count?.attachments ?? 0}
+                              onOpen={() => setFilesFor(po)}
+                              what={`attached to ${po.poNumber}`}
+                            />
+                          </td>
                           <td className="whitespace-nowrap text-right">
                             <div className="flex justify-end">
                               <ActionMenu
@@ -927,7 +915,7 @@ export default function PurchaseOrdersPage() {
                             inset the inner table's first row sat flush
                             against the order above it and read as a tenth
                             column of that row. */}
-                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <div className="border-border bg-card overflow-hidden rounded-lg border">
                                 <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
                                   <FileText size={13} className="text-muted-foreground shrink-0" />
