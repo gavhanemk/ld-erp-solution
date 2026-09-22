@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertCircle,
   ChevronDown,
@@ -105,6 +105,15 @@ const MODE_LABEL: Record<string, string> = {
   UPI: 'UPI',
   PDC: 'Post-dated cheque',
 }
+
+/**
+ * The ageing buckets, in the order money comes due.
+ *
+ * Listed here rather than gathered from the rows on screen: an empty bucket
+ * is worth offering — picking "Over 90 days" and getting nothing is an answer,
+ * and a dropdown whose options change as the data does cannot be learnt.
+ */
+const BUCKETS = ['Not yet due', '1-30 days', '31-60 days', '61-90 days', 'Over 90 days'] as const
 
 /** Anything past its date reads red; the rest stays quiet. */
 function bucketClass(bucket: string) {
@@ -252,6 +261,13 @@ export default function SupplierPaymentsPage() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [supplierId, setSupplierId] = useState('')
+  /** Outstanding tab only — which ageing bucket. */
+  const [bucket, setBucket] = useState('')
+  /** History tab only — how the money left. */
+  const [payMode, setPayMode] = useState('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
   const [paying, setPaying] = useState<OutstandingBill | null>(null)
   /** Which row's receipts and files are showing. One at a time, on whichever tab is open. */
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -290,23 +306,73 @@ export default function SupplierPaymentsPage() {
   }, [load])
 
   const term = search.trim().toLowerCase()
-  const visibleBills = term
-    ? bills.filter(
-        (b) =>
-          b.supplier.name.toLowerCase().includes(term) ||
-          b.billNumber.toLowerCase().includes(term) ||
-          (b.supplierInvoiceNo ?? '').toLowerCase().includes(term)
-      )
-    : bills
-  const visiblePayments = term
-    ? payments.filter(
-        (p) =>
-          p.supplier.name.toLowerCase().includes(term) ||
-          p.paymentNumber.toLowerCase().includes(term) ||
-          (p.invoice?.billNumber ?? '').toLowerCase().includes(term) ||
-          (p.referenceNo ?? '').toLowerCase().includes(term)
-      )
-    : payments
+
+  /**
+   * Every supplier on either list, not only the tab in front of you.
+   *
+   * A dropdown that emptied and refilled on each tab would leave the chosen
+   * supplier selected but absent from its own options, which renders as blank
+   * — the control would look broken at the moment it was working.
+   */
+  const supplierOptions = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const b of bills) seen.set(b.supplier.id, b.supplier.name)
+    for (const p of payments) seen.set(p.supplier.id, p.supplier.name)
+    return [...seen]
+      .map(([id, name]) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  }, [bills, payments])
+
+  /**
+   * Whether a timestamp falls inside the chosen range.
+   *
+   * Compared as `yyyy-mm-dd` text rather than as Date objects: that is exactly
+   * what a date input holds, the format sorts correctly as a string, and it
+   * sidesteps the midnight-boundary bugs that come of building a Date in the
+   * browser's timezone from a UTC stamp.
+   */
+  const inRange = (iso?: string | null) => {
+    if (!from && !to) return true
+    if (!iso) return false
+    const day = iso.slice(0, 10)
+    if (from && day < from) return false
+    if (to && day > to) return false
+    return true
+  }
+
+  const filtersOn = Boolean(search || supplierId || bucket || payMode || from || to)
+  const clearFilters = () => {
+    setSearch('')
+    setSupplierId('')
+    setBucket('')
+    setPayMode('')
+    setFrom('')
+    setTo('')
+  }
+
+  const visibleBills = bills.filter(
+    (b) =>
+      (!term ||
+        b.supplier.name.toLowerCase().includes(term) ||
+        b.billNumber.toLowerCase().includes(term) ||
+        (b.supplierInvoiceNo ?? '').toLowerCase().includes(term)) &&
+      (!supplierId || b.supplier.id === supplierId) &&
+      (!bucket || b.bucket === bucket) &&
+      inRange(b.billDate)
+  )
+
+  const visiblePayments = payments.filter(
+    (p) =>
+      (!term ||
+        p.supplier.name.toLowerCase().includes(term) ||
+        p.paymentNumber.toLowerCase().includes(term) ||
+        (p.invoice?.billNumber ?? '').toLowerCase().includes(term) ||
+        (p.referenceNo ?? '').toLowerCase().includes(term) ||
+        (p.chequeNo ?? '').toLowerCase().includes(term)) &&
+      (!supplierId || p.supplier.id === supplierId) &&
+      (!payMode || p.mode === payMode) &&
+      inRange(p.paymentDate)
+  )
 
   return (
     <div className="space-y-5">
@@ -411,6 +477,85 @@ export default function SupplierPaymentsPage() {
             />
           </div>
 
+          <select
+            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-44"
+            value={supplierId}
+            onChange={(e) => setSupplierId(e.target.value)}
+            aria-label="Filter by supplier"
+          >
+            <option value="">All suppliers</option>
+            {supplierOptions.map((sup) => (
+              <option key={sup.id} value={sup.id}>
+                {sup.name}
+              </option>
+            ))}
+          </select>
+
+          {/* One dropdown, two meanings — an ageing bucket is nothing on the
+            history tab, and how the money left is nothing on a bill nobody
+            has paid. Rendering both at once would put a permanently useless
+            control in front of somebody on every tab. */}
+          {tab === 'outstanding' ? (
+            <select
+              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+              aria-label="Filter by ageing"
+            >
+              <option value="">Any ageing</option>
+              {BUCKETS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <select
+              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
+              value={payMode}
+              onChange={(e) => setPayMode(e.target.value)}
+              aria-label="Filter by how it was paid"
+            >
+              <option value="">Any way paid</option>
+              {Object.entries(MODE_LABEL).map(([v, label]) => (
+                <option key={v} value={v}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* A line of its own on a phone: two date boxes and the words either
+            side of them do not share a row with a search box at 360px. */}
+          <div className="flex w-full min-w-0 shrink-0 items-center gap-1.5 sm:w-auto">
+            <span className="text-muted-foreground shrink-0 text-xs">
+              {tab === 'outstanding' ? 'Billed' : 'Paid'}
+            </span>
+            <input
+              type="date"
+              className="form-input h-8 min-w-0 flex-1 py-0 text-xs sm:w-[8.5rem] sm:flex-none"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => setFrom(e.target.value)}
+              aria-label={tab === 'outstanding' ? 'Billed on or after' : 'Paid on or after'}
+            />
+            <span className="text-muted-foreground shrink-0 text-xs">to</span>
+            <input
+              type="date"
+              className="form-input h-8 min-w-0 flex-1 py-0 text-xs sm:w-[8.5rem] sm:flex-none"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => setTo(e.target.value)}
+              aria-label={tab === 'outstanding' ? 'Billed on or before' : 'Paid on or before'}
+            />
+          </div>
+
+          {filtersOn && (
+            <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
+              Clear
+            </button>
+          )}
+
           <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
             {tab === 'outstanding'
               ? `${visibleBills.length} ${visibleBills.length === 1 ? 'bill' : 'bills'}`
@@ -430,7 +575,7 @@ export default function SupplierPaymentsPage() {
               <p className="text-muted-foreground mt-1 text-sm">
                 {bills.length === 0
                   ? 'Every purchase bill on the system is paid in full.'
-                  : 'Try a different supplier or bill number.'}
+                  : 'Clear the filters to see every bill that is still owed.'}
               </p>
             </div>
           ) : (
@@ -698,7 +843,7 @@ export default function SupplierPaymentsPage() {
             <p className="text-muted-foreground mt-1 text-sm">
               {payments.length === 0
                 ? 'Payments recorded against a purchase bill will appear here.'
-                : 'Try a different supplier, bill, or reference.'}
+                : 'Clear the filters to see every payment made.'}
             </p>
           </div>
         ) : (

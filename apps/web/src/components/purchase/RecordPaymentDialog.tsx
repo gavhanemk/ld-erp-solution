@@ -2,8 +2,18 @@
 
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Loader2, Paperclip, X } from 'lucide-react'
+import {
+  AlertCircle,
+  IndianRupee,
+  Landmark,
+  Loader2,
+  MapPin,
+  Paperclip,
+  Percent,
+  X,
+} from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
+import { Section } from '@/components/purchase/Section'
 
 export interface PayableBill {
   id: string
@@ -128,14 +138,13 @@ export function RecordPaymentDialog({
             : `Only ₹${money(owing)} is left on this bill`
           : null
 
-  const tdsProblem =
-    !deductsTax
-      ? null
-      : !tdsAmount.trim() || Number.isNaN(tds)
-        ? 'Put the tax deducted in'
-        : tds <= 0
-          ? 'A deduction has to be more than zero'
-          : null
+  const tdsProblem = !deductsTax
+    ? null
+    : !tdsAmount.trim() || Number.isNaN(tds)
+      ? 'Put the tax deducted in'
+      : tds <= 0
+        ? 'A deduction has to be more than zero'
+        : null
 
   /**
    * What is still outstanding, in the order it appears on the form.
@@ -144,13 +153,17 @@ export function RecordPaymentDialog({
    * dead button answers a press with nothing, and half of these fields show
    * only a grey hint until they are asked for.
    */
-  const missing: string[] = []
-  if (amountProblem) missing.push(amountProblem.toLowerCase())
-  if (tdsProblem) missing.push(tdsProblem.toLowerCase())
-  if (!isCash && !bankAccountId) missing.push('which account it was paid from')
-  if (needsReference && !referenceNo.trim()) missing.push('the transaction reference')
-  if (isCheque && !chequeNo.trim()) missing.push('the cheque number')
-  if (isCheque && !chequeDate) missing.push('the date on the cheque')
+  const missing: Array<{ what: string; focus: string }> = []
+  if (amountProblem) missing.push({ what: amountProblem.toLowerCase(), focus: 'pay-amount' })
+  if (tdsProblem) missing.push({ what: tdsProblem.toLowerCase(), focus: 'pay-tds' })
+  if (!isCash && !bankAccountId)
+    missing.push({ what: 'which account it was paid from', focus: 'pay-account' })
+  if (needsReference && !referenceNo.trim())
+    missing.push({ what: 'the transaction reference', focus: 'pay-reference' })
+  if (isCheque && !chequeNo.trim())
+    missing.push({ what: 'the cheque number', focus: 'pay-cheque-no' })
+  if (isCheque && !chequeDate)
+    missing.push({ what: 'the date on the cheque', focus: 'pay-cheque-date' })
 
   /** Files are held until the payment exists, because a file needs something to hang off. */
   function chooseFiles(list: FileList | null) {
@@ -183,12 +196,21 @@ export function RecordPaymentDialog({
   }
 
   async function save() {
+    // A press always answers. The notice is at the top of a form that by this
+    // point is usually scrolled past it, so it is said and then jumped to.
     if (missing.length) {
+      const what = missing.map((m) => m.what)
       setError(
-        missing.length === 1
-          ? `Still to fill in: ${missing[0]}.`
-          : `Still to fill in: ${missing.slice(0, -1).join(', ')} and ${missing[missing.length - 1]}.`,
+        what.length === 1
+          ? `Still to fill in: ${what[0]}.`
+          : `Still to fill in: ${what.slice(0, -1).join(', ')} and ${what[what.length - 1]}.`
       )
+      const id = missing[0].focus
+      requestAnimationFrame(() => {
+        const el = document.getElementById(id) ?? document.getElementById('pay-form-error')
+        el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        el?.focus({ preventScroll: true })
+      })
       return
     }
 
@@ -232,314 +254,385 @@ export function RecordPaymentDialog({
       )
     } catch (err) {
       setError(
-        err instanceof ApiError
-          ? err.message
-          : 'Could not reach the server. Is the API running?'
+        err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?'
       )
       setBusy(false)
     }
   }
 
   return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
-      onClick={onClose}
-    >
+    /*
+     * The backdrop does not close this.
+     *
+     * It used to, and a form with eleven boxes on it vanished whenever a click
+     * landed an inch wide of the card. The order, bill and receipt forms never
+     * did that — this one was the odd one out. Escape and the two close
+     * controls still work, because those are things a person means to do.
+     */
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">
       <div
-        className="glass-card flex max-h-[92vh] w-full max-w-2xl flex-col"
+        className="glass-card po-form flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="pay-dialog-title"
-        onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === 'Escape') onClose()
         }}
       >
-        <div className="border-border shrink-0 border-b px-5 py-4">
-          <h2 id="pay-dialog-title" className="text-foreground text-base font-semibold">
-            Record a payment
-          </h2>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {bill.supplier.name} · {bill.billNumber}
-            {bill.supplierInvoiceNo ? ` · their invoice ${bill.supplierInvoiceNo}` : ''}
-            {' · '}
-            <span className="text-foreground font-medium">₹{money(owing)} outstanding</span>
-          </p>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-5 py-4">
-          {error && (
-            <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-              {error}
+        {/* Header — stays put while the body scrolls, and carries the primary
+          action, as the order and bill forms do. */}
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
+              <IndianRupee size={16} className="text-primary" />
             </div>
-          )}
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="form-label">Location</span>
-              <select
-                className="form-input h-10"
-                value={warehouseId}
-                onChange={(e) => setWarehouseId(e.target.value)}
-              >
-                <option value="">Head office</option>
-                {warehouses.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="block">
-              <span className="form-label">Paid on</span>
-              <input
-                className="form-input h-10"
-                type="date"
-                max={todayValue()}
-                value={paymentDate}
-                onChange={(e) => setPaymentDate(e.target.value)}
-              />
-            </label>
-
-            <label className="block">
-              <span className="form-label">
-                Amount<span className="ml-0.5 text-red-400">*</span>
-              </span>
-              <input
-                className="form-input h-10"
-                type="number"
-                step="0.01"
-                min="0"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                autoFocus
-              />
-              {amountProblem && (
-                <span className="mt-1 block text-xs text-red-400">{amountProblem}</span>
-              )}
-            </label>
-
-            <label className="block">
-              <span className="form-label">
-                How it was paid<span className="ml-0.5 text-red-400">*</span>
-              </span>
-              <select
-                className="form-input h-10"
-                value={mode}
-                onChange={(e) => {
-                  const next = e.target.value
-                  setMode(next)
-                  if (next !== 'CHEQUE' && next !== 'PDC') {
-                    setChequeNo('')
-                    setChequeDate('')
-                  }
-                }}
-              >
-                {MODES.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="block sm:col-span-2">
-              <span className="form-label">
-                Paid through
-                {!isCash && <span className="ml-0.5 text-red-400">*</span>}
-              </span>
-              <select
-                className="form-input h-10"
-                value={bankAccountId}
-                onChange={(e) => setBankAccountId(e.target.value)}
-              >
-                <option value="">{isCash ? 'Cash in hand' : 'Select an account...'}</option>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {accountLabel(a)}
-                  </option>
-                ))}
-              </select>
-              {!isCash && !bankAccountId && (
-                <span className="text-muted-foreground mt-1 block text-xs">
-                  {accounts.length === 0
-                    ? 'No accounts set up yet — add one under Masters → Bank Accounts.'
-                    : 'Which account the money left. It is what the bank statement is reconciled against.'}
-                </span>
-              )}
-            </label>
-
-            {needsReference && (
-              <label className="block sm:col-span-2">
-                <span className="form-label">
-                  Reference<span className="ml-0.5 text-red-400">*</span>
-                </span>
-                <input
-                  className="form-input h-10"
-                  value={referenceNo}
-                  onChange={(e) => setReferenceNo(e.target.value)}
-                  placeholder="UTR or transaction reference"
-                />
-              </label>
-            )}
-
-            {isCheque && (
-              <>
-                <label className="block">
-                  <span className="form-label">
-                    Cheque number<span className="ml-0.5 text-red-400">*</span>
-                  </span>
-                  <input
-                    className="form-input h-10"
-                    value={chequeNo}
-                    onChange={(e) => setChequeNo(e.target.value)}
-                    placeholder="As written on the cheque"
-                  />
-                </label>
-
-                <label className="block">
-                  <span className="form-label">
-                    Date on the cheque<span className="ml-0.5 text-red-400">*</span>
-                  </span>
-                  <input
-                    className="form-input h-10"
-                    type="date"
-                    value={chequeDate}
-                    onChange={(e) => setChequeDate(e.target.value)}
-                  />
-                </label>
-
-                <label className="block sm:col-span-2">
-                  <span className="form-label">Reference</span>
-                  <input
-                    className="form-input h-10"
-                    value={referenceNo}
-                    onChange={(e) => setReferenceNo(e.target.value)}
-                    placeholder="Anything else that finds it at the bank"
-                  />
-                </label>
-              </>
-            )}
-
-            {/* Tax is deducted once. Where the bill already recorded it there
-              is nothing to decide here, and offering the tick would invite
-              somebody to take it off the supplier twice. */}
-            <div className="border-border bg-secondary/30 rounded-lg border p-3 sm:col-span-2">
-              {billTds > 0 ? (
-                <p className="text-muted-foreground text-xs">
-                  <span className="text-foreground font-medium">
-                    ₹{money(billTds)} of tax is already deducted on {bill.billNumber}
-                  </span>{' '}
-                  — which is why only ₹{money(owing)} is outstanding on it. It comes off once, so
-                  there is nothing to deduct here.
-                </p>
-              ) : (
-                <>
-                  <label className="flex cursor-pointer items-start gap-2">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={deductsTax}
-                      onChange={(e) => {
-                        setDeductsTax(e.target.checked)
-                        if (!e.target.checked) setTdsAmount('')
-                      }}
-                    />
-                    <span className="text-foreground text-sm">
-                      Tax deducted from this payment
-                      <span className="text-muted-foreground block text-xs">
-                        TDS we hold back and pay to the government instead of to the supplier. It
-                        settles the bill just as the cash does.
-                      </span>
-                    </span>
-                  </label>
-
-                  {deductsTax && (
-                    <div className="mt-3 max-w-xs">
-                      <span className="form-label">Tax deducted</span>
-                      <input
-                        className="form-input h-10"
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={tdsAmount}
-                        onChange={(e) => setTdsAmount(e.target.value)}
-                        placeholder="0.00"
-                      />
-                      {tdsProblem ? (
-                        <span className="mt-1 block text-xs text-red-400">{tdsProblem}</span>
-                      ) : (
-                        <span className="text-muted-foreground mt-1 block text-xs">
-                          ₹{money(settles)} comes off {bill.billNumber} in all.
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
+            <div className="min-w-0">
+              <h2 id="pay-dialog-title" className="text-foreground text-base font-semibold">
+                Record a payment
+              </h2>
+              <p className="text-muted-foreground mt-0.5 truncate text-xs">
+                {bill.supplier.name} · {bill.billNumber}
+                {bill.supplierInvoiceNo ? ` · their invoice ${bill.supplierInvoiceNo}` : ''}
+              </p>
             </div>
-
-            <label className="block sm:col-span-2">
-              <span className="form-label">Notes</span>
-              <input
-                className="form-input h-10"
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Anything worth remembering about this payment"
-              />
-            </label>
-
-            <div className="sm:col-span-2">
-              <span className="form-label">Files</span>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="btn-secondary cursor-pointer text-xs">
-                  <Paperclip size={14} />
-                  Attach
-                  <input
-                    type="file"
-                    multiple
-                    className="hidden"
-                    onChange={(e) => {
-                      chooseFiles(e.target.files)
-                      e.target.value = ''
-                    }}
-                  />
-                </label>
-                {files.length === 0 && (
-                  <span className="text-muted-foreground text-xs">
-                    The bank advice, the counterfoil, the UTR screenshot — up to {MAX_FILES}.
-                  </span>
-                )}
-                {files.map((f, i) => (
-                  <span
-                    key={`${f.name}-${i}`}
-                    className="border-border bg-secondary/50 flex items-center gap-1 rounded-md border px-2 py-1 text-xs"
-                  >
-                    {f.name}
-                    <button
-                      type="button"
-                      aria-label={`Remove ${f.name}`}
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => setFiles((prev) => prev.filter((_, n) => n !== i))}
-                    >
-                      <X size={12} />
-                    </button>
-                  </span>
-                ))}
-              </div>
-              {/* Said here rather than after the save fails: the payment goes
-                in either way, and the file is the part that would be lost. */}
-              {files.length > 0 && (
-                <span className="text-muted-foreground mt-1.5 block text-xs">
-                  Sent once the payment is recorded.
-                </span>
-              )}
-            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <button type="button" className="btn-primary" onClick={save} disabled={busy}>
+              {busy ? <Loader2 size={15} className="animate-spin" /> : <IndianRupee size={15} />}
+              Record payment
+            </button>
+            <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
+              <X size={18} />
+            </button>
           </div>
         </div>
 
-        <div className="border-border flex shrink-0 justify-end gap-2 border-t px-5 py-4">
+        <div className="flex-1 space-y-2.5 overflow-y-auto px-4 py-2.5">
+          {error && (
+            <div
+              id="pay-form-error"
+              className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3"
+            >
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+              <p className="text-sm text-red-400">{error}</p>
+            </div>
+          )}
+
+          {/* What is owed leads, because it is the figure every other box on
+            this form is measured against. */}
+          <div className="border-primary/25 bg-primary/5 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 rounded-xl border px-3.5 py-2.5">
+            <span className="text-muted-foreground text-xs">Outstanding on {bill.billNumber}</span>
+            <span className="text-foreground text-lg font-semibold tabular-nums">
+              ₹{money(owing)}
+            </span>
+          </div>
+
+          <Section icon={IndianRupee} title="The payment">
+            <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-4">
+              <div className="md:col-span-2">
+                <label className="form-label" htmlFor="pay-location">
+                  Location
+                </label>
+                {/* The icon is drawn over the control and the control padded to
+                  clear it, as on the order form — outside the border it would
+                  push this field a different distance from its label than the
+                  three beside it. */}
+                <div className="relative">
+                  <MapPin
+                    size={14}
+                    className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                  />
+                  <select
+                    id="pay-location"
+                    className="form-input pl-9"
+                    value={warehouseId}
+                    onChange={(e) => setWarehouseId(e.target.value)}
+                  >
+                    <option value="">Head office</option>
+                    {warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="form-label" htmlFor="pay-date">
+                  Paid on
+                </label>
+                <input
+                  id="pay-date"
+                  className="form-input"
+                  type="date"
+                  max={todayValue()}
+                  value={paymentDate}
+                  onChange={(e) => setPaymentDate(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <label className="form-label" htmlFor="pay-amount">
+                  Amount<span className="ml-0.5 text-red-400">*</span>
+                </label>
+                <input
+                  id="pay-amount"
+                  className="form-input"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  autoFocus
+                />
+                {amountProblem ? (
+                  <span className="mt-1 block text-xs text-red-400">{amountProblem}</span>
+                ) : (
+                  settles < owing - 0.005 && (
+                    <span className="text-muted-foreground mt-1 block text-xs">
+                      ₹{money(owing - settles)} would still be owed.
+                    </span>
+                  )
+                )}
+              </div>
+            </div>
+          </Section>
+
+          <Section icon={Landmark} title="How the money left">
+            <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-4">
+              <div>
+                <label className="form-label" htmlFor="pay-mode">
+                  How it was paid<span className="ml-0.5 text-red-400">*</span>
+                </label>
+                <select
+                  id="pay-mode"
+                  className="form-input"
+                  value={mode}
+                  onChange={(e) => {
+                    const next = e.target.value
+                    setMode(next)
+                    if (next !== 'CHEQUE' && next !== 'PDC') {
+                      setChequeNo('')
+                      setChequeDate('')
+                    }
+                  }}
+                >
+                  {MODES.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="md:col-span-3">
+                <label className="form-label" htmlFor="pay-account">
+                  Paid through
+                  {!isCash && <span className="ml-0.5 text-red-400">*</span>}
+                </label>
+                <select
+                  id="pay-account"
+                  className="form-input"
+                  value={bankAccountId}
+                  onChange={(e) => setBankAccountId(e.target.value)}
+                >
+                  <option value="">{isCash ? 'Cash in hand' : 'Select an account...'}</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {accountLabel(a)}
+                    </option>
+                  ))}
+                </select>
+                {!isCash && !bankAccountId && (
+                  <span className="text-muted-foreground mt-1 block text-xs">
+                    {accounts.length === 0
+                      ? 'No accounts set up yet — add one under Masters → Bank Accounts.'
+                      : 'What the bank statement is reconciled against.'}
+                  </span>
+                )}
+              </div>
+
+              {isCheque && (
+                <>
+                  <div>
+                    <label className="form-label" htmlFor="pay-cheque-no">
+                      Cheque number<span className="ml-0.5 text-red-400">*</span>
+                    </label>
+                    <input
+                      id="pay-cheque-no"
+                      className="form-input"
+                      value={chequeNo}
+                      onChange={(e) => setChequeNo(e.target.value)}
+                      placeholder="As written on the cheque"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="form-label" htmlFor="pay-cheque-date">
+                      Date on the cheque<span className="ml-0.5 text-red-400">*</span>
+                    </label>
+                    <input
+                      id="pay-cheque-date"
+                      className="form-input"
+                      type="date"
+                      value={chequeDate}
+                      onChange={(e) => setChequeDate(e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className={isCheque ? 'md:col-span-2' : 'md:col-span-4'}>
+                <label className="form-label" htmlFor="pay-reference">
+                  Reference
+                  {needsReference && <span className="ml-0.5 text-red-400">*</span>}
+                </label>
+                <input
+                  id="pay-reference"
+                  className="form-input"
+                  value={referenceNo}
+                  onChange={(e) => setReferenceNo(e.target.value)}
+                  placeholder={
+                    isCheque
+                      ? 'Anything else that finds it at the bank'
+                      : isCash
+                        ? 'Voucher number, or who took the cash'
+                        : 'UTR or transaction reference'
+                  }
+                />
+              </div>
+            </div>
+          </Section>
+
+          {/* Tax is deducted once. Where the bill already recorded it there is
+            nothing to decide here, and offering the tick would invite somebody
+            to take it off the supplier twice. */}
+          <Section icon={Percent} title="Tax deducted at source">
+            {billTds > 0 ? (
+              <p className="text-muted-foreground text-xs leading-relaxed">
+                <span className="text-foreground font-medium">
+                  ₹{money(billTds)} is already deducted on {bill.billNumber}
+                </span>{' '}
+                — which is why only ₹{money(owing)} is outstanding on it. It comes off once, so
+                there is nothing to deduct here.
+              </p>
+            ) : (
+              <>
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={deductsTax}
+                    onChange={(e) => {
+                      setDeductsTax(e.target.checked)
+                      if (!e.target.checked) setTdsAmount('')
+                    }}
+                  />
+                  <span className="text-foreground text-sm">
+                    Tax deducted from this payment
+                    <span className="text-muted-foreground block text-xs">
+                      TDS we hold back and pay to the government instead of to the supplier. It
+                      settles the bill just as the cash does.
+                    </span>
+                  </span>
+                </label>
+
+                {deductsTax && (
+                  <div className="mt-3 max-w-xs">
+                    <label className="form-label" htmlFor="pay-tds">
+                      Tax deducted
+                    </label>
+                    <input
+                      id="pay-tds"
+                      className="form-input"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={tdsAmount}
+                      onChange={(e) => setTdsAmount(e.target.value)}
+                      placeholder="0.00"
+                    />
+                    {tdsProblem ? (
+                      <span className="mt-1 block text-xs text-red-400">{tdsProblem}</span>
+                    ) : (
+                      <span className="text-muted-foreground mt-1 block text-xs">
+                        ₹{money(settles)} comes off {bill.billNumber} in all.
+                      </span>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </Section>
+
+          <Section icon={Paperclip} title="Notes and papers">
+            <div className="space-y-3">
+              <div>
+                <label className="form-label" htmlFor="pay-notes">
+                  Notes
+                </label>
+                <input
+                  id="pay-notes"
+                  className="form-input"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Anything worth remembering about this payment"
+                />
+              </div>
+
+              <div>
+                <span className="form-label">Files</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="btn-secondary cursor-pointer text-xs">
+                    <Paperclip size={14} />
+                    Attach
+                    <input
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => {
+                        chooseFiles(e.target.files)
+                        e.target.value = ''
+                      }}
+                    />
+                  </label>
+                  {files.length === 0 && (
+                    <span className="text-muted-foreground text-xs">
+                      The bank advice, the counterfoil, the UTR screenshot — up to {MAX_FILES}.
+                    </span>
+                  )}
+                  {files.map((f, i) => (
+                    <span
+                      key={`${f.name}-${i}`}
+                      className="border-border bg-secondary/50 flex items-center gap-1 rounded-md border px-2 py-1 text-xs"
+                    >
+                      {f.name}
+                      <button
+                        type="button"
+                        aria-label={`Remove ${f.name}`}
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={() => setFiles((prev) => prev.filter((_, n) => n !== i))}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                {/* Said here rather than after the save fails: the payment goes
+                  in either way, and the file is the part that would be lost. */}
+                {files.length > 0 && (
+                  <span className="text-muted-foreground mt-1.5 block text-xs">
+                    Sent once the payment is recorded.
+                  </span>
+                )}
+              </div>
+            </div>
+          </Section>
+        </div>
+
+        {/* Footer — stays put, so Record payment is always one press away. */}
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
           <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
             Cancel
           </button>
