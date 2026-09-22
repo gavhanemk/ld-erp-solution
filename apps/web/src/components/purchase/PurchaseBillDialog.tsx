@@ -789,78 +789,97 @@ export function PurchaseBillDialog({
           {!isEdit && (
             <Section icon={Download} title="Which deliveries is this bill for?">
               {receiptChoices.length === 0 ? (
-                <p className="border-border bg-secondary/60 text-muted-foreground flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
-                  <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
+                <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
+                  <Info size={12} className="mt-0.5 shrink-0 opacity-70" />
                   {supplierId
                     ? 'This supplier has nothing waiting to be billed. Type the bill by hand below.'
                     : 'No deliveries are waiting to be billed. Type the bill by hand below, or receive the goods first.'}
                 </p>
               ) : (
                 <>
-                  <p className="text-muted-foreground mb-2 text-xs">
-                    Tick every delivery this invoice covers — one bill can settle as many as the
-                    supplier sent. Ticking brings across what was accepted at the gate and the rate
-                    that was ordered.
+                  <p className="text-muted-foreground mb-1.5 text-[11px] leading-snug">
+                    Tick every delivery this invoice covers — one bill can settle several. The
+                    number on each is what is still to bill.
                   </p>
-                  <div className="grid gap-1.5 sm:grid-cols-2">
-                    {receiptChoices.map((g) => {
-                      const on = billedSet.has(g.grnNumber)
-                      const left = Number(g.billing?.pendingQty ?? 0)
-                      return (
-                        <label
-                          key={g.id}
-                          className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs transition ${
-                            on
-                              ? 'border-primary/40 bg-primary/10'
-                              : 'border-border bg-secondary/40 hover:border-primary/40'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            className="accent-primary size-3.5 shrink-0"
-                            checked={on}
-                            disabled={pulling}
-                            onChange={() => {
-                              if (on) dropReceipt(g.grnNumber)
-                              else void pullFromGrn(g.id)
-                            }}
-                          />
-                          <span className="min-w-0 flex-1 leading-tight">
+                  {/* ── Sized to the receipt number, not to the dialog ──────
+                    Each of these was a half-width box holding a quarter of
+                    that in words. A supplier with a fortnight of deliveries
+                    on one invoice — which is the whole reason this list
+                    exists — pushed the bill itself off the screen. They are
+                    chips that wrap now, and the strip is capped: past about
+                    four rows it scrolls rather than growing. */}
+                  <div className="-mx-0.5 max-h-24 overflow-y-auto px-0.5 py-0.5">
+                    <div className="flex flex-wrap gap-1">
+                      {receiptChoices.map((g) => {
+                        const on = billedSet.has(g.grnNumber)
+                        const left = Number(g.billing?.pendingQty ?? 0)
+                        return (
+                          <label
+                            key={g.id}
+                            title={
+                              left > 0
+                                ? `${left.toLocaleString('en-IN')} still to bill on ${g.grnNumber}`
+                                : g.grnNumber
+                            }
+                            className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-1.5 py-1 text-[11px] leading-none transition ${
+                              on
+                                ? 'border-primary/40 bg-primary/10'
+                                : 'border-border bg-secondary/40 hover:border-primary/40'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="accent-primary size-3 shrink-0"
+                              checked={on}
+                              disabled={pulling}
+                              onChange={() => {
+                                if (on) dropReceipt(g.grnNumber)
+                                else void pullFromGrn(g.id)
+                              }}
+                            />
                             <span className="text-foreground font-mono">{g.grnNumber}</span>
-                            {g.po && (
-                              <span className="text-muted-foreground"> · {g.po.poNumber}</span>
-                            )}
                             {/* Until a supplier is settled the list spans all
                               of them, and a receipt number alone says nothing
-                              about whose delivery it was. */}
-                            {!supplierId && g.po?.supplier?.name && (
-                              <span className="text-muted-foreground block truncate">
+                              about whose delivery it was. The order number is
+                              the first thing to go when space is short. */}
+                            {!supplierId && g.po?.supplier?.name ? (
+                              <span className="text-muted-foreground max-w-[9rem] truncate">
                                 {g.po.supplier.name}
                               </span>
+                            ) : (
+                              g.po && <span className="text-muted-foreground">{g.po.poNumber}</span>
                             )}
-                          </span>
-                          {left > 0 && (
-                            <span className="text-muted-foreground shrink-0 tabular-nums">
-                              {left.toLocaleString('en-IN')} to bill
-                            </span>
-                          )}
-                        </label>
-                      )
-                    })}
+                            {left > 0 && (
+                              <span className="text-muted-foreground tabular-nums">
+                                {left.toLocaleString('en-IN')}
+                              </span>
+                            )}
+                          </label>
+                        )
+                      })}
+                    </div>
                   </div>
-                  {pulling && (
-                    <p className="text-muted-foreground mt-2 flex items-center gap-1.5 text-xs">
-                      <Loader2 size={12} className="animate-spin" />
-                      Reading the delivery...
-                    </p>
-                  )}
-                  {billedReceipts.length > 0 && (
-                    <p className="border-border bg-secondary/60 text-muted-foreground mt-2 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
-                      <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
-                      On this bill: {billedReceipts.join(', ')}. The quantities and rates below came
-                      from the gate — change them only where the supplier&apos;s invoice differs.
-                    </p>
-                  )}
+                  {/* Which receipts are on the bill is said by the ticks above
+                    and again by the "Against receipt" tag on every line below.
+                    Saying it a third time in prose cost two lines and told
+                    nobody anything. Only the warning about the figures is
+                    left, because that one is not written anywhere else. */}
+                  <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-[11px]">
+                    {pulling ? (
+                      <>
+                        <Loader2 size={11} className="animate-spin" />
+                        Reading the delivery...
+                      </>
+                    ) : (
+                      billedReceipts.length > 0 && (
+                        <>
+                          <Info size={11} className="shrink-0 opacity-70" />
+                          Quantities and rates came from the gate — change them only where their
+                          invoice differs.
+                        </>
+                      )
+                    )}
+                  </p>
                 </>
               )}
             </Section>
