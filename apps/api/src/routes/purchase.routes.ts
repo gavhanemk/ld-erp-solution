@@ -3157,10 +3157,16 @@ router.get('/bills', requirePermission(MODULE, 'view'), async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
   const status = typeof req.query.status === 'string' ? req.query.status : ''
   const supplierId = typeof req.query.supplierId === 'string' ? req.query.supplierId : ''
+  const itemId = typeof req.query.itemId === 'string' ? req.query.itemId : ''
+  const from = typeof req.query.from === 'string' && req.query.from ? req.query.from : ''
+  const to = typeof req.query.to === 'string' && req.query.to ? req.query.to : ''
 
   const where: Prisma.PurchaseInvoiceWhereInput = {
     ...(status ? { status: status as Prisma.EnumInvoiceStatusFilter['equals'] } : {}),
     ...(supplierId ? { supplierId } : {}),
+    // `some`, not `every`: a bill with thread on it somewhere is still a bill
+    // with thread on it.
+    ...(itemId ? { lines: { some: { itemId } } } : {}),
     ...(req.query.overdue === 'true'
       ? { dueDate: { lt: new Date() }, status: { in: ['UNPAID', 'PARTIAL'] } }
       : {}),
@@ -3173,6 +3179,15 @@ router.get('/bills', requirePermission(MODULE, 'view'), async (req, res) => {
           ],
         }
       : {}),
+  }
+
+  // A day range, inclusive at both ends — `to` is pushed to the end of its
+  // day so a bill booked that afternoon is not quietly dropped from it.
+  if (from || to) {
+    const range: Prisma.DateTimeFilter = {}
+    if (from) range.gte = new Date(`${from}T00:00:00`)
+    if (to) range.lte = new Date(`${to}T23:59:59.999`)
+    where.billDate = range
   }
 
   const sort = typeof req.query.sort === 'string' ? req.query.sort : 'billDate'
