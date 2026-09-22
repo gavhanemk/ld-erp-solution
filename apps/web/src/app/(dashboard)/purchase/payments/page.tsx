@@ -16,6 +16,8 @@ import { RecordPaymentDialog, type PayableBill } from '@/components/purchase/Rec
 import { BillFilesDialog, billFiles } from '@/components/purchase/BillDetail'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
+import { ExportButton } from '@/components/tables/ExportButton'
+import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
 import { formatDate } from '@/lib/utils'
 
 /** A file hanging off an order or a receipt — a bill and a payment hold none of their own. */
@@ -73,6 +75,7 @@ interface Payment {
   bankAccount?: { id: string; accountName: string; bankName: string } | null
   /** The advice, the counterfoil — attached when the payment was recorded. */
   attachments?: BillFile[]
+  notes?: string | null
   invoice?: ({ id: string; billNumber: string } & BillTrail) | null
   createdBy?: { id: string; name: string } | null
 }
@@ -374,6 +377,96 @@ export default function SupplierPaymentsPage() {
       inRange(p.paymentDate)
   )
 
+  /**
+   * Two lists, two shapes, one button.
+   *
+   * What is owed and what has been paid share a screen but not a single
+   * column, so the export follows the open tab. One combined sheet would have
+   * half its cells empty on every row.
+   */
+  const OWED_COLUMNS: ExportColumn<OutstandingBill>[] = [
+    { header: 'Supplier', value: (b) => b.supplier.name },
+    { header: 'Our Ref', value: (b) => b.billNumber },
+    { header: 'Their Bill No.', value: (b) => b.supplierInvoiceNo ?? '' },
+    { header: 'Order No.', value: (b) => b.po?.poNumber ?? '' },
+    { header: 'Bill Date', value: (b) => asDate(b.billDate) },
+    { header: 'Due', value: (b) => asDate(b.dueDate) },
+    { header: 'Ageing', value: (b) => b.bucket },
+    { header: 'Days Overdue', value: (b) => b.daysOverdue },
+    { header: 'Bill Total', value: (b) => asNumber(b.totalAmount) },
+    { header: 'TDS on Bill', value: (b) => asNumber(b.tdsAmount) },
+    { header: 'Paid', value: (b) => asNumber(b.paidAmount) },
+    { header: 'Outstanding', value: (b) => asNumber(b.balanceAmount) },
+    { header: 'Status', value: (b) => b.status },
+  ]
+
+  const PAID_COLUMNS: ExportColumn<Payment>[] = [
+    { header: 'Payment No.', value: (p) => p.paymentNumber },
+    { header: 'Paid On', value: (p) => asDate(p.paymentDate) },
+    { header: 'Supplier', value: (p) => p.supplier.name },
+    { header: 'Against Bill', value: (p) => p.invoice?.billNumber ?? '' },
+    { header: 'Order No.', value: (p) => p.invoice?.po?.poNumber ?? '' },
+    { header: 'Location', value: (p) => p.warehouse?.name ?? 'Head office' },
+    { header: 'How Paid', value: (p) => MODE_LABEL[p.mode] ?? p.mode },
+    { header: 'Paid Through', value: (p) => p.bankAccount?.accountName ?? '' },
+    { header: 'Bank', value: (p) => p.bankAccount?.bankName ?? '' },
+    { header: 'Reference', value: (p) => p.referenceNo ?? '' },
+    { header: 'Cheque No.', value: (p) => p.chequeNo ?? '' },
+    { header: 'Cheque Date', value: (p) => asDate(p.chequeDate) },
+    { header: 'Amount', value: (p) => asNumber(p.amount) },
+    { header: 'Tax Deducted', value: (p) => asNumber(p.tdsAmount) ?? 0 },
+    { header: 'Files', value: (p) => (p.attachments ?? []).length },
+    { header: 'Recorded By', value: (p) => p.createdBy?.name ?? '' },
+    { header: 'Notes', value: (p) => p.notes ?? '' },
+  ]
+
+  /**
+   * Exports exactly what the filters have left on screen.
+   *
+   * No second fetch, unlike the three paginated lists: this screen already
+   * holds both lists whole, and the filtering happens in the browser. Asking
+   * the server again would only risk handing over a different set than the one
+   * being looked at.
+   */
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const owed = tab === 'outstanding'
+      const count = owed ? visibleBills.length : visiblePayments.length
+      if (count === 0) {
+        setMessage(`Nothing to export — ${owed ? 'no bills' : 'no payments'} match these filters.`)
+        return
+      }
+      // Two calls rather than one with a ternary inside it: the generic
+      // binds to whichever branch TypeScript reads first, and the other list
+      // is then the wrong type for its own columns.
+      if (owed) {
+        await downloadRows({
+          rows: visibleBills,
+          columns: OWED_COLUMNS,
+          name: 'supplier-outstanding',
+          sheet: 'Outstanding',
+          format,
+        })
+      } else {
+        await downloadRows({
+          rows: visiblePayments,
+          columns: PAID_COLUMNS,
+          name: 'supplier-payments',
+          sheet: 'Payments Made',
+          format,
+        })
+      }
+      setMessage(
+        owed
+          ? `Exported ${count} outstanding ${count === 1 ? 'bill' : 'bills'}.`
+          : `Exported ${count} ${count === 1 ? 'payment' : 'payments'}.`
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
+  }
+
   return (
     <div className="space-y-5">
       <div className="page-header flex-wrap gap-3">
@@ -381,9 +474,12 @@ export default function SupplierPaymentsPage() {
           <h1 className="page-title">Supplier Payments</h1>
           <p className="page-subtitle">What is owed, and what has been paid against it</p>
         </div>
-        <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
-          <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
+          </button>
+          <ExportButton onExport={exportList} disabled={loading} />
+        </div>
       </div>
 
       {error && (

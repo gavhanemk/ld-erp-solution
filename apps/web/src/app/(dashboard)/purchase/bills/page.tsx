@@ -17,10 +17,19 @@ import {
   Paperclip,
   FileText,
 } from 'lucide-react'
-import { api, ApiError, type Paginated } from '@/lib/api'
+import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
 import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
+import { ExportButton } from '@/components/tables/ExportButton'
+import {
+  asDate,
+  asNumber,
+  downloadRows,
+  fetchEveryPage,
+  type ExportColumn,
+  type ExportFormat,
+} from '@/lib/export'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
@@ -78,8 +87,43 @@ function PurchaseBillsTable() {
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
+  const [supplierId, setSupplierId] = useState('')
+  const [itemId, setItemId] = useState('')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
   const [overdueOnly, setOverdueOnly] = useState(false)
   const [page, setPage] = useState(1)
+
+  /*
+   * Every supplier and every item, for the filter dropdowns.
+   *
+   * This list is paginated at the server, so there is no free set of
+   * "suppliers on this page" worth building — the master list is what a
+   * filter needs here, fetched once rather than on every keystroke.
+   */
+  const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
+  const [items, setItems] = useState<Array<{ id: string; name: string }>>([])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [s, i] = await Promise.all([
+          masterResource<{ id: string; name: string }>('suppliers').list({ limit: 500 }),
+          masterResource<{ id: string; name: string }>('items').list({ limit: 500 }),
+        ])
+        if (cancelled) return
+        setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
+        setItems([...i.data].sort((a, b) => a.name.localeCompare(b.name)))
+      } catch {
+        // The filters just come up empty — the list itself still loads and
+        // still works without them.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [busy, setBusy] = useState(false)
   const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseBill | null }>({
     open: false,
@@ -121,15 +165,94 @@ function PurchaseBillsTable() {
     return () => clearTimeout(t)
   }, [search])
 
+  /**
+   * The list's query string, built once, so the export and the screen can
+   * never describe two different lists.
+   */
+  const query = (p: number, limit: number) => {
+    const qs = new URLSearchParams({ page: String(p), limit: String(limit) })
+    if (debounced) qs.set('q', debounced)
+    if (status) qs.set('status', status)
+    if (supplierId) qs.set('supplierId', supplierId)
+    if (itemId) qs.set('itemId', itemId)
+    if (fromDate) qs.set('from', fromDate)
+    if (toDate) qs.set('to', toDate)
+    if (overdueOnly) qs.set('overdue', 'true')
+    return `/purchase/bills?${qs}`
+  }
+
+  /**
+   * One row per bill.
+   *
+   * Every column here is money or a date belonging to the bill as a whole, so
+   * repeating it down the bill's lines would double-count the first time
+   * anybody put a sum under Total — which is the first thing anybody does.
+   * The item detail lives on the goods receipt export, where there is no money
+   * to double.
+   */
+  const EXPORT_COLUMNS: ExportColumn<PurchaseBill>[] = [
+    { header: 'Their Bill No.', value: (b) => b.supplierInvoiceNo ?? '' },
+    { header: 'Their Bill Date', value: (b) => asDate(b.supplierInvoiceDate) },
+    { header: 'Our Ref', value: (b) => b.billNumber },
+    { header: 'Booked On', value: (b) => asDate(b.billDate) },
+    { header: 'Due', value: (b) => asDate(b.dueDate) },
+    { header: 'Status', value: (b) => STATUS[b.status]?.label ?? b.status },
+    { header: 'Supplier', value: (b) => b.supplier?.name ?? '' },
+    { header: 'Supplier Code', value: (b) => b.supplier?.code ?? '' },
+    { header: 'GSTIN', value: (b) => b.supplier?.gstin ?? '' },
+    { header: 'Order No.', value: (b) => b.po?.poNumber ?? '' },
+    { header: 'Against Receipts', value: (b) => receiptsOn(b).join(', ') },
+    { header: 'Subtotal', value: (b) => asNumber(b.subtotal) },
+    { header: 'Discount', value: (b) => asNumber(b.discountAmount) },
+    { header: 'Taxable', value: (b) => asNumber(b.taxableAmount) },
+    { header: 'CGST', value: (b) => asNumber(b.cgst) },
+    { header: 'SGST', value: (b) => asNumber(b.sgst) },
+    { header: 'IGST', value: (b) => asNumber(b.igst) },
+    { header: 'Round Off', value: (b) => asNumber(b.roundOff) },
+    { header: 'Total', value: (b) => asNumber(b.totalAmount) },
+    { header: 'TDS Section', value: (b) => b.tdsSection ?? '' },
+    { header: 'TDS', value: (b) => asNumber(b.tdsAmount) },
+    { header: 'Reverse Charge', value: (b) => (b.isReverseCharge ? 'Yes' : 'No') },
+    { header: 'Paid', value: (b) => asNumber(b.paidAmount) },
+    { header: 'Outstanding', value: (b) => asNumber(b.balanceAmount) },
+    { header: 'Booked By', value: (b) => b.createdBy?.name ?? '' },
+    { header: 'Notes', value: (b) => b.notes ?? '' },
+  ]
+
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const {
+        rows: all,
+        total,
+        truncated,
+      } = await fetchEveryPage<PurchaseBill>((p) => query(p, 100))
+      if (all.length === 0) {
+        setMessage('Nothing to export — no bills match these filters.')
+        return
+      }
+      await downloadRows({
+        rows: all,
+        columns: EXPORT_COLUMNS,
+        name: 'purchase-bills',
+        sheet: 'Purchase Bills',
+        format,
+      })
+      setMessage(
+        truncated
+          ? `Exported the first ${all.length} of ${total} bills. Narrow the filters to get the rest.`
+          : `Exported ${all.length} ${all.length === 1 ? 'bill' : 'bills'}.`
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
+  }
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      if (overdueOnly) qs.set('overdue', 'true')
-      const res = await api.get<Paginated<PurchaseBill>>(`/purchase/bills?${qs}`)
+      const res = await api.get<Paginated<PurchaseBill>>(query(page, rowsPerPage))
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
@@ -144,7 +267,7 @@ function PurchaseBillsTable() {
     } finally {
       setLoading(false)
     }
-  }, [debounced, status, overdueOnly, page, rowsPerPage])
+  }, [debounced, status, supplierId, itemId, fromDate, toDate, overdueOnly, page, rowsPerPage])
 
   useEffect(() => {
     void load()
@@ -154,7 +277,7 @@ function PurchaseBillsTable() {
   // list, which reads as "nothing found" rather than "you moved".
   useEffect(() => {
     setPage(1)
-  }, [debounced, status, overdueOnly])
+  }, [debounced, status, supplierId, itemId, fromDate, toDate, overdueOnly])
 
   const cancel = async (bill: PurchaseBill) => {
     const reason = prompt(
@@ -245,6 +368,7 @@ function PurchaseBillsTable() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          <ExportButton onExport={exportList} disabled={loading} />
           <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
             <Plus size={15} /> Book Bill
           </button>
@@ -264,53 +388,126 @@ function PurchaseBillsTable() {
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
-          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[220px] sm:basis-0">
-            <Search size={14} className="text-muted-foreground shrink-0" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Our number, theirs, or supplier..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label="Search purchase bills"
-            />
+        {/* Two rows on a phone, one flowing row at a desk — see the same
+          grouping on Purchase Orders. The wrappers are `sm:contents` above a
+          phone, so their children rejoin the one wrapping row they were
+          always in rather than keeping a second, disagreeing layout. */}
+        <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <div className="flex items-center gap-2 sm:contents">
+            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+              <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder="Search..."
+                title="Reaches our number, theirs, and the supplier"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search purchase bills"
+              />
+            </div>
+
+            {/* Two dates, not a preset list — the mill asks "what did we book
+              between the 3rd and the 11th" far more often than "last month",
+              and either end alone is a valid question. */}
+            <div className="flex shrink-0 items-center gap-1">
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="From date"
+              />
+              <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="To date"
+              />
+            </div>
           </div>
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            aria-label="Filter by status"
-          >
-            <option value="">All statuses</option>
-            {Object.entries(STATUS).map(([v, s]) => (
-              <option key={v} value={v}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <label className="text-muted-foreground flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
-            <input
-              type="checkbox"
-              checked={overdueOnly}
-              onChange={(e) => setOverdueOnly(e.target.checked)}
-            />
-            Overdue only
-          </label>
-          {(search || status || overdueOnly) && (
-            <button
-              className="btn-ghost h-8 shrink-0 px-2 text-xs"
-              onClick={() => {
-                setSearch('')
-                setStatus('')
-                setOverdueOnly(false)
-              }}
+
+          <div className="flex items-center gap-2 sm:contents">
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
             >
-              Clear
-            </button>
-          )}
-          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-            {total} {total === 1 ? 'bill' : 'bills'}
-          </span>
+              <option value="">All suppliers</option>
+              {suppliers.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={itemId}
+              onChange={(e) => setItemId(e.target.value)}
+              aria-label="Filter by item"
+            >
+              <option value="">All items</option>
+              {items.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              aria-label="Filter by status"
+            >
+              <option value="">All statuses</option>
+              {Object.entries(STATUS).map(([v, s]) => (
+                <option key={v} value={v}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 sm:contents">
+            <label className="text-muted-foreground flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={overdueOnly}
+                onChange={(e) => setOverdueOnly(e.target.checked)}
+              />
+              Overdue only
+            </label>
+
+            {/* Only when it is doing something. A permanent Clear is a
+              control that does nothing on the screen somebody usually
+              sees. */}
+            {(search || status || supplierId || itemId || fromDate || toDate || overdueOnly) && (
+              <button
+                className="btn-ghost h-8 shrink-0 px-2 text-xs"
+                onClick={() => {
+                  setSearch('')
+                  setStatus('')
+                  setSupplierId('')
+                  setItemId('')
+                  setFromDate('')
+                  setToDate('')
+                  setOverdueOnly(false)
+                }}
+              >
+                Clear
+              </button>
+            )}
+
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {total} {total === 1 ? 'bill' : 'bills'}
+            </span>
+          </div>
         </div>
 
         {loading && rows.length === 0 ? (
@@ -318,7 +515,7 @@ function PurchaseBillsTable() {
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
             <p className="text-muted-foreground text-sm">
-              {debounced || status || overdueOnly
+              {debounced || status || supplierId || itemId || fromDate || toDate || overdueOnly
                 ? 'No bills match what you are looking for. Clear the filters to see them all.'
                 : 'No supplier bills booked yet. Book one to record what a supplier has charged you — start from a goods receipt and it fills itself in.'}
             </p>

@@ -28,6 +28,15 @@ import {
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
+import { ExportButton } from '@/components/tables/ExportButton'
+import {
+  asDate,
+  asNumber,
+  downloadRows,
+  fetchEveryPage,
+  type ExportColumn,
+  type ExportFormat,
+} from '@/lib/export'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
@@ -162,14 +171,7 @@ export default function PurchaseOrdersPage() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      if (supplierId) qs.set('supplierId', supplierId)
-      if (itemId) qs.set('itemId', itemId)
-      if (fromDate) qs.set('from', fromDate)
-      if (toDate) qs.set('to', toDate)
-      const res = await api.get<Paginated<PurchaseOrder>>(`/purchase/orders?${qs}`)
+      const res = await api.get<Paginated<PurchaseOrder>>(query(page, rowsPerPage))
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
@@ -198,6 +200,24 @@ export default function PurchaseOrdersPage() {
 
   const anyFilter = Boolean(search || status || supplierId || itemId || fromDate || toDate)
 
+  /**
+   * The list's query string, built once.
+   *
+   * The export calls this too. An exporter that assembled its own filters
+   * would be one `if` away from handing somebody a spreadsheet of a different
+   * list than the one on their screen, and nothing about the file would say so.
+   */
+  const query = (p: number, limit: number) => {
+    const qs = new URLSearchParams({ page: String(p), limit: String(limit) })
+    if (debounced) qs.set('q', debounced)
+    if (status) qs.set('status', status)
+    if (supplierId) qs.set('supplierId', supplierId)
+    if (itemId) qs.set('itemId', itemId)
+    if (fromDate) qs.set('from', fromDate)
+    if (toDate) qs.set('to', toDate)
+    return `/purchase/orders?${qs}`
+  }
+
   const clearFilters = () => {
     setSearch('')
     setStatus('')
@@ -205,6 +225,73 @@ export default function PurchaseOrdersPage() {
     setItemId('')
     setFromDate('')
     setToDate('')
+  }
+
+  /**
+   * What goes in the spreadsheet.
+   *
+   * The eight columns on screen, plus the five that are on the order but not
+   * on the row — the tax split, the discount and the delivery date. A list is
+   * read; a spreadsheet is worked on, and the figures somebody is going to
+   * total are exactly the ones the row had no width for.
+   */
+  const EXPORT_COLUMNS: ExportColumn<PurchaseOrder>[] = [
+    { header: 'Order No.', value: (po) => po.poNumber },
+    { header: 'Order Date', value: (po) => asDate(po.poDate) },
+    { header: 'Status', value: (po) => STATUS[po.status]?.label ?? po.status },
+    { header: 'Supplier', value: (po) => po.supplier?.name ?? '' },
+    { header: 'Supplier Code', value: (po) => po.supplier?.code ?? '' },
+    { header: 'GSTIN', value: (po) => po.supplier?.gstin ?? '' },
+    { header: 'Reference', value: (po) => po.reference ?? '' },
+    { header: 'Enquiry No.', value: (po) => po.enquiryNo ?? '' },
+    { header: 'Delivery Date', value: (po) => asDate(po.deliveryDate) },
+    { header: 'Items', value: (po) => (po.lines ?? []).length },
+    { header: 'Subtotal', value: (po) => asNumber(po.subtotal) },
+    { header: 'Discount', value: (po) => asNumber(po.discountAmount) },
+    { header: 'Taxable', value: (po) => asNumber(po.taxableAmount) },
+    { header: 'CGST', value: (po) => asNumber(po.cgst) },
+    { header: 'SGST', value: (po) => asNumber(po.sgst) },
+    { header: 'IGST', value: (po) => asNumber(po.igst) },
+    { header: 'Other Charges', value: (po) => asNumber(po.otherCharges) },
+    { header: 'Total', value: (po) => asNumber(po.totalAmount) },
+    { header: 'Files', value: (po) => po._count?.attachments ?? 0 },
+    { header: 'Remark', value: (po) => po.remark ?? '' },
+  ]
+
+  /**
+   * Every order the filters allow, not the twenty-five on this page.
+   *
+   * The API caps a request at 200, so this walks the pages. Somebody who has
+   * filtered to a supplier and a month wants that month, and a file holding
+   * only its first page would be wrong in the quietest possible way.
+   */
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const {
+        rows: all,
+        total,
+        truncated,
+      } = await fetchEveryPage<PurchaseOrder>((p) => query(p, 200))
+      if (all.length === 0) {
+        setMessage('Nothing to export — no orders match these filters.')
+        return
+      }
+      await downloadRows({
+        rows: all,
+        columns: EXPORT_COLUMNS,
+        name: 'purchase-orders',
+        sheet: 'Purchase Orders',
+        format,
+      })
+      setMessage(
+        truncated
+          ? `Exported the first ${all.length} of ${total} orders. Narrow the filters to get the rest.`
+          : `Exported ${all.length} ${all.length === 1 ? 'order' : 'orders'}.`
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
   }
 
   const act = async (po: PurchaseOrder, what: 'cancel') => {
@@ -372,6 +459,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          <ExportButton onExport={exportList} disabled={loading} />
           <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
             <Plus size={15} /> New Purchase Order
           </button>

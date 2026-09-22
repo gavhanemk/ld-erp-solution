@@ -24,6 +24,15 @@ import {
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
 import { Pagination } from '@/components/tables/Pagination'
+import { ExportButton } from '@/components/tables/ExportButton'
+import {
+  asDate,
+  asNumber,
+  downloadRows,
+  fetchEveryPage,
+  type ExportColumn,
+  type ExportFormat,
+} from '@/lib/export'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
@@ -77,6 +86,15 @@ interface Receipt {
   }
   bills?: Array<{ id: string; billNumber: string }>
 }
+
+/**
+ * One line of the export: a receipt and one of its items.
+ *
+ * `l` is null only for a receipt that somehow has no lines — it is still
+ * listed rather than dropped, because a receipt missing from a file nobody
+ * knows is incomplete is worse than a row with empty quantities.
+ */
+type ExportRow = { g: Receipt; l: ReceiptLine | null }
 
 /** How the billing state of a receipt reads on the row. */
 function billStage(grn: Receipt): { label: string; cls: string } | null {
@@ -318,21 +336,101 @@ export default function GoodsReceiptPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /**
+   * The list's query string, built once.
+   *
+   * The export calls this too, so a filtered screen and the file it produces
+   * cannot describe two different lists.
+   *
+   * Filtered at the server, unlike the waiting list: receipts are an archive
+   * that grows for ever and this page only ever holds fifty of them, so
+   * filtering in the browser would filter the page and not the list.
+   */
+  const query = (p: number, limit: number) => {
+    const qs = new URLSearchParams({ page: String(p), limit: String(limit) })
+    if (debounced) qs.set('q', debounced)
+    if (status) qs.set('status', status)
+    if (supplierId) qs.set('supplierId', supplierId)
+    if (itemId) qs.set('itemId', itemId)
+    if (fromDate) qs.set('from', fromDate)
+    if (toDate) qs.set('to', toDate)
+    return `/purchase/grn?${qs}`
+  }
+
+  /**
+   * One row per item received, not one per receipt.
+   *
+   * A receipt's whole substance is its lines — what turned up, how much was
+   * taken and how much went back. One row per receipt would have to render
+   * that as "2 items", which is the one thing a spreadsheet cannot work with.
+   * The receipt's own details repeat down its lines, so the file pivots by
+   * item, by supplier or by month without any further preparation.
+   *
+   * The orders export goes the other way, one row per order, because an order
+   * carries money: repeating its total against every line would double-count
+   * the moment somebody put a sum under the column.
+   */
+  const exportRows = (list: Receipt[]): ExportRow[] =>
+    list.flatMap<ExportRow>((g) =>
+      g.lines.length ? g.lines.map((l) => ({ g, l })) : [{ g, l: null }]
+    )
+
+  const EXPORT_COLUMNS: ExportColumn<ExportRow>[] = [
+    { header: 'GRN No.', value: ({ g }) => g.grnNumber },
+    { header: 'Received On', value: ({ g }) => asDate(g.grnDate) },
+    { header: 'Status', value: ({ g }) => stage(g.status).label },
+    { header: 'Order No.', value: ({ g }) => g.po?.poNumber ?? '' },
+    { header: 'Supplier', value: ({ g }) => g.po?.supplier?.name ?? '' },
+    { header: 'Challan No.', value: ({ g }) => g.challanNo ?? '' },
+    { header: 'Challan Date', value: ({ g }) => asDate(g.challanDate) },
+    { header: 'Gate Entry', value: ({ g }) => g.gateEntryNo ?? '' },
+    { header: 'Vehicle', value: ({ g }) => g.vehicleNo ?? '' },
+    { header: 'Item Code', value: ({ l }) => l?.item.code ?? '' },
+    { header: 'Item', value: ({ l }) => l?.item.name ?? '' },
+    { header: 'UOM', value: ({ l }) => l?.item.uom?.symbol ?? '' },
+    { header: 'Ordered', value: ({ l }) => asNumber(l?.orderedQty) },
+    { header: 'Received', value: ({ l }) => asNumber(l?.receivedQty) },
+    { header: 'Rejected', value: ({ l }) => asNumber(l?.rejectedQty) },
+    { header: 'Into Stock', value: ({ l }) => asNumber(l?.acceptedQty) },
+    { header: 'Store', value: ({ l }) => l?.warehouse.name ?? '' },
+    { header: 'Batch', value: ({ l }) => l?.batchNumber ?? '' },
+    { header: 'Billing', value: ({ g }) => billStage(g)?.label ?? '' },
+    { header: 'Billed On', value: ({ g }) => (g.bills ?? []).map((b) => b.billNumber).join(', ') },
+    { header: 'Files', value: ({ g }) => g._count?.attachments ?? 0 },
+    { header: 'Notes', value: ({ g }) => g.notes ?? '' },
+  ]
+
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const { rows: all, total, truncated } = await fetchEveryPage<Receipt>((p) => query(p, 100))
+      const flat = exportRows(all)
+      if (flat.length === 0) {
+        setMessage('Nothing to export — no receipts match these filters.')
+        return
+      }
+      await downloadRows({
+        rows: flat,
+        columns: EXPORT_COLUMNS,
+        name: 'goods-receipts',
+        sheet: 'Goods Receipts',
+        format,
+      })
+      setMessage(
+        truncated
+          ? `Exported the first ${all.length} of ${total} receipts. Narrow the filters to get the rest.`
+          : `Exported ${all.length} ${all.length === 1 ? 'receipt' : 'receipts'} as ${flat.length} rows, one per item.`
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
+  }
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(PER_PAGE) })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      // At the server, unlike the waiting list: receipts are an archive that
-      // grows for ever and this page only ever holds fifty of them, so
-      // filtering in the browser would filter the page and not the list.
-      if (supplierId) qs.set('supplierId', supplierId)
-      if (itemId) qs.set('itemId', itemId)
-      if (fromDate) qs.set('from', fromDate)
-      if (toDate) qs.set('to', toDate)
-      const res = await api.get<Paginated<Receipt>>(`/purchase/grn?${qs}`)
+      const res = await api.get<Paginated<Receipt>>(query(page, PER_PAGE))
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
@@ -621,6 +719,7 @@ export default function GoodsReceiptPage() {
           >
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          <ExportButton onExport={exportList} disabled={loading} />
           <button className="btn-primary" onClick={() => setDialog('')}>
             <Plus size={15} /> Receive goods
           </button>
