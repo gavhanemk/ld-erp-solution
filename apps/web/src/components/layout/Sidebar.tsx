@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
+  BarChart3,
   LayoutDashboard, ShoppingCart, Package, Warehouse, Factory,
   BookOpen, Users, Wrench, Bot, Settings, ChevronLeft, ChevronRight,
   LogOut, Bell, Zap, ChevronDown, ChevronRight as ChevronRightIcon,
@@ -44,6 +45,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { label: 'Reports', href: '/reports', icon: BarChart3 },
   {
     label: 'Masters', icon: Layers,
     children: [

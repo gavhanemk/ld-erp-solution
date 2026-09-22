@@ -16,6 +16,7 @@ import dashboardRoutes from './routes/dashboard.routes'
 import masterRoutes from './routes/master.routes'
 import salesRoutes from './routes/sales.routes'
 import purchaseRoutes from './routes/purchase.routes'
+import reportsRoutes from './routes/reports.routes'
 import inventoryRoutes from './routes/inventory.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
@@ -158,6 +159,7 @@ app.use('/api/dashboard', authMiddleware, dashboardRoutes)
 app.use('/api/masters', authMiddleware, masterRoutes)
 app.use('/api/sales', authMiddleware, salesRoutes)
 app.use('/api/purchase', authMiddleware, purchaseRoutes)
+app.use('/api/reports', authMiddleware, reportsRoutes)
 app.use('/api/inventory', authMiddleware, inventoryRoutes)
 app.use('/api/production', authMiddleware, productionRoutes)
 app.use('/api/accounts', authMiddleware, accountsRoutes)
