@@ -149,3 +149,4 @@ For licensing inquiries, contact: info@ldcottonmills.com
 ---
 
 *LD ERP Solution v1.0.0 — Built for LD Cotton Mills*
+Purchase module live
