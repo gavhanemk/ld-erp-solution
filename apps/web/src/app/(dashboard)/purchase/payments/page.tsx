@@ -15,6 +15,7 @@ import { api, ApiError } from '@/lib/api'
 import { RecordPaymentDialog, type PayableBill } from '@/components/purchase/RecordPaymentDialog'
 import { BillFilesDialog, billFiles } from '@/components/purchase/BillDetail'
 import { FilesCell } from '@/components/tables/FilesCell'
+import { RowPanel } from '@/components/tables/RowPanel'
 import { formatDate } from '@/lib/utils'
 
 /** A file hanging off an order or a receipt — a bill and a payment hold none of their own. */
@@ -136,16 +137,12 @@ function BillTrailPanel({ billNumber, po, lines }: { billNumber: string } & Bill
   const orderFiles = po?.attachments ?? []
 
   return (
-    <div className="border-border bg-card overflow-hidden rounded-lg border">
-      <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
-        <FileText size={13} className="text-muted-foreground shrink-0" />
-        <h4 className="text-foreground text-[11px] font-semibold">Receipts &amp; Files</h4>
-        <span className="text-muted-foreground ml-auto text-[10px]">
-          {grns.length} {grns.length === 1 ? 'receipt' : 'receipts'} on {billNumber}
-        </span>
-      </div>
-
-      <div className="max-h-[22rem] overflow-y-auto">
+    <RowPanel
+      icon={FileText}
+      title="Receipts & Files"
+      note={`${grns.length} ${grns.length === 1 ? 'receipt' : 'receipts'} on ${billNumber}`}
+    >
+      <>
         {orderFiles.length > 0 && (
           <div className="border-border flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-3 py-2 text-xs">
             <span className="text-muted-foreground shrink-0">Order {po?.poNumber}:</span>
@@ -169,30 +166,18 @@ function BillTrailPanel({ billNumber, po, lines }: { billNumber: string } & Bill
             Entered by hand — no goods receipt behind this bill.
           </p>
         ) : (
-          <table className="w-full table-fixed text-sm">
+          <table className="subtable w-full table-fixed">
             <thead className="sticky top-0 z-10">
-              <tr className="bg-secondary border-border border-b">
-                <th
-                  style={{ width: '18%' }}
-                  className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider"
-                >
-                  GRN No.
-                </th>
-                <th
-                  style={{ width: '18%' }}
-                  className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider"
-                >
-                  Date
-                </th>
-                <th className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider">
-                  Files
-                </th>
+              <tr>
+                <th style={{ width: '18%' }}>GRN No.</th>
+                <th style={{ width: '18%' }}>Date</th>
+                <th>Files</th>
               </tr>
             </thead>
             <tbody>
               {grns.map((g) => (
-                <tr key={g.id} className="border-border/40 border-b last:border-0">
-                  <td className="whitespace-nowrap px-3 py-1.5 text-xs">
+                <tr key={g.id}>
+                  <td className="whitespace-nowrap">
                     <a
                       href={`/print/goods-receipt/${g.id}`}
                       target="_blank"
@@ -203,8 +188,8 @@ function BillTrailPanel({ billNumber, po, lines }: { billNumber: string } & Bill
                       {g.grnNumber}
                     </a>
                   </td>
-                  <td className="whitespace-nowrap px-3 py-1.5 text-xs">{formatDate(g.grnDate)}</td>
-                  <td className="px-3 py-1.5 text-xs">
+                  <td className="whitespace-nowrap">{formatDate(g.grnDate)}</td>
+                  <td>
                     {g.files.length === 0 ? (
                       <span className="text-muted-foreground">—</span>
                     ) : (
@@ -229,8 +214,8 @@ function BillTrailPanel({ billNumber, po, lines }: { billNumber: string } & Bill
             </tbody>
           </table>
         )}
-      </div>
-    </div>
+      </>
+    </RowPanel>
   )
 }
 
@@ -541,7 +526,7 @@ export default function SupplierPaymentsPage() {
               <div className="list-rows w-full">
                 <table className="data-table w-full">
                   <thead>
-                    <tr>
+                    <tr className="bg-secondary">
                       <th style={{ width: 30 }} />
                       <th>Supplier</th>
                       <th>Bill</th>
@@ -794,7 +779,7 @@ export default function SupplierPaymentsPage() {
             <div className="list-rows w-full">
               <table className="data-table w-full">
                 <thead>
-                  <tr>
+                  <tr className="bg-secondary">
                     <th style={{ width: 30 }} />
                     <th>Payment</th>
                     <th>Date</th>

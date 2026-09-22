@@ -31,6 +31,7 @@ import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDi
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FilesCell } from '@/components/tables/FilesCell'
+import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, itemsPreview } from '@/lib/utils'
 
@@ -916,156 +917,143 @@ export default function PurchaseOrdersPage() {
                             against the order above it and read as a tenth
                             column of that row. */}
                             <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                              <div className="border-border bg-card overflow-hidden rounded-lg border">
-                                <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
-                                  <FileText size={13} className="text-muted-foreground shrink-0" />
-                                  <h4 className="text-foreground text-[11px] font-semibold">
-                                    Item Details
-                                  </h4>
-                                  <span className="text-muted-foreground ml-auto text-[10px]">
-                                    {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
-                                    {po.poNumber}
-                                  </span>
-                                </div>
-                                {/* Capped and scrollable, not left to grow with
-                                  the order. A kit's worth of trims can run to
-                                  thirty lines, and without this the panel would
-                                  push everything below it — the next order, the
-                                  pager — halfway down the screen. The header
-                                  stays pinned so a long list never loses its
-                                  column names. */}
-                                <div className="max-h-[22rem] overflow-y-auto">
-                                  <table className="w-full table-fixed text-sm">
-                                    <thead className="sticky top-0 z-10">
-                                      <tr className="bg-secondary border-border border-b">
-                                        {INNER_COLS.map(({ label: h, width }) => (
-                                          <th
-                                            key={h}
-                                            style={width ? { width } : undefined}
-                                            className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                              INNER_NUMERIC.includes(h) ? 'text-right' : 'text-left'
-                                            }`}
-                                          >
-                                            {h}
-                                          </th>
-                                        ))}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {lines.map((line, i) => {
-                                        // An item is filed under one category, which may
-                                        // itself sit under a parent. Where it does, the
-                                        // parent is the category and the item's own is the
-                                        // subcategory; where it does not, there is no
-                                        // subcategory to show.
-                                        const cat = line.item?.category
-                                        const parent = cat?.parent
-                                        return (
-                                          <tr
-                                            key={line.itemId + i}
-                                            className="border-border/40 border-b last:border-0"
-                                          >
-                                            <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
-                                              {line.item?.code ?? '—'}
-                                            </td>
-                                            <td className="px-3 py-1.5">
-                                              <div className="text-foreground truncate text-xs">
-                                                {line.item?.name ?? '—'}
+                              <RowPanel
+                                icon={FileText}
+                                title="Item Details"
+                                note={`${lines.length} ${
+                                  lines.length === 1 ? 'line' : 'lines'
+                                } on ${po.poNumber}`}
+                              >
+                                <table className="subtable w-full table-fixed">
+                                  <thead className="sticky top-0 z-10">
+                                    <tr>
+                                      {INNER_COLS.map(({ label: h, width }) => (
+                                        <th
+                                          key={h}
+                                          style={width ? { width } : undefined}
+                                          className={
+                                            INNER_NUMERIC.includes(h) ? 'text-right' : undefined
+                                          }
+                                        >
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {lines.map((line, i) => {
+                                      // An item is filed under one category, which may
+                                      // itself sit under a parent. Where it does, the
+                                      // parent is the category and the item's own is the
+                                      // subcategory; where it does not, there is no
+                                      // subcategory to show.
+                                      const cat = line.item?.category
+                                      const parent = cat?.parent
+                                      return (
+                                        <tr
+                                          key={line.itemId + i}
+                                          className="border-border/40 border-b last:border-0"
+                                        >
+                                          <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                            {line.item?.code ?? '—'}
+                                          </td>
+                                          <td className="px-3 py-1.5">
+                                            <div className="text-foreground truncate text-xs">
+                                              {line.item?.name ?? '—'}
+                                            </div>
+                                            {(line.description || line.item?.hsnCode) && (
+                                              <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                {line.description}
+                                                {line.description && line.item?.hsnCode
+                                                  ? ' · '
+                                                  : ''}
+                                                {line.item?.hsnCode
+                                                  ? `HSN: ${line.item.hsnCode}`
+                                                  : ''}
                                               </div>
-                                              {(line.description || line.item?.hsnCode) && (
-                                                <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                                  {line.description}
-                                                  {line.description && line.item?.hsnCode
-                                                    ? ' · '
-                                                    : ''}
-                                                  {line.item?.hsnCode
-                                                    ? `HSN: ${line.item.hsnCode}`
-                                                    : ''}
+                                            )}
+                                          </td>
+                                          <td>
+                                            {line.style?.code || line.styleNo ? (
+                                              <>
+                                                <div className="text-foreground truncate font-mono text-xs">
+                                                  {line.style?.code ?? line.styleNo}
                                                 </div>
-                                              )}
-                                            </td>
-                                            <td className="px-3 py-1.5 text-xs">
-                                              {line.style?.code || line.styleNo ? (
-                                                <>
-                                                  <div className="text-foreground truncate font-mono text-xs">
-                                                    {line.style?.code ?? line.styleNo}
+                                                {line.style?.name && (
+                                                  <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                    {line.style.name}
                                                   </div>
-                                                  {line.style?.name && (
-                                                    <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                                      {line.style.name}
-                                                    </div>
-                                                  )}
-                                                </>
-                                              ) : (
-                                                <span className="text-muted-foreground">—</span>
-                                              )}
-                                            </td>
-                                            <td className="px-3 py-1.5 text-xs">
-                                              {(parent?.name ?? cat?.name) ? (
-                                                <>
-                                                  <div className="text-foreground truncate">
-                                                    {parent?.name ?? cat?.name}
-                                                  </div>
-                                                  {parent && cat?.name && (
-                                                    <div className="text-muted-foreground truncate text-[10px] leading-tight">
-                                                      {cat.name}
-                                                    </div>
-                                                  )}
-                                                </>
-                                              ) : (
-                                                <span className="text-muted-foreground">—</span>
-                                              )}
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                              {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
-                                              {line.shortClosed ? (
-                                                <div
-                                                  className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
-                                                  title={line.shortCloseReason ?? undefined}
-                                                >
-                                                  Closed short
+                                                )}
+                                              </>
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td>
+                                            {(parent?.name ?? cat?.name) ? (
+                                              <>
+                                                <div className="text-foreground truncate">
+                                                  {parent?.name ?? cat?.name}
                                                 </div>
-                                              ) : (
-                                                (po.status === 'SENT' ||
-                                                  po.status === 'PARTIALLY_RECEIVED') &&
-                                                Number(line.pendingQty) > 0 && (
-                                                  <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
-                                                    {Number(line.pendingQty)} pending
+                                                {parent && cat?.name && (
+                                                  <div className="text-muted-foreground truncate text-[10px] leading-tight">
+                                                    {cat.name}
                                                   </div>
-                                                )
-                                              )}
-                                            </td>
-                                            <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                              ₹{money(line.unitRate)}
-                                            </td>
-                                            {/* A discount is stored as a percentage
+                                                )}
+                                              </>
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
+                                            {Number(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                            {line.shortClosed ? (
+                                              <div
+                                                className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
+                                                title={line.shortCloseReason ?? undefined}
+                                              >
+                                                Closed short
+                                              </div>
+                                            ) : (
+                                              (po.status === 'SENT' ||
+                                                po.status === 'PARTIALLY_RECEIVED') &&
+                                              Number(line.pendingQty) > 0 && (
+                                                <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
+                                                  {Number(line.pendingQty)} pending
+                                                </div>
+                                              )
+                                            )}
+                                          </td>
+                                          <td className="text-right tabular-nums">
+                                            ₹{money(line.unitRate)}
+                                          </td>
+                                          {/* A discount is stored as a percentage
                                             whatever was typed into the form, so it
                                             is shown as one. A dash rather than 0%,
                                             because nothing was taken off. */}
-                                            <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                              {Number(line.discount) > 0 ? (
-                                                `${Number(line.discount)}%`
-                                              ) : (
-                                                <span className="text-muted-foreground">—</span>
-                                              )}
-                                            </td>
-                                            <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                              {Number(line.gstRate) > 0 ? (
-                                                `${Number(line.gstRate)}%`
-                                              ) : (
-                                                <span className="text-muted-foreground">—</span>
-                                              )}
-                                            </td>
-                                            <td className="px-3 py-1.5 text-right text-xs font-medium tabular-nums">
-                                              ₹{money(line.amount ?? 0)}
-                                            </td>
-                                          </tr>
-                                        )
-                                      })}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              </div>
+                                          <td className="text-right tabular-nums">
+                                            {Number(line.discount) > 0 ? (
+                                              `${Number(line.discount)}%`
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="text-right tabular-nums">
+                                            {Number(line.gstRate) > 0 ? (
+                                              `${Number(line.gstRate)}%`
+                                            ) : (
+                                              <span className="text-muted-foreground">—</span>
+                                            )}
+                                          </td>
+                                          <td className="text-right font-medium tabular-nums">
+                                            ₹{money(line.amount ?? 0)}
+                                          </td>
+                                        </tr>
+                                      )
+                                    })}
+                                  </tbody>
+                                </table>
+                              </RowPanel>
                             </td>
                           </tr>
                         )}

@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { FilesCell } from '@/components/tables/FilesCell'
+import { RowPanel } from '@/components/tables/RowPanel'
 import {
   Plus,
   Search,
@@ -1251,141 +1252,122 @@ export default function GoodsReceiptPage() {
                             {expanded && lines.length > 0 && (
                               <tr>
                                 <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                                  <div className="border-border bg-card overflow-hidden rounded-lg border">
-                                    <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
-                                      <FileText
-                                        size={13}
-                                        className="text-muted-foreground shrink-0"
-                                      />
-                                      <h4 className="text-foreground text-[11px] font-semibold">
-                                        Item Details
-                                      </h4>
-                                      <span className="text-muted-foreground ml-auto text-[10px]">
-                                        {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
-                                        {po.poNumber}
-                                      </span>
-                                    </div>
-                                    {/* Capped and scrollable — an order with
-                                  thirty trims on it would otherwise push the
-                                  next order, and the pager, halfway down the
-                                  screen. */}
-                                    <div className="max-h-[22rem] overflow-y-auto">
-                                      <table className="w-full table-fixed text-sm">
-                                        <thead className="sticky top-0 z-10">
-                                          <tr className="bg-secondary border-border border-b">
-                                            {WAITING_COLS.map(({ label: h, width, numeric }) => (
-                                              <th
-                                                key={h}
-                                                style={{ width }}
-                                                className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                                  numeric ? 'text-right' : 'text-left'
-                                                }`}
-                                              >
-                                                {h}
-                                              </th>
-                                            ))}
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {lines.map((line) => {
-                                            const cat = line.item?.category
-                                            const parent = cat?.parent
-                                            return (
-                                              <tr
-                                                key={line.id}
-                                                className="border-border/40 border-b last:border-0"
-                                              >
-                                                <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
-                                                  {line.item?.code ?? '—'}
-                                                </td>
-                                                <td className="px-3 py-1.5">
-                                                  <div className="text-foreground truncate text-xs">
-                                                    {line.item?.name ?? '—'}
+                                  <RowPanel
+                                    icon={FileText}
+                                    title="Item Details"
+                                    note={`${lines.length} ${
+                                      lines.length === 1 ? 'line' : 'lines'
+                                    } on ${po.poNumber}`}
+                                  >
+                                    <table className="subtable w-full table-fixed">
+                                      <thead className="sticky top-0 z-10">
+                                        <tr>
+                                          {WAITING_COLS.map(({ label: h, width, numeric }) => (
+                                            <th
+                                              key={h}
+                                              style={{ width }}
+                                              className={numeric ? 'text-right' : undefined}
+                                            >
+                                              {h}
+                                            </th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {lines.map((line) => {
+                                          const cat = line.item?.category
+                                          const parent = cat?.parent
+                                          return (
+                                            <tr
+                                              key={line.id}
+                                              className="border-border/40 border-b last:border-0"
+                                            >
+                                              <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                                {line.item?.code ?? '—'}
+                                              </td>
+                                              <td className="px-3 py-1.5">
+                                                <div className="text-foreground truncate text-xs">
+                                                  {line.item?.name ?? '—'}
+                                                </div>
+                                              </td>
+                                              <td className="px-3 py-1.5 text-xs">
+                                                {line.style?.code || line.styleNo ? (
+                                                  <div className="text-foreground truncate font-mono text-xs">
+                                                    {line.style?.code ?? line.styleNo}
                                                   </div>
-                                                </td>
-                                                <td className="px-3 py-1.5 text-xs">
-                                                  {line.style?.code || line.styleNo ? (
-                                                    <div className="text-foreground truncate font-mono text-xs">
-                                                      {line.style?.code ?? line.styleNo}
-                                                    </div>
-                                                  ) : (
-                                                    <span className="text-muted-foreground">—</span>
-                                                  )}
-                                                </td>
-                                                <td className="px-3 py-1.5 text-xs">
-                                                  {parent?.name ?? cat?.name ?? (
-                                                    <span className="text-muted-foreground">—</span>
-                                                  )}
-                                                </td>
-                                                <td className="px-3 py-1.5 text-xs">
-                                                  {parent ? (
-                                                    cat?.name
-                                                  ) : (
-                                                    <span className="text-muted-foreground">—</span>
-                                                  )}
-                                                </td>
-                                                <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                                  {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
-                                                </td>
-                                                <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                                  {qty(line.receivedQty)}
-                                                </td>
-                                                <td className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums">
-                                                  {line.shortClosed ? (
-                                                    <div className="flex items-center justify-end gap-1 whitespace-normal text-amber-500">
-                                                      <span
-                                                        title={line.shortCloseReason ?? undefined}
-                                                      >
-                                                        Closed short
-                                                      </span>
-                                                      <span className="text-muted-foreground">
-                                                        ·
-                                                      </span>
-                                                      <button
-                                                        type="button"
-                                                        className="text-primary underline"
-                                                        onClick={() =>
-                                                          setLineConfirm({
-                                                            type: 'reopen',
-                                                            po,
-                                                            line,
-                                                          })
-                                                        }
-                                                      >
-                                                        Reopen
-                                                      </button>
-                                                    </div>
-                                                  ) : Number(line.pendingQty) > 0 ? (
-                                                    <div className="flex items-center justify-end gap-1 whitespace-normal">
-                                                      <span>{qty(line.pendingQty)}</span>
-                                                      <span className="text-muted-foreground">
-                                                        ·
-                                                      </span>
-                                                      <button
-                                                        type="button"
-                                                        className="text-primary underline"
-                                                        onClick={() =>
-                                                          setLineConfirm({
-                                                            type: 'close',
-                                                            po,
-                                                            line,
-                                                          })
-                                                        }
-                                                      >
-                                                        Close short
-                                                      </button>
-                                                    </div>
-                                                  ) : (
-                                                    <span className="text-muted-foreground">—</span>
-                                                  )}
-                                                </td>
-                                              </tr>
-                                            )
-                                          })}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  </div>
+                                                ) : (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                              <td>
+                                                {parent?.name ?? cat?.name ?? (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                              <td>
+                                                {parent ? (
+                                                  cat?.name
+                                                ) : (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right tabular-nums">
+                                                {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right tabular-nums">
+                                                {qty(line.receivedQty)}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right tabular-nums">
+                                                {line.shortClosed ? (
+                                                  <div className="flex items-center justify-end gap-1 whitespace-normal text-amber-500">
+                                                    <span
+                                                      title={line.shortCloseReason ?? undefined}
+                                                    >
+                                                      Closed short
+                                                    </span>
+                                                    <span className="text-muted-foreground">·</span>
+                                                    <button
+                                                      type="button"
+                                                      className="text-primary underline"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'reopen',
+                                                          po,
+                                                          line,
+                                                        })
+                                                      }
+                                                    >
+                                                      Reopen
+                                                    </button>
+                                                  </div>
+                                                ) : Number(line.pendingQty) > 0 ? (
+                                                  <div className="flex items-center justify-end gap-1 whitespace-normal">
+                                                    <span>{qty(line.pendingQty)}</span>
+                                                    <span className="text-muted-foreground">·</span>
+                                                    <button
+                                                      type="button"
+                                                      className="text-primary underline"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'close',
+                                                          po,
+                                                          line,
+                                                        })
+                                                      }
+                                                    >
+                                                      Close short
+                                                    </button>
+                                                  </div>
+                                                ) : (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </RowPanel>
                                 </td>
                               </tr>
                             )}
@@ -1590,7 +1572,7 @@ export default function GoodsReceiptPage() {
                       the building. */}
                   <table className="data-table w-full">
                     <thead>
-                      <tr>
+                      <tr className="bg-secondary">
                         <th style={{ width: 30 }} />
                         <th>Number</th>
                         <th className="col-wide">Against order</th>
@@ -1768,37 +1750,43 @@ export default function GoodsReceiptPage() {
 
                             {expanded && (
                               <tr>
-                                <td colSpan={12} className="bg-secondary/40 p-0">
-                                  <div className="max-h-[22rem] overflow-y-auto">
-                                    <table className="data-table w-full">
+                                <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                  <RowPanel
+                                    icon={FileText}
+                                    title="What arrived"
+                                    note={`${grn.lines.length} ${
+                                      grn.lines.length === 1 ? 'line' : 'lines'
+                                    } on ${grn.grnNumber}`}
+                                  >
+                                    <table className="subtable w-full">
                                       <thead className="sticky top-0 z-10">
-                                        <tr className="bg-secondary">
+                                        <tr>
                                           <th>Item</th>
                                           <th>Store</th>
-                                          <th style={{ textAlign: 'right' }}>Ordered</th>
-                                          <th style={{ textAlign: 'right' }}>Arrived</th>
-                                          <th style={{ textAlign: 'right' }}>Rejected</th>
-                                          <th style={{ textAlign: 'right' }}>Into stock</th>
+                                          <th className="text-right">Ordered</th>
+                                          <th className="text-right">Arrived</th>
+                                          <th className="text-right">Rejected</th>
+                                          <th className="text-right">Into stock</th>
                                         </tr>
                                       </thead>
                                       <tbody>
                                         {grn.lines.map((l) => (
                                           <tr key={l.id}>
                                             <td>
-                                              <div className="text-sm">{l.item.name}</div>
+                                              <div className="text-foreground">{l.item.name}</div>
                                               <div className="text-muted-foreground font-mono text-[10px]">
                                                 {l.item.code}
                                                 {l.batchNumber ? ` · batch ${l.batchNumber}` : ''}
                                               </div>
                                             </td>
-                                            <td className="text-xs">{l.warehouse.name}</td>
-                                            <td className="text-right text-sm tabular-nums">
+                                            <td>{l.warehouse.name}</td>
+                                            <td className="text-right tabular-nums">
                                               {qty(l.orderedQty)}
                                             </td>
-                                            <td className="text-right text-sm tabular-nums">
+                                            <td className="text-right tabular-nums">
                                               {qty(l.receivedQty)}
                                             </td>
-                                            <td className="text-right text-sm tabular-nums">
+                                            <td className="text-right tabular-nums">
                                               {Number(l.rejectedQty) > 0 ? (
                                                 <span className="text-red-400">
                                                   {qty(l.rejectedQty)}
@@ -1807,19 +1795,19 @@ export default function GoodsReceiptPage() {
                                                 <span className="text-muted-foreground">—</span>
                                               )}
                                             </td>
-                                            <td className="text-right text-sm tabular-nums">
+                                            <td className="text-right tabular-nums">
                                               {qty(l.acceptedQty)} {l.item.uom?.symbol ?? ''}
                                             </td>
                                           </tr>
                                         ))}
                                       </tbody>
                                     </table>
-                                  </div>
-                                  {grn.notes && (
-                                    <p className="text-muted-foreground px-4 py-2 text-xs">
-                                      {grn.notes}
-                                    </p>
-                                  )}
+                                    {grn.notes && (
+                                      <p className="border-border text-muted-foreground border-t px-3 py-2 text-xs">
+                                        {grn.notes}
+                                      </p>
+                                    )}
+                                  </RowPanel>
                                 </td>
                               </tr>
                             )}

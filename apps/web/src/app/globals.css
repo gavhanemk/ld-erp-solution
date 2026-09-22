@@ -392,6 +392,45 @@
     }
   }
 
+
+  /* ── The table inside an expanded row ────────────────────────────────────
+
+     There were four ideas of this in the purchase module. Three lists drew
+     it with a tinted, sticky, uppercase header at 10px; the goods receipt
+     list drew it with `.data-table`, so its rows stood at the full 12px of
+     padding and read as a second list rather than as detail; and the bill
+     list drew it in sentence case at `font-medium` with no tint and no
+     sticky header at all. Put side by side — which is how somebody scrolling
+     a list sees them — they did not look like the same application.
+
+     One class, so they cannot drift again. It is deliberately quieter than
+     `.data-table`: smaller type, tighter rows, a lighter rule between lines.
+     A panel that opens underneath a row is detail about that row, and
+     detail that shouts as loudly as the list makes the list harder to read.
+
+     `:where()` keeps this at zero specificity from the class, so a
+     `text-right` on a numeric column still wins. Written as
+     `.subtable > thead > tr > th` it would score above a plain utility and
+     every figure would sit left of its own heading — which is exactly what
+     went wrong with `.data-table` once already. */
+  :where(.subtable) > thead > tr > th {
+    @apply bg-secondary text-muted-foreground border-border border-b px-3 py-1.5
+           text-left text-[10px] font-semibold uppercase tracking-wider;
+  }
+
+  :where(.subtable) > tbody > tr > td {
+    @apply border-border/40 border-b px-3 py-1.5 text-xs;
+  }
+
+  :where(.subtable) > tbody > tr:last-child > td {
+    @apply border-b-0;
+  }
+
+  /* A totals line, where a panel has one to draw. */
+  :where(.subtable) > tfoot > tr > td {
+    @apply border-border border-t px-3 py-1.5 text-xs font-semibold;
+  }
+
   /* Status Badges */
   .badge {
     @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium;

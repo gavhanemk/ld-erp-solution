@@ -65,82 +65,86 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
   const lines = bill.lines ?? []
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[880px] text-xs">
-        <thead>
-          <tr className="border-border text-muted-foreground border-b text-left">
-            <th className="py-2 pr-3 font-medium">Item code</th>
-            <th className="py-2 pr-3 font-medium">Item</th>
-            <th className="py-2 pr-3 font-medium">HSN</th>
-            <th className="py-2 pr-3 font-medium">From receipt</th>
-            <th className="py-2 pr-3 text-right font-medium">Qty</th>
-            <th className="py-2 pr-3 text-right font-medium">Rate</th>
-            <th className="py-2 pr-3 text-right font-medium">Taxable</th>
-            <th className="py-2 pr-3 text-right font-medium">GST</th>
-            <th className="py-2 text-right font-medium">Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          {lines.map((l) => {
-            const orderRate = l.grnLine?.unitRate != null ? Number(l.grnLine.unitRate) : null
-            const billed = Number(l.unitPrice ?? 0)
-            // The rate booked is not always the rate the supplier asked for.
-            const heldToOrder = orderRate != null && Math.abs(billed - orderRate) < 0.005
+    <table className="subtable w-full">
+      <thead className="sticky top-0 z-10">
+        <tr>
+          <th className="col-roomy">Item code</th>
+          <th>Item</th>
+          <th className="col-full">HSN</th>
+          <th className="col-wide">From receipt</th>
+          <th className="text-right">Qty</th>
+          <th className="text-right">Rate</th>
+          <th className="col-wide text-right">Taxable</th>
+          <th className="text-right">GST</th>
+          <th className="text-right">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        {lines.map((l) => {
+          const orderRate = l.grnLine?.unitRate != null ? Number(l.grnLine.unitRate) : null
+          const billed = Number(l.unitPrice ?? 0)
+          // The rate booked is not always the rate the supplier asked for.
+          const heldToOrder = orderRate != null && Math.abs(billed - orderRate) < 0.005
 
-            return (
-              <tr key={l.id} className="border-border/50 border-b last:border-0">
-                <td className="text-muted-foreground py-2 pr-3 font-mono">{l.item?.code ?? '—'}</td>
-                <td className="text-foreground py-2 pr-3">
-                  {l.item?.name ?? '—'}
-                  {l.description && (
-                    <div className="text-muted-foreground text-[10px]">{l.description}</div>
-                  )}
-                </td>
-                <td className="text-muted-foreground py-2 pr-3 font-mono">
-                  {l.hsnCode ?? l.item?.hsnCode ?? '—'}
-                </td>
-                <td className="text-muted-foreground py-2 pr-3 font-mono">
-                  {l.grnLine?.grn?.grnNumber ?? 'Direct'}
-                </td>
-                <td className="text-foreground py-2 pr-3 text-right tabular-nums">
-                  {qtyFmt(l.qty)}
-                  {l.item?.uom?.symbol && (
-                    <span className="text-muted-foreground ml-1">{l.item.uom.symbol}</span>
-                  )}
-                </td>
-                <td className="py-2 pr-3 text-right tabular-nums">
-                  <span className="text-foreground">₹{inr(billed)}</span>
-                  {orderRate != null && !heldToOrder && (
-                    <div className="text-muted-foreground text-[10px]">order ₹{inr(orderRate)}</div>
-                  )}
-                </td>
-                <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
-                  ₹{inr(l.taxableValue)}
-                </td>
-                <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
-                  {Number(l.gstRate ?? 0)}%
-                </td>
-                <td className="text-foreground py-2 text-right font-medium tabular-nums">
-                  ₹{inr(l.amount)}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-        <tfoot>
-          <tr className="border-border border-t">
-            <td colSpan={6} />
-            <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
-              ₹{inr(bill.taxableAmount)}
-            </td>
-            <td />
-            <td className="text-foreground py-2 text-right font-semibold tabular-nums">
-              ₹{inr(bill.totalAmount)}
-            </td>
-          </tr>
-        </tfoot>
-      </table>
-    </div>
+          return (
+            <tr key={l.id}>
+              <td className="text-muted-foreground col-roomy font-mono">{l.item?.code ?? '—'}</td>
+              <td className="text-foreground">
+                {l.item?.name ?? '—'}
+                {l.description && (
+                  <div className="text-muted-foreground text-[10px]">{l.description}</div>
+                )}
+              </td>
+              <td className="text-muted-foreground col-full font-mono">
+                {l.hsnCode ?? l.item?.hsnCode ?? '—'}
+              </td>
+              <td className="text-muted-foreground col-wide font-mono">
+                {l.grnLine?.grn?.grnNumber ?? 'Direct'}
+              </td>
+              <td className="text-foreground text-right tabular-nums">
+                {qtyFmt(l.qty)}
+                {l.item?.uom?.symbol && (
+                  <span className="text-muted-foreground ml-1">{l.item.uom.symbol}</span>
+                )}
+              </td>
+              <td className="text-right tabular-nums">
+                <span className="text-foreground">₹{inr(billed)}</span>
+                {orderRate != null && !heldToOrder && (
+                  <div className="text-muted-foreground text-[10px]">order ₹{inr(orderRate)}</div>
+                )}
+              </td>
+              <td className="text-muted-foreground col-wide text-right tabular-nums">
+                ₹{inr(l.taxableValue)}
+              </td>
+              <td className="text-muted-foreground text-right tabular-nums">
+                {Number(l.gstRate ?? 0)}%
+              </td>
+              <td className="text-foreground text-right font-medium tabular-nums">
+                ₹{inr(l.amount)}
+              </td>
+            </tr>
+          )
+        })}
+      </tbody>
+      {/* One cell per column, each carrying its column's tier, rather than a
+        colSpan across the first six. A colSpan counts columns that are no
+        longer there once a tier drops out, and the totals then sit under
+        whichever heading happens to be in that place — which is worse than
+        no total at all. */}
+      <tfoot>
+        <tr>
+          <td className="col-roomy" />
+          <td className="text-muted-foreground">Total</td>
+          <td className="col-full" />
+          <td className="col-wide" />
+          <td />
+          <td />
+          <td className="col-wide text-right tabular-nums">₹{inr(bill.taxableAmount)}</td>
+          <td />
+          <td className="text-right tabular-nums">₹{inr(bill.totalAmount)}</td>
+        </tr>
+      </tfoot>
+    </table>
   )
 }
 

@@ -23,6 +23,7 @@ import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purch
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FilesCell } from '@/components/tables/FilesCell'
+import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 
@@ -649,21 +650,15 @@ function PurchaseBillsTable() {
                         {open && lines.length > 0 && (
                           <tr>
                             <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                              <div className="border-border bg-card overflow-hidden rounded-lg border">
-                                <div className="border-border flex items-center gap-1.5 border-b px-3 py-1.5">
-                                  <FileText size={13} className="text-muted-foreground shrink-0" />
-                                  <h4 className="text-foreground text-[11px] font-semibold">
-                                    Bill Items
-                                  </h4>
-                                  <span className="text-muted-foreground ml-auto text-[10px]">
-                                    {lines.length} {lines.length === 1 ? 'line' : 'lines'} on{' '}
-                                    {bill.billNumber}
-                                  </span>
-                                </div>
-                                <div className="max-h-[22rem] overflow-y-auto">
-                                  <BillItems bill={bill} />
-                                </div>
-                              </div>
+                              <RowPanel
+                                icon={FileText}
+                                title="Bill Items"
+                                note={`${lines.length} ${
+                                  lines.length === 1 ? 'line' : 'lines'
+                                } on ${bill.billNumber}`}
+                              >
+                                <BillItems bill={bill} />
+                              </RowPanel>
                             </td>
                           </tr>
                         )}
