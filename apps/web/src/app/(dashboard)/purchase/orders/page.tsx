@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
   Plus,
   Pencil,
+  History,
   Printer,
   Search,
   RefreshCw,
@@ -25,6 +26,7 @@ import {
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
+import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FilesCell } from '@/components/tables/FilesCell'
@@ -116,6 +118,7 @@ export default function PurchaseOrdersPage() {
   })
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
+  const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
 
   /*
    * Every supplier and every item, for the two filter dropdowns.
@@ -309,6 +312,17 @@ The supplier already has this order. If it was real and fell through, cancel it 
         label: 'Receive goods',
         icon: <PackageCheck size={15} />,
         href: `/purchase/grn?receive=${po.id}`,
+      })
+    }
+
+    // A draft cannot have had anything arrive against it, so it is the one
+    // status with nothing to show.
+    if (po.status !== 'DRAFT') {
+      items.push({
+        key: 'history',
+        label: 'Goods receipt history',
+        icon: <History size={15} />,
+        onClick: () => setHistoryFor(po),
       })
     }
 
@@ -1090,6 +1104,15 @@ The supplier already has this order. If it was real and fell through, cancel it 
           void load()
         }}
       />
+
+      {historyFor && (
+        <GoodsReceiptHistoryDialog
+          poId={historyFor.id}
+          poNumber={historyFor.poNumber}
+          supplierName={historyFor.supplier?.name}
+          onClose={() => setHistoryFor(null)}
+        />
+      )}
 
       {filesFor && (
         <OrderAttachmentsDialog
