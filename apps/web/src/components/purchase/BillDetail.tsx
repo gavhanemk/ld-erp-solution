@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Building2,
@@ -66,86 +66,110 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
 
   return (
     <div className="overflow-x-auto">
-        <table className="w-full min-w-[880px] text-xs">
-          <thead>
-            <tr className="border-border text-muted-foreground border-b text-left">
-              <th className="py-2 pr-3 font-medium">Item code</th>
-              <th className="py-2 pr-3 font-medium">Item</th>
-              <th className="py-2 pr-3 font-medium">HSN</th>
-              <th className="py-2 pr-3 font-medium">From receipt</th>
-              <th className="py-2 pr-3 text-right font-medium">Qty</th>
-              <th className="py-2 pr-3 text-right font-medium">Rate</th>
-              <th className="py-2 pr-3 text-right font-medium">Taxable</th>
-              <th className="py-2 pr-3 text-right font-medium">GST</th>
-              <th className="py-2 text-right font-medium">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l) => {
-              const orderRate = l.grnLine?.unitRate != null ? Number(l.grnLine.unitRate) : null
-              const billed = Number(l.unitPrice ?? 0)
-              // The rate booked is not always the rate the supplier asked for.
-              const heldToOrder = orderRate != null && Math.abs(billed - orderRate) < 0.005
+      <table className="w-full min-w-[880px] text-xs">
+        <thead>
+          <tr className="border-border text-muted-foreground border-b text-left">
+            <th className="py-2 pr-3 font-medium">Item code</th>
+            <th className="py-2 pr-3 font-medium">Item</th>
+            <th className="py-2 pr-3 font-medium">HSN</th>
+            <th className="py-2 pr-3 font-medium">From receipt</th>
+            <th className="py-2 pr-3 text-right font-medium">Qty</th>
+            <th className="py-2 pr-3 text-right font-medium">Rate</th>
+            <th className="py-2 pr-3 text-right font-medium">Taxable</th>
+            <th className="py-2 pr-3 text-right font-medium">GST</th>
+            <th className="py-2 text-right font-medium">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((l) => {
+            const orderRate = l.grnLine?.unitRate != null ? Number(l.grnLine.unitRate) : null
+            const billed = Number(l.unitPrice ?? 0)
+            // The rate booked is not always the rate the supplier asked for.
+            const heldToOrder = orderRate != null && Math.abs(billed - orderRate) < 0.005
 
-              return (
-                <tr key={l.id} className="border-border/50 border-b last:border-0">
-                  <td className="text-muted-foreground py-2 pr-3 font-mono">
-                    {l.item?.code ?? '—'}
-                  </td>
-                  <td className="text-foreground py-2 pr-3">
-                    {l.item?.name ?? '—'}
-                    {l.description && (
-                      <div className="text-muted-foreground text-[10px]">{l.description}</div>
-                    )}
-                  </td>
-                  <td className="text-muted-foreground py-2 pr-3 font-mono">
-                    {l.hsnCode ?? l.item?.hsnCode ?? '—'}
-                  </td>
-                  <td className="text-muted-foreground py-2 pr-3 font-mono">
-                    {l.grnLine?.grn?.grnNumber ?? 'Direct'}
-                  </td>
-                  <td className="text-foreground py-2 pr-3 text-right tabular-nums">
-                    {qtyFmt(l.qty)}
-                    {l.item?.uom?.symbol && (
-                      <span className="text-muted-foreground ml-1">{l.item.uom.symbol}</span>
-                    )}
-                  </td>
-                  <td className="py-2 pr-3 text-right tabular-nums">
-                    <span className="text-foreground">₹{inr(billed)}</span>
-                    {orderRate != null && !heldToOrder && (
-                      <div className="text-muted-foreground text-[10px]">
-                        order ₹{inr(orderRate)}
-                      </div>
-                    )}
-                  </td>
-                  <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
-                    ₹{inr(l.taxableValue)}
-                  </td>
-                  <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
-                    {Number(l.gstRate ?? 0)}%
-                  </td>
-                  <td className="text-foreground py-2 text-right font-medium tabular-nums">
-                    ₹{inr(l.amount)}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-          <tfoot>
-            <tr className="border-border border-t">
-              <td colSpan={6} />
-              <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
-                ₹{inr(bill.taxableAmount)}
-              </td>
-              <td />
-              <td className="text-foreground py-2 text-right font-semibold tabular-nums">
-                ₹{inr(bill.totalAmount)}
-              </td>
-            </tr>
-          </tfoot>
-        </table>
+            return (
+              <tr key={l.id} className="border-border/50 border-b last:border-0">
+                <td className="text-muted-foreground py-2 pr-3 font-mono">{l.item?.code ?? '—'}</td>
+                <td className="text-foreground py-2 pr-3">
+                  {l.item?.name ?? '—'}
+                  {l.description && (
+                    <div className="text-muted-foreground text-[10px]">{l.description}</div>
+                  )}
+                </td>
+                <td className="text-muted-foreground py-2 pr-3 font-mono">
+                  {l.hsnCode ?? l.item?.hsnCode ?? '—'}
+                </td>
+                <td className="text-muted-foreground py-2 pr-3 font-mono">
+                  {l.grnLine?.grn?.grnNumber ?? 'Direct'}
+                </td>
+                <td className="text-foreground py-2 pr-3 text-right tabular-nums">
+                  {qtyFmt(l.qty)}
+                  {l.item?.uom?.symbol && (
+                    <span className="text-muted-foreground ml-1">{l.item.uom.symbol}</span>
+                  )}
+                </td>
+                <td className="py-2 pr-3 text-right tabular-nums">
+                  <span className="text-foreground">₹{inr(billed)}</span>
+                  {orderRate != null && !heldToOrder && (
+                    <div className="text-muted-foreground text-[10px]">order ₹{inr(orderRate)}</div>
+                  )}
+                </td>
+                <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
+                  ₹{inr(l.taxableValue)}
+                </td>
+                <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
+                  {Number(l.gstRate ?? 0)}%
+                </td>
+                <td className="text-foreground py-2 text-right font-medium tabular-nums">
+                  ₹{inr(l.amount)}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+        <tfoot>
+          <tr className="border-border border-t">
+            <td colSpan={6} />
+            <td className="text-muted-foreground py-2 pr-3 text-right tabular-nums">
+              ₹{inr(bill.taxableAmount)}
+            </td>
+            <td />
+            <td className="text-foreground py-2 text-right font-semibold tabular-nums">
+              ₹{inr(bill.totalAmount)}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
     </div>
   )
+}
+
+/** A file behind a bill, tagged with which document it actually hangs off. */
+export type BillFile = BillAttachment & { kind: 'order' | 'receipt'; source: string }
+
+/**
+ * Every file behind a bill, from its order and from each of its receipts.
+ *
+ * A bill carries no files of its own — the quotation was agreed on the order
+ * and the challan came in on the receipt, and both stay where they were
+ * attached. A receipt reached through several bill lines would otherwise
+ * contribute its files once per line, so they are gathered by id.
+ */
+export function billFiles(bill: PurchaseBill): BillFile[] {
+  const seen = new Map<string, BillFile>()
+
+  for (const f of bill.po?.attachments ?? []) {
+    seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
+  }
+  for (const line of bill.lines ?? []) {
+    const grn = line.grnLine?.grn
+    if (!grn) continue
+    for (const f of grn.attachments ?? []) {
+      if (!seen.has(f.id)) seen.set(f.id, { ...f, kind: 'receipt', source: grn.grnNumber })
+    }
+  }
+
+  return [...seen.values()]
 }
 
 const fileSize = (bytes: number) => {
@@ -165,11 +189,7 @@ const fileSize = (bytes: number) => {
  * `kind` decides which endpoint signs the link: an order's files and a
  * receipt's files are different tables and different routes.
  */
-function Attachments({
-  files,
-}: {
-  files: Array<BillAttachment & { kind: 'order' | 'receipt'; source: string }>
-}) {
+function Attachments({ files }: { files: BillFile[] }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -183,20 +203,14 @@ function Attachments({
       const res = await api.get<{ data: { url: string } }>(`/purchase/${path}/${file.id}/link`)
       window.open(res.data.url, '_blank', 'noopener')
     } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : 'Could not open that file. Try again.'
-      )
+      setError(err instanceof ApiError ? err.message : 'Could not open that file. Try again.')
     } finally {
       setBusy(null)
     }
   }
 
   if (!files.length) {
-    return (
-      <p className="text-muted-foreground text-sm">
-        No files on the order or its receipts.
-      </p>
-    )
+    return <p className="text-muted-foreground text-sm">No files on the order or its receipts.</p>
   }
 
   return (
@@ -272,24 +286,7 @@ function Field({ label, value }: { label: React.ReactNode; value: React.ReactNod
  * "what is on this list". Nothing in here is a control — somebody who came to
  * check a figure should not be one slip away from changing it.
  */
-export function BillDetailDialog({
-  bill,
-  onClose,
-  focus,
-}: {
-  bill: PurchaseBill
-  onClose: () => void
-  /** Opened from the paperclip — land on the files rather than at the top. */
-  focus?: 'attachments'
-}) {
-  const filesRef = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    if (focus === 'attachments') {
-      filesRef.current?.scrollIntoView({ block: 'center' })
-    }
-  }, [focus])
-
+export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClose: () => void }) {
   const receipts = [
     ...new Set((bill.lines ?? []).map((l) => l.grnLine?.grn?.grnNumber).filter(Boolean)),
   ] as string[]
@@ -300,28 +297,7 @@ export function BillDetailDialog({
   const payments = bill.payments ?? []
   const notes = bill.debitNotes ?? []
 
-  /*
-   * Every file behind this bill, from the order and from each receipt.
-   *
-   * A receipt reached through several bill lines would otherwise contribute
-   * its files once per line, so they are gathered by id.
-   */
-  const files = (() => {
-    const seen = new Map<string, BillAttachment & { kind: 'order' | 'receipt'; source: string }>()
-
-    for (const f of bill.po?.attachments ?? []) {
-      seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
-    }
-    for (const line of bill.lines ?? []) {
-      const grn = line.grnLine?.grn
-      if (!grn) continue
-      for (const f of grn.attachments ?? []) {
-        if (!seen.has(f.id)) seen.set(f.id, { ...f, kind: 'receipt', source: grn.grnNumber })
-      }
-    }
-
-    return [...seen.values()]
-  })()
+  const files = billFiles(bill)
 
   return createPortal(
     // The same shell the order, receipt and bill forms use: offset past the
@@ -379,7 +355,10 @@ export function BillDetailDialog({
               },
               { label: 'Items', value: String(bill.lines?.length ?? 0), color: 'text-teal-400' },
             ].map((s) => (
-              <div key={s.label} className="border-border bg-card rounded-xl border p-3 text-center">
+              <div
+                key={s.label}
+                className="border-border bg-card rounded-xl border p-3 text-center"
+              >
                 <p className={`text-lg font-bold tabular-nums ${s.color}`}>{s.value}</p>
                 <p className="text-muted-foreground mt-0.5 text-[11px] uppercase tracking-wide">
                   {s.label}
@@ -549,9 +528,7 @@ export function BillDetailDialog({
                       ]
                     : []),
                   ...(Number(bill.igst ?? 0) > 0 ? [['IGST', inr(bill.igst)]] : []),
-                  ...(Number(bill.roundOff ?? 0) !== 0
-                    ? [['Round off', inr(bill.roundOff)]]
-                    : []),
+                  ...(Number(bill.roundOff ?? 0) !== 0 ? [['Round off', inr(bill.roundOff)]] : []),
                 ].map(([label, value]) => (
                   <div key={label} className="flex justify-between gap-4">
                     <dt className="text-muted-foreground">{label}</dt>
@@ -698,15 +675,13 @@ export function BillDetailDialog({
             </Section>
           )}
 
-          <div ref={filesRef}>
-            <Section icon={Paperclip} title={`Attachments (${files.length})`}>
-              <Attachments files={files} />
-            </Section>
-          </div>
+          <Section icon={Paperclip} title={`Attachments (${files.length})`}>
+            <Attachments files={files} />
+          </Section>
 
           {bill.notes && (
             <Section icon={MessageSquare} title="Notes">
-              <p className="text-foreground text-sm whitespace-pre-wrap">{bill.notes}</p>
+              <p className="text-foreground whitespace-pre-wrap text-sm">{bill.notes}</p>
             </Section>
           )}
         </div>
@@ -715,6 +690,71 @@ export function BillDetailDialog({
           <button className="btn-secondary" onClick={onClose}>
             Close
           </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  )
+}
+
+/**
+ * Just the papers behind a bill, and nothing else.
+ *
+ * The paperclip in the list used to open the whole detail window scrolled to
+ * its attachments panel. That answers "tell me everything about this bill"
+ * when the question asked was "let me see the challan" — eight panels of
+ * figures to scroll past, and the window it opened is the one the Actions
+ * menu already opens. A paperclip should open the files.
+ *
+ * Shaped like the order and receipt file viewers rather than like the four
+ * purchase forms: a centred card, because a list of two or three files does
+ * not need the full height of the screen. Wider than those two by one step,
+ * since a bill's files come from more than one document and so carry a
+ * column saying which.
+ */
+export function BillFilesDialog({ bill, onClose }: { bill: PurchaseBill; onClose: () => void }) {
+  const files = billFiles(bill)
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="glass-card flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bill-files-title"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose()
+        }}
+      >
+        <div className="border-border flex shrink-0 items-start justify-between gap-4 border-b px-4 py-2.5">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
+              <Paperclip size={16} className="text-primary" />
+            </div>
+            <div className="min-w-0">
+              <h2 id="bill-files-title" className="text-foreground text-base font-semibold">
+                Attachments
+              </h2>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                {files.length === 0
+                  ? 'Nothing scanned onto this bill’s order or its receipts'
+                  : `${files.length} ${files.length === 1 ? 'file' : 'files'} on ${
+                      bill.supplierInvoiceNo || bill.billNumber
+                    } — from its order and its receipts`}
+              </p>
+            </div>
+          </div>
+          <button className="btn-ghost shrink-0 p-1.5" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-4 py-3">
+          <Attachments files={files} />
         </div>
       </div>
     </div>,

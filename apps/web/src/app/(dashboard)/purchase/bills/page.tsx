@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
-import { BillItems, BillDetailDialog } from '@/components/purchase/BillDetail'
+import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { useAppSettings } from '@/lib/appSettings'
@@ -85,11 +85,10 @@ function PurchaseBillsTable() {
   })
   /** The one bill whose items are showing. One at a time, so the list stays a list. */
   const [expanded, setExpanded] = useState<string | null>(null)
-  /** The bill open in the full detail window, and where to land in it. */
-  const [detail, setDetail] = useState<{
-    bill: PurchaseBill
-    focus?: 'attachments'
-  } | null>(null)
+  /** The bill open in the full detail window. */
+  const [detail, setDetail] = useState<PurchaseBill | null>(null)
+  /** The bill whose files are open on their own, from the paperclip. */
+  const [filesFor, setFilesFor] = useState<PurchaseBill | null>(null)
 
   /*
    * Arriving from "Book a bill for this" on a goods receipt.
@@ -180,7 +179,7 @@ function PurchaseBillsTable() {
         key: 'view',
         label: 'View full detail',
         icon: <Eye size={14} />,
-        onClick: () => setDetail({ bill }),
+        onClick: () => setDetail(bill),
       },
       {
         key: 'print',
@@ -215,14 +214,23 @@ function PurchaseBillsTable() {
 
   return (
     <div className="space-y-5">
-      <div className="page-header flex-wrap gap-3">
-        <div>
+      {/* One row at every width. It used to carry `flex-wrap`, which on a
+        phone put refresh and Book Bill on a line of their own underneath —
+        a whole row spent on two buttons, on the screen with the least room
+        to spend. Without it the heading gives way instead: it wraps to two
+        short lines on the narrowest phones and the buttons stay where they
+        belong, hard right of the title. */}
+      <div className="page-header gap-3">
+        <div className="min-w-0">
           <h1 className="page-title">Purchase Bills</h1>
-          <p className="page-subtitle">
+          {/* Desk only. On a phone the heading already says what this is —
+            the sentence under it cost a line of a list somebody is
+            scrolling. */}
+          <p className="page-subtitle hidden sm:block">
             What your suppliers have charged you, and what is still owed
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
@@ -382,10 +390,21 @@ function PurchaseBillsTable() {
                           <span className="text-muted-foreground">Direct</span>
                         )}
                         {fileCountOn(bill) > 0 && (
-                          <span className="text-muted-foreground ml-1.5 inline-flex items-center gap-0.5">
+                          // Pressable here too. On the card this was a count
+                          // and nothing else, so the same paperclip opened
+                          // the files in the table and did nothing at all on
+                          // a phone.
+                          <button
+                            type="button"
+                            className="text-primary hover:text-primary/80 ml-1.5 inline-flex items-center gap-0.5 underline transition"
+                            onClick={() => setFilesFor(bill)}
+                            title={`Open the ${fileCountOn(bill)} file${
+                              fileCountOn(bill) === 1 ? '' : 's'
+                            } on this bill's order and receipts`}
+                          >
                             <Paperclip size={10} />
                             {fileCountOn(bill)}
-                          </span>
+                          </button>
                         )}
                       </dd>
                       <dt className="text-muted-foreground">Booked</dt>
@@ -552,13 +571,17 @@ function PurchaseBillsTable() {
                                 </span>
                               )}
                               {fileCountOn(bill) > 0 && (
-                                // A paperclip that cannot be pressed is a tease.
-                                // It opens the detail window at its attachments,
-                                // which is where the files are listed and signed.
+                                // A paperclip opens the files, and only the
+                                // files. It used to open the whole detail
+                                // window scrolled down to its attachments
+                                // panel — which answers "tell me everything
+                                // about this bill" when the question asked was
+                                // "let me see the challan", and is the same
+                                // window the Actions menu already opens.
                                 <button
                                   type="button"
                                   className="text-primary hover:text-primary/80 inline-flex shrink-0 items-center gap-0.5 text-[10px] underline transition"
-                                  onClick={() => setDetail({ bill, focus: 'attachments' })}
+                                  onClick={() => setFilesFor(bill)}
                                   title={`Open the ${fileCountOn(bill)} file${
                                     fileCountOn(bill) === 1 ? '' : 's'
                                   } on this bill's order and receipts`}
@@ -680,9 +703,9 @@ function PurchaseBillsTable() {
         onSaved={() => void load()}
       />
 
-      {detail && (
-        <BillDetailDialog bill={detail.bill} focus={detail.focus} onClose={() => setDetail(null)} />
-      )}
+      {filesFor && <BillFilesDialog bill={filesFor} onClose={() => setFilesFor(null)} />}
+
+      {detail && <BillDetailDialog bill={detail} onClose={() => setDetail(null)} />}
     </div>
   )
 }
