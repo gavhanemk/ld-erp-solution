@@ -1526,7 +1526,7 @@ export default function GoodsReceiptPage() {
                                 <div className="mt-2 grid grid-cols-4 gap-2 text-xs">
                                   {[
                                     ['Ordered', Number(l.orderedQty ?? 0)],
-                                    ['Arrived', Number(l.receivedQty ?? 0)],
+                                    ['Received', Number(l.receivedQty ?? 0)],
                                     ['Rejected', Number(l.rejectedQty ?? 0)],
                                     ['Stock', Number(l.acceptedQty ?? 0)],
                                   ].map(([label, value]) => (
@@ -1764,7 +1764,7 @@ export default function GoodsReceiptPage() {
                                           <th>Item</th>
                                           <th>Store</th>
                                           <th className="text-right">Ordered</th>
-                                          <th className="text-right">Arrived</th>
+                                          <th className="text-right">Received</th>
                                           <th className="text-right">Rejected</th>
                                           <th className="text-right">Into stock</th>
                                         </tr>
