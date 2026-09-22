@@ -566,9 +566,18 @@ export default function PurchaseOrdersPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-foreground font-mono text-xs font-semibold">
+                          {/* The number is the way to the printed order. The
+                            goods receipt screen already puts this link on the
+                            order it names, so one habit covers both screens. */}
+                          <a
+                            href={`/print/purchase-order/${po.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                            title={`Open the printed sheet for ${po.poNumber}`}
+                          >
                             {po.poNumber}
-                          </span>
+                          </a>
                           <span className={s.cls}>{s.label}</span>
                           {po._count?.attachments ? (
                             <button
@@ -805,9 +814,15 @@ export default function PurchaseOrdersPage() {
                             </button>
                           </td>
                           <td>
-                            <div className="text-foreground font-mono text-xs font-semibold">
+                            <a
+                              href={`/print/purchase-order/${po.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              title={`Open the printed sheet for ${po.poNumber}`}
+                            >
                               {po.poNumber}
-                            </div>
+                            </a>
                           </td>
                           <td>
                             {/* Capped, because nothing else caps it. Under

@@ -1417,9 +1417,15 @@ export default function GoodsReceiptPage() {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-foreground font-mono text-xs font-semibold">
+                              <a
+                                href={`/print/goods-receipt/${grn.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                                title={`Open the printed sheet for ${grn.grnNumber}`}
+                              >
                                 {grn.grnNumber}
-                              </span>
+                              </a>
                               <span className={s.cls}>{s.label}</span>
                               {(() => {
                                 const b = billStage(grn)
@@ -1614,7 +1620,17 @@ export default function GoodsReceiptPage() {
                                   )}
                                 </button>
                               </td>
-                              <td className="font-mono text-xs text-teal-400">{grn.grnNumber}</td>
+                              <td>
+                                <a
+                                  href={`/print/goods-receipt/${grn.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-xs text-teal-400 hover:underline"
+                                  title={`Open the printed sheet for ${grn.grnNumber}`}
+                                >
+                                  {grn.grnNumber}
+                                </a>
+                              </td>
                               <td className="col-wide whitespace-nowrap">
                                 <a
                                   href={`/print/purchase-order/${grn.po.id}`}
