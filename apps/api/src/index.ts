@@ -27,6 +27,7 @@ import settingsRoutes from './routes/settings.routes'
 import webhookRoutes from './routes/webhook.routes'
 
 import { errorHandler } from './middleware/errorHandler'
+import { storageConfigured } from './lib/storage'
 import { authMiddleware } from './middleware/auth'
 import { logger } from './utils/logger'
 import { prisma } from '@ld-erp/database'
@@ -138,6 +139,11 @@ app.get('/health', async (_, res) => {
     version: '1.0.0',
     database,
     databaseCheckMs: Date.now() - started,
+    // Whether this server has somewhere to put files. Not a secret — true or
+    // false, never the keys — and without it a deployment missing its storage
+    // credentials looks perfectly healthy while every attachment in the mill
+    // fails with nothing to point at.
+    fileStorage: storageConfigured() ? 'ok' : 'not configured',
     timestamp: new Date().toISOString(),
     uptime: `${Math.floor(process.uptime())}s`,
   })

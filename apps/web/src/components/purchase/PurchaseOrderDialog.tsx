@@ -1727,12 +1727,23 @@ export function PurchaseOrderDialog({
       // The names of whatever did not make it are reported instead, and they
       // can be added by reopening the order.
       if (pendingFiles.length && id) {
-        const failed: string[] = []
+        // The reason is kept, not just the name. Naming a file that failed
+        // without saying why leaves the person at the desk — and whoever they
+        // ring about it — with nowhere at all to go.
+        const failed: Array<{ name: string; why: string }> = []
         for (const file of pendingFiles) {
           try {
             await uploadOne(file, id)
-          } catch {
-            failed.push(file.name)
+          } catch (err) {
+            failed.push({
+              name: file.name,
+              why:
+                err instanceof ApiError
+                  ? err.message
+                  : err instanceof Error
+                    ? err.message
+                    : 'no reason given',
+            })
           }
         }
         setPendingFiles([])
@@ -1740,7 +1751,9 @@ export function PurchaseOrderDialog({
         if (failed.length) {
           onSaved()
           setError(
-            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach: ${failed.join(', ')}. Reopen the order to try again.`
+            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach — ` +
+              failed.map((f) => `${f.name}: ${f.why}`).join(' · ') +
+              '. Reopen the order to try again.'
           )
           setSaving(null)
           return
