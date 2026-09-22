@@ -59,10 +59,28 @@ export function Section({
   const [open, setOpen] = useState(openByDefault)
   const shut = foldable && !open
 
+  /*
+   * The heading is a heading now.
+   *
+   * It used to be an 11px uppercase tracked caption, which at that size and
+   * weight sat below the field labels beneath it in the reading order — so a
+   * form of six panels read as one undifferentiated sheet and the eye had
+   * nothing to jump between. A name in the body size, over a tinted tile
+   * carrying the section's icon, is what makes a panel findable.
+   */
+  const heading = (
+    <>
+      <span className="bg-primary/10 border-primary/20 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border">
+        <Icon size={15} className="text-primary" />
+      </span>
+      <span className="text-foreground text-[15px] font-semibold">{title}</span>
+    </>
+  )
+
   return (
     <section className="border-border bg-card rounded-xl border">
       <div
-        className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3.5 py-2 ${
+        className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-3 ${
           shut ? '' : 'border-border/70 border-b'
         }`}
       >
@@ -70,18 +88,21 @@ export function Section({
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
-            className="text-foreground hover:text-primary flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] transition-colors"
+            className="hover:text-primary flex min-w-0 items-center gap-2.5 transition-colors"
             aria-expanded={open}
           >
-            <Icon size={14} className="text-primary shrink-0" />
-            {title}
-            {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            {heading}
+            {/* The chevron sits with the title rather than at the far right:
+              it is part of the control you press, and a caret an arm's length
+              away from the words reads as a separate button. */}
+            {open ? (
+              <ChevronUp size={15} className="text-muted-foreground shrink-0" />
+            ) : (
+              <ChevronDown size={15} className="text-muted-foreground shrink-0" />
+            )}
           </button>
         ) : (
-          <h3 className="text-foreground flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
-            <Icon size={14} className="text-primary shrink-0" />
-            {title}
-          </h3>
+          <h3 className="flex min-w-0 items-center gap-2.5">{heading}</h3>
         )}
         {shut && summary && (
           <span className="text-muted-foreground min-w-0 truncate text-xs">{summary}</span>
@@ -90,7 +111,7 @@ export function Section({
           <div className="ml-auto flex shrink-0 items-center gap-2 [&>*]:ml-0">{actions}</div>
         )}
       </div>
-      {!shut && <div className="p-3.5">{children}</div>}
+      {!shut && <div className="p-4">{children}</div>}
     </section>
   )
 }

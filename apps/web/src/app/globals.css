@@ -571,18 +571,19 @@
     @apply block text-sm font-medium text-foreground mb-1.5;
   }
 
-  /* A denser field on the longest forms in the ERP.
+  /* The rhythm of the purchase forms.
 
-     The purchase order form asks for about forty things on one screen. At the
-     app's normal rhythm — a 14px label over a 42px control, 6px apart — that
-     is roughly 55px of height per field before anything is typed, and the
-     form scrolled past two screens with a third of it spent on labels.
+     These once ran the other way: an 11px uppercase muted caption over a 38px
+     control, to fit the purchase order's forty fields into fewer screens. It
+     bought about 4px a field and cost more than it bought — a capitalised
+     grey caption reads as a footnote about the field rather than as its name,
+     and on a form where half the boxes are optional the eye could not tell
+     which was which without reading every one.
 
-     So inside `.po-form` the label steps back and the control tightens: a
-     small capitalised label in the muted colour, which reads as a caption
-     rather than competing with the value beside it, and 38px of control
-     instead of 42px. Nothing about the hit area suffers — 38px is still well
-     above the floor for a pointer target.
+     So the label is a name again: sentence case, the body colour, medium
+     weight. The control is 42px, which is the rhythm the rest of the app
+     already uses, and the saving is taken back by folding the sections
+     nobody fills in on most orders.
 
      Written as `:where(.po-form)` so the whole rule stays at one class of
      specificity. Written plainly, `.po-form .form-input` would outrank every
@@ -591,17 +592,46 @@
      Tailwind's utilities come last and win, which is what a component class
      should do. */
   :where(.po-form) .form-label {
-    @apply mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground;
+    @apply mb-1.5 text-[13px] font-medium normal-case tracking-normal text-foreground;
   }
 
   :where(.po-form) .form-input {
-    @apply py-2;
+    @apply py-2.5;
+  }
+
+  /* The sentence under a field, for the ones that need one. Muted and small,
+     so it reads as guidance rather than as a second label. */
+  :where(.po-form) .form-help {
+    @apply text-muted-foreground mt-1.5 block text-xs leading-snug;
+  }
+
+  /* A read-only fact the form shows rather than asks for — the supplier's
+     billing address, where the goods are going. Boxed so it is plainly not a
+     field somebody failed to fill in. */
+  :where(.po-form) .form-readout {
+    @apply border-border flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm;
+    background: hsl(var(--field));
+  }
+
+  /* The item table inside a purchase form. A quiet header band and a hairline
+     between rows, so the eye reads down a column without a grid drawn round
+     every cell. */
+  :where(.po-form) .line-table thead tr {
+    @apply bg-secondary;
+  }
+
+  :where(.po-form) .line-table thead th {
+    @apply text-muted-foreground px-3 py-2.5 text-left text-xs font-semibold;
+  }
+
+  :where(.po-form) .line-table tbody tr {
+    @apply border-border/60 border-b last:border-0;
   }
 
   /* The select's height is set rather than padded, for the reason given
      further up. Placed after that rule so it wins at the same specificity. */
   :where(.po-form) :where(select).form-input {
-    height: 2.375rem;
+    height: 2.625rem;
   }
 
   /* Amber text that holds up in both themes.
