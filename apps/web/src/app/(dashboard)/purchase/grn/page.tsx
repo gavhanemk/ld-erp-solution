@@ -596,7 +596,12 @@ export default function GoodsReceiptPage() {
       <div className="page-header flex-wrap gap-3">
         <div>
           <h1 className="page-title">Goods Receipt</h1>
-          <p className="page-subtitle">What has arrived against your purchase orders</p>
+          {/* Desk only. On a phone the screen is short and the heading
+            already says what this is — the sentence under it cost a line of
+            a list somebody is scrolling. */}
+          <p className="page-subtitle hidden sm:block">
+            What has arrived against your purchase orders
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -635,7 +640,18 @@ export default function GoodsReceiptPage() {
           arrives holding a challan and needs the order it is against, then
           wants to see the receipt they just made. In a box of its own above
           the list the first one read as a banner rather than as work. */}
-        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
+        {/* ── Rows on a phone, one flowing row at a desk ─────────────────
+
+          Five full-width controls stacked five deep took a third of a phone
+          screen before a single order showed. Grouped, they take two rows:
+          what you type and when, then the three things you pick.
+
+          The grouping wrappers are `sm:contents`, so above a phone they stop
+          existing and their children rejoin the one wrapping row they were
+          always in. That keeps a single set of controls rather than one set
+          per layout, which is how these bars end up disagreeing with
+          themselves. The same arrangement as the purchase order list. */}
+        <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
           {/* A pair of pills, not underlined tabs. They now sit in a row of
             controls, and a rule under one of them reads as a stray line rather
             than as the thing that is selected. */}
@@ -672,122 +688,140 @@ export default function GoodsReceiptPage() {
 
           <span className="bg-border hidden h-6 w-px shrink-0 lg:block" />
 
-          {/* One box for words, whichever list is showing. It reaches item
-            names and codes as well as the order and the supplier, so "poplin"
-            finds the order that has poplin on it. */}
-          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0">
-            <Search size={14} className="text-muted-foreground shrink-0" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder={
-                tab === 'waiting' ? 'Order, supplier, item...' : 'Receipt, order, supplier...'
-              }
-              value={tab === 'waiting' ? waitSearch : search}
-              onChange={(e) =>
-                tab === 'waiting' ? setWaitSearch(e.target.value) : setSearch(e.target.value)
-              }
-              aria-label="Search"
-            />
+          <div className="flex items-center gap-2 sm:contents">
+            {/* One box for words, whichever list is showing. It reaches item
+              names and codes as well as the order and the supplier, so
+              "poplin" finds the order that has poplin on it — which is what
+              the title says, because the placeholder no longer has room to.
+
+              The magnifying glass is a desk luxury: it costs 22px of a row
+              that already has two date boxes in it, and a box you type into
+              needs no icon to explain itself. */}
+            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+              <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder="Search..."
+                title={
+                  tab === 'waiting'
+                    ? 'Reaches the order, the supplier, and the items on it'
+                    : 'Reaches the receipt, the order, the supplier, and the items on it'
+                }
+                value={tab === 'waiting' ? waitSearch : search}
+                onChange={(e) =>
+                  tab === 'waiting' ? setWaitSearch(e.target.value) : setSearch(e.target.value)
+                }
+                aria-label="Search"
+              />
+            </div>
+
+            {/* Two dates, not a preset list. A mill asks "what came in between
+              the 3rd and the 11th" far more often than it asks for last month,
+              and either end on its own is a valid question: everything since
+              the 3rd, everything up to the 11th.
+
+              The word between them is a desk luxury too — on a phone the two
+              boxes sitting against each other say the same thing for 18px
+              less, and those 18px go to the box you type in. */}
+            <div className="flex shrink-0 items-center gap-1">
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="From date"
+              />
+              <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="To date"
+              />
+            </div>
           </div>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-32"
-            value={supplierId}
-            onChange={(e) => setSupplierId(e.target.value)}
-            aria-label="Filter by supplier"
-          >
-            <option value="">All suppliers</option>
-            {waitingSuppliers.map((sup) => (
-              <option key={sup.id} value={sup.id}>
-                {sup.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1 sm:contents">
+            <select
+              className="form-input h-8 min-w-0 grow basis-[6.6rem] px-1 py-0 text-[10px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
+            >
+              <option value="">All suppliers</option>
+              {waitingSuppliers.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
+                </option>
+              ))}
+            </select>
 
-          {/* Built from what is actually on order, not from the item master.
-            The mill has forty items today and will have four hundred; a list
-            of every one of them, most with nothing outstanding, is something
-            to scroll rather than a filter. */}
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-            value={itemId}
-            onChange={(e) => setItemId(e.target.value)}
-            aria-label="Filter by item"
-          >
-            <option value="">All items</option>
-            {waitingItems.map((it) => (
-              <option key={it.id} value={it.id}>
-                {it.name}
-              </option>
-            ))}
-          </select>
+            {/* Built from what is actually on order, not from the item master.
+              The mill has forty items today and will have four hundred; a list
+              of every one of them, most with nothing outstanding, is something
+              to scroll rather than a filter. */}
+            <select
+              className="form-input h-8 min-w-0 grow basis-[4.85rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={itemId}
+              onChange={(e) => setItemId(e.target.value)}
+              aria-label="Filter by item"
+            >
+              <option value="">All items</option>
+              {waitingItems.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.name}
+                </option>
+              ))}
+            </select>
 
-          {/* Two dates, not a preset list. A mill asks "what came in between
-            the 3rd and the 11th" far more often than it asks for last month,
-            and either end on its own is a valid question: everything since the
-            3rd, everything up to the 11th. */}
-          <div className="flex shrink-0 items-center gap-1">
-            <input
-              type="date"
-              className="form-input h-8 w-[7.5rem] py-0 text-xs"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(e) => setFromDate(e.target.value)}
-              aria-label="From date"
-            />
-            <span className="text-muted-foreground text-xs">to</span>
-            <input
-              type="date"
-              className="form-input h-8 w-[7.5rem] py-0 text-xs"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(e) => setToDate(e.target.value)}
-              aria-label="To date"
-            />
+            {/* The one filter the two lists cannot share: an order can be part
+              received and a receipt cannot, and a receipt can be cancelled
+              where an order on this list never is. */}
+            {tab === 'waiting' ? (
+              <select
+                className="form-input h-8 min-w-0 grow basis-[8.95rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+                value={waitStatus}
+                onChange={(e) => setWaitStatus(e.target.value)}
+                aria-label="Filter by how much has arrived"
+              >
+                <option value="">Anything still due</option>
+                <option value="SENT">Nothing arrived yet</option>
+                <option value="PARTIALLY_RECEIVED">Part received</option>
+              </select>
+            ) : (
+              <select
+                className="form-input h-8 min-w-0 grow basis-[8.95rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                aria-label="Filter by status"
+              >
+                <option value="">Any status</option>
+                <option value="ACCEPTED">Received</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            )}
           </div>
 
-          {/* The one filter the two lists cannot share: an order can be part
-            received and a receipt cannot, and a receipt can be cancelled where
-            an order on this list never is. */}
-          {tab === 'waiting' ? (
-            <select
-              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-              value={waitStatus}
-              onChange={(e) => setWaitStatus(e.target.value)}
-              aria-label="Filter by how much has arrived"
-            >
-              <option value="">Anything still due</option>
-              <option value="SENT">Nothing arrived yet</option>
-              <option value="PARTIALLY_RECEIVED">Part received</option>
-            </select>
-          ) : (
-            <select
-              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              aria-label="Filter by status"
-            >
-              <option value="">Any status</option>
-              <option value="ACCEPTED">Received</option>
-              <option value="CANCELLED">Cancelled</option>
-            </select>
-          )}
+          <div className="flex items-center gap-2 sm:contents">
+            {/* Only when it is doing something. A permanent Clear is a control
+              that does nothing on the screen somebody usually sees. */}
+            {anyFilter && (
+              <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
+                Clear
+              </button>
+            )}
 
-          {/* Only when it is doing something. A permanent Clear is a control
-            that does nothing on the screen somebody usually sees. */}
-          {anyFilter && (
-            <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
-              Clear
-            </button>
-          )}
-
-          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-            {tab === 'waiting'
-              ? waitingShown.length === waiting.length
-                ? `${waiting.length} ${waiting.length === 1 ? 'order' : 'orders'}`
-                : `${waitingShown.length} of ${waiting.length}`
-              : `${total} ${total === 1 ? 'receipt' : 'receipts'}`}
-          </span>
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {tab === 'waiting'
+                ? waitingShown.length === waiting.length
+                  ? `${waiting.length} ${waiting.length === 1 ? 'order' : 'orders'}`
+                  : `${waitingShown.length} of ${waiting.length}`
+                : `${total} ${total === 1 ? 'receipt' : 'receipts'}`}
+            </span>
+          </div>
         </div>
 
         {tab === 'waiting' ? (
