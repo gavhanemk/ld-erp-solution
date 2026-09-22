@@ -29,22 +29,48 @@ const id = (what: string) =>
  */
 export const paymentModes = ['CASH', 'CHEQUE', 'NEFT', 'RTGS', 'UPI', 'PDC'] as const
 
-/** The modes where a bare amount is not enough to find the money again. */
-const NEEDS_REFERENCE = new Set(['CHEQUE', 'PDC', 'NEFT', 'RTGS', 'UPI'])
+/**
+ * The modes where a bare amount is not enough to find the money again.
+ *
+ * The two cheque modes used to be in here, because the cheque number was
+ * being written into `referenceNo` for want of a column of its own. It has
+ * one now, so they are checked separately below.
+ */
+const NEEDS_REFERENCE = new Set(['NEFT', 'RTGS', 'UPI'])
 
 /** The modes that are a cheque, and so carry a date the cheque itself bears. */
 const IS_CHEQUE = new Set(['CHEQUE', 'PDC'])
 
 const paymentBase = z.object({
   billId: id('a bill to pay'),
+  /**
+   * Where the payment is booked. Empty means head office, exactly as the
+   * Location box on a purchase order does.
+   */
+  warehouseId: z.string().optional().nullable(),
+  /** The account the money left. Required for everything except cash. */
+  bankAccountId: z.string().optional().nullable(),
   paymentDate: z.coerce.date().optional(),
   amount: money,
+  /**
+   * Tax withheld from this payment and owed to the government rather than to
+   * the supplier. Zero unless somebody says otherwise, and refused outright
+   * when the bill already recorded TDS — the route does that check, because
+   * only it can see the bill.
+   */
+  tdsAmount: z
+    .number({ invalid_type_error: 'Tax deducted has to be an amount' })
+    .min(0, 'Tax deducted cannot be less than zero')
+    .max(99_999_999, 'That amount looks like a typo')
+    .optional(),
   mode: z.enum(paymentModes, {
     required_error: 'Say how it was paid',
     invalid_type_error: 'Say how it was paid',
   }),
   /** Cheque number, UTR, or the UPI reference — whatever finds it at the bank. */
   referenceNo: z.string().max(60).optional().nullable(),
+  /** As written on the cheque. Quoted back by the bank; a UTR is not the same. */
+  chequeNo: z.string().max(40).optional().nullable(),
   chequeDate: z.coerce.date().optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
 })
@@ -64,10 +90,33 @@ export const createPaymentSchema = paymentBase.superRefine((data, ctx) => {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['referenceNo'],
-      message:
-        data.mode === 'CHEQUE' || data.mode === 'PDC'
-          ? 'Put the cheque number in'
-          : 'Put the transaction reference in',
+      message: 'Put the transaction reference in',
+    })
+  }
+
+  if (IS_CHEQUE.has(data.mode) && !data.chequeNo?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['chequeNo'],
+      message: 'Put the cheque number in',
+    })
+  }
+
+  if (!IS_CHEQUE.has(data.mode) && data.chequeNo?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['chequeNo'],
+      message: 'A cheque number only belongs on a cheque',
+    })
+  }
+
+  // "Paid Through" on the mill's own voucher. Cash is the one mode that does
+  // not leave a bank account, so it is the one that may be blank.
+  if (data.mode !== 'CASH' && !data.bankAccountId?.trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['bankAccountId'],
+      message: 'Say which account it was paid from',
     })
   }
 

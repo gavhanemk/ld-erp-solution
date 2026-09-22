@@ -149,7 +149,22 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
 }
 
 /** A file behind a bill, tagged with which document it actually hangs off. */
-export type BillFile = BillAttachment & { kind: 'order' | 'receipt'; source: string }
+export type BillFile = BillAttachment & { kind: FileKind; source: string }
+
+/**
+ * Which table a file lives in, and so which route signs its download link.
+ *
+ * `payment` is the one that hangs off the money rather than the goods — the
+ * bank advice or the cheque counterfoil, attached when the payment was
+ * recorded. It only ever appears on a payment's own row.
+ */
+export type FileKind = 'order' | 'receipt' | 'payment'
+
+const FILE_ROUTES: Record<FileKind, string> = {
+  order: 'attachments',
+  receipt: 'grn-attachments',
+  payment: 'payment-attachments',
+}
 
 /**
  * Every file behind a bill, from its order and from each of its receipts.
@@ -164,13 +179,21 @@ export interface FileTrail {
   lines?: Array<{
     grnLine?: { grn: { grnNumber: string; attachments?: BillAttachment[] } } | null
   }>
+  /** Set only when the trail is being shown for one payment. */
+  payment?: { paymentNumber: string; attachments?: BillAttachment[] } | null
 }
 
 export function billFiles(bill: FileTrail): BillFile[] {
   const seen = new Map<string, BillFile>()
 
+  // The payment's own files lead, where there are any: somebody opening this
+  // from a payment row came for the advice or the counterfoil, not for the
+  // quotation that was agreed two months earlier.
+  for (const f of bill.payment?.attachments ?? []) {
+    seen.set(f.id, { ...f, kind: 'payment', source: bill.payment!.paymentNumber })
+  }
   for (const f of bill.po?.attachments ?? []) {
-    seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
+    if (!seen.has(f.id)) seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
   }
   for (const line of bill.lines ?? []) {
     const grn = line.grnLine?.grn
@@ -204,13 +227,13 @@ function Attachments({ files }: { files: BillFile[] }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const open = async (file: { id: string; kind: 'order' | 'receipt' }) => {
+  const open = async (file: { id: string; kind: FileKind }) => {
     setBusy(file.id)
     setError(null)
     try {
       // The link is signed and short-lived, so it is fetched at the moment it
       // is wanted rather than put in the page and left to go stale.
-      const path = file.kind === 'order' ? 'attachments' : 'grn-attachments'
+      const path = FILE_ROUTES[file.kind]
       const res = await api.get<{ data: { url: string } }>(`/purchase/${path}/${file.id}/link`)
       window.open(res.data.url, '_blank', 'noopener')
     } catch (err) {

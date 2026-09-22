@@ -2940,8 +2940,10 @@ const billInclude = {
       paymentNumber: true,
       paymentDate: true,
       amount: true,
+      tdsAmount: true,
       mode: true,
       referenceNo: true,
+      chequeNo: true,
       chequeDate: true,
       createdBy: { select: { id: true, name: true } },
     },
@@ -3895,6 +3897,12 @@ const billTrailSelect = {
 
 const paymentInclude = {
   supplier: { select: { id: true, code: true, name: true } },
+  warehouse: { select: { id: true, code: true, name: true } },
+  bankAccount: { select: { id: true, accountName: true, bankName: true, accountNumber: true } },
+  attachments: {
+    select: { id: true, fileName: true, mimeType: true, sizeBytes: true, createdAt: true },
+    orderBy: { createdAt: 'asc' as const },
+  },
   invoice: {
     select: {
       id: true,
@@ -3931,15 +3939,19 @@ async function syncBillFromPayments(tx: Prisma.TransactionClient, billId: string
 
   const paid = await tx.supplierPayment.aggregate({
     where: { invoiceId: billId },
-    _sum: { amount: true },
+    _sum: { amount: true, tdsAmount: true },
   })
   const paidAmount = round2(Number(paid._sum.amount ?? 0))
+  // Tax withheld at payment goes to the government rather than to the
+  // supplier, so it settles the bill exactly as the cash does. Left out, a
+  // bill paid net of TDS would sit part-paid for the rest of its life.
+  const withheldAmount = round2(Number(paid._sum.tdsAmount ?? 0))
 
   // TDS is withheld from the supplier rather than paid to them, so the bill is
   // settled in full by the smaller payment. Counting it as outstanding would
   // leave a stub against every contractor forever.
   const settleable = round2(Number(bill.totalAmount) - Number(bill.tdsAmount))
-  const balanceAmount = round2(Math.max(0, settleable - paidAmount))
+  const balanceAmount = round2(Math.max(0, settleable - paidAmount - withheldAmount))
 
   // A cancelled bill keeps its own status — money against it is a separate
   // problem and silently reopening it would hide that.
@@ -3948,7 +3960,7 @@ async function syncBillFromPayments(tx: Prisma.TransactionClient, billId: string
       ? 'CANCELLED'
       : balanceAmount <= 0
         ? 'PAID'
-        : paidAmount > 0
+        : paidAmount > 0 || withheldAmount > 0
           ? 'PARTIAL'
           : 'UNPAID'
 
@@ -4111,14 +4123,53 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
       )
     }
 
+    const tds = round2(data.tdsAmount ?? 0)
+
+    // TDS is deducted once. A bill records it when the deduction is known at
+    // booking; a payment records it when it was not. Both together would pay
+    // the supplier twice short and claim the same deduction twice.
+    if (tds > 0 && Number(bill.tdsAmount) > 0) {
+      throw new AppError(
+        `${bill.billNumber} already has ₹${Number(bill.tdsAmount).toFixed(2)} of tax deducted on it. It comes off once — correct the bill if that figure is wrong.`,
+        400,
+        'TDS_ALREADY_ON_BILL'
+      )
+    }
+
+    // Checked here rather than left to the foreign key, which would surface as
+    // a database error nobody outside this file can read.
+    if (data.warehouseId) {
+      const where = await tx.warehouse.findUnique({
+        where: { id: data.warehouseId },
+        select: { id: true },
+      })
+      if (!where) throw new AppError('That location no longer exists', 400, 'BAD_LOCATION')
+    }
+
+    if (data.bankAccountId) {
+      const account = await tx.bankAccount.findUnique({
+        where: { id: data.bankAccountId },
+        select: { id: true, accountName: true, isActive: true },
+      })
+      if (!account) throw new AppError('That account no longer exists', 400, 'BAD_ACCOUNT')
+      if (!account.isActive) {
+        throw new AppError(
+          `${account.accountName} is closed. Pick the account the money really left.`,
+          400,
+          'ACCOUNT_CLOSED'
+        )
+      }
+    }
+
     // What earlier payments already settled. Summed rather than read off the
     // bill so two clerks paying at the same moment cannot both pass the check
-    // against a stale figure.
+    // against a stale figure. Tax withheld counts: it left the bill even
+    // though it never reached the supplier.
     const paid = await tx.supplierPayment.aggregate({
       where: { invoiceId: bill.id },
-      _sum: { amount: true },
+      _sum: { amount: true, tdsAmount: true },
     })
-    const alreadyPaid = round2(Number(paid._sum.amount ?? 0))
+    const alreadyPaid = round2(Number(paid._sum.amount ?? 0) + Number(paid._sum.tdsAmount ?? 0))
     const settleable = round2(Number(bill.totalAmount) - Number(bill.tdsAmount))
     const owing = round2(settleable - alreadyPaid)
 
@@ -4126,9 +4177,12 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
       throw new AppError(`${bill.billNumber} is already paid in full.`, 409, 'BILL_ALREADY_PAID')
     }
 
-    if (round2(data.amount) > owing) {
+    const settles = round2(data.amount + tds)
+    if (settles > owing) {
       throw new AppError(
-        `That is more than is owed — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`,
+        tds > 0
+          ? `₹${data.amount.toFixed(2)} and ₹${tds.toFixed(2)} deducted comes to ₹${settles.toFixed(2)} — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`
+          : `That is more than is owed — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`,
         400,
         'OVERPAYMENT'
       )
@@ -4141,10 +4195,14 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
         paymentNumber,
         supplierId: bill.supplierId,
         invoiceId: bill.id,
+        warehouseId: data.warehouseId || null,
+        bankAccountId: data.bankAccountId || null,
         paymentDate: when,
         amount: round2(data.amount),
+        tdsAmount: tds,
         mode: data.mode,
         referenceNo: data.referenceNo?.trim() || null,
+        chequeNo: data.chequeNo?.trim() || null,
         chequeDate: data.chequeDate ?? null,
         notes: data.notes ?? null,
         createdById: req.user!.id,
@@ -4171,5 +4229,158 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
     message: `${payment.paymentNumber} recorded against ${payment.invoice?.billNumber}.`,
   })
 })
+
+// ── Files against a payment ─────────────────────────────────────────────────
+//
+// The bank advice, the cheque counterfoil, the UTR screenshot. The same three
+// steps as an order's files — ask for a link, send the file straight to
+// storage, then record it — so the file never travels through the API.
+
+router.get('/payments/:id/attachments', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.supplierPaymentAttachment.findMany({
+    where: { paymentId: req.params.id },
+    include: attachmentInclude,
+    orderBy: { createdAt: 'asc' },
+  })
+  res.json({ success: true, data: rows })
+})
+
+/** Step one: a one-use link to send the file to. Nothing is recorded yet. */
+router.post(
+  '/payments/:id/attachments/upload-url',
+  requirePermission(MODULE, 'create'),
+  async (req, res) => {
+    const { fileName, sizeBytes } = z
+      .object({
+        fileName: z.string().min(1, 'The file needs a name').max(255),
+        sizeBytes: z
+          .number()
+          .int()
+          .positive('That file is empty')
+          .max(MAX_FILE_BYTES, `Files have to be ${MAX_FILE_BYTES / 1024 / 1024}MB or smaller`),
+      })
+      .parse(req.body)
+
+    const payment = await prisma.supplierPayment.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, paymentNumber: true },
+    })
+    if (!payment) throw new AppError('Payment not found', 404, 'NOT_FOUND')
+
+    const already = await prisma.supplierPaymentAttachment.count({
+      where: { paymentId: payment.id },
+    })
+    if (already >= MAX_FILES_PER_DOCUMENT) {
+      throw new AppError(
+        `${payment.paymentNumber} already has ${MAX_FILES_PER_DOCUMENT} files. Remove one before adding another.`,
+        409,
+        'TOO_MANY_FILES'
+      )
+    }
+
+    const path = storagePathFor('supplier-payments', payment.id, fileName)
+    const { uploadUrl } = await signedUploadUrl(path)
+
+    res.json({ success: true, data: { uploadUrl, storagePath: path, fileName, sizeBytes } })
+  }
+)
+
+/** Step three: the file is in the bucket, so record it. */
+router.post(
+  '/payments/:id/attachments',
+  requirePermission(MODULE, 'create'),
+  async (req: AuthRequest, res) => {
+    const { fileName, storagePath } = z
+      .object({
+        fileName: z.string().min(1).max(255),
+        storagePath: z.string().min(1),
+      })
+      .parse(req.body)
+
+    const payment = await prisma.supplierPayment.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, paymentNumber: true },
+    })
+    if (!payment) throw new AppError('Payment not found', 404, 'NOT_FOUND')
+
+    // A path is only ever handed out for one payment, and this is what stops a
+    // reply being replayed against another one.
+    if (!storagePath.startsWith(`supplier-payments/${payment.id}/`)) {
+      throw new AppError('That file does not belong to this payment', 400, 'WRONG_DOCUMENT')
+    }
+
+    // The browser told us the size. Ask storage instead — the row must describe
+    // a file that is really there, at the size it really is.
+    const { sizeBytes, mimeType } = await statObject(storagePath)
+    if (sizeBytes > MAX_FILE_BYTES) {
+      await removeObject(storagePath).catch(() => {})
+      throw new AppError(
+        `That file is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_BYTES / 1024 / 1024}MB.`,
+        400,
+        'FILE_TOO_LARGE'
+      )
+    }
+
+    const attachment = await prisma.supplierPaymentAttachment.create({
+      data: {
+        paymentId: payment.id,
+        fileName,
+        storagePath,
+        mimeType,
+        sizeBytes,
+        uploadedById: req.user!.id,
+      },
+      include: attachmentInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'SupplierPaymentAttachment',
+      entityId: attachment.id,
+      after: attachment,
+    })
+
+    res.status(201).json({ success: true, data: attachment })
+  }
+)
+
+/** A link that works for a few minutes. The bucket itself stays private. */
+router.get('/payment-attachments/:id/link', requirePermission(MODULE, 'view'), async (req, res) => {
+  const file = await prisma.supplierPaymentAttachment.findUnique({ where: { id: req.params.id } })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+
+  res.json({
+    success: true,
+    data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName },
+  })
+})
+
+router.delete(
+  '/payment-attachments/:id',
+  requirePermission(MODULE, 'delete'),
+  async (req: AuthRequest, res) => {
+    const file = await prisma.supplierPaymentAttachment.findUnique({
+      where: { id: req.params.id },
+      include: attachmentInclude,
+    })
+    if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+
+    // The row goes first. A row pointing at a file that is gone is a broken
+    // download; a file with no row is invisible and merely wastes space.
+    await prisma.supplierPaymentAttachment.delete({ where: { id: file.id } })
+    await removeObject(file.storagePath).catch(() => {})
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'DELETE',
+      entityType: 'SupplierPaymentAttachment',
+      entityId: file.id,
+      before: file,
+    })
+
+    res.json({ success: true, message: `${file.fileName} removed.` })
+  }
+)
 
 export default router

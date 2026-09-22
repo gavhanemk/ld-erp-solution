@@ -7,6 +7,122 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 22 Sep 2026 — a supplier payment records what the mill's own voucher records
+
+**Migration:** `20260922060000_supplier_payment_voucher_details`
+**Branch:** `fix/purchase`
+**Status: NOT YET APPLIED.** See "What you have to do" at the bottom.
+
+### What changes
+
+Four nullable-or-defaulted columns on `supplier_payments`, two foreign keys,
+and one new table. Additive only: nothing renamed, nothing dropped, no existing
+row rewritten. There are **no payments on the system at all**, so nothing can
+be affected either way.
+
+| Column | Holds |
+|---|---|
+| `warehouseId` | Where the payment is booked — the old ERP's "Location". Empty is head office |
+| `bankAccountId` | The account the money left — the old ERP's "Paid Through" |
+| `chequeNo` | As written on the cheque |
+| `tdsAmount` | Tax withheld from this payment. `DECIMAL(12,2) NOT NULL DEFAULT 0` |
+
+| Table | Holds |
+|---|---|
+| `supplier_payment_attachments` | The bank advice, the counterfoil, the UTR screenshot |
+
+### Why
+
+Surveyed against the mill's Absolute ERP payment voucher. Its form has ten
+boxes; ours had five, and the five that were missing are the ones an accounts
+query actually turns on — which account the money left, which cheque it was,
+and the papers that prove it. A payment nobody can tie to a line on a bank
+statement is a payment nobody can defend.
+
+`chequeNo` is the odd one out: we were already asking for a cheque number and
+writing it into `referenceNo`, which sat beside a `chequeDate` that had
+nothing to pair with. It has its own column now, and `referenceNo` goes back to
+meaning the UTR or transaction reference.
+
+### The two decisions worth knowing
+
+**Both foreign keys are `ON DELETE RESTRICT`, not `SET NULL`.** A payment
+that has forgotten which account it came out of cannot be reconciled, and that
+is the single thing the record exists to support. Retiring an account or a
+store is what their `isActive` flags are for. (This is the same trap that
+makes `purchase_invoice_lines.grnLineId` orphan a bill line when a billed
+receipt is deleted — worth not repeating.)
+
+**Tax is deducted once.** A bill already carries `tdsSection`, `tdsRate` and
+`tdsAmount`, and `syncBillFromPayments` already settles the bill net of it.
+The new column is for the other case — the deduction decided at payment time,
+which previously had nowhere to go and left the bill sitting part-paid for
+ever. The API refuses a payment-level deduction on a bill that already carries
+one, and the dialog does not offer the tick there at all.
+
+Both now count toward settling: `balance = (total − bill TDS) − paid −
+withheld at payment`.
+
+### Why it is hand-written
+
+Same reason as every entry below. `prisma migrate diff` against the live
+database on 22 Sep still wants to:
+
+```sql
+DROP TABLE "bom_line_sizes";
+DROP COLUMN "styleId";          -- items
+DROP COLUMN "approvedById";     -- bom, and seven more
+DROP TYPE "BOMStatus";
+```
+
+That is the other team's applied work. **The answer is still no.** The SQL in
+the migration folder is the four columns, the two keys, the table and its
+indexes, and nothing else.
+
+### What you have to do
+
+**Apply it.** From `packages/database`:
+
+```bash
+npx prisma db execute --file prisma/migrations/20260922060000_supplier_payment_voucher_details/migration.sql --schema prisma/schema.prisma
+npx prisma migrate resolve --applied 20260922060000_supplier_payment_voucher_details
+```
+
+`db execute` runs the file and never diffs the schema, so it cannot offer to
+reset anything. `migrate resolve` then records it as applied. Every statement
+is guarded with `IF NOT EXISTS`, so running it twice is safe.
+
+Then, with the API stopped — Windows locks the Prisma engine file:
+
+```bash
+pnpm db:generate
+```
+
+Until the SQL is applied, **the Supplier Payments screen will not load** — the
+API reads `supplier_payments.warehouseId` and Postgres does not have it yet.
+Orders, receipts, bills, stock and the masters are unaffected.
+
+Row counts taken immediately before, to compare against afterwards:
+
+| Table | Before |
+|---|---|
+| `purchase_orders` | 4 |
+| `purchase_order_lines` | 6 |
+| `grn` | 2 |
+| `grn_lines` | 2 |
+| `purchase_invoices` | 1 |
+| `supplier_payments` | 0 |
+| `suppliers` | 17 |
+| `items` | 43 |
+| `stock_ledger` | 93 |
+| `users` | 5 |
+| `bom` | 5 |
+| `bom_lines` | 42 |
+| `bank_accounts` | 3 |
+| `warehouses` | 5 |
+
+---
+
 ## 18 Sep 2026 — a goods receipt records the delivery it came from
 
 **Migration:** `20260918064500_grn_delivery_details`

@@ -316,6 +316,31 @@ export const createWarehouseSchema = z.object({
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
 
+/**
+ * The accounts money leaves from — what a supplier payment calls "Paid
+ * through". The mill's own vouchers name one on every payment that is not
+ * cash, so the list has to be somewhere a person can add to.
+ *
+ * IFSC is eleven characters with a fixed shape: four letters, a zero, then
+ * six of either. Wrong and the money does not move, so it is worth refusing
+ * at the form rather than at the bank.
+ */
+export const createBankAccountSchema = z.object({
+  accountName: name,
+  bankName: z.string().min(1, 'Which bank it is with').max(120),
+  accountNumber: z.string().min(1, 'The account number is required').max(30),
+  ifscCode: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, 'An IFSC code looks like HDFC0001234'),
+  branch: optionalText,
+  accountType: z.enum(['CURRENT', 'SAVINGS', 'CC', 'OD']).optional(),
+  openingBalance: z.coerce.number().optional(),
+  isActive,
+})
+export const updateBankAccountSchema = createBankAccountSchema.partial()
+
 export const createDepartmentSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
   code,

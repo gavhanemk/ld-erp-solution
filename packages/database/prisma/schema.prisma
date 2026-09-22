@@ -269,6 +269,7 @@ model User {
   countedStock    StockAdjustment[]         @relation("AdjustmentMadeBy")
   receivedGoods   GRN[]                     @relation("GRNCreatedBy")
   uploadedGrnFiles GRNAttachment[]          @relation("GRNAttachmentUploadedBy")
+  uploadedPaymentFiles SupplierPaymentAttachment[] @relation("PaymentAttachmentUploadedBy")
   shortClosedPoLines PurchaseOrderLine[]    @relation("PurchaseOrderLineShortClosedBy")
 
   @@index([email])
@@ -738,6 +739,8 @@ model Warehouse {
   transfersOut   StockTransfer[]           @relation("TransferFrom")
   transfersIn    StockTransfer[]           @relation("TransferTo")
   adjustments    StockAdjustment[]
+
+  supplierPayments SupplierPayment[]
 
   @@map("warehouses")
 }
@@ -1414,18 +1417,58 @@ model SupplierPayment {
   supplier      Supplier         @relation(fields: [supplierId], references: [id])
   invoiceId     String?
   invoice       PurchaseInvoice? @relation(fields: [invoiceId], references: [id])
+  /// Which of our places the payment is booked at — the old ERP's "Location",
+  /// empty meaning head office. Kept on the payment rather than read from the
+  /// bill because a unit can settle a bill the head office raised.
+  warehouseId   String?
+  warehouse     Warehouse?       @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  /// The account the money actually left — the old ERP's "Paid Through".
+  /// Restrict, not set-null: a payment that forgets which account it came out
+  /// of cannot be reconciled against a bank statement, and retiring an account
+  /// is what `isActive` is for.
+  bankAccountId String?
+  bankAccount   BankAccount?     @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
   paymentDate   DateTime         @default(now())
   amount        Decimal          @db.Decimal(12, 2)
+  /// Tax withheld from this payment and owed to the government instead of to
+  /// the supplier. Only ever set when the bill did not already record TDS —
+  /// deducting in both places would pay the supplier twice short.
+  tdsAmount     Decimal          @default(0) @db.Decimal(12, 2)
   mode          PaymentMode
   referenceNo   String?
+  /// Its own column rather than borrowed from `referenceNo`, which already sat
+  /// beside `chequeDate` with nothing to pair with. A cheque number is quoted
+  /// back by the bank and searched on; a UTR is not the same thing.
+  chequeNo      String?
   chequeDate    DateTime?
   notes         String?
   createdById   String
   createdBy     User             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
   createdAt     DateTime         @default(now())
 
+  attachments SupplierPaymentAttachment[]
+
   @@index([supplierId])
   @@map("supplier_payments")
+}
+
+/// The bank advice, the cheque counterfoil, the UTR screenshot. Same shape as
+/// the order and receipt attachments: the file lives in object storage and the
+/// row only says where.
+model SupplierPaymentAttachment {
+  id           String          @id @default(cuid())
+  paymentId    String
+  payment      SupplierPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String          @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User            @relation("PaymentAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime        @default(now())
+
+  @@index([paymentId])
+  @@map("supplier_payment_attachments")
 }
 
 // ═══════════════════════════════════════════
@@ -1865,6 +1908,8 @@ model BankAccount {
   currentBalance Decimal  @default(0) @db.Decimal(14, 2)
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
+
+  supplierPayments SupplierPayment[]
 
   @@map("bank_accounts")
 }

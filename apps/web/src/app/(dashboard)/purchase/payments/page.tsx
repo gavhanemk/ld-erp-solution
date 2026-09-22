@@ -34,6 +34,7 @@ interface BillFile {
  * one hop from the same bill.
  */
 interface BillTrail {
+  payment?: { paymentNumber: string; attachments?: BillFile[] } | null
   po?: { id: string; poNumber: string; attachments?: BillFile[] } | null
   lines?: Array<{
     id: string
@@ -59,13 +60,32 @@ interface Payment {
   paymentNumber: string
   paymentDate: string
   amount: string | number
+  /** Tax withheld here rather than paid to the supplier. Usually zero. */
+  tdsAmount?: string | number | null
   mode: string
   referenceNo?: string | null
+  chequeNo?: string | null
   chequeDate?: string | null
   supplier: { id: string; name: string }
+  /** Where it was booked. Absent means head office. */
+  warehouse?: { id: string; name: string } | null
+  /** The account the money left. Absent on a cash payment. */
+  bankAccount?: { id: string; accountName: string; bankName: string } | null
+  /** The advice, the counterfoil — attached when the payment was recorded. */
+  attachments?: BillFile[]
   invoice?: ({ id: string; billNumber: string } & BillTrail) | null
   createdBy?: { id: string; name: string } | null
 }
+
+/**
+ * Everything behind one payment: the bill's own trail, plus the files that
+ * hang off the payment itself. Gathered here so the row's file button opens
+ * both instead of pretending the payment's own papers do not exist.
+ */
+const paymentTrail = (p: Payment): BillTrail => ({
+  ...(p.invoice ?? {}),
+  payment: { paymentNumber: p.paymentNumber, attachments: p.attachments },
+})
 
 interface Summary {
   billCount: number
@@ -744,10 +764,31 @@ export default function SupplierPaymentsPage() {
                       <dt className="text-muted-foreground">How</dt>
                       <dd className="text-foreground min-w-0">
                         {MODE_LABEL[p.mode] ?? p.mode}
-                        {p.referenceNo && (
-                          <span className="text-muted-foreground"> · {p.referenceNo}</span>
+                        {(p.chequeNo || p.referenceNo) && (
+                          <span className="text-muted-foreground">
+                            {' '}
+                            · {p.chequeNo || p.referenceNo}
+                          </span>
                         )}
                       </dd>
+                      <dt className="text-muted-foreground">Paid from</dt>
+                      <dd className="text-foreground min-w-0">
+                        {p.bankAccount ? (
+                          p.bankAccount.accountName
+                        ) : (
+                          <span className="text-muted-foreground">
+                            {p.mode === 'CASH' ? 'Cash in hand' : '—'}
+                          </span>
+                        )}
+                      </dd>
+                      {Number(p.tdsAmount ?? 0) > 0 && (
+                        <>
+                          <dt className="text-muted-foreground">Tax deducted</dt>
+                          <dd className="text-foreground min-w-0 tabular-nums">
+                            ₹{money(p.tdsAmount ?? 0)}
+                          </dd>
+                        </>
+                      )}
                       <dt className="text-muted-foreground">Recorded by</dt>
                       <dd className="text-foreground min-w-0">{p.createdBy?.name ?? '—'}</dd>
                     </dl>
@@ -861,27 +902,45 @@ export default function SupplierPaymentsPage() {
                             <span className="text-foreground text-xs">
                               {MODE_LABEL[p.mode] ?? p.mode}
                             </span>
-                            {p.referenceNo && (
+                            {/* One line, not three: the reference and the
+                              account are what a query about a payment starts
+                              from, and a third line would set this row taller
+                              than every other on the list. */}
+                            {(p.chequeNo || p.referenceNo || p.bankAccount) && (
                               <div className="text-muted-foreground text-[10px]">
-                                {p.referenceNo}
+                                {[
+                                  p.chequeNo || p.referenceNo,
+                                  p.bankAccount?.accountName,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
                               </div>
                             )}
                           </td>
                           <td className="text-foreground text-right font-medium tabular-nums">
                             ₹{money(p.amount)}
+                            {Number(p.tdsAmount ?? 0) > 0 && (
+                              <div className="text-muted-foreground text-[10px] font-normal">
+                                +₹{money(p.tdsAmount ?? 0)} tax
+                              </div>
+                            )}
                           </td>
                           <td className="col-full text-xs">{p.createdBy?.name ?? '—'}</td>
                           <td className="col-roomy whitespace-nowrap">
+                            {/* The payment's own papers count here too —
+                              the advice and the counterfoil were attached to
+                              this payment, and a file button that ignored
+                              them would say a payment with three scans on it
+                              had none. */}
                             <FilesCell
-                              count={p.invoice ? billFiles(p.invoice).length : 0}
+                              count={billFiles(paymentTrail(p)).length}
                               onOpen={() =>
-                                p.invoice &&
                                 setFilesFor({
-                                  trail: p.invoice,
-                                  label: p.invoice.billNumber,
+                                  trail: paymentTrail(p),
+                                  label: p.invoice?.billNumber ?? p.paymentNumber,
                                 })
                               }
-                              what="on this bill's order and receipts"
+                              what="on this payment, and on its bill's order and receipts"
                             />
                           </td>
                         </tr>
