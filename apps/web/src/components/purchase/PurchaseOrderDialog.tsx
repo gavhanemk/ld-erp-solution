@@ -1760,7 +1760,13 @@ export function PurchaseOrderDialog({
         }
       }
 
-      if (mode !== 'draft' && id) {
+      // Only a draft needs sending. An order that is already with the supplier
+      // stays sent when it is corrected, and asking the server to send it a
+      // second time fails — which would then tell the buyer, wrongly, that
+      // their order is waiting as a draft.
+      const alreadySent = isEdit && record?.status !== 'DRAFT'
+
+      if (mode !== 'draft' && id && !alreadySent) {
         try {
           await api.patch(`/purchase/orders/${id}/send`, {})
         } catch (err) {

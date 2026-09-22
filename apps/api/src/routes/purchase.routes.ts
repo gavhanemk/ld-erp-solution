@@ -928,14 +928,31 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
   })
   if (!before || before.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
-  // Once an order is with the supplier, or goods have started arriving against
-  // it, editing it silently would leave the paper they hold disagreeing with
-  // ours. Cancel and raise a fresh one instead.
-  if (before.status !== 'DRAFT') {
+  // A draft is our own paper, and an order that has only been sent is paper on
+  // the supplier's desk — both can still be corrected, and the buyer is told
+  // to send the new copy afterwards. What cannot be corrected is an order
+  // something has already arrived against.
+  //
+  // That is not caution, it is the schema: this edit replaces the lines
+  // wholesale, and `grn_lines.poLineId` is ON DELETE SET NULL. Every receipt
+  // line pointing at a replaced order line would be cut loose without a word,
+  // and ordered-versus-received is summed through exactly that column.
+  if (before.status !== 'DRAFT' && before.status !== 'SENT') {
     throw new AppError(
       `This order is ${before.status.toLowerCase().replace('_', ' ')} and can no longer be edited. Raise a new one.`,
       400,
-      'PO_NOT_DRAFT'
+      'PO_NOT_EDITABLE'
+    )
+  }
+
+  // Belt and braces for the case the status alone misses: a receipt that was
+  // cancelled puts the order back to SENT while its lines still point here.
+  const arrived = await prisma.gRNLine.count({ where: { poLine: { poId: before.id } } })
+  if (arrived > 0) {
+    throw new AppError(
+      'Goods have been booked against this order, so its lines can no longer be changed. Correct the receipt instead, or raise a fresh order for the difference.',
+      400,
+      'PO_HAS_RECEIPTS'
     )
   }
 

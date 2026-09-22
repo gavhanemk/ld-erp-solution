@@ -8,7 +8,6 @@ import {
   Search,
   RefreshCw,
   AlertCircle,
-  Send,
   Ban,
   Trash2,
   ChevronDown,
@@ -16,9 +15,7 @@ import {
   CalendarDays,
   FileText,
   Info,
-  Undo2,
   PackageCheck,
-  History,
   Paperclip,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
@@ -207,25 +204,8 @@ export default function PurchaseOrdersPage() {
     setToDate('')
   }
 
-  const act = async (po: PurchaseOrder, what: 'send' | 'cancel' | 'reopen') => {
-    if (what === 'cancel' && !confirm(`Cancel ${po.poNumber}?`)) return
-    /*
-     * Reopening is asked about, because it is the one action here that makes
-     * a document somebody already holds wrong. The prompt says that rather
-     * than "are you sure?": the supplier has the old sheet, and the person
-     * clicking is the one who has to send them the new one.
-     */
-    if (
-      what === 'reopen' &&
-      !confirm(
-        `Reopen ${po.poNumber} as a draft?
-
-` +
-          'The supplier already has this order. Their copy will be out of date ' +
-          'until you send it again. This is recorded against your name.'
-      )
-    )
-      return
+  const act = async (po: PurchaseOrder, what: 'cancel') => {
+    if (!confirm(`Cancel ${po.poNumber}?`)) return
     setBusy(true)
     setMessage(null)
     try {
@@ -279,6 +259,20 @@ export default function PurchaseOrdersPage() {
    * draft or a cancelled order may be deleted — and a second copy would
    * eventually disagree with this one about a live document.
    */
+  /*
+   * Five things, in the order somebody reaches for them.
+   *
+   * "Reopen as a draft" is gone. Correcting an order the supplier already had
+   * used to mean pulling it back to a draft first, then editing, then sending
+   * it again — three decisions for one intention, and it left the order
+   * sitting as a draft if the buyer was interrupted halfway. Edit is offered
+   * straight away now and the order stays sent; the note after saving is what
+   * reminds them to send the new copy.
+   *
+   * "Mark as sent to supplier" is gone because saving the form already does
+   * it, and "Goods receipt history" because it belongs on the goods receipt
+   * screen, which is where it only ever led.
+   */
   const rowActions = (po: PurchaseOrder): RowAction[] => {
     const items: RowAction[] = [
       {
@@ -290,11 +284,20 @@ export default function PurchaseOrdersPage() {
       },
     ]
 
-    // Booking in a delivery, and the deliveries already booked in. The mill's
-    // old ERP carried Add GRN and View History of GRN on the order row itself,
-    // and that is where somebody looks for them: they are holding this order's
-    // paperwork. Both lead to the receipt screen rather than opening a form
-    // here, so the store keeper lands where the rest of the receiving work is.
+    // Correctable right up until the first delivery. After that the receipts
+    // reconcile against these very lines, and the server refuses — replacing
+    // a line that a receipt points at would cut the receipt loose.
+    if (po.status === 'DRAFT' || po.status === 'SENT') {
+      items.push({
+        key: 'edit',
+        label: 'Edit order',
+        icon: <Pencil size={15} />,
+        onClick: () => setDialog({ open: true, record: po }),
+      })
+    }
+
+    // Leads to the receipt screen rather than opening a form here, so the
+    // store keeper lands where the rest of the receiving work is.
     if (po.status === 'SENT' || po.status === 'PARTIALLY_RECEIVED') {
       items.push({
         key: 'receive',
@@ -303,44 +306,7 @@ export default function PurchaseOrdersPage() {
         href: `/purchase/grn?receive=${po.id}`,
       })
     }
-    if (po.status !== 'DRAFT') {
-      items.push({
-        key: 'history',
-        label: 'Goods receipt history',
-        icon: <History size={15} />,
-        href: `/purchase/grn?q=${encodeURIComponent(po.poNumber)}`,
-      })
-    }
 
-    // A sent order cannot be edited in place — the supplier is working from
-    // paper. It can be pulled back to a draft, which is a decision rather than
-    // a slip: it asks first and it is written to the activity log. Gone once a
-    // receipt or a bill exists against the order, because those reconcile
-    // against it line by line.
-    if (po.status === 'SENT') {
-      items.push({
-        key: 'reopen',
-        label: 'Reopen as a draft',
-        icon: <Undo2 size={15} />,
-        onClick: () => void act(po, 'reopen'),
-      })
-    }
-    if (po.status === 'DRAFT') {
-      items.push(
-        {
-          key: 'edit',
-          label: 'Edit order',
-          icon: <Pencil size={15} />,
-          onClick: () => setDialog({ open: true, record: po }),
-        },
-        {
-          key: 'send',
-          label: 'Mark as sent to supplier',
-          icon: <Send size={15} />,
-          onClick: () => void act(po, 'send'),
-        }
-      )
-    }
     if (po.status !== 'CANCELLED' && po.status !== 'COMPLETED') {
       items.push({
         key: 'cancel',
@@ -350,10 +316,13 @@ export default function PurchaseOrdersPage() {
         danger: true,
       })
     }
+
+    // The server allows this only while nothing has been received or billed,
+    // so offering it anywhere else would be a button that always failed.
     if (po.status === 'DRAFT' || po.status === 'CANCELLED') {
       items.push({
         key: 'delete',
-        label: 'Delete for good',
+        label: 'Delete order',
         icon: <Trash2 size={15} />,
         onClick: () => void remove(po),
         danger: true,
@@ -1092,8 +1061,9 @@ export default function PurchaseOrdersPage() {
         <div className="border-border bg-secondary/40 flex items-start gap-2 border-t px-4 py-2">
           <Info size={14} className="text-primary mt-0.5 shrink-0" />
           <p className="text-muted-foreground text-xs">
-            An order can be changed while it is a draft. Once it is marked sent, raise a new one
-            instead — the supplier is holding the old paper.
+            An order can be changed until the first delivery arrives against it. Change one the
+            supplier already has, and send them the new print — they are working from the old paper
+            until you do.
           </p>
         </div>
       </div>
@@ -1102,7 +1072,16 @@ export default function PurchaseOrdersPage() {
         open={dialog.open}
         record={dialog.record}
         onClose={() => setDialog({ open: false, record: null })}
-        onSaved={() => void load()}
+        onSaved={() => {
+          // Correcting an order the supplier already holds makes their copy
+          // wrong, and nothing else in the system will tell them. This does.
+          if (dialog.record?.status === 'SENT') {
+            setMessage(
+              `${dialog.record.poNumber} has been changed. The supplier is holding the old paper — send them the new print.`
+            )
+          }
+          void load()
+        }}
       />
 
       {filesFor && (
