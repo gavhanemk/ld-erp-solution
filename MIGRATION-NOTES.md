@@ -11,7 +11,7 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 **Migration:** `20260922060000_supplier_payment_voucher_details`
 **Branch:** `fix/purchase`
-**Status: NOT YET APPLIED.** See "What you have to do" at the bottom.
+**Status: already applied to the shared database.** Nobody needs to apply it.
 
 ### What changes
 
@@ -79,9 +79,9 @@ That is the other team's applied work. **The answer is still no.** The SQL in
 the migration folder is the four columns, the two keys, the table and its
 indexes, and nothing else.
 
-### What you have to do
+### How it was applied
 
-**Apply it.** From `packages/database`:
+From `packages/database`, on 22 Sep 2026:
 
 ```bash
 npx prisma db execute --file prisma/migrations/20260922060000_supplier_payment_voucher_details/migration.sql --schema prisma/schema.prisma
@@ -98,28 +98,49 @@ Then, with the API stopped — Windows locks the Prisma engine file:
 pnpm db:generate
 ```
 
-Until the SQL is applied, **the Supplier Payments screen will not load** — the
-API reads `supplier_payments.warehouseId` and Postgres does not have it yet.
+Row counts taken immediately before and again immediately after — **identical
+on every table**:
+
+| Table | Before | After |
+|---|---|---|
+| `purchase_orders` | 4 | 4 |
+| `purchase_order_lines` | 6 | 6 |
+| `grn` | 2 | 2 |
+| `grn_lines` | 2 | 2 |
+| `purchase_invoices` | 1 | 1 |
+| `supplier_payments` | 0 | 0 |
+| `suppliers` | 17 | 17 |
+| `items` | 43 | 43 |
+| `stock_ledger` | 93 | 93 |
+| `users` | 5 | 5 |
+| `bom` | 5 | 5 |
+| `bom_lines` | 42 | 42 |
+| `bank_accounts` | 3 | 3 |
+| `warehouses` | 5 | 5 |
+
+The BOM tables the generated diff wanted to drop were checked afterwards and
+are all still there: `bom` (5), `bom_lines` (42), `bom_line_sizes` and `items.styleId`
+both intact.
+
+The route's own query was then run against the migrated database — the full
+`paymentInclude`, and the aggregate the bill-settling math depends on. Both
+returned cleanly.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+Without `db:generate` your Prisma client does not know the four columns exist
+and every read of `supplier_payments` fails with `The column
+supplier_payments.warehouseId does not exist` — which is exactly what the
+Supplier Payments screen showed between the code landing and the SQL running.
 Orders, receipts, bills, stock and the masters are unaffected.
-
-Row counts taken immediately before, to compare against afterwards:
-
-| Table | Before |
-|---|---|
-| `purchase_orders` | 4 |
-| `purchase_order_lines` | 6 |
-| `grn` | 2 |
-| `grn_lines` | 2 |
-| `purchase_invoices` | 1 |
-| `supplier_payments` | 0 |
-| `suppliers` | 17 |
-| `items` | 43 |
-| `stock_ledger` | 93 |
-| `users` | 5 |
-| `bom` | 5 |
-| `bom_lines` | 42 |
-| `bank_accounts` | 3 |
-| `warehouses` | 5 |
 
 ---
 
