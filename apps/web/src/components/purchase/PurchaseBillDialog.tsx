@@ -170,6 +170,12 @@ interface GrnOption {
     poNumber: string
     supplier?: { id: string; name: string; code?: string } | null
   } | null
+  /** What is still unbilled on this receipt. Sent by `/purchase/grn`. */
+  billing?: {
+    acceptedQty: number | string
+    billedQty: number | string
+    pendingQty: number | string
+  } | null
 }
 
 const emptyLine = (): BillLine => ({
@@ -194,15 +200,19 @@ export function PurchaseBillDialog({
   onClose,
   onSaved,
   record,
-  initialGrnId,
+  initialGrnIds,
 }: {
   open: boolean
   onClose: () => void
   onSaved: () => void
   record?: PurchaseBill | null
   /**
-   * A receipt to gather onto the bill the moment the form opens, for the
-   * "Book a bill for this" shortcut on the goods receipt screen.
+   * Receipts to gather onto the bill the moment the form opens, for the
+   * "Add bill" and "Bill together" shortcuts on the goods receipt screen.
+   *
+   * A list rather than one, because a supplier routinely sends one invoice
+   * for a week of deliveries — which is exactly what the receipts screen
+   * lets somebody tick off and send here.
    *
    * The old ERP put an "Add Bill From GRN" button beside every receipt, which
    * is how the accounts team thinks about it — the receipt is on the desk and
@@ -210,7 +220,7 @@ export function PurchaseBillDialog({
    * pressing Book Bill, picking the supplier and then finding the receipt is
    * four steps to arrive where the button already was.
    */
-  initialGrnId?: string | null
+  initialGrnIds?: string[] | null
 }) {
   const isEdit = Boolean(record)
 
@@ -236,7 +246,6 @@ export function PurchaseBillDialog({
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
 
-  const [pullGrnId, setPullGrnId] = useState('')
   const [pulling, setPulling] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -277,7 +286,6 @@ export function PurchaseBillDialog({
         gstRate: String(c.gstRate ?? ''),
       })) ?? [],
     )
-    setPullGrnId('')
     setError(null)
   }, [open, record])
 
@@ -290,29 +298,45 @@ export function PurchaseBillDialog({
    * the same receipt twice, which the form would rightly refuse as a
    * duplicate.
    */
+  /*
+   * What is on the bill, readable without waiting for a render.
+   *
+   * Gathering several receipts in one go calls the puller in a loop, and
+   * every call in that loop closes over the same render's `lines` and
+   * `supplierId`. The second receipt would therefore be checked against a
+   * bill it could not see the first one on — no duplicate caught, no
+   * supplier compared. These carry the running truth instead.
+   */
+  const linesRef = useRef(lines)
+  const supplierIdRef = useRef(supplierId)
+  useEffect(() => {
+    linesRef.current = lines
+  }, [lines])
+  useEffect(() => {
+    supplierIdRef.current = supplierId
+  }, [supplierId])
+
   const autoPulled = useRef<string | null>(null)
   useEffect(() => {
-    if (!open || record || !initialGrnId) return
-    if (autoPulled.current === initialGrnId) return
+    if (!open || record || !initialGrnIds?.length) return
+    // Keyed on the ids themselves, so a parent handing over a freshly built
+    // array on every render does not gather the same receipts again.
+    const key = initialGrnIds.join(',')
+    if (autoPulled.current === key) return
     if (!grns.length) return
 
-    autoPulled.current = initialGrnId
-    setPullGrnId(initialGrnId)
-  }, [open, record, initialGrnId, grns])
+    autoPulled.current = key
+    // One after another rather than all at once: each receipt has to be
+    // checked against the bill the one before it built.
+    void (async () => {
+      for (const id of initialGrnIds) await pullFromGrn(id)
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, record, initialGrnIds, grns])
 
   useEffect(() => {
     if (!open) autoPulled.current = null
   }, [open])
-
-  // Separated from setting the id above so the pull runs with `pullGrnId`
-  // already committed — `pullFromGrn` reads it rather than taking an argument.
-  useEffect(() => {
-    if (!open || record || !initialGrnId) return
-    if (pullGrnId !== initialGrnId) return
-    if (lines.some((l) => l.grnLineId)) return
-    void pullFromGrn()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pullGrnId])
 
   useEffect(() => {
     if (!open) return
@@ -362,26 +386,6 @@ export function PurchaseBillDialog({
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
 
-  /*
-   * Receipts worth offering: this supplier's, not cancelled, and not already
-   * gathered onto this bill.
-   *
-   * The last of those was missing, and it made the picker read as broken.
-   * A receipt already on the bill stayed in the list, so somebody looking for
-   * a second delivery to add saw the one they had just added, picked it, and
-   * was told it was already there. Where a supplier has only the one receipt,
-   * the list then looked full and behaved empty.
-   */
-  const pullable = useMemo(() => {
-    const already = new Set(lines.map((l) => l.grnNumber).filter(Boolean))
-    return grns.filter(
-      (g) =>
-        g.status !== 'CANCELLED' &&
-        !already.has(g.grnNumber) &&
-        (!supplierId || g.po?.supplier?.id === supplierId),
-    )
-  }, [grns, supplierId, lines])
-
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
    *
@@ -393,6 +397,49 @@ export function PurchaseBillDialog({
     () => [...new Set(lines.map((l) => l.grnNumber).filter(Boolean))] as string[],
     [lines],
   )
+
+  const billedSet = useMemo(() => new Set(billedReceipts), [billedReceipts])
+
+  /**
+   * Every delivery this bill could be for — the ones already on it first,
+   * then the rest still waiting.
+   *
+   * A dropdown picked one at a time hid the thing that matters most here: a
+   * supplier's single invoice routinely covers a week of deliveries. Nobody
+   * was told that, so everybody assumed one bill meant one delivery and rang
+   * to ask. A list you tick says it without a word.
+   */
+  const receiptChoices = useMemo(() => {
+    const mine = grns.filter(
+      (g) =>
+        g.status !== 'CANCELLED' &&
+        (billedSet.has(g.grnNumber) ||
+          ((!supplierId || g.po?.supplier?.id === supplierId) &&
+            // Nothing left to bill is nothing to offer — ticking it only ever
+            // produced "already billed".
+            (g.billing == null || Number(g.billing.pendingQty) > 0)))
+    )
+    return [...mine].sort(
+      (a, b) =>
+        Number(billedSet.has(b.grnNumber)) - Number(billedSet.has(a.grnNumber)) ||
+        a.grnNumber.localeCompare(b.grnNumber)
+    )
+  }, [grns, supplierId, billedSet])
+
+  /**
+   * Takes a delivery back off the bill, and the lines it brought with it.
+   *
+   * Untickable matters as much as tickable: somebody who ticks the wrong
+   * delivery should not have to close the form and start again.
+   */
+  const dropReceipt = (grnNumber: string) => {
+    setLines((prev) => {
+      const kept = prev.filter((l) => l.grnNumber !== grnNumber)
+      const next = kept.length ? kept : [emptyLine()]
+      linesRef.current = next
+      return next
+    })
+  }
 
   const taxMode = !supplier
     ? null
@@ -488,8 +535,8 @@ export function PurchaseBillDialog({
    * bill is somebody's demand for money and it comes from one of them. And a
    * receipt already on this bill, which would double the quantity.
    */
-  const pullFromGrn = async () => {
-    if (!pullGrnId) return
+  const pullFromGrn = async (grnId: string) => {
+    if (!grnId) return
     setPulling(true)
     setError(null)
     try {
@@ -508,7 +555,7 @@ export function PurchaseBillDialog({
             gstRate: number
           }>
         }
-      }>(`/purchase/bills/match/${pullGrnId}`)
+      }>(`/purchase/bills/match/${grnId}`)
 
       const d = res.data
       const open = d.lines.filter((l) => l.pendingQty > 0)
@@ -520,9 +567,9 @@ export function PurchaseBillDialog({
         return
       }
 
-      const existing = lines.filter((l) => l.grnLineId)
+      const existing = linesRef.current.filter((l) => l.grnLineId)
 
-      if (existing.length && supplierId && supplierId !== d.po.supplier.id) {
+      if (existing.length && supplierIdRef.current && supplierIdRef.current !== d.po.supplier.id) {
         setError(
           `${d.grn.grnNumber} is from a different supplier. One bill is one supplier's demand for money — start a separate bill for it.`,
         )
@@ -537,6 +584,7 @@ export function PurchaseBillDialog({
         return
       }
 
+      supplierIdRef.current = d.po.supplier.id
       setSupplierId(d.po.supplier.id)
 
       /*
@@ -571,12 +619,11 @@ export function PurchaseBillDialog({
        */
       setLines((prev) => {
         const keep = prev.filter((l) => l.grnLineId || l.itemId)
-        return [...keep, ...pulled]
+        const next = [...keep, ...pulled]
+        linesRef.current = next
+        return next
       })
 
-      // Cleared so the next receipt is a deliberate choice rather than a
-      // second press of the same one.
-      setPullGrnId('')
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not read that goods receipt.')
     } finally {
@@ -740,56 +787,82 @@ export function PurchaseBillDialog({
           )}
 
           {!isEdit && (
-            <Section icon={Download} title="Start from a goods receipt">
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="flex-1 min-w-[240px]">
-                  {/* Only once the bill has receipts on it does this box say
-                    something the panel's own heading does not. Before that the
-                    two would read the same thing twice over. */}
-                  {billedReceipts.length > 0 && (
-                    <label className="form-label" htmlFor="bill-grn">
-                      Add another goods receipt
-                    </label>
+            <Section icon={Download} title="Which deliveries is this bill for?">
+              {receiptChoices.length === 0 ? (
+                <p className="border-border bg-secondary/60 text-muted-foreground flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
+                  <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
+                  {supplierId
+                    ? 'This supplier has nothing waiting to be billed. Type the bill by hand below.'
+                    : 'No deliveries are waiting to be billed. Type the bill by hand below, or receive the goods first.'}
+                </p>
+              ) : (
+                <>
+                  <p className="text-muted-foreground mb-2 text-xs">
+                    Tick every delivery this invoice covers — one bill can settle as many as the
+                    supplier sent. Ticking brings across what was accepted at the gate and the rate
+                    that was ordered.
+                  </p>
+                  <div className="grid gap-1.5 sm:grid-cols-2">
+                    {receiptChoices.map((g) => {
+                      const on = billedSet.has(g.grnNumber)
+                      const left = Number(g.billing?.pendingQty ?? 0)
+                      return (
+                        <label
+                          key={g.id}
+                          className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs transition ${
+                            on
+                              ? 'border-primary/40 bg-primary/10'
+                              : 'border-border bg-secondary/40 hover:border-primary/40'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="accent-primary size-3.5 shrink-0"
+                            checked={on}
+                            disabled={pulling}
+                            onChange={() => {
+                              if (on) dropReceipt(g.grnNumber)
+                              else void pullFromGrn(g.id)
+                            }}
+                          />
+                          <span className="min-w-0 flex-1 leading-tight">
+                            <span className="text-foreground font-mono">{g.grnNumber}</span>
+                            {g.po && (
+                              <span className="text-muted-foreground"> · {g.po.poNumber}</span>
+                            )}
+                            {/* Until a supplier is settled the list spans all
+                              of them, and a receipt number alone says nothing
+                              about whose delivery it was. */}
+                            {!supplierId && g.po?.supplier?.name && (
+                              <span className="text-muted-foreground block truncate">
+                                {g.po.supplier.name}
+                              </span>
+                            )}
+                          </span>
+                          {left > 0 && (
+                            <span className="text-muted-foreground shrink-0 tabular-nums">
+                              {left.toLocaleString('en-IN')} to bill
+                            </span>
+                          )}
+                        </label>
+                      )
+                    })}
+                  </div>
+                  {pulling && (
+                    <p className="text-muted-foreground mt-2 flex items-center gap-1.5 text-xs">
+                      <Loader2 size={12} className="animate-spin" />
+                      Reading the delivery...
+                    </p>
                   )}
-                  <select
-                    id="bill-grn"
-                    className="form-input"
-                    value={pullGrnId}
-                    onChange={(e) => setPullGrnId(e.target.value)}
-                  >
-                    <option value="">Type the bill by hand instead</option>
-                    {pullable.map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.grnNumber}
-                        {g.po ? ` — ${g.po.poNumber}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => void pullFromGrn()}
-                  disabled={!pullGrnId || pulling}
-                >
-                  {pulling ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                  {billedReceipts.length ? 'Add lines' : 'Pull lines'}
-                </button>
-              </div>
-              {/* A tinted strip with a mark on it, not a line of grey under
-                the box. This sentence is the running record of which
-                deliveries are on the bill, and somebody gathering a week of
-                them looks at it repeatedly — it has to be findable. */}
-              <p className="border-border bg-secondary/60 text-muted-foreground mt-2 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
-                <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
-                {billedReceipts.length > 0 && pullable.length === 0
-                  ? `On this bill: ${billedReceipts.join(', ')}. That is every receipt this supplier has waiting — add more lines by hand if their invoice covers anything else.`
-                  : billedReceipts.length
-                    ? `On this bill: ${billedReceipts.join(', ')}. Pick another to add it — one bill can settle as many deliveries as the supplier invoiced together.`
-                    : pullable.length === 0
-                      ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
-                      : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
-              </p>
+                  {billedReceipts.length > 0 && (
+                    <p className="border-border bg-secondary/60 text-muted-foreground mt-2 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
+                      <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
+                      On this bill: {billedReceipts.join(', ')}. The quantities and rates below came
+                      from the gate — change them only where the supplier&apos;s invoice differs.
+                    </p>
+                  )}
+                </>
+              )}
             </Section>
           )}
 

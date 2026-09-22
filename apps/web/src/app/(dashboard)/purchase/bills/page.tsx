@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, Suspense, useCallback, useEffect, useState } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import {
@@ -102,6 +102,15 @@ function PurchaseBillsTable() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const fromGrn = searchParams.get('fromGrn')
+  /**
+   * One receipt, or several separated by commas.
+   *
+   * A row's own "Add bill" sends one. "Bill together" on the receipts screen
+   * sends the whole ticked set, because a supplier's one invoice routinely
+   * covers a week of deliveries. Memoised because the dialog gathers on the
+   * identity of this array, and a fresh one every render would gather twice.
+   */
+  const fromGrnIds = useMemo(() => (fromGrn ? fromGrn.split(',').filter(Boolean) : null), [fromGrn])
 
   useEffect(() => {
     if (fromGrn) setDialog({ open: true, record: null })
@@ -683,7 +692,7 @@ function PurchaseBillsTable() {
       <PurchaseBillDialog
         open={dialog.open}
         record={dialog.record}
-        initialGrnId={fromGrn}
+        initialGrnIds={fromGrnIds}
         onClose={() => {
           setDialog({ open: false, record: null })
           // The receipt has been dealt with one way or another; leaving it in
