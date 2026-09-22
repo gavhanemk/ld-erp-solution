@@ -55,6 +55,16 @@ export const billLineSchema = z.object({
   unitPrice: rate,
   discount: percent('Discount').optional(),
   gstRate: percent('GST rate').optional(),
+  /**
+   * What to do when the supplier has billed a different rate than the order
+   * agreed. Required only on a line where the two actually differ — an
+   * ordinary line never carries it.
+   *
+   * `ACCEPT` books the supplier's rate, and the bill needs a reason saying
+   * why it was agreed. `DEBIT_NOTE` books the order's rate and raises a draft
+   * debit note to the supplier for the difference.
+   */
+  rateAction: z.enum(['ACCEPT', 'DEBIT_NOTE']).optional().nullable(),
 })
 
 /**
@@ -71,9 +81,30 @@ export const billChargeSchema = z.object({
 const billBase = z.object({
   supplierId: id('a supplier'),
   poId: z.string().optional().nullable(),
-  /** The number printed on the supplier's own invoice. */
-  supplierInvoiceNo: z.string().max(50).optional().nullable(),
-  supplierInvoiceDate: z.coerce.date().optional().nullable(),
+  /*
+   * The number and date printed on the supplier's own invoice.
+   *
+   * Both required. A bill is only ever booked once their invoice is on the
+   * desk — that is the document being entered, and this is its identity.
+   * They were optional while nobody had said otherwise, which let a bill be
+   * saved with no way to tie it back to the supplier's paper.
+   *
+   * It is also what makes the duplicate guard bite. The unique index on
+   * (supplier, invoice number) cannot catch a second booking of the same
+   * invoice while the number is allowed to be blank, because Postgres treats
+   * every NULL as distinct from every other.
+   */
+  supplierInvoiceNo: z
+    .string({ required_error: "Put the supplier's bill number in" })
+    .trim()
+    .min(1, "Put the supplier's bill number in")
+    .max(50, 'That bill number is too long'),
+  // An error map rather than required_error: `coerce.date` turns a missing
+  // value into an Invalid Date before the required check ever runs, so it
+  // fails as "Invalid date" — which tells a clerk nothing about which box.
+  supplierInvoiceDate: z.coerce.date({
+    errorMap: () => ({ message: 'Put the date on the supplier’s bill' }),
+  }),
   billDate: z.coerce.date().optional(),
   dueDate: z.coerce.date().optional().nullable(),
   discountAmount: money.optional(),
@@ -87,6 +118,12 @@ const billBase = z.object({
   tdsSection: z.string().max(20).optional().nullable(),
   tdsRate: percent('TDS rate').optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
+  /**
+   * Why a rate higher than the order was agreed to. Asked for once per bill
+   * rather than per line, because a supplier who raised their price raised it
+   * for one reason and typing it four times helps nobody.
+   */
+  rateVarianceReason: z.string().max(300).optional().nullable(),
   lines: z.array(billLineSchema).min(1, 'A bill needs at least one line'),
   charges: z.array(billChargeSchema).optional(),
 })

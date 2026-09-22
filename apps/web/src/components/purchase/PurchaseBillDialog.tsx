@@ -1,8 +1,27 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import { X, Loader2, AlertCircle, Plus, Trash2, Download, TriangleAlert } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  X,
+  Loader2,
+  AlertCircle,
+  Plus,
+  Trash2,
+  Download,
+  TriangleAlert,
+  Receipt,
+  Info,
+  FileText,
+  Package,
+  Percent,
+  MessageSquare,
+  Calculator,
+} from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+// The same panel the order and receipt forms are built from, so all three
+// read as one module rather than three people's ideas of a form.
+import { Section } from '@/components/purchase/PurchaseOrderDialog'
 
 export interface BillLine {
   itemId: string
@@ -16,6 +35,12 @@ export interface BillLine {
   acceptedQty?: number
   pendingQty?: number
   orderedRate?: number
+  /**
+   * What to do about a rate that does not match the order. Only ever set on a
+   * line where the two actually differ; the API refuses the bill until every
+   * such line carries one.
+   */
+  rateAction?: 'ACCEPT' | 'DEBIT_NOTE' | null
   grnNumber?: string
 }
 
@@ -23,6 +48,15 @@ export interface BillCharge {
   chargeTypeId: string
   amount: number | string
   gstRate: number | string
+}
+
+/** A file hanging off an order or a receipt. The bill itself holds none. */
+export interface BillAttachment {
+  id: string
+  fileName: string
+  mimeType: string | null
+  sizeBytes: number
+  createdAt: string
 }
 
 export interface PurchaseBill {
@@ -51,9 +85,55 @@ export interface PurchaseBill {
   status: string
   notes: string | null
   supplier?: { id: string; name: string; code: string; gstin: string | null; stateCode: string | null; isMsme?: boolean; creditDays?: number }
-  po?: { id: string; poNumber: string } | null
-  lines?: Array<BillLine & { id: string; grnLine?: { id: string; acceptedQty: string; grn: { grnNumber: string } } | null }>
-  charges?: Array<BillCharge & { id: string }>
+  po?: { id: string; poNumber: string; attachments?: BillAttachment[] } | null
+  createdBy?: { id: string; name: string } | null
+  createdAt?: string
+  lines?: Array<
+    BillLine & {
+      id: string
+      item?: { id: string; code: string; name: string; hsnCode: string | null; uom?: { symbol: string } | null }
+      hsnCode?: string | null
+      taxableValue?: string | number
+      cgst?: string | number
+      sgst?: string | number
+      igst?: string | number
+      amount?: string | number
+      grnLine?: {
+        id: string
+        acceptedQty: string
+        unitRate?: string | number
+        grn: { id: string; grnNumber: string; attachments?: BillAttachment[] }
+      } | null
+    }
+  >
+  charges?: Array<
+    BillCharge & {
+      id: string
+      chargeType?: { id: string; name: string } | null
+      cgst?: string | number
+      sgst?: string | number
+      igst?: string | number
+    }
+  >
+  payments?: Array<{
+    id: string
+    paymentNumber: string
+    paymentDate: string
+    amount: string | number
+    mode: string
+    referenceNo: string | null
+    chequeDate: string | null
+    createdBy?: { id: string; name: string } | null
+  }>
+  debitNotes?: Array<{
+    id: string
+    noteNumber: string
+    noteDate: string
+    reason: string | null
+    subtotal: string | number
+    totalAmount: string | number
+    status: string
+  }>
 }
 
 interface Option {
@@ -76,7 +156,20 @@ interface GrnOption {
   id: string
   grnNumber: string
   status: string
-  po?: { poNumber: string; supplierId: string } | null
+  /**
+   * Shaped exactly as `/purchase/grn` returns it — the supplier arrives
+   * nested inside the order, not flattened onto it.
+   *
+   * This was written as `supplierId` once, which is not a field the API has
+   * ever sent. Nothing failed loudly: the filter below read `undefined`,
+   * compared it against the chosen supplier, and quietly offered no receipts
+   * at all, so a bill could never be started from one.
+   */
+  po?: {
+    id: string
+    poNumber: string
+    supplier?: { id: string; name: string; code?: string } | null
+  } | null
 }
 
 const emptyLine = (): BillLine => ({
@@ -101,11 +194,23 @@ export function PurchaseBillDialog({
   onClose,
   onSaved,
   record,
+  initialGrnId,
 }: {
   open: boolean
   onClose: () => void
   onSaved: () => void
   record?: PurchaseBill | null
+  /**
+   * A receipt to gather onto the bill the moment the form opens, for the
+   * "Book a bill for this" shortcut on the goods receipt screen.
+   *
+   * The old ERP put an "Add Bill From GRN" button beside every receipt, which
+   * is how the accounts team thinks about it — the receipt is on the desk and
+   * the bill is raised against it. Reaching the same place by opening Bills,
+   * pressing Book Bill, picking the supplier and then finding the receipt is
+   * four steps to arrive where the button already was.
+   */
+  initialGrnId?: string | null
 }) {
   const isEdit = Boolean(record)
 
@@ -126,6 +231,8 @@ export function PurchaseBillDialog({
   const [tdsSection, setTdsSection] = useState('')
   const [tdsRate, setTdsRate] = useState('')
   const [notes, setNotes] = useState('')
+  /** Why a rate above the order was agreed. Asked for once, not per line. */
+  const [rateVarianceReason, setRateVarianceReason] = useState('')
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
 
@@ -147,6 +254,7 @@ export function PurchaseBillDialog({
     setTdsSection(record?.tdsSection ?? '')
     setTdsRate(num(record?.tdsRate) > 0 ? String(record?.tdsRate) : '')
     setNotes(record?.notes ?? '')
+    setRateVarianceReason('')
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
@@ -172,6 +280,39 @@ export function PurchaseBillDialog({
     setPullGrnId('')
     setError(null)
   }, [open, record])
+
+  /*
+   * Gathers the receipt the shortcut arrived with, once and once only.
+   *
+   * Waits for the receipt list to load, because the picker below is driven by
+   * it and a bill that filled itself in while the box beside it still read
+   * "choose a receipt" would look broken. The ref stops a re-render pulling
+   * the same receipt twice, which the form would rightly refuse as a
+   * duplicate.
+   */
+  const autoPulled = useRef<string | null>(null)
+  useEffect(() => {
+    if (!open || record || !initialGrnId) return
+    if (autoPulled.current === initialGrnId) return
+    if (!grns.length) return
+
+    autoPulled.current = initialGrnId
+    setPullGrnId(initialGrnId)
+  }, [open, record, initialGrnId, grns])
+
+  useEffect(() => {
+    if (!open) autoPulled.current = null
+  }, [open])
+
+  // Separated from setting the id above so the pull runs with `pullGrnId`
+  // already committed — `pullFromGrn` reads it rather than taking an argument.
+  useEffect(() => {
+    if (!open || record || !initialGrnId) return
+    if (pullGrnId !== initialGrnId) return
+    if (lines.some((l) => l.grnLineId)) return
+    void pullFromGrn()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pullGrnId])
 
   useEffect(() => {
     if (!open) return
@@ -221,16 +362,25 @@ export function PurchaseBillDialog({
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
 
-  // Receipts worth offering: this supplier's, and not cancelled. A cancelled
-  // receipt is refused by the API anyway, so offering it would only waste a
-  // save.
-  const pullable = useMemo(
-    () =>
-      grns.filter(
-        (g) => g.status !== 'CANCELLED' && (!supplierId || g.po?.supplierId === supplierId),
-      ),
-    [grns, supplierId],
-  )
+  /*
+   * Receipts worth offering: this supplier's, not cancelled, and not already
+   * gathered onto this bill.
+   *
+   * The last of those was missing, and it made the picker read as broken.
+   * A receipt already on the bill stayed in the list, so somebody looking for
+   * a second delivery to add saw the one they had just added, picked it, and
+   * was told it was already there. Where a supplier has only the one receipt,
+   * the list then looked full and behaved empty.
+   */
+  const pullable = useMemo(() => {
+    const already = new Set(lines.map((l) => l.grnNumber).filter(Boolean))
+    return grns.filter(
+      (g) =>
+        g.status !== 'CANCELLED' &&
+        !already.has(g.grnNumber) &&
+        (!supplierId || g.po?.supplier?.id === supplierId),
+    )
+  }, [grns, supplierId, lines])
 
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
@@ -295,6 +445,16 @@ export function PurchaseBillDialog({
 
   const setLine = (index: number, patch: Partial<BillLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
+
+  /**
+   * Clears a rate decision the moment the rate it was made about changes.
+   *
+   * Somebody who picks "book at the order's rate" and then retypes the rate
+   * is answering a different question, and carrying the old answer forward
+   * would raise a debit note for a difference nobody is looking at any more.
+   */
+  const setLineRate = (index: number, unitPrice: string) =>
+    setLine(index, { unitPrice, rateAction: null })
 
   const pickItem = (index: number, itemId: string) => {
     const item = itemById.get(itemId)
@@ -432,8 +592,8 @@ export function PurchaseBillDialog({
     const payload = {
       supplierId,
       poId: poId || null,
-      supplierInvoiceNo: supplierInvoiceNo.trim() || null,
-      supplierInvoiceDate: supplierInvoiceDate || null,
+      supplierInvoiceNo: supplierInvoiceNo.trim(),
+      supplierInvoiceDate,
       billDate,
       dueDate: dueDate || null,
       discountAmount: num(discountAmount),
@@ -449,7 +609,9 @@ export function PurchaseBillDialog({
         unitPrice: num(l.unitPrice),
         discount: num(l.discount),
         gstRate: num(l.gstRate),
+        rateAction: l.rateAction ?? null,
       })),
+      rateVarianceReason: rateVarianceReason.trim() || null,
       charges: charges
         .filter((c) => c.chargeTypeId && num(c.amount) > 0)
         .map((c) => ({
@@ -474,36 +636,102 @@ export function PurchaseBillDialog({
     }
   }
 
-  const incomplete = !supplierId || lines.some((l) => !l.itemId || num(l.qty) <= 0)
-
-  // Differences worth a word before saving. Neither blocks the save: a rate can
-  // legitimately change, and the API refuses the one case that must not pass —
-  // billing more than was accepted.
+  // Over-billing is shown but not blocked here — the API refuses it, and its
+  // message says exactly how much is left on which receipt. A rate mismatch
+  // does block, because the answer is a choice only a person can make.
   const overBilled = lines.filter((l) => l.pendingQty != null && num(l.qty) > l.pendingQty)
   const rateDrift = lines.filter(
     (l) => l.orderedRate != null && Math.abs(num(l.unitPrice) - l.orderedRate) > 0.005,
   )
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div className="glass-card w-full max-w-6xl my-auto" role="dialog" aria-modal="true">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <div>
-            <h2 className="text-lg font-semibold text-foreground">
-              {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
-            </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {isEdit
-                ? 'A bill can be changed until a payment is made against it'
-                : 'Our reference number is given when you save. Type the supplier’s own number below.'}
-            </p>
+  /** Every mismatch has to be answered — the API refuses the bill otherwise. */
+  const undecidedRates = rateDrift.filter((l) => !l.rateAction)
+
+  /**
+   * A reason is owed only for agreeing to pay *more*. Accepting a rate below
+   * the order costs the mill nothing and needs no explaining.
+   */
+  const needsRateReason = rateDrift.some(
+    (l) => l.rateAction === 'ACCEPT' && num(l.unitPrice) - (l.orderedRate ?? 0) > 0.005,
+  )
+
+  const incomplete =
+    !supplierId ||
+    // The supplier's invoice is on the desk when a bill is booked, so its
+    // number and date are part of the document rather than optional extras.
+    !supplierInvoiceNo.trim() ||
+    !supplierInvoiceDate ||
+    lines.some((l) => !l.itemId || num(l.qty) <= 0) ||
+    undecidedRates.length > 0 ||
+    (needsRateReason && !rateVarianceReason.trim())
+
+  /*
+   * Rendered on `document.body`, as the order and receipt dialogs already are.
+   *
+   * Left in the page it sat 32px from the top and 12px from the bottom, and no
+   * amount of centring fixed it: an ancestor in the dashboard shell carries a
+   * `backdrop-filter`, and that makes it the containing block for anything
+   * `position: fixed` inside it. So `inset-0` was measuring from the top bar
+   * rather than from the window, and the strip of page showing above the form
+   * was the top bar's own height leaking through.
+   */
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      {/* `h-full`, not a cap — see PurchaseOrderDialog for why: a cap only
+        says how tall the card may not be, so a form shorter than the screen
+        hugs its content and the leftover is split above and below as
+        centring slack, which is the whitespace that used to show over the
+        top of this one. Filling the height makes the margin the padding and
+        nothing else. */}
+      <div
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bill-dialog-title"
+      >
+        {/* Header — stays put while the body scrolls. */}
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
+          <div className="flex items-center gap-2.5">
+            <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
+              <Receipt size={16} className="text-primary" />
+            </div>
+            <div>
+              <h2 id="bill-dialog-title" className="text-foreground text-base font-semibold">
+                {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
+              </h2>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                {isEdit
+                  ? 'A bill can be changed until a payment is made against it'
+                  : 'Our reference number is given when you save. Type the supplier’s own number below.'}
+              </p>
+            </div>
           </div>
-          <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
-            <X size={18} />
-          </button>
+          {/* The primary action sits in the header as well as the footer, as
+            it does on the order and receipt forms. On a long form the footer
+            is a scroll away from wherever somebody happens to be. */}
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="submit"
+              form="bill-form"
+              className="btn-primary"
+              disabled={saving || incomplete}
+            >
+              {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
+              {isEdit ? 'Save changes' : 'Book bill'}
+            </button>
+            <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
-        <form onSubmit={submit} className="px-6 py-5 space-y-5">
+        <form id="bill-form" onSubmit={submit} className="flex flex-1 flex-col overflow-hidden">
+          {/* The same rhythm as the goods receipt and purchase order forms:
+            px-4 py-2.5 and a tight gap between blocks. This was px-6 py-5 with
+            space-y-5, which on a form this tall reads as a different app —
+            twice the air of every other dialog, and a band of nothing under
+            the header before anything to fill in. */}
+          <div className="flex-1 space-y-2.5 overflow-y-auto px-4 py-2.5">
           {error && (
             <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
               <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
@@ -512,12 +740,17 @@ export function PurchaseBillDialog({
           )}
 
           {!isEdit && (
-            <div className="rounded-lg border border-border bg-secondary/30 p-3">
+            <Section icon={Download} title="Start from a goods receipt">
               <div className="flex flex-wrap items-end gap-3">
                 <div className="flex-1 min-w-[240px]">
-                  <label className="form-label" htmlFor="bill-grn">
-                    {billedReceipts.length ? 'Add another goods receipt' : 'Start from a goods receipt'}
-                  </label>
+                  {/* Only once the bill has receipts on it does this box say
+                    something the panel's own heading does not. Before that the
+                    two would read the same thing twice over. */}
+                  {billedReceipts.length > 0 && (
+                    <label className="form-label" htmlFor="bill-grn">
+                      Add another goods receipt
+                    </label>
+                  )}
                   <select
                     id="bill-grn"
                     className="form-input"
@@ -543,17 +776,25 @@ export function PurchaseBillDialog({
                   {billedReceipts.length ? 'Add lines' : 'Pull lines'}
                 </button>
               </div>
-              <p className="text-xs text-muted-foreground mt-2">
-                {pullable.length === 0
-                  ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
+              {/* A tinted strip with a mark on it, not a line of grey under
+                the box. This sentence is the running record of which
+                deliveries are on the bill, and somebody gathering a week of
+                them looks at it repeatedly — it has to be findable. */}
+              <p className="border-border bg-secondary/60 text-muted-foreground mt-2 flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
+                <Info size={13} className="mt-0.5 shrink-0 opacity-70" />
+                {billedReceipts.length > 0 && pullable.length === 0
+                  ? `On this bill: ${billedReceipts.join(', ')}. That is every receipt this supplier has waiting — add more lines by hand if their invoice covers anything else.`
                   : billedReceipts.length
-                    ? `On this bill: ${billedReceipts.join(', ')}. Pick another receipt to add it — one bill can settle as many deliveries as the supplier invoiced together.`
-                    : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
+                    ? `On this bill: ${billedReceipts.join(', ')}. Pick another to add it — one bill can settle as many deliveries as the supplier invoiced together.`
+                    : pullable.length === 0
+                      ? 'No receipts are waiting to be billed. Book the bill by hand, or receive the goods first.'
+                      : 'Brings across what was accepted at the gate and the rate that was ordered, so the bill can be checked against it. You can add more than one receipt.'}
               </p>
-            </div>
+            </Section>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <Section icon={FileText} title="The bill">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-2.5">
             <div className="md:col-span-2">
               <label className="form-label" htmlFor="bill-supplier">
                 Supplier<span className="text-red-400 ml-0.5">*</span>
@@ -588,8 +829,11 @@ export function PurchaseBillDialog({
             </div>
 
             <div>
+              {/* The bill is booked with their invoice on the desk, so this is
+                the document's own number rather than an afterthought. It is
+                also what stops the same invoice being booked twice. */}
               <label className="form-label" htmlFor="bill-supplier-no">
-                Supplier’s invoice no.
+                Bill no. <span className="text-muted-foreground">(theirs)</span>
               </label>
               <input
                 id="bill-supplier-no"
@@ -597,12 +841,21 @@ export function PurchaseBillDialog({
                 placeholder="As printed on their bill"
                 value={supplierInvoiceNo}
                 onChange={(e) => setSupplierInvoiceNo(e.target.value)}
+                required
               />
+              {/* A prompt, not an alarm. An empty box on a form nobody has
+                filled in yet has not gone wrong — it is simply not done, and
+                amber on first sight reads as a mistake already made. */}
+              {!supplierInvoiceNo.trim() && (
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Put the supplier’s bill number in
+                </span>
+              )}
             </div>
 
             <div>
               <label className="form-label" htmlFor="bill-supplier-date">
-                Their invoice date
+                Bill date
               </label>
               <input
                 id="bill-supplier-date"
@@ -610,7 +863,13 @@ export function PurchaseBillDialog({
                 className="form-input"
                 value={supplierInvoiceDate}
                 onChange={(e) => setSupplierInvoiceDate(e.target.value)}
+                required
               />
+              {!supplierInvoiceDate && (
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Put the date on their bill
+                </span>
+              )}
             </div>
 
             <div>
@@ -662,6 +921,7 @@ export function PurchaseBillDialog({
               </label>
             </div>
           </div>
+          </Section>
 
           {(overBilled.length > 0 || rateDrift.length > 0) && (
             <div className="flex items-start gap-3 p-3 rounded-lg border border-amber-500/40 bg-amber-500/5">
@@ -673,22 +933,112 @@ export function PurchaseBillDialog({
                     {l.pendingQty} is left to bill on {l.grnNumber}. Saving this will be refused.
                   </p>
                 ))}
-                {rateDrift.map((l, i) => (
-                  <p key={`r${i}`}>
-                    {itemById.get(l.itemId)?.name ?? 'A line'}: billed at ₹{inr(num(l.unitPrice))} but
-                    ordered at ₹{inr(l.orderedRate!)}. Check this is agreed before you save.
-                  </p>
-                ))}
               </div>
             </div>
           )}
 
+          {/*
+            The rate half of the three-way match.
+
+            Quantity has always been checked against the receipt. The rate was
+            not, so a supplier could bill the goods that did arrive at any
+            price. Each mismatch now has to be answered before the bill saves:
+            take their rate, with a reason, or hold them to the order's and
+            claim the difference back.
+          */}
+          {rateDrift.length > 0 && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-3">
+              <div className="flex items-start gap-2">
+                <TriangleAlert size={15} className="mt-0.5 shrink-0 text-amber-400" />
+                <p className="text-sm text-amber-300">
+                  {rateDrift.length === 1
+                    ? 'One line is billed at a different rate than the order agreed.'
+                    : `${rateDrift.length} lines are billed at a different rate than the order agreed.`}{' '}
+                  Say what to do with each before saving.
+                </p>
+              </div>
+
+              {rateDrift.map((l) => {
+                const index = lines.indexOf(l)
+                const billed = num(l.unitPrice)
+                const ordered = l.orderedRate!
+                const diff = billed - ordered
+                const totalDiff = diff * num(l.qty)
+                const higher = diff > 0
+
+                return (
+                  <div
+                    key={`rv${index}`}
+                    className="rounded-md border border-border bg-secondary/40 p-2.5"
+                  >
+                    <p className="text-sm text-foreground">
+                      {itemById.get(l.itemId)?.name ?? 'A line'}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Order ₹{inr(ordered)} · billed ₹{inr(billed)} ·{' '}
+                      <span className={higher ? 'text-amber-400' : 'text-emerald-400'}>
+                        {higher ? '+' : ''}
+                        {inr(diff)} each, {higher ? '+' : ''}
+                        {inr(totalDiff)} on this line
+                      </span>
+                    </p>
+
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setLine(index, { rateAction: 'ACCEPT' })}
+                        className={`rounded-md border px-2.5 py-1.5 text-xs transition ${
+                          l.rateAction === 'ACCEPT'
+                            ? 'border-amber-500/60 bg-amber-500/15 text-amber-300'
+                            : 'border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        Accept ₹{inr(billed)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLine(index, { rateAction: 'DEBIT_NOTE' })}
+                        className={`rounded-md border px-2.5 py-1.5 text-xs transition ${
+                          l.rateAction === 'DEBIT_NOTE'
+                            ? 'border-teal-500/60 bg-teal-500/15 text-teal-300'
+                            : 'border-border text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {higher
+                          ? `Book ₹${inr(ordered)} and claim the difference`
+                          : `Book ₹${inr(ordered)}`}
+                      </button>
+                    </div>
+
+                    {l.rateAction === 'DEBIT_NOTE' && higher && (
+                      <p className="mt-1.5 text-[11px] text-muted-foreground">
+                        A debit note for ₹{inr(totalDiff)} plus tax is raised in draft. Nothing is
+                        sent to the supplier until somebody sends it.
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
+
+              {needsRateReason && (
+                <label className="block">
+                  <span className="form-label">Why the higher rate was agreed</span>
+                  <input
+                    className="form-input h-9"
+                    value={rateVarianceReason}
+                    onChange={(e) => setRateVarianceReason(e.target.value)}
+                    placeholder="e.g. yarn price rose, agreed with the supplier on the phone"
+                  />
+                </label>
+              )}
+            </div>
+          )}
+
           {/* Lines */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                What the supplier has charged for
-              </h3>
+          <Section
+            icon={Package}
+            title="What the supplier has charged for"
+            actions={
               <button
                 type="button"
                 onClick={() => setLines((p) => [...p, emptyLine()])}
@@ -696,18 +1046,18 @@ export function PurchaseBillDialog({
               >
                 <Plus size={14} /> Add line
               </button>
-            </div>
-
+            }
+          >
             <div className="overflow-x-auto border border-border rounded-lg">
               <table className="w-full text-sm min-w-[900px]">
                 <thead>
-                  <tr className="border-b border-border bg-secondary/40">
-                    {['Item', 'Against receipt', 'Qty', 'Rate', 'Disc %', 'GST %', 'Amount', ''].map(
+                  <tr className="border-b border-border bg-secondary/70">
+                    {['Item', 'Against receipt', 'Qty', 'Rate', 'Disc %', 'GST %', 'Amount (₹)', ''].map(
                       (h, i) => (
                         <th
                           key={h || i}
-                          className={`text-[10px] uppercase tracking-wider text-muted-foreground py-2 px-3 ${
-                            ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount'].includes(h)
+                          className={`text-[10px] uppercase tracking-wider font-semibold text-muted-foreground py-2 px-3 ${
+                            ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount (₹)'].includes(h)
                               ? 'text-right'
                               : 'text-left'
                           }`}
@@ -780,7 +1130,7 @@ export function PurchaseBillDialog({
                             min={0}
                             className="form-input h-9 text-right"
                             value={String(line.unitPrice)}
-                            onChange={(e) => setLine(i, { unitPrice: e.target.value })}
+                            onChange={(e) => setLineRate(i, e.target.value)}
                             aria-label={`Line ${i + 1} rate`}
                           />
                           {line.orderedRate != null && (
@@ -836,15 +1186,14 @@ export function PurchaseBillDialog({
                 </tbody>
               </table>
             </div>
-          </div>
+          </Section>
 
           {/* Charges — freight, transport, dyeing. Own GST rate each. */}
           {chargeTypes.length > 0 && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Extras at the foot of the bill
-                </h3>
+            <Section
+              icon={Percent}
+              title="Extras at the foot of the bill"
+              actions={
                 <button
                   type="button"
                   onClick={() =>
@@ -854,7 +1203,8 @@ export function PurchaseBillDialog({
                 >
                   <Plus size={14} /> Add charge
                 </button>
-              </div>
+              }
+            >
 
               {charges.length > 0 && (
                 <div className="border border-border rounded-lg divide-y divide-border/50">
@@ -936,13 +1286,13 @@ export function PurchaseBillDialog({
                   ))}
                 </div>
               )}
-            </div>
+            </Section>
           )}
 
-          {/* Totals, TDS and notes */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {/* What is typed on the left, what it comes to on the right. */}
+          <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
+            <Section icon={MessageSquare} title="Deducted at source, and anything worth noting">
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                 <div>
                   <label className="form-label" htmlFor="bill-tds-section">
                     TDS section
@@ -979,13 +1329,15 @@ export function PurchaseBillDialog({
                   id="bill-notes"
                   rows={3}
                   className="form-input"
+                  placeholder="Add any notes or remarks about this bill..."
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                 />
               </div>
-            </div>
+            </Section>
 
-            <div className="rounded-lg border border-border bg-secondary/30 p-4 space-y-2 text-sm h-fit">
+            <Section icon={Calculator} title="Totals">
+            <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
               <Row label="Goods subtotal" value={totals.subtotal} />
               <div className="flex items-center justify-between gap-4">
                 <label htmlFor="bill-discount" className="text-muted-foreground">
@@ -1052,9 +1404,13 @@ export function PurchaseBillDialog({
                 </>
               )}
             </div>
+            </Section>
           </div>
 
-          <div className="flex items-center justify-end gap-3 pt-3 border-t border-border">
+          </div>
+
+          {/* Footer — stays put, so Save is always one press away. */}
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
             <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
               Cancel
             </button>
@@ -1065,7 +1421,8 @@ export function PurchaseBillDialog({
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 

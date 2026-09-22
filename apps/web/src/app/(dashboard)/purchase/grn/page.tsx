@@ -1,6 +1,10 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
+import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
+import { FilesCell } from '@/components/tables/FilesCell'
+import { RowPanel } from '@/components/tables/RowPanel'
 import {
   Plus,
   Search,
@@ -11,12 +15,18 @@ import {
   ChevronRight,
   Printer,
   PackageCheck,
+  Pencil,
+  Trash2,
+  FileText,
+  ReceiptIndianRupee,
+  Paperclip,
 } from 'lucide-react'
-import Link from 'next/link'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
 import { Pagination } from '@/components/tables/Pagination'
-import { formatDate } from '@/lib/utils'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { formatDate, itemsPreview } from '@/lib/utils'
 
 /**
  * What has actually turned up against the purchase orders.
@@ -50,6 +60,33 @@ interface Receipt {
     supplier: { id: string; name: string } | null
   }
   lines: ReceiptLine[]
+  /** How many files were scanned onto the receipt — the challan, usually. */
+  _count?: { attachments: number }
+  challanNo?: string | null
+  challanDate?: string | null
+  gateEntryNo?: string | null
+  /**
+   * How much of what was accepted has been billed, worked out by the API so
+   * this screen and the bill form cannot disagree about what is still owed.
+   */
+  billing?: {
+    acceptedQty: number
+    billedQty: number
+    pendingQty: number
+    status: 'NOTHING_TO_BILL' | 'NOT_BILLED' | 'PARTLY_BILLED' | 'BILLED'
+  }
+  bills?: Array<{ id: string; billNumber: string }>
+}
+
+/** How the billing state of a receipt reads on the row. */
+function billStage(grn: Receipt): { label: string; cls: string } | null {
+  if (grn.status === 'CANCELLED') return null
+  const b = grn.billing
+  if (!b) return null
+  if (b.status === 'NOTHING_TO_BILL') return { label: 'Nothing to bill', cls: 'badge-neutral' }
+  if (b.status === 'BILLED') return { label: 'Billed', cls: 'badge-success' }
+  if (b.status === 'PARTLY_BILLED') return { label: 'Part billed', cls: 'badge-info' }
+  return { label: 'Bill pending', cls: 'badge-warning' }
 }
 
 /**
@@ -61,6 +98,24 @@ interface Receipt {
  * belongs to. A list of receipts already made answers a question they are not
  * asking, and on a system with nothing received yet it is simply blank.
  */
+interface WaitingLine {
+  id: string
+  qty: string | number
+  receivedQty: string | number
+  pendingQty: string | number
+  shortClosed: boolean
+  shortCloseReason: string | null
+  styleNo?: string | null
+  style?: { id: string; code: string; name: string } | null
+  item?: {
+    id: string
+    code: string
+    name: string
+    uom?: { symbol: string } | null
+    category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
+  } | null
+}
+
 interface WaitingOrder {
   id: string
   poNumber: string
@@ -69,16 +124,61 @@ interface WaitingOrder {
   reference: string | null
   totalAmount: string | number
   supplier?: { id: string; name: string } | null
-  lines?: Array<{
-    id: string
-    qty: string | number
-    receivedQty: string | number
-    item?: { id: string; code: string; name: string } | null
-  }>
+  lines?: WaitingLine[]
+  _count?: { attachments: number }
 }
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
+
+/**
+ * An order's lines added up by unit, not blindly added up together.
+ *
+ * A single-item order is one group and the sum is just its quantity. A
+ * multi-item order almost never shares one unit — metres of fabric next to
+ * pieces of button next to rolls of tape — and adding those raw numbers
+ * together produces a total that is not wrong so much as meaningless. Each
+ * unit gets its own running total instead, in the order its first line was
+ * seen, so Total/Received/Pending line up group-for-group across the row.
+ */
+function qtyByUnit(lines: WaitingLine[]) {
+  const groups = new Map<
+    string,
+    { unit: string; ordered: number; received: number; pending: number }
+  >()
+  for (const l of lines) {
+    const unit = l.item?.uom?.symbol ?? ''
+    const g = groups.get(unit) ?? { unit, ordered: 0, received: 0, pending: 0 }
+    g.ordered += Number(l.qty)
+    g.received += Number(l.receivedQty)
+    g.pending += Number(l.pendingQty)
+    groups.set(unit, g)
+  }
+  return [...groups.values()]
+}
+
+/** The columns of the panel that opens under a waiting order — the same shape as the order screen's own, so a line reads the same wherever it is looked at from. */
+const WAITING_COLS: Array<{ label: string; width: string; numeric?: boolean }> = [
+  { label: 'Item code', width: '10%' },
+  { label: 'Item', width: '22%' },
+  { label: 'Style no', width: '9%' },
+  { label: 'Category', width: '12%' },
+  { label: 'Subcategory', width: '12%' },
+  { label: 'Qty', width: '9%', numeric: true },
+  { label: 'Received qty', width: '10%', numeric: true },
+  { label: 'Pending qty', width: '16%', numeric: true },
+]
+
+/** One of the three qty columns, condensed the same way an item list is. */
+function qtyPreview(
+  groups: Array<{ unit: string; ordered: number; received: number; pending: number }>,
+  field: 'ordered' | 'received' | 'pending'
+): { shown: string; extra: string; full: string } {
+  const parts = groups.map((g) => `${qty(g[field])}${g.unit ? ` ${g.unit}` : ''}`)
+  const shown = parts.slice(0, 2).join(', ')
+  const extra = parts.length > 2 ? ` +${parts.length - 2} more` : ''
+  return { shown, extra, full: parts.join(', ') }
+}
 
 /** The word a store keeper would use, not the word in the database. */
 function stage(status: Receipt['status']): { label: string; cls: string } {
@@ -118,6 +218,16 @@ export default function GoodsReceiptPage() {
   const [page, setPage] = useState(1)
   const [open, setOpen] = useState<string | null>(null)
 
+  /** Which waiting order has its lines open — a store keeper checks one at a time. */
+  const [openOrder, setOpenOrder] = useState<string | null>(null)
+
+  /** A line being closed short or reopened — the reason box (if any) asks once both are known. */
+  const [lineConfirm, setLineConfirm] = useState<{
+    type: 'close' | 'reopen'
+    po: WaitingOrder
+    line: WaitingLine
+  } | null>(null)
+
   /**
    * The receiving form, and the order it should open on.
    *
@@ -125,6 +235,21 @@ export default function GoodsReceiptPage() {
    * is the plain "Receive goods" button with nothing chosen yet.
    */
   const [dialog, setDialog] = useState<string | null>(null)
+
+  /** The receipt being corrected, or null when the form above is closed. */
+  const [editGrnId, setEditGrnId] = useState<string | null>(null)
+  /** The receipt whose files are open, off the paperclip on its row. */
+  const [filesFor, setFilesFor] = useState<{
+    id: string
+    number: string
+    kind: 'order' | 'receipt'
+  } | null>(null)
+
+  /** Which receipt is being cancelled or deleted, and which — the reason box asks once both are known. */
+  const [confirmAction, setConfirmAction] = useState<{
+    type: 'cancel' | 'delete'
+    grn: Receipt
+  } | null>(null)
 
   /**
    * Which of the two lists is showing.
@@ -337,19 +462,15 @@ export default function GoodsReceiptPage() {
     setStatus('')
   }
 
-  const cancel = async (grn: Receipt) => {
-    const reason = prompt(
-      `Why is ${grn.grnNumber} being cancelled?\n\nThe stock it brought in will be taken back out.`
-    )
-    if (!reason || reason.trim().length < 5) return
-
+  const cancel = async (grn: Receipt, reason: string) => {
     setBusy(grn.id)
     setError(null)
     setMessage(null)
     try {
       const res = await api.patch<{ message?: string }>(`/purchase/grn/${grn.id}/cancel`, {
-        reason: reason.trim(),
+        reason,
       })
+      setConfirmAction(null)
       await load()
       // Cancelling hands the quantity back to the order, which can put it back
       // on the waiting list or move it off completed.
@@ -362,12 +483,132 @@ export default function GoodsReceiptPage() {
     }
   }
 
+  /*
+   * Removing a receipt for good, not the ordinary undo. If it is still live,
+   * the server reverses its stock first — refusing outright if any of that
+   * stock has already left the warehouse — so this can never delete a
+   * receipt while leaving its movement sitting unexplained on the ledger.
+   */
+  const remove = async (grn: Receipt, reason: string) => {
+    setBusy(grn.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.delete<{ message?: string }>(`/purchase/grn/${grn.id}`, { reason })
+      setConfirmAction(null)
+      await load()
+      void loadWaiting()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete it.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /*
+   * Tells one line that the rest of it is not coming, instead of leaving the
+   * order "Part received" forever waiting on a delivery that will not arrive.
+   * Reversible — `reopenLine` below undoes it — so this is a decision recorded
+   * with a reason, not a deletion.
+   */
+  const closeLineShort = async (po: WaitingOrder, line: WaitingLine, reason: string) => {
+    setBusy(line.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${line.id}/short-close`,
+        { reason }
+      )
+      setLineConfirm(null)
+      void loadWaiting()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not close that line.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const reopenLine = async (po: WaitingOrder, line: WaitingLine) => {
+    setBusy(line.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${line.id}/reopen`,
+        {}
+      )
+      setLineConfirm(null)
+      void loadWaiting()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reopen that line.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** What can be done to one receipt, in words, behind a single Actions button. */
+  const rowActions = (grn: Receipt): RowAction[] => {
+    const items: RowAction[] = [
+      {
+        key: 'view',
+        label: 'View / print',
+        icon: <Printer size={14} />,
+        href: `/print/goods-receipt/${grn.id}`,
+        newTab: true,
+      },
+    ]
+    if (grn.status !== 'CANCELLED') {
+      items.push(
+        {
+          // The old ERP's "Add Bill From GRN", in the same place: beside the
+          // receipt, where somebody holding the supplier's invoice is already
+          // looking. It opens the bill form with this receipt's lines already
+          // gathered, rather than making them find it from the other end.
+          key: 'bill',
+          label: 'Book a bill for this',
+          icon: <ReceiptIndianRupee size={14} />,
+          href: `/purchase/bills?fromGrn=${grn.id}`,
+        },
+        {
+          key: 'edit',
+          label: 'Correct this receipt',
+          icon: <Pencil size={14} />,
+          onClick: () => setEditGrnId(grn.id),
+        },
+        {
+          key: 'cancel',
+          label: 'Cancel',
+          icon: <Ban size={14} />,
+          onClick: () => setConfirmAction({ type: 'cancel', grn }),
+          danger: true,
+        }
+      )
+    }
+    items.push({
+      key: 'delete',
+      label: 'Delete for good',
+      icon: <Trash2 size={14} />,
+      onClick: () => setConfirmAction({ type: 'delete', grn }),
+      danger: true,
+    })
+    return items
+  }
+
   return (
     <div className="space-y-5">
       <div className="page-header flex-wrap gap-3">
         <div>
           <h1 className="page-title">Goods Receipt</h1>
-          <p className="page-subtitle">What has arrived against your purchase orders</p>
+          {/* Desk only. On a phone the screen is short and the heading
+            already says what this is — the sentence under it cost a line of
+            a list somebody is scrolling. */}
+          <p className="page-subtitle hidden sm:block">
+            What has arrived against your purchase orders
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -406,7 +647,18 @@ export default function GoodsReceiptPage() {
           arrives holding a challan and needs the order it is against, then
           wants to see the receipt they just made. In a box of its own above
           the list the first one read as a banner rather than as work. */}
-        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
+        {/* ── Rows on a phone, one flowing row at a desk ─────────────────
+
+          Five full-width controls stacked five deep took a third of a phone
+          screen before a single order showed. Grouped, they take two rows:
+          what you type and when, then the three things you pick.
+
+          The grouping wrappers are `sm:contents`, so above a phone they stop
+          existing and their children rejoin the one wrapping row they were
+          always in. That keeps a single set of controls rather than one set
+          per layout, which is how these bars end up disagreeing with
+          themselves. The same arrangement as the purchase order list. */}
+        <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
           {/* A pair of pills, not underlined tabs. They now sit in a row of
             controls, and a rule under one of them reads as a stray line rather
             than as the thing that is selected. */}
@@ -443,122 +695,140 @@ export default function GoodsReceiptPage() {
 
           <span className="bg-border hidden h-6 w-px shrink-0 lg:block" />
 
-          {/* One box for words, whichever list is showing. It reaches item
-            names and codes as well as the order and the supplier, so "poplin"
-            finds the order that has poplin on it. */}
-          <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[190px]">
-            <Search size={14} className="text-muted-foreground shrink-0" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder={
-                tab === 'waiting' ? 'Order, supplier, item...' : 'Receipt, order, supplier...'
-              }
-              value={tab === 'waiting' ? waitSearch : search}
-              onChange={(e) =>
-                tab === 'waiting' ? setWaitSearch(e.target.value) : setSearch(e.target.value)
-              }
-              aria-label="Search"
-            />
+          <div className="flex items-center gap-2 sm:contents">
+            {/* One box for words, whichever list is showing. It reaches item
+              names and codes as well as the order and the supplier, so
+              "poplin" finds the order that has poplin on it — which is what
+              the title says, because the placeholder no longer has room to.
+
+              The magnifying glass is a desk luxury: it costs 22px of a row
+              that already has two date boxes in it, and a box you type into
+              needs no icon to explain itself. */}
+            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+              <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder="Search..."
+                title={
+                  tab === 'waiting'
+                    ? 'Reaches the order, the supplier, and the items on it'
+                    : 'Reaches the receipt, the order, the supplier, and the items on it'
+                }
+                value={tab === 'waiting' ? waitSearch : search}
+                onChange={(e) =>
+                  tab === 'waiting' ? setWaitSearch(e.target.value) : setSearch(e.target.value)
+                }
+                aria-label="Search"
+              />
+            </div>
+
+            {/* Two dates, not a preset list. A mill asks "what came in between
+              the 3rd and the 11th" far more often than it asks for last month,
+              and either end on its own is a valid question: everything since
+              the 3rd, everything up to the 11th.
+
+              The word between them is a desk luxury too — on a phone the two
+              boxes sitting against each other say the same thing for 18px
+              less, and those 18px go to the box you type in. */}
+            <div className="flex shrink-0 items-center gap-1">
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="From date"
+              />
+              <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="To date"
+              />
+            </div>
           </div>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-32"
-            value={supplierId}
-            onChange={(e) => setSupplierId(e.target.value)}
-            aria-label="Filter by supplier"
-          >
-            <option value="">All suppliers</option>
-            {waitingSuppliers.map((sup) => (
-              <option key={sup.id} value={sup.id}>
-                {sup.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1 sm:contents">
+            <select
+              className="form-input h-8 min-w-0 grow basis-[6.6rem] px-1 py-0 text-[10px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
+            >
+              <option value="">All suppliers</option>
+              {waitingSuppliers.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
+                </option>
+              ))}
+            </select>
 
-          {/* Built from what is actually on order, not from the item master.
-            The mill has forty items today and will have four hundred; a list
-            of every one of them, most with nothing outstanding, is something
-            to scroll rather than a filter. */}
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-            value={itemId}
-            onChange={(e) => setItemId(e.target.value)}
-            aria-label="Filter by item"
-          >
-            <option value="">All items</option>
-            {waitingItems.map((it) => (
-              <option key={it.id} value={it.id}>
-                {it.name}
-              </option>
-            ))}
-          </select>
+            {/* Built from what is actually on order, not from the item master.
+              The mill has forty items today and will have four hundred; a list
+              of every one of them, most with nothing outstanding, is something
+              to scroll rather than a filter. */}
+            <select
+              className="form-input h-8 min-w-0 grow basis-[4.85rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={itemId}
+              onChange={(e) => setItemId(e.target.value)}
+              aria-label="Filter by item"
+            >
+              <option value="">All items</option>
+              {waitingItems.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.name}
+                </option>
+              ))}
+            </select>
 
-          {/* Two dates, not a preset list. A mill asks "what came in between
-            the 3rd and the 11th" far more often than it asks for last month,
-            and either end on its own is a valid question: everything since the
-            3rd, everything up to the 11th. */}
-          <div className="flex shrink-0 items-center gap-1">
-            <input
-              type="date"
-              className="form-input h-8 w-[7.5rem] py-0 text-xs"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(e) => setFromDate(e.target.value)}
-              aria-label="From date"
-            />
-            <span className="text-muted-foreground text-xs">to</span>
-            <input
-              type="date"
-              className="form-input h-8 w-[7.5rem] py-0 text-xs"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(e) => setToDate(e.target.value)}
-              aria-label="To date"
-            />
+            {/* The one filter the two lists cannot share: an order can be part
+              received and a receipt cannot, and a receipt can be cancelled
+              where an order on this list never is. */}
+            {tab === 'waiting' ? (
+              <select
+                className="form-input h-8 min-w-0 grow basis-[8.95rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+                value={waitStatus}
+                onChange={(e) => setWaitStatus(e.target.value)}
+                aria-label="Filter by how much has arrived"
+              >
+                <option value="">Anything still due</option>
+                <option value="SENT">Nothing arrived yet</option>
+                <option value="PARTIALLY_RECEIVED">Part received</option>
+              </select>
+            ) : (
+              <select
+                className="form-input h-8 min-w-0 grow basis-[8.95rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                aria-label="Filter by status"
+              >
+                <option value="">Any status</option>
+                <option value="ACCEPTED">Received</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            )}
           </div>
 
-          {/* The one filter the two lists cannot share: an order can be part
-            received and a receipt cannot, and a receipt can be cancelled where
-            an order on this list never is. */}
-          {tab === 'waiting' ? (
-            <select
-              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-              value={waitStatus}
-              onChange={(e) => setWaitStatus(e.target.value)}
-              aria-label="Filter by how much has arrived"
-            >
-              <option value="">Anything still due</option>
-              <option value="SENT">Nothing arrived yet</option>
-              <option value="PARTIALLY_RECEIVED">Part received</option>
-            </select>
-          ) : (
-            <select
-              className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-              aria-label="Filter by status"
-            >
-              <option value="">Any status</option>
-              <option value="ACCEPTED">Received</option>
-              <option value="CANCELLED">Cancelled</option>
-            </select>
-          )}
+          <div className="flex items-center gap-2 sm:contents">
+            {/* Only when it is doing something. A permanent Clear is a control
+              that does nothing on the screen somebody usually sees. */}
+            {anyFilter && (
+              <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
+                Clear
+              </button>
+            )}
 
-          {/* Only when it is doing something. A permanent Clear is a control
-            that does nothing on the screen somebody usually sees. */}
-          {anyFilter && (
-            <button className="btn-ghost h-8 shrink-0 px-2 text-xs" onClick={clearFilters}>
-              Clear
-            </button>
-          )}
-
-          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-            {tab === 'waiting'
-              ? waitingShown.length === waiting.length
-                ? `${waiting.length} ${waiting.length === 1 ? 'order' : 'orders'}`
-                : `${waitingShown.length} of ${waiting.length}`
-              : `${total} ${total === 1 ? 'receipt' : 'receipts'}`}
-          </span>
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {tab === 'waiting'
+                ? waitingShown.length === waiting.length
+                  ? `${waiting.length} ${waiting.length === 1 ? 'order' : 'orders'}`
+                  : `${waitingShown.length} of ${waiting.length}`
+                : `${total} ${total === 1 ? 'receipt' : 'receipts'}`}
+            </span>
+          </div>
         </div>
 
         {tab === 'waiting' ? (
@@ -574,87 +844,539 @@ export default function GoodsReceiptPage() {
                   : 'No order matches those filters. Clear them to see the rest.'}
               </p>
             ) : (
-              <div className="w-full overflow-x-auto">
-                <table className="data-table table-compact w-full min-w-[860px]">
-                  <thead>
-                    <tr className="bg-secondary">
-                      <th style={{ width: '11%' }}>Order</th>
-                      <th style={{ width: '25%' }}>Supplier</th>
-                      <th style={{ width: '12%' }}>Date</th>
-                      <th style={{ width: '12%' }}>Reference</th>
-                      <th style={{ width: '10%' }}>Items</th>
-                      <th style={{ width: '11%', textAlign: 'right' }}>Total</th>
-                      <th style={{ width: '10%', textAlign: 'right' }}>Still due</th>
-                      <th style={{ width: '9%' }}>Status</th>
-                      <th style={{ width: '14%' }} />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {waitingShown.map((po) => {
-                      const ordered = (po.lines ?? []).reduce((t, l) => t + Number(l.qty), 0)
-                      const got = (po.lines ?? []).reduce((t, l) => t + Number(l.receivedQty), 0)
-                      const due = Math.max(0, ordered - got)
-                      const part = po.status === 'PARTIALLY_RECEIVED'
-                      return (
-                        <tr key={po.id}>
-                          <td className="whitespace-nowrap font-mono text-xs font-semibold">
-                            {po.poNumber}
-                          </td>
-                          <td className="text-sm">{po.supplier?.name ?? '—'}</td>
-                          <td className="whitespace-nowrap text-xs">{formatDate(po.poDate)}</td>
-                          <td className="text-xs">
-                            {po.reference || <span className="text-muted-foreground">—</span>}
-                          </td>
-                          <td className="whitespace-nowrap text-xs">
-                            {(po.lines ?? []).length}{' '}
-                            {(po.lines ?? []).length === 1 ? 'item' : 'items'}
-                          </td>
-                          <td className="whitespace-nowrap text-right text-sm font-semibold tabular-nums">
-                            ₹
-                            {Number(po.totalAmount).toLocaleString('en-IN', {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 2,
-                            })}
-                          </td>
-                          {/* Of the ordered quantity, not of the money. What a
-                            store keeper checks off a challan is pieces. */}
-                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                            {qty(due)}
-                            {part && (
-                              <span className="text-muted-foreground"> of {qty(ordered)}</span>
-                            )}
-                          </td>
-                          <td>
-                            <span className={part ? 'badge-warning' : 'badge-info'}>
-                              {part ? 'Part received' : 'Sent'}
-                            </span>
-                          </td>
-                          <td className="whitespace-nowrap text-right">
-                            <div className="flex justify-end gap-1.5">
-                              <button
-                                className="btn-primary h-7 px-2.5 text-xs"
-                                onClick={() => setDialog(po.id)}
+              <div className="list-scope">
+                {/* ── On a phone, not a table ────────────────────────────────
+
+                  This tab had no such thing until now: eleven columns behind
+                  a 1080px floor and a sideways drag, at every width including
+                  the laptop everyone here uses. It is the one screen in
+                  purchase that somebody stands at a gate with a phone to use,
+                  and it was the one screen you could not.
+
+                  What is due is the figure the whole tab exists for, so it
+                  sits where the money sits on the other cards — hard right of
+                  the first line — and Receive is a full-width press rather
+                  than a 13px icon. */}
+                <div className="list-cards divide-border divide-y">
+                  {waitingShown.map((po) => {
+                    const part = po.status === 'PARTIALLY_RECEIVED'
+                    const lines = po.lines ?? []
+                    const groups = qtyByUnit(lines)
+                    const anyPending = groups.some((g) => g.pending > 0)
+                    const expanded = openOrder === po.id
+                    const items = itemsPreview(lines.map((l) => l.item?.name))
+                    const ordered = qtyPreview(groups, 'ordered')
+                    const received = qtyPreview(groups, 'received')
+                    const pending = qtyPreview(groups, 'pending')
+                    return (
+                      <div key={po.id} className="p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <a
+                                href={`/print/purchase-order/${po.id}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                                title="Open this order's PDF"
                               >
-                                <PackageCheck size={13} /> Receive
-                              </button>
-                              <button
-                                className="btn-ghost border-border h-7 rounded-lg border px-2.5 text-xs"
-                                onClick={() => {
-                                  setTab('receipts')
-                                  setSearch(po.poNumber)
-                                  setStatus('')
-                                }}
-                                title={`Show the receipts already made against ${po.poNumber}`}
-                              >
-                                History
-                              </button>
+                                {po.poNumber}
+                              </a>
+                              <span className={part ? 'badge-warning' : 'badge-info'}>
+                                {part ? 'Part received' : 'Sent'}
+                              </span>
+                              {/* The card carries what the table's files
+                                column carries, so the two views agree on
+                                whether anything is scanned onto the order. */}
+                              {po._count?.attachments ? (
+                                <button
+                                  type="button"
+                                  className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5 text-[10px] underline transition"
+                                  onClick={() =>
+                                    setFilesFor({
+                                      id: po.id,
+                                      number: po.poNumber,
+                                      kind: 'order',
+                                    })
+                                  }
+                                  title={`Open the ${po._count.attachments} file${
+                                    po._count.attachments === 1 ? '' : 's'
+                                  } attached to ${po.poNumber}`}
+                                >
+                                  <Paperclip size={10} />
+                                  {po._count.attachments}
+                                </button>
+                              ) : null}
                             </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                            <p className="text-foreground mt-1 font-medium leading-snug">
+                              {po.supplier?.name ?? '—'}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-right" title={pending.full}>
+                            <span
+                              className={`block text-sm font-semibold tabular-nums ${
+                                anyPending ? 'text-amber-500' : 'text-muted-foreground'
+                              }`}
+                            >
+                              {pending.shown}
+                              {pending.extra}
+                            </span>
+                            <span className="text-muted-foreground block text-[10px]">
+                              still due
+                            </span>
+                          </span>
+                        </div>
+
+                        <dl className="mt-2.5 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                          <dt className="text-muted-foreground">Ordered</dt>
+                          <dd className="text-foreground min-w-0 tabular-nums" title={ordered.full}>
+                            {ordered.shown}
+                            {ordered.extra}
+                          </dd>
+                          <dt className="text-muted-foreground">Received</dt>
+                          <dd
+                            className="text-foreground min-w-0 tabular-nums"
+                            title={received.full}
+                          >
+                            {received.shown}
+                            {received.extra}
+                          </dd>
+                          <dt className="text-muted-foreground">Ordered on</dt>
+                          <dd className="text-foreground min-w-0">{formatDate(po.poDate)}</dd>
+                          {po.reference ? (
+                            <>
+                              <dt className="text-muted-foreground">Reference</dt>
+                              <dd className="text-foreground min-w-0 truncate">{po.reference}</dd>
+                            </>
+                          ) : null}
+                          <dt className="text-muted-foreground">Items</dt>
+                          <dd className="text-foreground min-w-0 truncate" title={items.full}>
+                            {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                            {items.shown ? (
+                              <span className="text-muted-foreground">
+                                {' '}
+                                · {items.shown}
+                                {items.extra}
+                              </span>
+                            ) : null}
+                          </dd>
+                        </dl>
+
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => setOpenOrder(expanded ? null : po.id)}
+                            disabled={lines.length === 0}
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                              lines.length === 0
+                                ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                : 'bg-primary/10 text-primary hover:bg-primary/20'
+                            }`}
+                            aria-expanded={expanded}
+                          >
+                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            {expanded ? 'Hide items' : 'Show items'}
+                          </button>
+                          <button
+                            className="btn-ghost border-border ml-auto h-8 rounded-lg border px-2.5 text-xs"
+                            onClick={() => {
+                              setTab('receipts')
+                              setSearch(po.poNumber)
+                              setStatus('')
+                            }}
+                            title={`Show the receipts already made against ${po.poNumber}`}
+                          >
+                            History
+                          </button>
+                          <button
+                            className="btn-primary h-8 px-3 text-xs"
+                            onClick={() => setDialog(po.id)}
+                          >
+                            <PackageCheck size={14} /> Receive
+                          </button>
+                        </div>
+
+                        {expanded && lines.length > 0 && (
+                          <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] space-y-2 overflow-y-auto rounded-lg border p-2">
+                            {lines.map((line) => (
+                              <div
+                                key={line.id}
+                                className="border-border bg-card rounded-lg border p-2.5"
+                              >
+                                <p className="text-foreground text-sm font-medium leading-snug">
+                                  {line.item?.name ?? '—'}
+                                </p>
+                                <p className="text-muted-foreground mt-0.5 truncate text-[10px]">
+                                  <span className="font-mono">{line.item?.code ?? '—'}</span>
+                                  {(line.style?.code || line.styleNo) && (
+                                    <> · {line.style?.code ?? line.styleNo}</>
+                                  )}
+                                </p>
+                                <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                                  <div>
+                                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">
+                                      Ordered
+                                    </dt>
+                                    <dd className="text-foreground tabular-nums">
+                                      {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">
+                                      Received
+                                    </dt>
+                                    <dd className="text-foreground tabular-nums">
+                                      {qty(line.receivedQty)}
+                                    </dd>
+                                  </div>
+                                  <div>
+                                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">
+                                      Still due
+                                    </dt>
+                                    <dd className="tabular-nums">
+                                      {line.shortClosed ? (
+                                        <span
+                                          className="text-amber-500"
+                                          title={line.shortCloseReason ?? undefined}
+                                        >
+                                          Closed short
+                                        </span>
+                                      ) : (
+                                        <span className="text-foreground">
+                                          {qty(Number(line.qty) - Number(line.receivedQty))}
+                                        </span>
+                                      )}
+                                    </dd>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="list-rows w-full">
+                  {/* What goes when the list narrows, in the order it goes:
+
+                      under "full"   the reference and the item summary
+                      under "wide"   the order date and what has arrived so far
+                      under "roomy"  the ordered quantity
+
+                      Never dropped: the order number, the supplier, what is
+                      still due, the status, and Receive. Still-due is the
+                      figure this whole tab exists to show. */}
+                  <table className="data-table table-compact w-full">
+                    <thead>
+                      <tr className="bg-secondary">
+                        <th style={{ width: 30 }} />
+                        <th>Order</th>
+                        <th>Supplier</th>
+                        <th className="col-wide">Date</th>
+                        <th className="col-full">Reference</th>
+                        <th className="col-full">Items</th>
+                        <th className="col-roomy" style={{ textAlign: 'right' }}>
+                          Total qty
+                        </th>
+                        <th className="col-wide" style={{ textAlign: 'right' }}>
+                          Received qty
+                        </th>
+                        <th style={{ textAlign: 'right' }}>Pending qty</th>
+                        <th>Status</th>
+                        <th className="col-roomy">Files</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {waitingShown.map((po) => {
+                        const part = po.status === 'PARTIALLY_RECEIVED'
+                        const lines = po.lines ?? []
+                        const groups = qtyByUnit(lines)
+                        const anyPending = groups.some((g) => g.pending > 0)
+                        const expanded = openOrder === po.id
+                        return (
+                          <Fragment key={po.id}>
+                            <tr>
+                              <td>
+                                <button
+                                  className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                    lines.length === 0
+                                      ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                      : 'bg-primary/10 text-primary hover:bg-primary/20'
+                                  }`}
+                                  onClick={() => setOpenOrder(expanded ? null : po.id)}
+                                  disabled={lines.length === 0}
+                                  title={expanded ? 'Hide items' : 'Show items'}
+                                  aria-label={`${expanded ? 'Hide' : 'Show'} items on ${po.poNumber}`}
+                                  aria-expanded={expanded}
+                                >
+                                  {expanded ? (
+                                    <ChevronDown size={14} />
+                                  ) : (
+                                    <ChevronRight size={14} />
+                                  )}
+                                </button>
+                              </td>
+                              <td className="whitespace-nowrap">
+                                <a
+                                  href={`/print/purchase-order/${po.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                                  title="Open this order's PDF"
+                                >
+                                  {po.poNumber}
+                                </a>
+                              </td>
+                              <td>
+                                <div className="max-w-[15rem] truncate text-sm">
+                                  {po.supplier?.name ?? '—'}
+                                </div>
+                              </td>
+                              <td className="col-wide whitespace-nowrap text-xs">
+                                {formatDate(po.poDate)}
+                              </td>
+                              <td className="col-full text-xs">
+                                {po.reference || <span className="text-muted-foreground">—</span>}
+                              </td>
+                              <td className="col-full text-xs">
+                                {lines.length === 0 ? (
+                                  <span className="text-muted-foreground">—</span>
+                                ) : (
+                                  <>
+                                    <div className="text-foreground whitespace-nowrap">
+                                      {lines.length} {lines.length === 1 ? 'item' : 'items'}
+                                    </div>
+                                    {(() => {
+                                      const p = itemsPreview(lines.map((l) => l.item?.name))
+                                      return (
+                                        <div
+                                          className="text-muted-foreground truncate text-[10px] leading-tight"
+                                          title={p.full}
+                                        >
+                                          {p.shown}
+                                          {p.extra}
+                                        </div>
+                                      )
+                                    })()}
+                                  </>
+                                )}
+                              </td>
+                              {/* Three columns, not one net figure — a mixed-unit
+                            order cannot be netted into a single "still due"
+                            without pretending metres and pieces are the same
+                            thing. Grouped by unit and truncated the same way
+                            the item list above is, with every group on hover. */}
+                              <td className="col-roomy whitespace-nowrap text-right text-xs tabular-nums">
+                                {(() => {
+                                  const p = qtyPreview(groups, 'ordered')
+                                  return (
+                                    <span title={p.full}>
+                                      {p.shown}
+                                      {p.extra}
+                                    </span>
+                                  )
+                                })()}
+                              </td>
+                              <td className="col-wide whitespace-nowrap text-right text-xs tabular-nums">
+                                {(() => {
+                                  const p = qtyPreview(groups, 'received')
+                                  return (
+                                    <span title={p.full}>
+                                      {p.shown}
+                                      {p.extra}
+                                    </span>
+                                  )
+                                })()}
+                              </td>
+                              <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                {(() => {
+                                  const p = qtyPreview(groups, 'pending')
+                                  return (
+                                    <span
+                                      className={
+                                        anyPending
+                                          ? 'font-medium text-amber-500'
+                                          : 'text-muted-foreground'
+                                      }
+                                      title={p.full}
+                                    >
+                                      {p.shown}
+                                      {p.extra}
+                                    </span>
+                                  )
+                                })()}
+                              </td>
+                              <td>
+                                <span className={part ? 'badge-warning' : 'badge-info'}>
+                                  {part ? 'Part received' : 'Sent'}
+                                </span>
+                              </td>
+                              <td className="col-roomy whitespace-nowrap">
+                                <FilesCell
+                                  count={po._count?.attachments ?? 0}
+                                  onOpen={() =>
+                                    setFilesFor({
+                                      id: po.id,
+                                      number: po.poNumber,
+                                      kind: 'order',
+                                    })
+                                  }
+                                  what={`attached to ${po.poNumber}`}
+                                />
+                              </td>
+                              <td className="whitespace-nowrap text-right">
+                                <div className="flex justify-end gap-1.5">
+                                  <button
+                                    className="btn-primary h-7 px-2.5 text-xs"
+                                    onClick={() => setDialog(po.id)}
+                                  >
+                                    <PackageCheck size={13} /> Receive
+                                  </button>
+                                  <button
+                                    className="btn-ghost border-border h-7 rounded-lg border px-2.5 text-xs"
+                                    onClick={() => {
+                                      setTab('receipts')
+                                      setSearch(po.poNumber)
+                                      setStatus('')
+                                    }}
+                                    title={`Show the receipts already made against ${po.poNumber}`}
+                                  >
+                                    History
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+
+                            {expanded && lines.length > 0 && (
+                              <tr>
+                                <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                  <RowPanel
+                                    icon={FileText}
+                                    title="Item Details"
+                                    note={`${lines.length} ${
+                                      lines.length === 1 ? 'line' : 'lines'
+                                    } on ${po.poNumber}`}
+                                  >
+                                    <table className="subtable w-full table-fixed">
+                                      <thead className="sticky top-0 z-10">
+                                        <tr>
+                                          {WAITING_COLS.map(({ label: h, width, numeric }) => (
+                                            <th
+                                              key={h}
+                                              style={{ width }}
+                                              className={numeric ? 'text-right' : undefined}
+                                            >
+                                              {h}
+                                            </th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {lines.map((line) => {
+                                          const cat = line.item?.category
+                                          const parent = cat?.parent
+                                          return (
+                                            <tr
+                                              key={line.id}
+                                              className="border-border/40 border-b last:border-0"
+                                            >
+                                              <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                                {line.item?.code ?? '—'}
+                                              </td>
+                                              <td className="px-3 py-1.5">
+                                                <div className="text-foreground truncate text-xs">
+                                                  {line.item?.name ?? '—'}
+                                                </div>
+                                              </td>
+                                              <td className="px-3 py-1.5 text-xs">
+                                                {line.style?.code || line.styleNo ? (
+                                                  <div className="text-foreground truncate font-mono text-xs">
+                                                    {line.style?.code ?? line.styleNo}
+                                                  </div>
+                                                ) : (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                              <td>
+                                                {parent?.name ?? cat?.name ?? (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                              <td>
+                                                {parent ? (
+                                                  cat?.name
+                                                ) : (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right tabular-nums">
+                                                {qty(line.qty)} {line.item?.uom?.symbol ?? ''}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right tabular-nums">
+                                                {qty(line.receivedQty)}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right tabular-nums">
+                                                {line.shortClosed ? (
+                                                  <div className="flex items-center justify-end gap-1 whitespace-normal text-amber-500">
+                                                    <span
+                                                      title={line.shortCloseReason ?? undefined}
+                                                    >
+                                                      Closed short
+                                                    </span>
+                                                    <span className="text-muted-foreground">·</span>
+                                                    <button
+                                                      type="button"
+                                                      className="text-primary underline"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'reopen',
+                                                          po,
+                                                          line,
+                                                        })
+                                                      }
+                                                    >
+                                                      Reopen
+                                                    </button>
+                                                  </div>
+                                                ) : Number(line.pendingQty) > 0 ? (
+                                                  <div className="flex items-center justify-end gap-1 whitespace-normal">
+                                                    <span>{qty(line.pendingQty)}</span>
+                                                    <span className="text-muted-foreground">·</span>
+                                                    <button
+                                                      type="button"
+                                                      className="text-primary underline"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'close',
+                                                          po,
+                                                          line,
+                                                        })
+                                                      }
+                                                    >
+                                                      Close short
+                                                    </button>
+                                                  </div>
+                                                ) : (
+                                                  <span className="text-muted-foreground">—</span>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          )
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </RowPanel>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </>
@@ -675,17 +1397,18 @@ export default function GoodsReceiptPage() {
                 </p>
               </div>
             ) : (
-              <>
-                {/* ── On a phone, not a table ──────────────────────────────────
+              <div className="list-scope">
+                {/* ── On a phone, not a table ──────────────────────────────
 
-              Same reasoning as the purchase order list: 8 columns cannot be
-              made to fit a phone, and a table you drag sideways costs two
-              gestures for every read and keeps the buttons off whichever edge
-              you are not looking at. Below xl each row is a block instead.
+                  Same reasoning as the tab beside it: eleven columns cannot
+                  be made to fit a phone, and a table you drag sideways costs
+                  two gestures for every read and keeps the buttons off
+                  whichever edge you are not looking at. On a narrow list each
+                  row is a block instead.
 
-              xl and not lg, because lg is where the sidebar comes back and
-              takes 260px of the screen with it. */}
-                <div className="divide-border divide-y xl:hidden">
+                  Measured on the list rather than the window — see
+                  `.list-scope` in globals.css. */}
+                <div className="list-cards divide-border divide-y">
                   {rows.map((grn) => {
                     const s = stage(grn.status)
                     const expanded = open === grn.id
@@ -698,6 +1421,27 @@ export default function GoodsReceiptPage() {
                                 {grn.grnNumber}
                               </span>
                               <span className={s.cls}>{s.label}</span>
+                              {(() => {
+                                const b = billStage(grn)
+                                return b ? <span className={b.cls}>{b.label}</span> : null
+                              })()}
+                              {grn._count?.attachments ? (
+                                <button
+                                  type="button"
+                                  className="text-muted-foreground hover:text-foreground inline-flex items-center gap-0.5 text-[10px] transition"
+                                  onClick={() =>
+                                    setFilesFor({
+                                      id: grn.id,
+                                      number: grn.grnNumber,
+                                      kind: 'receipt',
+                                    })
+                                  }
+                                  title="Open the files on this receipt"
+                                >
+                                  <Paperclip size={10} />
+                                  {grn._count.attachments}
+                                </button>
+                              ) : null}
                             </div>
                             <p className="text-foreground mt-1 font-medium leading-snug">
                               {grn.po.supplier?.name ?? '—'}
@@ -710,7 +1454,27 @@ export default function GoodsReceiptPage() {
 
                         <dl className="mt-2.5 grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
                           <dt className="text-muted-foreground">Against order</dt>
-                          <dd className="text-foreground min-w-0 font-mono">{grn.po.poNumber}</dd>
+                          <dd className="min-w-0">
+                            <a
+                              href={`/print/purchase-order/${grn.po.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-teal-400 hover:underline"
+                              title="Open this order's PDF"
+                            >
+                              {grn.po.poNumber}
+                            </a>
+                          </dd>
+                          <dt className="text-muted-foreground">Items</dt>
+                          {(() => {
+                            const p = itemsPreview(grn.lines.map((l) => l.item?.name))
+                            return (
+                              <dd className="text-foreground min-w-0 truncate" title={p.full}>
+                                {p.shown}
+                                {p.extra}
+                              </dd>
+                            )
+                          })()}
                           <dt className="text-muted-foreground">Received</dt>
                           <dd className="text-foreground min-w-0">
                             {formatDate(grn.grnDate)}
@@ -729,35 +1493,24 @@ export default function GoodsReceiptPage() {
                             {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                             {expanded ? 'Hide items' : 'What arrived'}
                           </button>
-                          <div className="flex gap-1">
-                            {/* Printable even once cancelled. A cancelled receipt
-                          is still the record of a delivery that happened, and
-                          somebody will need the paper for it. */}
-                            <Link
-                              href={`/print/goods-receipt/${grn.id}`}
-                              target="_blank"
-                              className="btn-ghost border-border rounded-lg border p-1.5"
-                              title="Print the goods receipt note"
-                              aria-label={`Print ${grn.grnNumber}`}
-                            >
-                              <Printer size={15} />
-                            </Link>
-                            {grn.status !== 'CANCELLED' && (
-                              <button
-                                className="btn-ghost border-border rounded-lg border p-1.5 hover:text-red-400"
-                                onClick={() => void cancel(grn)}
-                                disabled={busy === grn.id}
-                                title="Cancel this receipt"
-                                aria-label={`Cancel ${grn.grnNumber}`}
+                          {grn.status !== 'CANCELLED' &&
+                            grn.billing &&
+                            Number(grn.billing.pendingQty) > 0 && (
+                              <Link
+                                href={`/purchase/bills?fromGrn=${grn.id}`}
+                                className="btn-secondary h-7 whitespace-nowrap px-2 text-xs"
                               >
-                                <Ban size={15} />
-                              </button>
+                                Add bill
+                              </Link>
                             )}
-                          </div>
+                          <ActionMenu
+                            label={`Actions for ${grn.grnNumber}`}
+                            items={rowActions(grn)}
+                          />
                         </div>
 
                         {expanded && (
-                          <div className="border-border bg-secondary/40 mt-2.5 space-y-2 rounded-lg border p-2">
+                          <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] space-y-2 overflow-y-auto rounded-lg border p-2">
                             {grn.lines.map((l) => (
                               <div
                                 key={l.id}
@@ -794,29 +1547,49 @@ export default function GoodsReceiptPage() {
                   })}
                 </div>
 
-                <div className="hidden w-full overflow-x-auto xl:block">
-                  {/* A floor, so the table scrolls rather than squashing.
+                <div className="list-rows w-full">
+                  {/* What goes when the list narrows, in the order it goes:
 
-              Eight columns with no minimum width squeeze to fit whatever they
-              are given: on a narrow screen the supplier and the number end up
-              two characters wide and wrapped over four lines. 900px is what
-              these columns need to stay readable, and the wrapper around them
-              already scrolls — which is the honest behaviour when a table is
-              genuinely wider than the screen.
+                      under "full"   the challan, the item summary, and how
+                                     much was accepted
+                      under "wide"   the order it came against
+                      under "roomy"  the date it arrived, and the billing
+                                     badge
 
-              It is under the 1058px a 1366px laptop has to give, so the
-              commonest screen there is still shows the whole table without
-              scrolling at all. */}
-                  <table className="data-table w-full min-w-[900px]">
+                      Never dropped: the receipt number, the supplier, the
+                      status and the actions.
+
+                      The billing badge goes last of the three and loses
+                      nothing when it does: the Add bill button in the actions
+                      cell is only there while something is still unbilled, so
+                      on a narrow list the button is the badge. Both together
+                      cost 306px of a 718px list, which is what pushed this
+                      table over the edge on a tablet.
+
+                      This table used to hold a 1180px floor and scroll
+                      sideways below it — on a 1366px laptop, which has 1056px
+                      to give, that meant dragging on the commonest screen in
+                      the building. */}
+                  <table className="data-table w-full">
                     <thead>
-                      <tr>
+                      <tr className="bg-secondary">
                         <th style={{ width: 30 }} />
                         <th>Number</th>
-                        <th>Against order</th>
+                        <th className="col-wide">Against order</th>
                         <th>Supplier</th>
-                        <th>Received</th>
-                        <th style={{ textAlign: 'right' }}>Items</th>
+                        {/* The supplier's own document, which is what the
+                          store and the accounts team both quote when they
+                          argue about a delivery. It was on the receipt all
+                          along and not on the screen. */}
+                        <th className="col-full">Challan</th>
+                        <th className="col-wide">Received</th>
+                        <th className="col-full">Items</th>
+                        <th className="col-full" style={{ textAlign: 'right' }}>
+                          Accepted
+                        </th>
                         <th>Status</th>
+                        <th className="col-roomy">Billing</th>
+                        <th className="col-roomy">Files</th>
                         <th />
                       </tr>
                     </thead>
@@ -842,9 +1615,45 @@ export default function GoodsReceiptPage() {
                                 </button>
                               </td>
                               <td className="font-mono text-xs text-teal-400">{grn.grnNumber}</td>
-                              <td className="font-mono text-xs">{grn.po.poNumber}</td>
-                              <td className="text-sm">{grn.po.supplier?.name ?? '—'}</td>
-                              <td className="text-xs">
+                              <td className="col-wide whitespace-nowrap">
+                                <a
+                                  href={`/print/purchase-order/${grn.po.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-xs text-teal-400 hover:underline"
+                                  title="Open this order's PDF"
+                                >
+                                  {grn.po.poNumber}
+                                </a>
+                              </td>
+                              <td>
+                                <div className="max-w-[15rem] truncate text-sm">
+                                  {grn.po.supplier?.name ?? '—'}
+                                </div>
+                              </td>
+                              <td className="col-full text-xs">
+                                {grn.challanNo ? (
+                                  <>
+                                    <div className="text-foreground font-mono">{grn.challanNo}</div>
+                                    {grn.challanDate && (
+                                      <div className="text-muted-foreground text-[10px]">
+                                        {formatDate(grn.challanDate)}
+                                      </div>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                                {grn.gateEntryNo && (
+                                  <div
+                                    className="text-muted-foreground text-[10px]"
+                                    title="Gate entry number"
+                                  >
+                                    Gate {grn.gateEntryNo}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="col-wide text-xs">
                                 {formatDate(grn.grnDate)}
                                 {grn.vehicleNo && (
                                   <div className="text-muted-foreground text-[10px]">
@@ -852,88 +1661,153 @@ export default function GoodsReceiptPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="text-right text-sm tabular-nums">
-                                {grn.lines.length}
+                              <td className="col-full text-xs">
+                                <div className="text-foreground whitespace-nowrap text-sm tabular-nums">
+                                  {grn.lines.length}
+                                </div>
+                                {(() => {
+                                  const p = itemsPreview(grn.lines.map((l) => l.item?.name))
+                                  return (
+                                    <div
+                                      className="text-muted-foreground truncate text-[10px] leading-tight"
+                                      title={p.full}
+                                    >
+                                      {p.shown}
+                                      {p.extra}
+                                    </div>
+                                  )
+                                })()}
+                              </td>
+                              <td className="col-full text-right text-sm tabular-nums">
+                                {grn.billing
+                                  ? Number(grn.billing.acceptedQty).toLocaleString('en-IN', {
+                                      maximumFractionDigits: 3,
+                                    })
+                                  : '—'}
                               </td>
                               <td>
                                 <span className={s.cls}>{s.label}</span>
                               </td>
+                              <td className="col-roomy whitespace-nowrap">
+                                {(() => {
+                                  const b = billStage(grn)
+                                  if (!b) return <span className="text-muted-foreground">—</span>
+                                  return (
+                                    <>
+                                      <span className={b.cls}>{b.label}</span>
+                                      {grn.bills && grn.bills.length > 0 && (
+                                        <div className="text-muted-foreground mt-0.5 font-mono text-[10px]">
+                                          {grn.bills.map((x) => x.billNumber).join(', ')}
+                                        </div>
+                                      )}
+                                    </>
+                                  )
+                                })()}
+                              </td>
+                              <td className="col-roomy whitespace-nowrap">
+                                <FilesCell
+                                  count={grn._count?.attachments ?? 0}
+                                  onOpen={() =>
+                                    setFilesFor({
+                                      id: grn.id,
+                                      number: grn.grnNumber,
+                                      kind: 'receipt',
+                                    })
+                                  }
+                                  what="on this receipt"
+                                />
+                              </td>
                               <td className="whitespace-nowrap text-right">
-                                <Link
-                                  href={`/print/goods-receipt/${grn.id}`}
-                                  target="_blank"
-                                  className="btn-ghost p-1.5"
-                                  title="Print the goods receipt note"
-                                  aria-label={`Print ${grn.grnNumber}`}
-                                >
-                                  <Printer size={15} />
-                                </Link>
-                                {grn.status !== 'CANCELLED' && (
-                                  <button
-                                    className="btn-ghost p-1.5 hover:text-red-400"
-                                    onClick={() => void cancel(grn)}
-                                    disabled={busy === grn.id}
-                                    title="Cancel this receipt"
-                                    aria-label={`Cancel ${grn.grnNumber}`}
-                                  >
-                                    <Ban size={15} />
-                                  </button>
-                                )}
+                                <div className="flex items-center justify-end gap-1.5">
+                                  {/* The old ERP puts Add Bill From GRN on the
+                                    row itself, not behind a menu, because a
+                                    clerk working through a stack of supplier
+                                    invoices does this on nearly every receipt.
+                                    Shown only while something is still left to
+                                    bill. */}
+                                  {grn.status !== 'CANCELLED' &&
+                                    grn.billing &&
+                                    Number(grn.billing.pendingQty) > 0 && (
+                                      <Link
+                                        href={`/purchase/bills?fromGrn=${grn.id}`}
+                                        className="btn-secondary h-7 whitespace-nowrap px-2 text-xs"
+                                        title={`Raise a bill for the ${Number(
+                                          grn.billing.pendingQty
+                                        ).toLocaleString(
+                                          'en-IN'
+                                        )} still unbilled on ${grn.grnNumber}`}
+                                      >
+                                        Add bill
+                                      </Link>
+                                    )}
+                                  <ActionMenu
+                                    label={`Actions for ${grn.grnNumber}`}
+                                    items={rowActions(grn)}
+                                  />
+                                </div>
                               </td>
                             </tr>
 
                             {expanded && (
                               <tr>
-                                <td colSpan={8} className="bg-secondary/40 p-0">
-                                  <table className="data-table w-full">
-                                    <thead>
-                                      <tr>
-                                        <th>Item</th>
-                                        <th>Store</th>
-                                        <th style={{ textAlign: 'right' }}>Ordered</th>
-                                        <th style={{ textAlign: 'right' }}>Arrived</th>
-                                        <th style={{ textAlign: 'right' }}>Rejected</th>
-                                        <th style={{ textAlign: 'right' }}>Into stock</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {grn.lines.map((l) => (
-                                        <tr key={l.id}>
-                                          <td>
-                                            <div className="text-sm">{l.item.name}</div>
-                                            <div className="text-muted-foreground font-mono text-[10px]">
-                                              {l.item.code}
-                                              {l.batchNumber ? ` · batch ${l.batchNumber}` : ''}
-                                            </div>
-                                          </td>
-                                          <td className="text-xs">{l.warehouse.name}</td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {qty(l.orderedQty)}
-                                          </td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {qty(l.receivedQty)}
-                                          </td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {Number(l.rejectedQty) > 0 ? (
-                                              <span className="text-red-400">
-                                                {qty(l.rejectedQty)}
-                                              </span>
-                                            ) : (
-                                              <span className="text-muted-foreground">—</span>
-                                            )}
-                                          </td>
-                                          <td className="text-right text-sm tabular-nums">
-                                            {qty(l.acceptedQty)} {l.item.uom?.symbol ?? ''}
-                                          </td>
+                                <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                  <RowPanel
+                                    icon={FileText}
+                                    title="What arrived"
+                                    note={`${grn.lines.length} ${
+                                      grn.lines.length === 1 ? 'line' : 'lines'
+                                    } on ${grn.grnNumber}`}
+                                  >
+                                    <table className="subtable w-full">
+                                      <thead className="sticky top-0 z-10">
+                                        <tr>
+                                          <th>Item</th>
+                                          <th>Store</th>
+                                          <th className="text-right">Ordered</th>
+                                          <th className="text-right">Arrived</th>
+                                          <th className="text-right">Rejected</th>
+                                          <th className="text-right">Into stock</th>
                                         </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                  {grn.notes && (
-                                    <p className="text-muted-foreground px-4 py-2 text-xs">
-                                      {grn.notes}
-                                    </p>
-                                  )}
+                                      </thead>
+                                      <tbody>
+                                        {grn.lines.map((l) => (
+                                          <tr key={l.id}>
+                                            <td>
+                                              <div className="text-foreground">{l.item.name}</div>
+                                              <div className="text-muted-foreground font-mono text-[10px]">
+                                                {l.item.code}
+                                                {l.batchNumber ? ` · batch ${l.batchNumber}` : ''}
+                                              </div>
+                                            </td>
+                                            <td>{l.warehouse.name}</td>
+                                            <td className="text-right tabular-nums">
+                                              {qty(l.orderedQty)}
+                                            </td>
+                                            <td className="text-right tabular-nums">
+                                              {qty(l.receivedQty)}
+                                            </td>
+                                            <td className="text-right tabular-nums">
+                                              {Number(l.rejectedQty) > 0 ? (
+                                                <span className="text-red-400">
+                                                  {qty(l.rejectedQty)}
+                                                </span>
+                                              ) : (
+                                                <span className="text-muted-foreground">—</span>
+                                              )}
+                                            </td>
+                                            <td className="text-right tabular-nums">
+                                              {qty(l.acceptedQty)} {l.item.uom?.symbol ?? ''}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                    {grn.notes && (
+                                      <p className="border-border text-muted-foreground border-t px-3 py-2 text-xs">
+                                        {grn.notes}
+                                      </p>
+                                    )}
+                                  </RowPanel>
                                 </td>
                               </tr>
                             )}
@@ -943,7 +1817,7 @@ export default function GoodsReceiptPage() {
                     </tbody>
                   </table>
                 </div>
-              </>
+              </div>
             )}
 
             <Pagination
@@ -968,6 +1842,80 @@ export default function GoodsReceiptPage() {
             // dropped to part received. Either way the list above is stale.
             void loadWaiting()
           }}
+        />
+      )}
+
+      {editGrnId !== null && (
+        <ReceiveGoodsDialog
+          grnId={editGrnId}
+          onClose={() => setEditGrnId(null)}
+          onSaved={(msg) => {
+            setEditGrnId(null)
+            setMessage(msg)
+            void load()
+            void loadWaiting()
+          }}
+        />
+      )}
+
+      {confirmAction && (
+        <ReasonDialog
+          title={
+            confirmAction.type === 'cancel'
+              ? `Cancel ${confirmAction.grn.grnNumber}?`
+              : `Delete ${confirmAction.grn.grnNumber} for good?`
+          }
+          description={
+            confirmAction.type === 'cancel'
+              ? 'The stock it brought in will be taken back out.'
+              : 'This removes the receipt entirely — it will not show up anywhere, not even as ' +
+                'cancelled. If its stock is still on the shelf, that stock is taken back out first.'
+          }
+          confirmLabel={confirmAction.type === 'cancel' ? 'Cancel receipt' : 'Delete for good'}
+          danger
+          requireReason={confirmAction.type === 'cancel'}
+          busy={busy === confirmAction.grn.id}
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={(reason) =>
+            void (confirmAction.type === 'cancel'
+              ? cancel(confirmAction.grn, reason)
+              : remove(confirmAction.grn, reason))
+          }
+        />
+      )}
+
+      {lineConfirm && (
+        <ReasonDialog
+          title={
+            lineConfirm.type === 'close'
+              ? `Close ${lineConfirm.line.item?.name ?? 'this line'} short?`
+              : `Reopen ${lineConfirm.line.item?.name ?? 'this line'}?`
+          }
+          description={
+            lineConfirm.type === 'close'
+              ? `This says the rest of it is not coming — it does not touch what has already ` +
+                `been received against ${lineConfirm.po.poNumber}.`
+              : `It will count as pending again on ${lineConfirm.po.poNumber}.`
+          }
+          confirmLabel={lineConfirm.type === 'close' ? 'Close short' : 'Reopen'}
+          danger={lineConfirm.type === 'close'}
+          requireReason={lineConfirm.type === 'close'}
+          busy={busy === lineConfirm.line.id}
+          onCancel={() => setLineConfirm(null)}
+          onConfirm={(reason) =>
+            void (lineConfirm.type === 'close'
+              ? closeLineShort(lineConfirm.po, lineConfirm.line, reason)
+              : reopenLine(lineConfirm.po, lineConfirm.line))
+          }
+        />
+      )}
+
+      {filesFor && (
+        <OrderAttachmentsDialog
+          kind={filesFor.kind}
+          docId={filesFor.id}
+          docNumber={filesFor.number}
+          onClose={() => setFilesFor(null)}
         />
       )}
     </div>

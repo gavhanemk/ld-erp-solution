@@ -1877,7 +1877,7 @@ export function PurchaseOrderDialog({
           sidebar above the overlay: on a narrower screen a sidebar sitting on top would clip the
           left edge of a centred form. On a phone the sidebar already takes most of the width, so
           there the overlay covers everything as before. */}
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
         {/* `h-full`, not `max-h-full` and not a vh figure.
 
           A cap only says how tall the card may not be. This form's content

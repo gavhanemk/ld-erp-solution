@@ -40,6 +40,14 @@
     --input: 217 33% 18%;
     --ring: 173 80% 40%;
 
+    /* What a form field is filled with.
+       Its own token rather than `--secondary`, because the two want opposite
+       things: a badge or a tab sits *on* the card and should barely lift off
+       it, while a field is a hole punched *into* the card and has to read as
+       recessed. Sharing one value meant whichever won, the other was wrong.
+       Dark mode wants the field lighter than the card. */
+    --field: 217 33% 15%;
+
     --radius: 0.625rem;
 
     /* Sidebar */
@@ -81,6 +89,13 @@
 
     --secondary: 220 16% 96%;
     --secondary-foreground: 222 40% 18%;
+
+    /* Light mode wants the field *darker* than the card, and by enough to see.
+       Fields used to take `--secondary` at 96% on a 100% white card — four
+       points of lightness, which on a bright office screen is no difference at
+       all: every box on a form read as one flat white sheet with text floating
+       on it. 91% is a clear step down without turning the form grey. */
+    --field: 220 16% 91%;
 
     --muted: 220 14% 90%;
     /* Secondary text: labels, hints, placeholders, table headers, the small
@@ -273,6 +288,149 @@
     @apply px-3 py-2;
   }
 
+  /* ── A list that fits the space it is given ──────────────────────────────
+
+     These lists used to swap between a card stack and a table at Tailwind's
+     `xl`, which is a window measurement. The table does not live in the
+     window though — it lives in what is left of it after the sidebar, and
+     the sidebar is 260px wide and can be collapsed to 68px. So the same
+     window gave the list two quite different widths and one breakpoint had
+     to answer for both. It got it wrong in the obvious direction: on a
+     1366px laptop, the commonest screen in the office, `xl` said "table"
+     while the list itself had only 1056px — under the 1080px floor the table
+     was holding — so the thing dragged sideways.
+
+     A container query asks the list how wide *it* is, which is the question
+     that was being answered wrongly. Collapse the sidebar and the columns
+     come back on their own; nothing has to know the sidebar exists.
+
+     `container-type: inline-size` makes this a containing block for `fixed`
+     descendants, the same trap `.glass-card`'s backdrop-filter set. Every
+     row menu here already renders through a portal, so nothing inside is
+     positioned against it. */
+  .list-scope {
+    container-type: inline-size;
+  }
+
+  /* Below this the columns cannot be made to read, so each row becomes a
+     block instead. 700px clears the widest of the six base tiers, which is
+     the purchase bill list at 682px. */
+  .list-cards {
+    display: block;
+  }
+
+  .list-rows {
+    display: none;
+  }
+
+  @container (min-width: 700px) {
+    .list-cards {
+      display: none;
+    }
+
+    .list-rows {
+      display: block;
+    }
+  }
+
+  /* Columns that earn their place as the list widens. Below their tier they
+     are gone — not squeezed to four characters over three lines, which is
+     what a `min-width` floor and a sideways drag buy you.
+
+     Three tiers, the same three for every list, so the lists behave alike.
+     Which columns go in which tier is the per-list judgement and is written
+     down at each table. Two rules hold it together:
+
+       · nothing needed to identify a row or act on it goes in a tier at all
+       · a tier must not hold more than still fits at that tier's width
+
+     The second one is measurable, not a matter of taste: force the tier on,
+     set the table to `width: min-content` and read it back. Every list here
+     was checked that way, and the widths below are the widest of those
+     floors with a little room over. They are deliberately the only numbers —
+     name the tiers by size rather than by pixels and retuning is one edit
+     here instead of six files of class renames.
+
+     Applied to the `th` and every matching `td` together — a table with one
+     more cell in a row than in its header is a table with its columns off by
+     one from there rightwards. */
+  .col-roomy,
+  .col-wide,
+  .col-full {
+    display: table-cell;
+  }
+
+  /* 1390 clears the widest full tier, the goods receipt list at 1369px. It
+     wants a real desk: a 1920px screen, or a 1600px one with the sidebar
+     collapsed. That is the honest answer for the least-scanned columns in
+     each list, and it is the only tier no laptop reaches. */
+  @container (max-width: 1389px) {
+    .col-full {
+      display: none;
+    }
+  }
+
+  /* 1010 has a ceiling as well as a floor, and it is the only tier that
+     does. The floor is the widest wide tier, the goods receipt list at
+     1000px. The ceiling is the 1056px a 1366px laptop has with the sidebar
+     open — the commonest screen in the office, and the one this whole
+     arrangement exists to serve. Above 1056 that screen loses the tier
+     entirely, so anything added to a wide tier has to be measured against
+     1010 and not guessed at. When the files column pushed the bill list's
+     wide tier to 1053 there was nowhere left to raise the number to, and
+     its due date moved up a tier instead. */
+  @container (max-width: 1009px) {
+    .col-wide {
+      display: none;
+    }
+  }
+
+  /* 890 clears the widest roomy tier, the bill list at 876px. */
+  @container (max-width: 889px) {
+    .col-roomy {
+      display: none;
+    }
+  }
+
+
+  /* ── The table inside an expanded row ────────────────────────────────────
+
+     There were four ideas of this in the purchase module. Three lists drew
+     it with a tinted, sticky, uppercase header at 10px; the goods receipt
+     list drew it with `.data-table`, so its rows stood at the full 12px of
+     padding and read as a second list rather than as detail; and the bill
+     list drew it in sentence case at `font-medium` with no tint and no
+     sticky header at all. Put side by side — which is how somebody scrolling
+     a list sees them — they did not look like the same application.
+
+     One class, so they cannot drift again. It is deliberately quieter than
+     `.data-table`: smaller type, tighter rows, a lighter rule between lines.
+     A panel that opens underneath a row is detail about that row, and
+     detail that shouts as loudly as the list makes the list harder to read.
+
+     `:where()` keeps this at zero specificity from the class, so a
+     `text-right` on a numeric column still wins. Written as
+     `.subtable > thead > tr > th` it would score above a plain utility and
+     every figure would sit left of its own heading — which is exactly what
+     went wrong with `.data-table` once already. */
+  :where(.subtable) > thead > tr > th {
+    @apply bg-secondary text-muted-foreground border-border border-b px-3 py-1.5
+           text-left text-[10px] font-semibold uppercase tracking-wider;
+  }
+
+  :where(.subtable) > tbody > tr > td {
+    @apply border-border/40 border-b px-3 py-1.5 text-xs;
+  }
+
+  :where(.subtable) > tbody > tr:last-child > td {
+    @apply border-b-0;
+  }
+
+  /* A totals line, where a panel has one to draw. */
+  :where(.subtable) > tfoot > tr > td {
+    @apply border-border border-t px-3 py-1.5 text-xs font-semibold;
+  }
+
   /* Status Badges */
   .badge {
     @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium;
@@ -328,10 +486,11 @@
   /* Form Inputs */
   .form-input {
     @apply w-full px-3 py-2.5 rounded-lg text-sm
-           bg-secondary border border-border text-foreground
+           border border-border text-foreground
            placeholder:text-muted-foreground
            focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500
            transition-colors duration-200;
+    background: hsl(var(--field));
   }
 
   /* A dropdown is the same control as a text field and must look like one, but
@@ -341,15 +500,22 @@
      10px of padding, inside a 1px border. The filter row above every list sets
      `h-9` to line the control up with the buttons beside it, which leaves 14px
      of content box for that 20px line. A text field simply overflows its box
-     and the browser still centres the caret, so nobody noticed. A select clips
-     its label against the padding box instead, and the words sit half-buried
-     along the bottom edge.
+     and the browser still centres the caret, so nobody noticed.
 
-     Padding is therefore dropped for a select and the centring left to the
-     height, which is what a select does well — the label ends up centred in
-     whatever height it is given, 36px in a filter row or the full 42px in a
-     form. The height below is deliberately not `min-height`: a minimum would
-     win against `h-9` and defeat the whole filter row.
+     A select cannot be left to do the same thing, and for a reason that only
+     showed up once `appearance: none` was added below. With the native
+     control drawn, height alone was enough — a select centres its own label
+     top to bottom regardless of padding, which is what let padding be dropped
+     here in the first place. Strip the native appearance away, as the arrow
+     below has to, and that centring goes with it: the label reverts to a
+     plain inline box sitting at the top of whatever height it is given, which
+     read as the text clipped against the bottom edge on anything shorter than
+     the default 42px. `display: grid; align-items: center` replaces the
+     centring the native control used to do for free — a single grid item
+     filling the row and centred on the cross axis, which is the standard fix
+     for exactly this once `appearance: none` is in play. The height below is
+     deliberately not `min-height`: a minimum would win against `h-9` and
+     defeat the whole filter row.
 
      The arrow used to be left to the browser, on the reasoning that drawing
      our own meant choosing a colour twice — once per theme. That reasoning
@@ -372,6 +538,8 @@
   :where(select).form-input {
     @apply appearance-none bg-no-repeat py-0 pr-9;
     height: 2.625rem;
+    display: grid;
+    align-items: center;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     background-position: right 0.7rem center;
     background-size: 0.85rem;

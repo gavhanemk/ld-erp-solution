@@ -72,3 +72,23 @@ export function truncate(str: string, maxLength: number): string {
   if (str.length <= maxLength) return str
   return str.slice(0, maxLength - 3) + '...'
 }
+
+/**
+ * The line-item names for an order or receipt row, condensed to what a
+ * table cell can actually hold.
+ *
+ * Two names read as a preview; past that, a count says the rest without
+ * trying to list a purchase order that runs to thirty lines. `full` is
+ * every name, for a hover title on the truncated text — the one place
+ * somebody genuinely needs to see all of them without opening the row.
+ */
+export function itemsPreview(names: Array<string | null | undefined>): {
+  shown: string
+  extra: string
+  full: string
+} {
+  const clean = names.filter((n): n is string => Boolean(n))
+  const shown = clean.slice(0, 2).join(', ')
+  const extra = clean.length > 2 ? ` +${clean.length - 2} more` : ''
+  return { shown, extra, full: clean.join(', ') }
+}

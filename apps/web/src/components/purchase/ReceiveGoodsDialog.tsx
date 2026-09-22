@@ -12,6 +12,7 @@ import {
   ClipboardList,
   FileText,
   Paperclip,
+  Pencil,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { api, ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
@@ -108,7 +109,10 @@ interface Delivery {
 }
 
 const BLANK_DELIVERY: Delivery = {
-  gateEntryNo: '',
+  // The gate keeps its own running count starting at 1 each day, so this is
+  // right far more often than it is wrong — and it is one box fewer to type
+  // on a delivery that is the first of the day, which is most of them.
+  gateEntryNo: '01',
   gateEntryDate: '',
   challanNo: '',
   challanDate: '',
@@ -129,10 +133,60 @@ const num = (v: string | number | undefined) => Number(v) || 0
 const text = (v: string) => (v.trim() === '' ? null : v.trim())
 const when = (v: string) => (v === '' ? null : v)
 
+/** An ISO instant, split for a `<input type="date">` and a `<input type="time">`. */
+const toDateInput = (iso?: string | null) => (iso ? iso.slice(0, 10) : '')
+const toTimeInput = (iso?: string | null) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime())
+    ? ''
+    : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** What `GET /purchase/grn/:id?view=editing` sends back. */
+interface EditingGrn {
+  vehicleNo: string | null
+  notes: string | null
+  grnDate: string
+  gateEntryNo: string | null
+  gateEntryDate: string | null
+  challanNo: string | null
+  challanDate: string | null
+  supplierBillNo: string | null
+  supplierInvoiceNo: string | null
+  supplierInvoiceDate: string | null
+  packageCount: number | null
+  driverName: string | null
+  formNo: string | null
+  clientName: string | null
+  orderedBy: string | null
+  referenceNo: string | null
+  supplierAddress: string | null
+  shippingAddress: string | null
+  lines: Array<{
+    poLineId: string | null
+    warehouseId: string
+    receivedQty: string | number
+    rejectedQty: string | number
+  }>
+  po: {
+    id: string
+    poNumber: string
+    status: string
+    supplier: OrderOption['supplier']
+    deliveryWarehouse: OrderOption['deliveryWarehouse']
+    supplierAddress?: string | null
+    lines: Array<Omit<OrderLine, 'receivedQty' | 'pendingQty'>>
+  } | null
+  /** Accepted-elsewhere per order line — this receipt's own lines already left out. */
+  otherAccepted: Record<string, number>
+}
+
 export function ReceiveGoodsDialog({
   onClose,
   onSaved,
   poId: startOn,
+  grnId,
 }: {
   onClose: () => void
   onSaved: (message: string) => void
@@ -144,7 +198,16 @@ export function ReceiveGoodsDialog({
    * is a chance to pick the wrong order, not a confirmation.
    */
   poId?: string
+  /**
+   * A receipt already on the books, to correct rather than raise fresh.
+   *
+   * Its own order is fixed — that cannot be changed here — but everything
+   * else, quantities included, can be. Takes over from `poId` entirely: the
+   * two are never both passed.
+   */
+  grnId?: string
 }) {
+  const editing = Boolean(grnId)
   const [orders, setOrders] = useState<OrderOption[]>([])
   const [warehouses, setWarehouses] = useState<
     Array<{ id: string; name: string; address?: string | null }>
@@ -188,13 +251,17 @@ export function ReceiveGoodsDialog({
   const [error, setError] = useState<string | null>(null)
 
   /*
-   * Why this receipt books in more than the order's own balance, past the
-   * mill's configured tolerance. Left alone on an ordinary receipt — the box
-   * only appears once the server has actually asked for one, so a store
-   * keeper booking a normal delivery never sees it.
+   * A note on why this receipt books in more than the order asked for.
+   *
+   * Never required and never demanded — a delivery can run over or short by
+   * any amount and still save. The box appears on its own once the numbers
+   * typed exceed the order, as somewhere to put the explanation if there is
+   * one worth keeping.
    */
   const [overReceiptReason, setOverReceiptReason] = useState('')
-  const [needsOverReceiptReason, setNeedsOverReceiptReason] = useState(false)
+
+  /** Why an already-booked receipt is being corrected. Required on every edit. */
+  const [editReason, setEditReason] = useState('')
 
   /** Rows need a stable key of their own — two rows can hold the same store. */
   const nextKey = useRef(0)
@@ -231,11 +298,14 @@ export function ReceiveGoodsDialog({
   }, [])
 
   useEffect(() => {
-    // A fresh order deserves a fresh answer to "does this need a reason" —
-    // carrying it over from whatever order was open before would either
-    // demand a reason nobody needs yet or hide one this order does need.
-    setNeedsOverReceiptReason(false)
+    // A fresh order starts with a blank note — carrying one over from
+    // whatever order was open before would attach it to the wrong receipt.
     setOverReceiptReason('')
+
+    // A receipt being corrected loads through the effect below instead —
+    // this one exists to turn a freshly-picked order into a blank receipt,
+    // which is not what an edit is.
+    if (editing) return
 
     if (!poId) {
       setOrder(null)
@@ -294,7 +364,111 @@ export function ReceiveGoodsDialog({
     return () => {
       cancelled = true
     }
-  }, [poId, warehouses])
+  }, [poId, warehouses, editing])
+
+  /*
+   * Loads a receipt already on the books, for correcting rather than raising
+   * fresh. Everything the create path builds from a freshly-picked order —
+   * `order`, the per-line rows, the paperwork, both addresses — is built here
+   * instead from the receipt itself and the order it was raised against.
+   */
+  useEffect(() => {
+    if (!grnId) return
+
+    let cancelled = false
+    setLoadingOrder(true)
+    setError(null)
+
+    void (async () => {
+      try {
+        const res = await api.get<Single<EditingGrn>>(`/purchase/grn/${grnId}?view=editing`)
+        if (cancelled) return
+
+        const g = res.data
+        const po = g.po
+        if (!po) throw new Error('The order this receipt was raised against no longer exists.')
+
+        const detail: OrderDetail = {
+          id: po.id,
+          poNumber: po.poNumber,
+          status: po.status,
+          supplier: po.supplier,
+          deliveryWarehouse: po.deliveryWarehouse,
+          supplierAddress: po.supplierAddress,
+          lines: po.lines.map((l) => ({
+            ...l,
+            // What every other receipt against this line already accounts
+            // for — this receipt's own lines are left out on purpose, the
+            // same way saving the correction leaves them out.
+            receivedQty: g.otherAccepted[l.id] ?? 0,
+            pendingQty: 0,
+          })),
+        }
+        setOrder(detail)
+
+        const byPoLine: Record<string, Alloc[]> = {}
+        for (const l of g.lines) {
+          if (!l.poLineId) continue
+          const arr = byPoLine[l.poLineId] ?? (byPoLine[l.poLineId] = [])
+          arr.push({
+            key: makeKey(),
+            warehouseId: l.warehouseId,
+            received: String(l.receivedQty),
+            rejected: String(l.rejectedQty),
+          })
+        }
+        // A line this receipt never touched still gets a row — empty, same
+        // as a fresh receipt — so it can be added without reopening later.
+        const fallback = po.deliveryWarehouse?.id ?? warehouses[0]?.id ?? ''
+        for (const l of po.lines) {
+          if (!byPoLine[l.id]) {
+            byPoLine[l.id] = [{ key: makeKey(), warehouseId: fallback, received: '', rejected: '' }]
+          }
+        }
+        setEntries(byPoLine)
+
+        setVehicleNo(g.vehicleNo ?? '')
+        setNotes(g.notes ?? '')
+        setGrnDate(toDateInput(g.grnDate))
+        setGrnTime(toTimeInput(g.grnDate))
+        setDelivery({
+          gateEntryNo: g.gateEntryNo ?? '',
+          gateEntryDate: toDateInput(g.gateEntryDate),
+          challanNo: g.challanNo ?? '',
+          challanDate: toDateInput(g.challanDate),
+          supplierBillNo: g.supplierBillNo ?? '',
+          supplierInvoiceNo: g.supplierInvoiceNo ?? '',
+          supplierInvoiceDate: toDateInput(g.supplierInvoiceDate),
+          packageCount: g.packageCount != null ? String(g.packageCount) : '',
+          driverName: g.driverName ?? '',
+          formNo: g.formNo ?? '',
+          clientName: g.clientName ?? '',
+          orderedBy: g.orderedBy ?? '',
+          referenceNo: g.referenceNo ?? '',
+        })
+
+        // Matched back to a warehouse by its address text, the same way the
+        // supplier address below is matched — the receipt keeps only the
+        // frozen text, never a link to the row that made it.
+        const shipSnapshot = g.shippingAddress?.trim()
+        const shipMatch = shipSnapshot
+          ? warehouses.find((w) => (w.address ?? '').trim() === shipSnapshot)
+          : undefined
+        setShippingWarehouseId(shipMatch?.id ?? fallback)
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof ApiError ? err.message : 'Could not open that receipt.')
+          setOrder(null)
+        }
+      } finally {
+        if (!cancelled) setLoadingOrder(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [grnId, warehouses])
 
   /*
    * The supplier's addresses on file, and which one this receipt starts on.
@@ -393,46 +567,56 @@ export function ReceiveGoodsDialog({
       )
     }
 
+    if (editing && !editReason.trim()) {
+      return setError('Say why this receipt is being corrected — one line is enough.')
+    }
+
     // The date and the time are typed separately and sent as one instant. Two
     // deliveries from the same supplier on one day are told apart by nothing
     // else.
     const stamp = grnDate ? (grnTime ? `${grnDate}T${grnTime}` : grnDate) : undefined
 
+    const paperwork = {
+      grnDate: stamp,
+      vehicleNo: text(vehicleNo),
+      notes: text(notes),
+      supplierAddressId: supplierAddressId || null,
+      shippingWarehouseId: shippingWarehouseId || null,
+      overReceiptReason: text(overReceiptReason),
+
+      gateEntryNo: text(delivery.gateEntryNo),
+      gateEntryDate: when(delivery.gateEntryDate),
+      challanNo: text(delivery.challanNo),
+      challanDate: when(delivery.challanDate),
+      supplierBillNo: text(delivery.supplierBillNo),
+      supplierInvoiceNo: text(delivery.supplierInvoiceNo),
+      supplierInvoiceDate: when(delivery.supplierInvoiceDate),
+      packageCount: delivery.packageCount.trim() === '' ? null : num(delivery.packageCount),
+      driverName: text(delivery.driverName),
+      formNo: text(delivery.formNo),
+      clientName: text(delivery.clientName),
+      orderedBy: text(delivery.orderedBy),
+      referenceNo: text(delivery.referenceNo),
+
+      lines: rows.map(({ line, alloc }) => ({
+        poLineId: line.id,
+        warehouseId: alloc.warehouseId,
+        receivedQty: num(alloc.received),
+        rejectedQty: num(alloc.rejected),
+      })),
+    }
+
     setSaving(true)
     try {
-      const res = await api.post<{ message?: string; data: { id: string; grnNumber: string } }>(
-        '/purchase/grn',
-        {
-          poId: order.id,
-          grnDate: stamp,
-          vehicleNo: text(vehicleNo),
-          notes: text(notes),
-          supplierAddressId: supplierAddressId || null,
-          shippingWarehouseId: shippingWarehouseId || null,
-          overReceiptReason: text(overReceiptReason),
-
-          gateEntryNo: text(delivery.gateEntryNo),
-          gateEntryDate: when(delivery.gateEntryDate),
-          challanNo: text(delivery.challanNo),
-          challanDate: when(delivery.challanDate),
-          supplierBillNo: text(delivery.supplierBillNo),
-          supplierInvoiceNo: text(delivery.supplierInvoiceNo),
-          supplierInvoiceDate: when(delivery.supplierInvoiceDate),
-          packageCount: delivery.packageCount.trim() === '' ? null : num(delivery.packageCount),
-          driverName: text(delivery.driverName),
-          formNo: text(delivery.formNo),
-          clientName: text(delivery.clientName),
-          orderedBy: text(delivery.orderedBy),
-          referenceNo: text(delivery.referenceNo),
-
-          lines: rows.map(({ line, alloc }) => ({
-            poLineId: line.id,
-            warehouseId: alloc.warehouseId,
-            receivedQty: num(alloc.received),
-            rejectedQty: num(alloc.rejected),
-          })),
-        }
-      )
+      const res = editing
+        ? await api.patch<{ message?: string; data: { id: string; grnNumber: string } }>(
+            `/purchase/grn/${grnId}`,
+            { ...paperwork, editReason: editReason.trim() }
+          )
+        : await api.post<{ message?: string; data: { id: string; grnNumber: string } }>(
+            '/purchase/grn',
+            { ...paperwork, poId: order.id }
+          )
 
       /*
        * Files chosen before the receipt existed. It has a number now, so they
@@ -441,7 +625,8 @@ export function ReceiveGoodsDialog({
        * A failure here does not undo the receipt — the stock is already on the
        * rack, and throwing that away over an attachment would be the worse
        * outcome. Whatever did not make it is named instead, and can be added
-       * by reopening the receipt.
+       * by reopening the receipt. Correcting an existing receipt has nothing
+       * pending — its files were already sent the moment they were chosen.
        */
       const { failed } = (await attachmentsRef.current?.uploadPending(res.data.id)) ?? {
         failed: [],
@@ -453,9 +638,6 @@ export function ReceiveGoodsDialog({
           : base
       )
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'OVER_RECEIPT_REASON_REQUIRED') {
-        setNeedsOverReceiptReason(true)
-      }
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {
       setSaving(false)
@@ -483,8 +665,23 @@ export function ReceiveGoodsDialog({
     </label>
   )
 
+  /*
+   * Whether anything on this receipt books in more than the order still has
+   * outstanding. Nothing is refused on the strength of it — it only decides
+   * whether to offer the note box, so a delivery that ran over has somewhere
+   * to say why while an ordinary one stays out of the way.
+   */
+  const booksOverOrder = (order?.lines ?? []).some((line) => {
+    const pending = num(line.qty) - num(line.receivedQty)
+    const taking = (entries[line.id] ?? []).reduce(
+      (sum, a) => sum + (num(a.received) - num(a.rejected)),
+      0
+    )
+    return taking > pending
+  })
+
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       {/* `h-full`, not a cap. A cap only says how tall the card may not be, so
         a form shorter than the screen hugs its content and the leftover is
         split above and below as centring slack — which is the strip of dimmed
@@ -505,12 +702,14 @@ export function ReceiveGoodsDialog({
             </div>
             <div>
               <h2 id="grn-dialog-title" className="text-foreground text-base font-semibold">
-                Receive goods
+                {editing ? 'Correct a receipt' : 'Receive goods'}
               </h2>
               <p className="text-muted-foreground mt-0.5 text-xs">
                 {order
-                  ? `Against ${order.poNumber} — ${order.supplier?.name ?? 'supplier not named'}`
-                  : 'Book in a delivery against a purchase order'}
+                  ? `${editing ? 'Correcting' : 'Against'} ${order.poNumber} — ${order.supplier?.name ?? 'supplier not named'}`
+                  : editing
+                    ? 'Opening the receipt…'
+                    : 'Book in a delivery against a purchase order'}
               </p>
             </div>
           </div>
@@ -523,10 +722,12 @@ export function ReceiveGoodsDialog({
               >
                 {saving ? (
                   <Loader2 size={15} className="animate-spin" />
+                ) : editing ? (
+                  <Pencil size={15} />
                 ) : (
                   <PackageCheck size={15} />
                 )}
-                Receive goods
+                {editing ? 'Save correction' : 'Receive goods'}
               </button>
             </div>
             <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
@@ -538,32 +739,35 @@ export function ReceiveGoodsDialog({
         {/* Body — the only thing that scrolls */}
         <div className="flex-1 space-y-2 overflow-y-auto px-4 py-2.5">
           {error && (
-            <div
-              className={`flex items-start gap-3 rounded-lg border p-3 ${
-                needsOverReceiptReason
-                  ? 'border-amber-500/40 bg-amber-500/5'
-                  : 'border-red-500/40 bg-red-500/5'
-              }`}
-            >
-              <AlertCircle
-                size={16}
-                className={`mt-0.5 shrink-0 ${needsOverReceiptReason ? 'text-amber-400' : 'text-red-400'}`}
-              />
-              <p className={`text-sm ${needsOverReceiptReason ? 'text-amber-400' : 'text-red-400'}`}>
-                {error}
-              </p>
+            <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+              <p className="text-sm text-red-400">{error}</p>
             </div>
           )}
 
-          {needsOverReceiptReason && (
+          {booksOverOrder && (
             <label className="block">
-              <span className="form-label">Why more than ordered (required to save)</span>
+              <span className="form-label">
+                Why more than ordered{' '}
+                <span className="text-muted-foreground font-normal">(optional)</span>
+              </span>
               <input
                 className="form-input h-9"
                 value={overReceiptReason}
                 onChange={(e) => setOverReceiptReason(e.target.value)}
                 placeholder="e.g. supplier combined this with next month's delivery"
-                autoFocus
+              />
+            </label>
+          )}
+
+          {editing && (
+            <label className="block">
+              <span className="form-label">Why this receipt is being corrected (required)</span>
+              <input
+                className="form-input h-9"
+                value={editReason}
+                onChange={(e) => setEditReason(e.target.value)}
+                placeholder="e.g. store keeper mis-typed the quantity that arrived"
               />
             </label>
           )}
@@ -572,19 +776,27 @@ export function ReceiveGoodsDialog({
             <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
               <label className="block">
                 <span className="form-label">Purchase order</span>
-                <select
-                  className="form-input h-9"
-                  value={poId}
-                  onChange={(e) => setPoId(e.target.value)}
-                  disabled={loadingLists}
-                >
-                  <option value="">Choose…</option>
-                  {orders.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.poNumber}
-                    </option>
-                  ))}
-                </select>
+                {editing ? (
+                  <input
+                    className="form-input text-muted-foreground h-9"
+                    value={order?.poNumber ?? ''}
+                    disabled
+                  />
+                ) : (
+                  <select
+                    className="form-input h-9"
+                    value={poId}
+                    onChange={(e) => setPoId(e.target.value)}
+                    disabled={loadingLists}
+                  >
+                    <option value="">Choose…</option>
+                    {orders.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.poNumber}
+                      </option>
+                    ))}
+                  </select>
+                )}
               </label>
               <label className="block">
                 <span className="form-label">Supplier</span>
@@ -738,6 +950,15 @@ export function ReceiveGoodsDialog({
             </p>
           )}
 
+          {/* Otherwise the form ends after two short boxes and leaves the rest
+              of the card empty — reading as broken rather than as waiting on
+              a choice only the store keeper can make. */}
+          {!loadingLists && !editing && orders.length > 0 && !poId && (
+            <p className="text-muted-foreground py-10 text-center text-sm">
+              Pick a purchase order above to see what&rsquo;s due.
+            </p>
+          )}
+
           {loadingOrder && <p className="text-muted-foreground py-6 text-sm">Opening the order…</p>}
 
           {order && !loadingOrder && (
@@ -837,9 +1058,9 @@ export function ReceiveGoodsDialog({
                                     )}
                                   </div>
                                   {over && (
-                                    <div className="mt-1 text-[11px] text-amber-400">
+                                    <div className="text-muted-foreground mt-1 text-[11px]">
                                       {Number((lineAccepted - pending).toFixed(3))} {unit} more than
-                                      is still due — saving may ask why.
+                                      is still due.
                                     </div>
                                   )}
                                   {line.shortClosed && (
@@ -882,7 +1103,7 @@ export function ReceiveGoodsDialog({
 
                             <td>
                               <input
-                                className="form-input h-8 text-right"
+                                className="form-input h-9 text-right"
                                 inputMode="decimal"
                                 value={alloc.received}
                                 onChange={(e) =>
@@ -897,7 +1118,7 @@ export function ReceiveGoodsDialog({
                             </td>
                             <td>
                               <input
-                                className="form-input h-8 text-right"
+                                className="form-input h-9 text-right"
                                 inputMode="decimal"
                                 value={alloc.rejected}
                                 onChange={(e) =>
@@ -921,7 +1142,7 @@ export function ReceiveGoodsDialog({
                             </td>
                             <td>
                               <select
-                                className="form-input h-8"
+                                className="form-input h-9"
                                 value={alloc.warehouseId}
                                 onChange={(e) =>
                                   setAlloc(line.id, alloc.key, { warehouseId: e.target.value })
@@ -947,7 +1168,7 @@ export function ReceiveGoodsDialog({
                                 {first ? (
                                   <button
                                     type="button"
-                                    className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                                    className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
                                     onClick={() => addAlloc(line.id)}
                                     disabled={done}
                                     title={`Send some of ${line.item.name} to another store`}
@@ -958,7 +1179,7 @@ export function ReceiveGoodsDialog({
                                 ) : (
                                   <button
                                     type="button"
-                                    className="border-border text-muted-foreground inline-flex h-8 w-8 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
+                                    className="border-border text-muted-foreground inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
                                     onClick={() => removeAlloc(line.id, alloc.key)}
                                     title="Remove this store"
                                     aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
@@ -1010,6 +1231,7 @@ export function ReceiveGoodsDialog({
                     ref={attachmentsRef}
                     basePath="/purchase/grn"
                     linkBasePath="/purchase/grn-attachments"
+                    recordId={grnId}
                     onError={setError}
                     onCountChange={setAttachmentCount}
                   />
@@ -1031,8 +1253,14 @@ export function ReceiveGoodsDialog({
             onClick={() => void save()}
             disabled={saving || !order || loadingOrder}
           >
-            {saving ? <Loader2 size={15} className="animate-spin" /> : <PackageCheck size={15} />}
-            Receive goods
+            {saving ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : editing ? (
+              <Pencil size={15} />
+            ) : (
+              <PackageCheck size={15} />
+            )}
+            {editing ? 'Save correction' : 'Receive goods'}
           </button>
         </div>
       </div>
