@@ -18,10 +18,11 @@ import { ChevronDown, ChevronUp } from 'lucide-react'
  * up here: a control that decides which cells below are live is read before
  * them, and in its own row it was a third size of text in a row of its own.
  *
- * It lives in its own file rather than in the order form that first drew it.
- * Four forms wear this chrome now, and the payment form is the smallest of
- * them — importing it from `PurchaseOrderDialog` would have dragged three and
- * a half thousand lines of order form into a page that never opens one.
+ * It lives in its own file rather than in the order form that first drew it,
+ * so a screen that wants one panel does not have to import three and a half
+ * thousand lines of order form to get it. The order, bill and receipt forms
+ * all wear it; `PurchaseOrderDialog` re-exports it for the imports that
+ * already pointed there.
  */
 export function Section({
   icon: Icon,
