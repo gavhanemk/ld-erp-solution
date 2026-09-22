@@ -236,20 +236,22 @@ export default function SupplierPaymentsPage() {
   /** Which row's receipts and files are showing. One at a time, on whichever tab is open. */
   const [expanded, setExpanded] = useState<string | null>(null)
 
+  /**
+   * Both lists, every time. The tab badges count what is on each, so a payment
+   * nobody has opened the history tab to see still has to be counted — a badge
+   * reading nought beside two real payments is a lie about the books.
+   */
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      if (tab === 'outstanding') {
-        const res = await api.get<{ data: OutstandingBill[]; summary: Summary }>(
-          '/purchase/payments/outstanding'
-        )
-        setBills(res.data)
-        setSummary(res.summary)
-      } else {
-        const res = await api.get<{ data: Payment[] }>('/purchase/payments')
-        setPayments(res.data)
-      }
+      const [owed, paid] = await Promise.all([
+        api.get<{ data: OutstandingBill[]; summary: Summary }>('/purchase/payments/outstanding'),
+        api.get<{ data: Payment[] }>('/purchase/payments'),
+      ])
+      setBills(owed.data)
+      setSummary(owed.summary)
+      setPayments(paid.data)
     } catch (err) {
       setError(
         err instanceof ApiError
@@ -261,7 +263,7 @@ export default function SupplierPaymentsPage() {
     } finally {
       setLoading(false)
     }
-  }, [tab])
+  }, [])
 
   useEffect(() => {
     void load()
