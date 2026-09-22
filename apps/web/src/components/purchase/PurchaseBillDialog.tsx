@@ -633,6 +633,28 @@ export function PurchaseBillDialog({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
+
+    /*
+     * Say what is still missing, and take the person to the first of it. The
+     * notice sits at the top of a form that by this point is usually scrolled
+     * a long way past it, so neither half is any use without the other.
+     */
+    if (missing.length) {
+      const what = missing.map((m) => m.what)
+      setError(
+        what.length === 1
+          ? `Still to fill in: ${what[0]}.`
+          : `Still to fill in: ${what.slice(0, -1).join(', ')} and ${what[what.length - 1]}.`,
+      )
+      const id = missing.find((m) => m.focus)?.focus
+      requestAnimationFrame(() => {
+        const el = document.getElementById(id ?? 'bill-form-error')
+        el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        if (id) el?.focus({ preventScroll: true })
+      })
+      return
+    }
+
     setSaving(true)
     setError(null)
 
@@ -702,15 +724,34 @@ export function PurchaseBillDialog({
     (l) => l.rateAction === 'ACCEPT' && num(l.unitPrice) - (l.orderedRate ?? 0) > 0.005,
   )
 
-  const incomplete =
-    !supplierId ||
-    // The supplier's invoice is on the desk when a bill is booked, so its
-    // number and date are part of the document rather than optional extras.
-    !supplierInvoiceNo.trim() ||
-    !supplierInvoiceDate ||
-    lines.some((l) => !l.itemId || num(l.qty) <= 0) ||
-    undecidedRates.length > 0 ||
-    (needsRateReason && !rateVarianceReason.trim())
+  /**
+   * What is still outstanding, named the way somebody would say it, in the
+   * order it appears on the form. This used to be a single boolean whose only
+   * job was to switch the button off, so a press answered with nothing at all
+   * — and the grey prompts under the two bill fields sit several screens above
+   * wherever a person is standing when they reach for Book bill.
+   */
+  const missing: Array<{ what: string; focus?: string }> = []
+  if (!supplierId) missing.push({ what: 'the supplier', focus: 'bill-supplier' })
+  // The supplier's invoice is on the desk when a bill is booked, so its
+  // number and date are part of the document rather than optional extras.
+  if (!supplierInvoiceNo.trim())
+    missing.push({ what: 'their bill number', focus: 'bill-supplier-no' })
+  if (!supplierInvoiceDate)
+    missing.push({ what: 'the date on their bill', focus: 'bill-supplier-date' })
+  if (lines.some((l) => !l.itemId)) missing.push({ what: 'an item on every line' })
+  if (lines.some((l) => num(l.qty) <= 0)) missing.push({ what: 'a quantity on every line' })
+  if (undecidedRates.length > 0) {
+    const n = undecidedRates.length
+    missing.push({
+      what:
+        n === 1
+          ? 'what to do about the rate that does not match the order'
+          : `what to do about the ${n} rates that do not match the order`,
+    })
+  }
+  if (needsRateReason && !rateVarianceReason.trim())
+    missing.push({ what: 'why the higher rate was agreed', focus: 'bill-rate-reason' })
 
   /*
    * Rendered on `document.body`, as the order and receipt dialogs already are.
@@ -761,7 +802,7 @@ export function PurchaseBillDialog({
               type="submit"
               form="bill-form"
               className="btn-primary"
-              disabled={saving || incomplete}
+              disabled={saving}
             >
               {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
               {isEdit ? 'Save changes' : 'Book bill'}
@@ -780,7 +821,10 @@ export function PurchaseBillDialog({
             the header before anything to fill in. */}
           <div className="flex-1 space-y-2.5 overflow-y-auto px-4 py-2.5">
           {error && (
-            <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
+            <div
+              id="bill-form-error"
+              className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5"
+            >
               <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
               <p className="text-sm text-red-400">{error}</p>
             </div>
@@ -925,7 +969,8 @@ export function PurchaseBillDialog({
                 the document's own number rather than an afterthought. It is
                 also what stops the same invoice being booked twice. */}
               <label className="form-label" htmlFor="bill-supplier-no">
-                Bill no. <span className="text-muted-foreground">(theirs)</span>
+                Bill no.<span className="text-red-400 ml-0.5">*</span>{' '}
+                <span className="text-muted-foreground">(theirs)</span>
               </label>
               <input
                 id="bill-supplier-no"
@@ -933,7 +978,6 @@ export function PurchaseBillDialog({
                 placeholder="As printed on their bill"
                 value={supplierInvoiceNo}
                 onChange={(e) => setSupplierInvoiceNo(e.target.value)}
-                required
               />
               {/* A prompt, not an alarm. An empty box on a form nobody has
                 filled in yet has not gone wrong — it is simply not done, and
@@ -947,7 +991,7 @@ export function PurchaseBillDialog({
 
             <div>
               <label className="form-label" htmlFor="bill-supplier-date">
-                Bill date
+                Bill date<span className="text-red-400 ml-0.5">*</span>
               </label>
               <input
                 id="bill-supplier-date"
@@ -955,7 +999,6 @@ export function PurchaseBillDialog({
                 className="form-input"
                 value={supplierInvoiceDate}
                 onChange={(e) => setSupplierInvoiceDate(e.target.value)}
-                required
               />
               {!supplierInvoiceDate && (
                 <span className="mt-1 block text-xs text-muted-foreground">
@@ -1116,6 +1159,7 @@ export function PurchaseBillDialog({
                 <label className="block">
                   <span className="form-label">Why the higher rate was agreed</span>
                   <input
+                    id="bill-rate-reason"
                     className="form-input h-9"
                     value={rateVarianceReason}
                     onChange={(e) => setRateVarianceReason(e.target.value)}
@@ -1510,7 +1554,7 @@ export function PurchaseBillDialog({
             <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
               Cancel
             </button>
-            <button type="submit" className="btn-primary" disabled={saving || incomplete}>
+            <button type="submit" className="btn-primary" disabled={saving}>
               {saving && <Loader2 size={15} className="animate-spin" />}
               {isEdit ? 'Save changes' : 'Book bill'}
             </button>
