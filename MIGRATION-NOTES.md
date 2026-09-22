@@ -7,6 +7,103 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 22 Sep 2026 — a record may not outlive what it describes
+
+**Migration:** `20260922160000_purchase_integrity_and_payment_reversal`
+**Branch:** `fix/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Three foreign keys moved from `ON DELETE SET NULL` to `ON DELETE RESTRICT`, and a
+supplier payment gained a status so it can be reversed rather than deleted.
+
+| Key | Was | Now |
+|---|---|---|
+| `purchase_invoice_lines.grnLineId` | SET NULL | RESTRICT |
+| `grn_lines.poLineId` | SET NULL | RESTRICT |
+| `supplier_payments.invoiceId` | SET NULL | RESTRICT |
+
+| Column | Holds |
+|---|---|
+| `supplier_payments.status` | `POSTED` or `REVERSED`. `NOT NULL DEFAULT 'POSTED'` |
+| `reversedAt`, `reversedById`, `reversalReason` | Who reversed it, when, and why |
+
+Plus a check constraint, `supplier_payments_reversal_is_explained`: a row marked
+REVERSED must carry all three. A reversal with no reason is unauditable, and
+the database is the only place that can insist on it.
+
+### Why the three keys
+
+Every one of them had a guard in the API that could never fire.
+
+The goods receipt delete route catches Postgres error P2003 and answers
+"that receipt has a bill matched against it — remove it from that bill
+first." P2003 was impossible: the database nulled the bill line instead. So
+the receipt went, its stock came back out, and the bill kept a line pointing
+at nothing — never three-way matched again, with nothing on it to say why.
+
+That was proved in a rolled-back transaction before the change, and the same
+script proves it shut after:
+
+```
+DELETE receipt  -> REFUSED by the database (P2003). Hole shut.
+DELETE PO line  -> REFUSED by the database (P2003). Hole shut.
+REVERSED with no reason -> REFUSED by the check constraint.
+```
+
+### The one thing that had to change with it
+
+Correcting a goods receipt used to delete every line and write fresh ones,
+which gave each a new id. Under the restrict key that would have refused any
+edit to a receipt that had been billed — including correcting its vehicle
+number. So the receipt patch now diffs: a line still on the receipt keeps its
+identity and is updated in place, only a line genuinely gone is deleted, and a
+line a bill is holding cannot go at all.
+
+It also now refuses to correct a line *down* below what a bill already claims:
+
+> Collar Clip is billed at 650 on PB-2627-0001, so this receipt cannot be
+> corrected down to 400. Correct the bill first.
+
+That check never existed. `checkAgainstReceipts` asks whether a bill is running
+ahead of its receipts; nothing asked whether a receipt was being corrected
+back behind its bills.
+
+### How it was applied
+
+From `packages/database`, on 22 Sep 2026:
+
+```bash
+npx prisma db execute --file prisma/migrations/20260922160000_purchase_integrity_and_payment_reversal/migration.sql --schema prisma/schema.prisma
+npx prisma migrate resolve --applied 20260922160000_purchase_integrity_and_payment_reversal
+```
+
+Changing a referential action is a DROP and re-ADD of the constraint. No row
+is read or written by it; the re-ADD validates that existing values still
+point at rows that exist, which was checked first and found clean — 0 of 2
+bill lines and 0 of 2 receipt lines were already orphaned.
+
+Row counts before and after — **identical on every table**: purchase_orders 4,
+purchase_order_lines 6, grn 2, grn_lines 2, purchase_invoices 1,
+purchase_invoice_lines 2, supplier_payments 0, debit_notes 0, suppliers 17,
+items 43, stock_ledger 93, users 5, bom 5, bom_lines 42.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+Without `db:generate` your Prisma client does not know `supplier_payments.status`
+exists and every read of a payment fails.
+
+---
+
 ## 22 Sep 2026 — a supplier payment records what the mill's own voucher records
 
 **Migration:** `20260922060000_supplier_payment_voucher_details`

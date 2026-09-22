@@ -111,6 +111,12 @@ enum VoucherType {
   CONTRA
 }
 
+/// Whether a supplier payment still settles anything.
+enum PaymentStatus {
+  POSTED
+  REVERSED
+}
+
 enum PaymentMode {
   CASH
   CHEQUE
@@ -263,6 +269,7 @@ model User {
   issuedMRs       MaterialRequisition[]     @relation("MRIssuedBy")
   createdBills    PurchaseInvoice[]         @relation("BillCreatedBy")
   createdPayments SupplierPayment[]         @relation("PaymentCreatedBy")
+  reversedPayments SupplierPayment[]        @relation("PaymentReversedBy")
   uploadedFiles   PurchaseOrderAttachment[] @relation("AttachmentUploadedBy")
   movedStock      StockTransfer[]           @relation("TransferMovedBy")
   cancelledStock  StockTransfer[]           @relation("TransferCancelledBy")
@@ -1324,8 +1331,14 @@ model GRNLine {
   id           String             @id @default(cuid())
   grnId        String
   grn          GRN                @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  /// The order line this was received against.
+  ///
+  /// `Restrict` for the same reason as the bill line: a receipt line with no
+  /// order line behind it cannot be matched, and the guards that refuse
+  /// editing an order with goods against it were only advisory while the
+  /// database would quietly null this instead.
   poLineId     String?
-  poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id])
+  poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
   itemId       String
   item         Item               @relation(fields: [itemId], references: [id])
   warehouseId  String
@@ -1415,8 +1428,13 @@ model SupplierPayment {
   paymentNumber String           @unique
   supplierId    String
   supplier      Supplier         @relation(fields: [supplierId], references: [id])
+  /// The bill this settles. Null for a payment on account.
+  ///
+  /// `Restrict`: the bill delete route already refuses a bill with payments
+  /// against it, and set-null would have let a payment survive with nothing
+  /// to reconcile it to.
   invoiceId     String?
-  invoice       PurchaseInvoice? @relation(fields: [invoiceId], references: [id])
+  invoice       PurchaseInvoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
   /// Which of our places the payment is booked at — the old ERP's "Location",
   /// empty meaning head office. Kept on the payment rather than read from the
   /// bill because a unit can settle a bill the head office raised.
@@ -1442,6 +1460,18 @@ model SupplierPayment {
   chequeNo      String?
   chequeDate    DateTime?
   notes         String?
+  /// Whether this payment still counts.
+  ///
+  /// A bounced cheque had nowhere to go: the payment could only be deleted,
+  /// which removed the evidence that the mill had ever tried to pay. Reversing
+  /// keeps the record and stops it settling the bill, so the bill reopens for
+  /// the amount and the trail still shows what happened.
+  status         PaymentStatus   @default(POSTED)
+  reversedAt     DateTime?
+  reversedById   String?
+  reversedBy     User?           @relation("PaymentReversedBy", fields: [reversedById], references: [id])
+  /// Why. Required by the route — a reversal with no reason is unauditable.
+  reversalReason String?
   createdById   String
   createdBy     User             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
   createdAt     DateTime         @default(now())
@@ -2316,8 +2346,15 @@ model PurchaseInvoiceLine {
   /// row at a time. Held per line rather than once on the bill, because a
   /// supplier routinely bills several deliveries together — and because a bill
   /// line for something never received is exactly what the match must catch.
+  /// The receipt line this bill line settles.
+  ///
+  /// `Restrict`, not the default set-null. Set-null made the GRN_BILLED guard
+  /// on the receipt delete route dead code: the receipt went, its stock came
+  /// back out, and the bill line survived pointing at nothing — so that bill
+  /// was never three-way matched again and nobody could see why. Proved in a
+  /// rolled-back transaction before it was changed.
   grnLineId    String?
-  grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id])
+  grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
   description  String?
   hsnCode      String?
   qty          Decimal         @db.Decimal(10, 3)

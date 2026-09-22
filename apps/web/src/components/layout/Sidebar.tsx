@@ -79,6 +79,7 @@ const navItems: NavItem[] = [
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
       { label: 'Purchase Bills', href: '/purchase/bills' },
       { label: 'Supplier Payments', href: '/purchase/payments' },
+      { label: 'Debit Notes', href: '/purchase/debit-notes' },
     ],
   },
   {

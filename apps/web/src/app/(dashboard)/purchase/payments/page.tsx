@@ -10,6 +10,7 @@ import {
   Paperclip,
   RefreshCw,
   Search,
+  Undo2,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { RecordPaymentDialog, type PayableBill } from '@/components/purchase/RecordPaymentDialog'
@@ -76,6 +77,11 @@ interface Payment {
   /** The advice, the counterfoil — attached when the payment was recorded. */
   attachments?: BillFile[]
   notes?: string | null
+  /** A reversed payment settles nothing, but stays on the record. */
+  status?: 'POSTED' | 'REVERSED'
+  reversedAt?: string | null
+  reversalReason?: string | null
+  reversedBy?: { id: string; name: string } | null
   invoice?: ({ id: string; billNumber: string } & BillTrail) | null
   createdBy?: { id: string; name: string } | null
 }
@@ -272,6 +278,46 @@ export default function SupplierPaymentsPage() {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const [paying, setPaying] = useState<OutstandingBill | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  /**
+   * Reverses a payment rather than deleting it.
+   *
+   * A bounced cheque is a thing that happened. Removing the row would remove
+   * the evidence that the mill ever tried to pay, so the payment stays, stops
+   * settling its bill, and the bill reopens for the amount.
+   */
+  const reverse = async (p: Payment) => {
+    const owed = `₹${money(p.amount)}`
+    if (
+      !confirm(
+        `Reverse ${p.paymentNumber}?
+
+` +
+          `${owed} goes back on ${p.invoice?.billNumber ?? 'the supplier account'}. ` +
+          `The payment stays on the record, marked reversed — it is not deleted.`
+      )
+    ) {
+      return
+    }
+    const reason = prompt('Why is it being reversed? (cheque bounced, wrong account, duplicate)')
+    if (!reason?.trim()) return
+
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await api.post<{ message?: string }>(
+        `/purchase/payments/${p.id}/reverse`,
+        { reason: reason.trim() }
+      )
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reverse that payment.')
+    } finally {
+      setBusy(false)
+    }
+  }
   /** Which row's receipts and files are showing. One at a time, on whichever tab is open. */
   const [expanded, setExpanded] = useState<string | null>(null)
 
@@ -1044,7 +1090,25 @@ export default function SupplierPaymentsPage() {
                       )}
                       <dt className="text-muted-foreground">Recorded by</dt>
                       <dd className="text-foreground min-w-0">{p.createdBy?.name ?? '—'}</dd>
+                      {p.status === 'REVERSED' && (
+                        <>
+                          <dt className="text-muted-foreground">Reversed</dt>
+                          <dd className="min-w-0 text-amber-400">
+                            {p.reversalReason ?? 'no reason recorded'}
+                          </dd>
+                        </>
+                      )}
                     </dl>
+
+                    {p.status !== 'REVERSED' && (
+                      <button
+                        className="btn-ghost mt-2 h-7 px-2 text-xs"
+                        onClick={() => void reverse(p)}
+                        disabled={busy}
+                      >
+                        <Undo2 size={13} /> Reverse this payment
+                      </button>
+                    )}
 
                     {canExpand && (
                       <div className="mt-3">
@@ -1085,6 +1149,7 @@ export default function SupplierPaymentsPage() {
                     <th className="col-wide">How</th>
                     <th style={{ textAlign: 'right' }}>Amount</th>
                     <th className="col-full">Recorded by</th>
+                    <th style={{ width: '7rem' }} />
                     <th className="col-roomy">Files</th>
                   </tr>
                 </thead>
@@ -1179,6 +1244,21 @@ export default function SupplierPaymentsPage() {
                             )}
                           </td>
                           <td className="col-full text-xs">{p.createdBy?.name ?? '—'}</td>
+                          <td className="whitespace-nowrap">
+                            {p.status === 'REVERSED' ? (
+                              <span className="badge-neutral" title={p.reversalReason ?? undefined}>
+                                Reversed
+                              </span>
+                            ) : (
+                              <button
+                                className="btn-ghost h-7 px-2 text-xs"
+                                onClick={() => void reverse(p)}
+                                disabled={busy}
+                              >
+                                <Undo2 size={13} /> Reverse
+                              </button>
+                            )}
+                          </td>
                           <td className="col-roomy whitespace-nowrap">
                             {/* The payment's own papers count here too —
                               the advice and the counterfoil were attached to
@@ -1199,7 +1279,7 @@ export default function SupplierPaymentsPage() {
                         </tr>
                         {pOpen && canExpand && p.invoice && (
                           <tr>
-                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={11} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <BillTrailPanel
                                 billNumber={p.invoice.billNumber}
                                 po={p.invoice.po}

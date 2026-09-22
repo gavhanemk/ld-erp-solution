@@ -2476,9 +2476,79 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       ? await shippingAddressFor(tx, data.shippingWarehouseId)
       : (po.deliveryWarehouse?.address ?? null)
 
-    // Replaced outright rather than diffed — a line missing from the new
-    // payload is a line no longer on this receipt, full stop.
-    await tx.gRNLine.deleteMany({ where: { grnId: before.id } })
+    /*
+     * Diffed rather than replaced outright.
+     *
+     * This used to delete every line and write fresh ones, which gave each a
+     * new id — and a bill line points at a receipt line by id. Under the old
+     * set-null foreign key that silently orphaned the bill; under the restrict
+     * key it would now refuse the edit outright, which would mean a receipt
+     * could not have its vehicle number corrected once it had been billed.
+     *
+     * So a line still on the receipt keeps its identity and is updated in
+     * place. Only a line genuinely gone is deleted, and a line a bill is
+     * holding cannot go at all.
+     */
+    const billed = await billedByGrnLine(
+      tx,
+      before.lines.map((l) => l.id)
+    )
+
+    const oldByKey = new Map(
+      before.lines.map((l) => [grnLineKey(l.poLineId, l.warehouseId, l.batchNumber), l])
+    )
+    const matchedOldIds = new Set<string>()
+    const pairs = prepared.map((p) => {
+      const old = oldByKey.get(grnLineKey(p.poLine.id, p.warehouseId, p.batchNumber))
+      if (old && !matchedOldIds.has(old.id)) {
+        matchedOldIds.add(old.id)
+        return { prepared: p, old }
+      }
+      return { prepared: p, old: null }
+    })
+
+    // A line a bill is holding must not be removed, and must not be corrected
+    // below what that bill already claims.
+    for (const line of before.lines) {
+      const claim = billed.get(line.id)
+      if (!claim || claim.qty <= 0) continue
+
+      const match = pairs.find((pair) => pair.old?.id === line.id)
+      const itemName = poLines.get(line.poLineId ?? '')?.item?.name ?? 'That item'
+
+      if (!match) {
+        throw new AppError(
+          `${itemName} is on ${claim.bills.join(' and ')} for ${claim.qty}. Take it off that bill before removing it from this receipt.`,
+          400,
+          'GRN_LINE_BILLED'
+        )
+      }
+      if (round3(match.prepared.accepted) < claim.qty) {
+        throw new AppError(
+          `${itemName} is billed at ${claim.qty} on ${claim.bills.join(' and ')}, so this receipt cannot be corrected down to ${round3(match.prepared.accepted)}. Correct the bill first.`,
+          400,
+          'GRN_BELOW_BILLED'
+        )
+      }
+    }
+
+    const goneIds = before.lines.filter((l) => !matchedOldIds.has(l.id)).map((l) => l.id)
+    if (goneIds.length) await tx.gRNLine.deleteMany({ where: { id: { in: goneIds } } })
+
+    for (const { prepared: p, old } of pairs) {
+      if (!old) continue
+      await tx.gRNLine.update({
+        where: { id: old.id },
+        data: {
+          orderedQty: p.orderedQty,
+          receivedQty: p.received,
+          rejectedQty: p.rejected,
+          acceptedQty: p.accepted,
+          unitRate: p.unitRate,
+          amount: round2(p.accepted * p.unitRate),
+        },
+      })
+    }
 
     await tx.gRN.update({
       where: { id: before.id },
@@ -2505,7 +2575,9 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
         orderedBy: data.orderedBy ?? null,
         referenceNo: data.referenceNo ?? null,
         lines: {
-          create: prepared.map((p) => ({
+          create: pairs
+            .filter((pair) => !pair.old)
+            .map(({ prepared: p }) => ({
             poLineId: p.poLine.id,
             itemId: p.poLine.itemId,
             warehouseId: p.warehouseId,
@@ -2945,6 +3017,9 @@ const billInclude = {
       referenceNo: true,
       chequeNo: true,
       chequeDate: true,
+      status: true,
+      reversedAt: true,
+      reversalReason: true,
       createdBy: { select: { id: true, name: true } },
     },
   },
@@ -3063,6 +3138,44 @@ function priceBill(opts: {
  * reason the document exists — without it the mill pays for goods that were
  * short-delivered or rejected, and nothing in the system ever notices.
  */
+/**
+ * How much of each receipt line is already claimed by a bill.
+ *
+ * The inverse of `checkAgainstReceipts`: that one asks whether a bill is
+ * running ahead of its receipts, this one asks whether a receipt is being
+ * corrected down behind its bills. Both questions have to be asked, and only
+ * the first one ever was — so a delivery booked at 650 and billed at 650
+ * could be corrected to 400 with nothing to stop it, leaving 250 billed that
+ * never arrived.
+ *
+ * A cancelled bill claims nothing.
+ */
+async function billedByGrnLine(
+  tx: Prisma.TransactionClient,
+  grnLineIds: string[]
+): Promise<Map<string, { qty: number; bills: string[] }>> {
+  if (!grnLineIds.length) return new Map()
+
+  const claims = await tx.purchaseInvoiceLine.findMany({
+    where: { grnLineId: { in: grnLineIds }, bill: { status: { not: 'CANCELLED' } } },
+    select: { grnLineId: true, qty: true, bill: { select: { billNumber: true } } },
+  })
+
+  const out = new Map<string, { qty: number; bills: string[] }>()
+  for (const c of claims) {
+    if (!c.grnLineId) continue
+    const entry = out.get(c.grnLineId) ?? { qty: 0, bills: [] }
+    entry.qty = round3(entry.qty + Number(c.qty))
+    if (!entry.bills.includes(c.bill.billNumber)) entry.bills.push(c.bill.billNumber)
+    out.set(c.grnLineId, entry)
+  }
+  return out
+}
+
+/** The identity of a receipt line, for matching an edit against what is there. */
+const grnLineKey = (poLineId: string | null, warehouseId: string, batch: string | null) =>
+  `${poLineId ?? '-'}|${warehouseId}|${batch ?? ''}`
+
 async function checkAgainstReceipts(
   tx: Prisma.TransactionClient,
   lines: BillLineInput[],
@@ -3912,6 +4025,7 @@ const billTrailSelect = {
 
 const paymentInclude = {
   supplier: { select: { id: true, code: true, name: true } },
+  reversedBy: { select: { id: true, name: true } },
   warehouse: { select: { id: true, code: true, name: true } },
   bankAccount: { select: { id: true, accountName: true, bankName: true, accountNumber: true } },
   attachments: {
@@ -3952,8 +4066,10 @@ async function syncBillFromPayments(tx: Prisma.TransactionClient, billId: string
   })
   if (!bill) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
 
+  // A reversed payment settles nothing — the money came back. It stays on
+  // the record so the trail still shows the mill tried to pay.
   const paid = await tx.supplierPayment.aggregate({
-    where: { invoiceId: billId },
+    where: { invoiceId: billId, status: 'POSTED' },
     _sum: { amount: true, tdsAmount: true },
   })
   const paidAmount = round2(Number(paid._sum.amount ?? 0))
@@ -4181,7 +4297,7 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
     // against a stale figure. Tax withheld counts: it left the bill even
     // though it never reached the supplier.
     const paid = await tx.supplierPayment.aggregate({
-      where: { invoiceId: bill.id },
+      where: { invoiceId: bill.id, status: 'POSTED' },
       _sum: { amount: true, tdsAmount: true },
     })
     const alreadyPaid = round2(Number(paid._sum.amount ?? 0) + Number(paid._sum.tdsAmount ?? 0))
@@ -4244,6 +4360,77 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
     message: `${payment.paymentNumber} recorded against ${payment.invoice?.billNumber}.`,
   })
 })
+
+/**
+ * Reverses a payment.
+ *
+ * Not a delete. A bounced cheque, a duplicate entry, money sent to the wrong
+ * account — all of them are things that *happened*, and removing the row
+ * removes the evidence that the mill ever tried to pay. The payment stays,
+ * stops settling its bill, and the bill reopens for the amount.
+ *
+ * The document number is not released. The series counts up and never hands
+ * the same number out twice, which is the point of it.
+ */
+router.post(
+  '/payments/:id/reverse',
+  requirePermission(MODULE, 'delete'),
+  async (req: AuthRequest, res) => {
+    const { reason } = z
+      .object({
+        reason: z
+          .string({ required_error: 'Say why it is being reversed' })
+          .trim()
+          .min(3, 'Say why it is being reversed')
+          .max(500),
+      })
+      .parse(req.body ?? {})
+
+    const payment = await prisma.$transaction(async (tx) => {
+      const before = await tx.supplierPayment.findUnique({
+        where: { id: req.params.id },
+        select: { id: true, paymentNumber: true, status: true, invoiceId: true },
+      })
+      if (!before) throw new AppError('That payment no longer exists', 404, 'NOT_FOUND')
+      if (before.status === 'REVERSED') {
+        throw new AppError(
+          `${before.paymentNumber} is already reversed.`,
+          409,
+          'ALREADY_REVERSED'
+        )
+      }
+
+      const updated = await tx.supplierPayment.update({
+        where: { id: before.id },
+        data: {
+          status: 'REVERSED',
+          reversedAt: new Date(),
+          reversedById: req.user!.id,
+          reversalReason: reason,
+        },
+        include: paymentInclude,
+      })
+
+      if (before.invoiceId) await syncBillFromPayments(tx, before.invoiceId)
+
+      return updated
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'SupplierPayment',
+      entityId: payment.id,
+      after: payment,
+    })
+
+    res.json({
+      success: true,
+      data: payment,
+      message: `${payment.paymentNumber} reversed. ${payment.invoice?.billNumber ?? 'The bill'} is owed again.`,
+    })
+  }
+)
 
 // ── Files against a payment ─────────────────────────────────────────────────
 //
