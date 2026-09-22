@@ -601,7 +601,7 @@ export function PurchaseOrderDialog({
 
   // Header
   const [supplierId, setSupplierId] = useState('')
-  const [poType, setPoType] = useState<PoType>('ITEM_LEVEL')
+  const [poType, setPoType] = useState<PoType>('NONE')
   const [indentOpen, setIndentOpen] = useState(false)
   const [warehouseId, setWarehouseId] = useState('')
   /// The date on the order. Asked for now, so a back-dated order lands in the
@@ -710,10 +710,21 @@ export function PurchaseOrderDialog({
   useEffect(() => {
     if (!open) return
     setSupplierId(record?.supplierId ?? '')
-    // Orders raised before this form asked carry the old default, which meant
-    // a discount per line — so they reopen as that rather than as a blank.
+    // A new order starts without a discount: most of this mill's carry none,
+    // and a discount column that is live by default invites a figure nobody
+    // agreed to.
+    //
+    // An order being reopened is a different question and keeps what it was
+    // raised as. Orders raised before this form asked hold "STANDARD" in the
+    // column — the database's own default, which is none of the three the
+    // form offers — and those meant a discount per line, so they must still
+    // reopen as that rather than quietly losing it.
     setPoType(
-      record?.poType === 'ORDER_LEVEL' || record?.poType === 'NONE' ? record.poType : 'ITEM_LEVEL'
+      !record
+        ? 'NONE'
+        : record.poType === 'ORDER_LEVEL' || record.poType === 'NONE'
+          ? record.poType
+          : 'ITEM_LEVEL'
     )
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
