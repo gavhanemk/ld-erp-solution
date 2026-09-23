@@ -695,16 +695,16 @@ export function ReceiveGoodsDialog({
       >
         {/* Header — stays put while the body scrolls, so it is always clear
           what is being filled in and Save is always one press away. */}
-        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
-          <div className="flex items-center gap-2.5">
-            <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
-              <PackageCheck size={16} className="text-primary" />
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+              <PackageCheck size={19} className="text-primary" />
             </div>
             <div>
-              <h2 id="grn-dialog-title" className="text-foreground text-base font-semibold">
+              <h2 id="grn-dialog-title" className="text-foreground truncate text-xl font-semibold tracking-tight">
                 {editing ? 'Correct a receipt' : 'Receive goods'}
               </h2>
-              <p className="text-muted-foreground mt-0.5 text-xs">
+              <p className="text-muted-foreground mt-0.5 text-[13px]">
                 {order
                   ? `${editing ? 'Correcting' : 'Against'} ${order.poNumber} — ${order.supplier?.name ?? 'supplier not named'}`
                   : editing
@@ -963,7 +963,7 @@ export function ReceiveGoodsDialog({
 
           {order && !loadingOrder && (
             <Section icon={FileText} title="What arrived">
-              <div className="border-border overflow-x-auto rounded-lg border">
+              <div className="border-border hidden overflow-x-auto rounded-lg border sm:block">
                 {/* A floor, so the columns scroll rather than squash. Most of
                 them are figures being typed into, and a number box squeezed to
                 two characters is one somebody will mis-key.
@@ -1197,6 +1197,207 @@ export function ReceiveGoodsDialog({
                 </table>
               </div>
 
+              {/* Same lines, one card each, for a screen too narrow for nine
+                columns. Every store split for a line sits inside its own
+                boxed block underneath, so nothing is typed off the right
+                edge of a table nobody can widen. */}
+              <div className="space-y-3 sm:hidden">
+                {order.lines.map((line) => {
+                  const allocs = entries[line.id] ?? []
+                  const ordered = num(line.qty)
+                  const already = num(line.receivedQty)
+                  const pending = ordered - already
+                  const unit = line.item.uom?.symbol ?? ''
+                  const done = pending <= 0 || Boolean(line.shortClosed)
+                  const category = line.item.category
+                  const categoryLabel = category
+                    ? category.parent
+                      ? `${category.parent.name} / ${category.name}`
+                      : category.name
+                    : null
+                  const lineAccepted = allocs.reduce(
+                    (sum, a) => sum + (num(a.received) - num(a.rejected)),
+                    0
+                  )
+                  const over = lineAccepted > pending + 0.0001
+                  const fieldLabel =
+                    'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+
+                  return (
+                    <div key={line.id} className="border-border bg-card rounded-lg border p-3">
+                      <div className="text-foreground text-sm font-medium">{line.item.name}</div>
+                      <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
+                        <span className="font-mono">{line.item.code}</span>
+                        {categoryLabel && (
+                          <>
+                            <span>·</span>
+                            <span>{categoryLabel}</span>
+                          </>
+                        )}
+                        {line.item.hsnCode && (
+                          <>
+                            <span>·</span>
+                            <span>HSN {line.item.hsnCode}</span>
+                          </>
+                        )}
+                      </div>
+                      {over && (
+                        <div className="text-muted-foreground mt-1 text-[11px]">
+                          {Number((lineAccepted - pending).toFixed(3))} {unit} more than is still
+                          due.
+                        </div>
+                      )}
+                      {line.shortClosed && (
+                        <div
+                          className="mt-1 text-[11px] text-amber-400"
+                          title={line.shortCloseReason ?? undefined}
+                        >
+                          Closed short
+                          {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} — no more
+                          expected
+                        </div>
+                      )}
+
+                      <div className="border-border/70 mt-2 grid grid-cols-3 gap-2 border-t pt-2">
+                        <div>
+                          <p className={fieldLabel}>Ordered</p>
+                          <p className="text-sm tabular-nums">
+                            {ordered} {unit}
+                          </p>
+                        </div>
+                        <div>
+                          <p className={fieldLabel}>Received</p>
+                          <p className="text-muted-foreground text-sm tabular-nums">
+                            {already > 0 ? `${already} ${unit}` : '—'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className={fieldLabel}>Still due</p>
+                          {pending > 0 ? (
+                            <p className="text-sm tabular-nums">
+                              {Number(pending.toFixed(3))} {unit}
+                            </p>
+                          ) : (
+                            <span className="badge-success">complete</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {allocs.map((alloc, i) => {
+                        const accepted = num(alloc.received) - num(alloc.rejected)
+                        const first = i === 0
+
+                        return (
+                          <div
+                            key={alloc.key}
+                            className="border-border/70 mt-2 space-y-2 rounded-md border p-2"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className={fieldLabel}>
+                                {allocs.length > 1 ? `Store ${i + 1}` : 'Store'}
+                              </span>
+                              {first ? (
+                                <button
+                                  type="button"
+                                  className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                                  onClick={() => addAlloc(line.id)}
+                                  disabled={done}
+                                  title={`Send some of ${line.item.name} to another store`}
+                                  aria-label={`Add another store for ${line.item.name}`}
+                                >
+                                  <Plus size={13} />
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="border-border text-muted-foreground inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
+                                  onClick={() => removeAlloc(line.id, alloc.key)}
+                                  title="Remove this store"
+                                  aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
+                                >
+                                  <Minus size={13} />
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="space-y-1">
+                                <label className={fieldLabel}>Received qty</label>
+                                <input
+                                  className="form-input h-9 w-full text-right"
+                                  inputMode="decimal"
+                                  value={alloc.received}
+                                  onChange={(e) =>
+                                    setAlloc(line.id, alloc.key, { received: e.target.value })
+                                  }
+                                  disabled={done}
+                                  placeholder="Qty"
+                                  aria-label={`Quantity of ${line.item.name} received on this receipt${
+                                    first ? '' : `, row ${i + 1}`
+                                  }`}
+                                />
+                              </div>
+                              <div className="space-y-1">
+                                <label className={fieldLabel}>Rejected</label>
+                                <input
+                                  className="form-input h-9 w-full text-right"
+                                  inputMode="decimal"
+                                  value={alloc.rejected}
+                                  onChange={(e) =>
+                                    setAlloc(line.id, alloc.key, { rejected: e.target.value })
+                                  }
+                                  disabled={done}
+                                  placeholder="0"
+                                  aria-label={`Quantity of ${line.item.name} rejected${
+                                    first ? '' : `, row ${i + 1}`
+                                  }`}
+                                />
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <p className={fieldLabel}>Into stock</p>
+                                <p className="text-sm tabular-nums">
+                                  {accepted > 0 ? (
+                                    <span className="text-foreground">
+                                      {Number(accepted.toFixed(3))} {unit}
+                                    </span>
+                                  ) : (
+                                    <span className="text-muted-foreground">—</span>
+                                  )}
+                                </p>
+                              </div>
+                              <div className="space-y-1">
+                                <label className={fieldLabel}>Store</label>
+                                <select
+                                  className="form-input h-9 w-full"
+                                  value={alloc.warehouseId}
+                                  onChange={(e) =>
+                                    setAlloc(line.id, alloc.key, { warehouseId: e.target.value })
+                                  }
+                                  disabled={done}
+                                  aria-label={`Store for ${line.item.name}${
+                                    first ? '' : `, row ${i + 1}`
+                                  }`}
+                                >
+                                  <option value="">Choose…</option>
+                                  {warehouses.map((w) => (
+                                    <option key={w.id} value={w.id}>
+                                      {w.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )
+                })}
+              </div>
+
               {/* Note and attachments, side by side — neither is more than a
                 few lines tall on its own, and stacking them just to stack them
                 was the extra scroll this row removes. The challan, the
@@ -1244,7 +1445,7 @@ export function ReceiveGoodsDialog({
         {/* Footer — pinned, so Save stays one press away no matter how far
           the body has scrolled. Repeated from the header's own button, which
           a phone hides. */}
-        <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-5 py-3.5">
           <button className="btn-secondary" onClick={onClose} disabled={saving}>
             Cancel
           </button>

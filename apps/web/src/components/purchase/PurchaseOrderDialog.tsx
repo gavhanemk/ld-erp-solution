@@ -1842,19 +1842,19 @@ export function PurchaseOrderDialog({
           aria-labelledby="po-dialog-title"
         >
           {/* Header — stays put while the body scrolls, so it is always clear what is being filled in */}
-          <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
-            <div className="flex items-center gap-2.5">
-              <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
-                <ShoppingCart size={16} className="text-primary" />
+          <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+                <ShoppingCart size={19} className="text-primary" />
               </div>
               <div>
-                <h2 id="po-dialog-title" className="text-foreground text-base font-semibold">
+                <h2 id="po-dialog-title" className="text-foreground truncate text-xl font-semibold tracking-tight">
                   Purchase Order
                 </h2>
                 {/* The number moves down here rather than into the heading. The
                   heading says what the form is; the line under it says which
                   one and what may be done to it. */}
-                <p className="text-muted-foreground mt-0.5 text-xs">
+                <p className="text-muted-foreground mt-0.5 text-[13px]">
                   {isEdit
                     ? `${record?.poNumber} — only a draft order can be changed`
                     : 'New order to a supplier'}
@@ -2195,7 +2195,7 @@ export function PurchaseOrderDialog({
                     : 'No discount on this order. Both the per-line cells and the order-level box are switched off.'}
               </p>
 
-              <div className="border-border bg-card overflow-x-auto rounded-lg border">
+              <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
                 <table className="w-full min-w-[1180px] table-fixed border-collapse text-sm">
                   <thead>
                     <tr className="bg-secondary">
@@ -2604,6 +2604,289 @@ export function PurchaseOrderDialog({
                     })}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Same rows, one card each, for a screen too narrow for
+                thirteen columns. The sideways-scrolling table above stays
+                for a desk; here every field for a line sits under the last
+                so nothing is typed sight-unseen off the right edge. */}
+              <div className="space-y-3 sm:hidden">
+                {lines.map((line, i) => {
+                  const item = itemById.get(line.itemId)
+                  const filed = categories.find((c) => c.id === item?.categoryId)
+                  const view = {
+                    ...line,
+                    categoryId: line.categoryId || filed?.parentId || filed?.id || '',
+                    subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
+                  }
+                  const subs = subCategoriesOf(view.categoryId)
+                  const choices = itemsFor(view)
+                  const money = priceOf(line)
+                  const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
+                  const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
+                  const cell = 'form-input h-9 px-2 text-xs w-full'
+                  const lastRate = line.itemId ? rateHistory[line.itemId]?.[0] : undefined
+                  const fieldLabel =
+                    'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+
+                  return (
+                    <div key={i} className="border-border bg-card rounded-lg border p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-muted-foreground text-xs font-semibold tabular-nums">
+                          Row {i + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeRow(i)}
+                          className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                          aria-label={`Remove row ${i + 1}`}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={fieldLabel}>Item</label>
+                        <input
+                          className={`${cell} font-mono`}
+                          list={`po-codes-m-${i}`}
+                          placeholder="Item code"
+                          value={line.codeText ?? ''}
+                          onChange={(e) => typeCodeFor(i, e.target.value)}
+                          aria-label={`Row ${i + 1} item code`}
+                        />
+                        <datalist id={`po-codes-m-${i}`}>
+                          {choices.map((it) => (
+                            <option key={it.id} value={it.code ?? ''} label={it.name} />
+                          ))}
+                        </datalist>
+                        <select
+                          className={cell}
+                          value={line.itemId}
+                          onChange={(e) => pickItemFor(i, e.target.value)}
+                          aria-label={`Row ${i + 1} item`}
+                        >
+                          <option value="">
+                            {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
+                          </option>
+                          {choices.map((it) => (
+                            <option key={it.id} value={it.id}>
+                              {it.name}
+                            </option>
+                          ))}
+                        </select>
+                        {(item?.hsnCode || line.mrNumber) && (
+                          <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
+                            {item?.hsnCode && (
+                              <span className="text-muted-foreground">HSN {item.hsnCode}</span>
+                            )}
+                            {line.mrNumber && (
+                              <span
+                                className="text-primary"
+                                title={`Raised against ${line.mrNumber}`}
+                              >
+                                {line.mrNumber}
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Category</label>
+                          <select
+                            className={cell}
+                            value={view.categoryId}
+                            onChange={(e) =>
+                              setLine(i, { categoryId: e.target.value, subcategoryId: '' })
+                            }
+                            aria-label={`Row ${i + 1} category`}
+                          >
+                            <option value="">All categories</option>
+                            {topCategories.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Sub-category</label>
+                          <select
+                            className={cell}
+                            value={view.subcategoryId}
+                            disabled={subs.length === 0}
+                            onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                            aria-label={`Row ${i + 1} subcategory`}
+                          >
+                            <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
+                            {subs.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Style no.</label>
+                          <input
+                            className={cell}
+                            placeholder="Style"
+                            value={(line.styleNo as string) ?? ''}
+                            onChange={(e) => typeStyleFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} style number`}
+                          />
+                          {line.styleNo && !line.styleId && (
+                            <p className="text-muted-foreground text-[10px]">Not in master</p>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Description</label>
+                          <input
+                            className={cell}
+                            placeholder="Optional"
+                            value={(line.description as string) ?? ''}
+                            onChange={(e) => setLine(i, { description: e.target.value })}
+                            aria-label={`Row ${i + 1} description`}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Qty</label>
+                          <input
+                            type="number"
+                            step="any"
+                            min={0}
+                            className={`${cell} ${needsQty ? 'border-amber-500/70' : ''}`}
+                            placeholder="0"
+                            value={String(line.qty)}
+                            onChange={(e) => setLine(i, { qty: e.target.value })}
+                            aria-label={`Row ${i + 1} quantity`}
+                          />
+                          {item?.uom?.symbol && (
+                            <p className="text-muted-foreground text-[10px]">
+                              {item.uom.symbol}
+                            </p>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Rate</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            className={`${cell} ${needsRate ? 'border-amber-500/70' : ''}`}
+                            placeholder="0.00"
+                            value={String(line.unitRate)}
+                            onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                            aria-label={`Row ${i + 1} rate`}
+                          />
+                          {lastRate && (
+                            <div>
+                              <p className="text-muted-foreground whitespace-nowrap text-[10px]">
+                                Last {inr(num(lastRate.unitRate))}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => setHistoryFor(line.itemId)}
+                                className="text-primary whitespace-nowrap text-[10px] hover:underline"
+                              >
+                                View history
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Discount</label>
+                          <div className="flex items-stretch gap-1">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
+                              className={`${cell} min-w-0 flex-1`}
+                              placeholder="0"
+                              disabled={poType !== 'ITEM_LEVEL'}
+                              value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
+                              onChange={(e) => setLine(i, { discount: e.target.value })}
+                              aria-label={`Row ${i + 1} discount`}
+                            />
+                            <select
+                              className={`${cell} w-14 shrink-0 px-1`}
+                              disabled={poType !== 'ITEM_LEVEL'}
+                              value={line.discountUnit ?? '%'}
+                              onChange={(e) =>
+                                setLine(i, { discountUnit: e.target.value as '%' | 'INR' })
+                              }
+                              aria-label={`Row ${i + 1} discount in percent or rupees`}
+                            >
+                              <option value="%">%</option>
+                              <option value="INR">₹</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Tax %</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            max={100}
+                            className={cell}
+                            placeholder="0"
+                            disabled={taxMode === 'NONE'}
+                            value={taxMode === 'NONE' ? '' : String(line.gstRate)}
+                            onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                            aria-label={`Row ${i + 1} tax percent`}
+                          />
+                          {line.itemId && (
+                            <label className="text-muted-foreground flex cursor-pointer items-center gap-1 text-[10px]">
+                              <input
+                                type="checkbox"
+                                className="scale-75"
+                                disabled={taxMode === 'NONE'}
+                                checked={num(line.gstRate) === 0}
+                                onChange={(e) =>
+                                  setLine(i, {
+                                    gstRate: e.target.checked
+                                      ? '0'
+                                      : item?.taxRate
+                                        ? String(item.taxRate.rate)
+                                        : '',
+                                  })
+                                }
+                              />
+                              Exempt
+                            </label>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="border-border/70 mt-2.5 flex items-center justify-between border-t pt-2">
+                        <span className={fieldLabel}>Amount</span>
+                        <div className="text-right">
+                          <div className="font-medium tabular-nums">
+                            {inr(totals.lineAmounts[i] ?? 0)}
+                          </div>
+                          {money.netPrice > 0 && (
+                            <p className="text-muted-foreground text-[10px] tabular-nums leading-tight">
+                              {inr(money.netPrice)} each
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
 
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
@@ -3254,7 +3537,7 @@ export function PurchaseOrderDialog({
           </div>
 
           {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
-          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-5 py-3.5">
             {incomplete && (
               <p className="warn-text mr-auto flex max-w-xl items-start gap-1.5 text-xs">
                 <AlertCircle size={13} className="mt-px shrink-0" />
@@ -3605,7 +3888,7 @@ export function PurchaseOrderDialog({
                       <h3 id="po-history-title" className="text-foreground text-base font-semibold">
                         Previous purchases
                       </h3>
-                      <p className="text-muted-foreground mt-0.5 text-xs">
+                      <p className="text-muted-foreground mt-0.5 text-[13px]">
                         {itemById.get(historyFor)?.name ?? 'This item'}
                       </p>
                     </div>

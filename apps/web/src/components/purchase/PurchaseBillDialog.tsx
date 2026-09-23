@@ -784,10 +784,10 @@ export function PurchaseBillDialog({
               <Receipt size={16} className="text-primary" />
             </div>
             <div>
-              <h2 id="bill-dialog-title" className="text-foreground text-base font-semibold">
+              <h2 id="bill-dialog-title" className="text-foreground truncate text-xl font-semibold tracking-tight">
                 {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
               </h2>
-              <p className="text-muted-foreground mt-0.5 text-xs">
+              <p className="text-muted-foreground mt-0.5 text-[13px]">
                 {isEdit
                   ? 'A bill can be changed until a payment is made against it'
                   : 'Our reference number is given when you save. Type the supplier’s own number below.'}
@@ -819,7 +819,7 @@ export function PurchaseBillDialog({
             space-y-5, which on a form this tall reads as a different app —
             twice the air of every other dialog, and a band of nothing under
             the header before anything to fill in. */}
-          <div className="flex-1 space-y-2.5 overflow-y-auto px-4 py-2.5">
+          <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {error && (
             <div
               id="bill-form-error"
@@ -1184,7 +1184,7 @@ export function PurchaseBillDialog({
               </button>
             }
           >
-            <div className="overflow-x-auto border border-border rounded-lg">
+            <div className="border-border hidden overflow-x-auto rounded-lg border sm:block">
               <table className="w-full text-sm min-w-[900px]">
                 <thead>
                   <tr className="border-b border-border bg-secondary/70">
@@ -1325,6 +1325,150 @@ export function PurchaseBillDialog({
                   })}
                 </tbody>
               </table>
+            </div>
+
+            {/* Same lines, one card each, for a screen too narrow for eight
+              columns. Every field a line has sits under the last instead of
+              off the right edge of a table nobody can widen on a phone. */}
+            <div className="space-y-3 sm:hidden">
+              {lines.map((line, i) => {
+                const item = itemById.get(line.itemId)
+                const fieldLabel =
+                  'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+
+                return (
+                  <div key={i} className="border-border bg-card rounded-lg border p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="text-muted-foreground text-xs font-semibold tabular-nums">
+                        Line {i + 1}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLines((p) => (p.length === 1 ? p : p.filter((_, x) => x !== i)))
+                        }
+                        disabled={lines.length === 1}
+                        className="btn-ghost text-muted-foreground p-1 hover:text-red-400 disabled:opacity-25"
+                        aria-label={`Remove line ${i + 1}`}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className={fieldLabel}>Item</label>
+                      <select
+                        className="form-input h-9 w-full"
+                        value={line.itemId}
+                        onChange={(e) => pickItem(i, e.target.value)}
+                        aria-label={`Line ${i + 1} item`}
+                      >
+                        <option value="">Select...</option>
+                        {items.map((it) => (
+                          <option key={it.id} value={it.id}>
+                            {it.code ? `${it.code} — ${it.name}` : it.name}
+                          </option>
+                        ))}
+                      </select>
+                      {item?.hsnCode && (
+                        <p className="text-muted-foreground font-mono text-[10px]">
+                          HSN {item.hsnCode}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="mt-2">
+                      <p className={fieldLabel}>Against receipt</p>
+                      {line.grnNumber ? (
+                        <>
+                          <span className="badge-info">{line.grnNumber}</span>
+                          {line.pendingQty != null && (
+                            <p className="text-muted-foreground mt-0.5 text-[10px]">
+                              {line.pendingQty} left to bill
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">Not matched</span>
+                      )}
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className={fieldLabel}>Qty</label>
+                        <input
+                          type="number"
+                          step="any"
+                          min={0}
+                          className="form-input h-9 w-full text-right"
+                          value={String(line.qty)}
+                          onChange={(e) => setLine(i, { qty: e.target.value })}
+                          aria-label={`Line ${i + 1} quantity`}
+                        />
+                        {item?.uom?.symbol && (
+                          <p className="text-muted-foreground text-right text-[10px]">
+                            {item.uom.symbol}
+                          </p>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <label className={fieldLabel}>Rate</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          className="form-input h-9 w-full text-right"
+                          value={String(line.unitPrice)}
+                          onChange={(e) => setLineRate(i, e.target.value)}
+                          aria-label={`Line ${i + 1} rate`}
+                        />
+                        {line.orderedRate != null && (
+                          <p className="text-muted-foreground text-right text-[10px]">
+                            ordered {inr(line.orderedRate)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className={fieldLabel}>Disc %</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          max={100}
+                          className="form-input h-9 w-full text-right"
+                          value={String(line.discount)}
+                          onChange={(e) => setLine(i, { discount: e.target.value })}
+                          aria-label={`Line ${i + 1} discount`}
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className={fieldLabel}>GST %</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          max={100}
+                          className="form-input h-9 w-full text-right"
+                          disabled={taxMode === 'NONE'}
+                          value={taxMode === 'NONE' ? '' : String(line.gstRate)}
+                          onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                          aria-label={`Line ${i + 1} GST rate`}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="border-border/70 mt-2.5 flex items-center justify-between border-t pt-2">
+                      <span className={fieldLabel}>Amount</span>
+                      <span className="font-medium tabular-nums">
+                        {inr(totals.lineGross[i] ?? 0)}
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </Section>
 
@@ -1550,7 +1694,7 @@ export function PurchaseBillDialog({
           </div>
 
           {/* Footer — stays put, so Save is always one press away. */}
-          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-5 py-3.5">
             <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
               Cancel
             </button>
