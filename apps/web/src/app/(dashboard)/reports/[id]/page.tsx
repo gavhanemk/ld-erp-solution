@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { AlertCircle, ArrowLeft, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
-import { ReportDashboard, type Analysis } from '@/components/reports/Dashboard'
+import { ReportDashboard, TONE, type Analysis, type Tone } from '@/components/reports/Dashboard'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { formatDate } from '@/lib/utils'
@@ -15,6 +15,9 @@ interface Column {
   label: string
   type: string
   unit?: string
+  /** For `badge`: the word to print, and what it means. */
+  badges?: Record<string, string>
+  badgeTones?: Record<string, Tone>
 }
 
 interface RunResult {
@@ -30,6 +33,32 @@ interface RunResult {
 
 const money = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/**
+ * A status as a badge, the same as the export prints it.
+ *
+ * Without this the preview showed the raw enum — COMPLETED, SENT — beside an
+ * exported sheet that showed "Completed" and "Sent" on a tinted cell, and the
+ * two looked like different reports. The word and the colour both come from
+ * the column definition rather than from the value's spelling.
+ */
+function Badge({ column, value }: { column: Column; value: unknown }) {
+  const raw = String(value)
+  const word = column.badges?.[raw] ?? raw
+  const tone = column.badgeTones?.[raw]
+  if (!tone) return <>{word}</>
+  return (
+    <span
+      className="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium"
+      style={{
+        background: `color-mix(in srgb, ${TONE[tone]} 16%, transparent)`,
+        color: TONE[tone],
+      }}
+    >
+      {word}
+    </span>
+  )
+}
 
 function cellText(c: Column, v: unknown): string {
   if (v == null || v === '') return '—'
@@ -233,7 +262,11 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
                                 : 'whitespace-nowrap'
                             }
                           >
-                            {cellText(c, r[c.key])}
+                            {c.type === 'badge' && r[c.key] != null && r[c.key] !== '' ? (
+                              <Badge column={c} value={r[c.key]} />
+                            ) : (
+                              cellText(c, r[c.key])
+                            )}
                           </td>
                         ))}
                       </tr>

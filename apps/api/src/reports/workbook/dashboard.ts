@@ -349,6 +349,8 @@ export function buildDashboard(
 
     charts.forEach((p, i) => {
       const left = i % 2 === 0
+      /** The last panel of an odd set — nothing will sit beside it. */
+      const alone = left && i === charts.length - 1
       const anchorRow = row + Math.floor(i / 2) * (CHART_ROWS + 1)
       const kind = shapeFor(p)
       const money = p.format === 'money'
@@ -469,10 +471,19 @@ export function buildDashboard(
           pointColours: s.pointColours,
         })),
         numFmt: money ? FMT.lakh : p.format === 'percent' ? FMT.percent : FMT.integer,
+        /*
+         * Two across, except a last chart with nothing beside it.
+         *
+         * An odd number of panels used to leave the final one at half width
+         * with an empty half-page next to it, which reads as a chart that
+         * failed to draw. Alone on its row it takes the whole width instead —
+         * and a ranking of suppliers is the better for it, since the names
+         * are what get truncated first.
+         */
         anchor: {
-          fromCol: left ? 0 : GRID / 2,
+          fromCol: alone || left ? 0 : GRID / 2,
           fromRow: anchorRow - 1,
-          toCol: left ? GRID / 2 : GRID,
+          toCol: alone ? GRID : left ? GRID / 2 : GRID,
           toRow: anchorRow - 1 + CHART_ROWS,
         },
         // A chart with more than one series has to name them, or the reader
@@ -485,8 +496,9 @@ export function buildDashboard(
 
       if (p.note) {
         const noteRow = anchorRow + CHART_ROWS - 1
-        const c1 = left ? 1 : GRID / 2 + 1
-        ws.mergeCells(noteRow, c1, noteRow, left ? GRID / 2 : GRID)
+        // The note sits under its own chart, so it widens with it.
+        const c1 = alone || left ? 1 : GRID / 2 + 1
+        ws.mergeCells(noteRow, c1, noteRow, alone || !left ? GRID : GRID / 2)
         const n = ws.getCell(noteRow, c1)
         n.value = p.note
         n.font = { name: 'Calibri', size: 8, italic: true, color: { argb: INK.muted } }

@@ -156,7 +156,7 @@ const TONE_EDGE = {
  * apart. Green against amber is close enough to need the printed value beside
  * it, which every bar here has.
  */
-const TONE: Record<Tone, string> = {
+export const TONE: Record<Tone, string> = {
   good: 'var(--tone-good)',
   normal: 'var(--tone-normal)',
   info: 'var(--tone-info)',
@@ -185,11 +185,21 @@ function fillFor(
   return RAMP[RAMP.length - 1 - step]
 }
 
+/**
+ * One panel.
+ *
+ * Deliberately not stretched to its neighbour's height. In a grid every card
+ * in a row grows to match the tallest, so a two-bar ranking beside a
+ * three-bar funnel got padded with an inch of nothing — which reads as a card
+ * that failed to load rather than as a short list. It is laid out in columns
+ * instead (see the panel grid), where a short card is simply short and the
+ * next one starts under it.
+ */
 function Card({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
-    <div className="glass-card flex flex-col p-4">
+    <div className="glass-card mb-3 break-inside-avoid p-4">
       <h3 className="text-foreground text-sm font-semibold">{title}</h3>
-      <div className="mt-3 flex-1">{children}</div>
+      <div className="mt-3">{children}</div>
       {note && <p className="text-muted-foreground mt-3 text-[11px] italic leading-snug">{note}</p>}
     </div>
   )
@@ -628,12 +638,17 @@ export function ReportDashboard({
         </p>
       )}
 
+      {/* Wrapping, not a fixed four columns.
+        A report with two KPIs left half a row of nothing beside them and a
+        report with five left three-quarters of a second row. They share the
+        width they are given instead: two take a half each, three a third,
+        five wrap to three and two. */}
       {analysis.kpis.length > 0 && (
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="flex flex-wrap gap-3">
           {analysis.kpis.map((k) => (
             <div
               key={k.label}
-              className={`glass-card p-3 ${k.tone ? `border ${TONE_EDGE[k.tone]}` : ''}`}
+              className={`glass-card min-w-0 flex-1 basis-[13rem] p-3 ${k.tone ? `border ${TONE_EDGE[k.tone]}` : ''}`}
             >
               <p className="text-muted-foreground text-xs">{k.label}</p>
               <p
@@ -693,8 +708,14 @@ export function ReportDashboard({
 
       {analysis.trend && analysis.trend.points.length > 1 && <TrendChart trend={analysis.trend} />}
 
+      {/* Columns, not a grid.
+        A grid row stretches every card to the tallest in it, so one long
+        panel put an inch of white under each short one beside it, and an odd
+        number of panels left half the last row empty. Columns let each card
+        be its own height and the next one start directly under it, which is
+        the whole of the empty space this used to have. */}
       {charts.length > 0 && (
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="gap-3 lg:columns-2 [&>*]:break-inside-avoid">
           {charts.map((p) => (
             <PanelCard key={p.title} panel={p} />
           ))}
@@ -704,11 +725,11 @@ export function ReportDashboard({
       {/* One category is a figure. Laid out as the KPI band is, because that
         is what it is — not a chart frame with a single bar in it. */}
       {cards.length > 0 && (
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="flex flex-wrap gap-3">
           {cards.map((p) => {
             const pt = p.points[0]
             return (
-              <div key={p.title} className="glass-card p-3">
+              <div key={p.title} className="glass-card min-w-0 flex-1 basis-[13rem] p-3">
                 <p className="text-muted-foreground text-xs leading-snug">{p.title}</p>
                 {pt ? (
                   <>
@@ -738,9 +759,11 @@ export function ReportDashboard({
 
       {analysis.matrix && <MatrixHeat matrix={analysis.matrix} />}
 
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+      {/* Also wrapping: a report with insights and no caveats, or the other
+        way round, left the other half of the row empty. */}
+      <div className="flex flex-wrap items-start gap-3">
         {analysis.insights.length > 0 && (
-          <div className="glass-card p-4">
+          <div className="glass-card min-w-0 flex-1 basis-[22rem] p-4">
             <h3 className="text-foreground flex items-center gap-2 text-sm font-semibold">
               <Lightbulb size={14} className="text-primary" />
               What the figures show
@@ -764,7 +787,7 @@ export function ReportDashboard({
           supposed to mean "look here" on something that never does. The
           heading carries the signal; the sentences carry the meaning. */}
         {analysis.caveats.length > 0 && (
-          <div className="glass-card p-4">
+          <div className="glass-card min-w-0 flex-1 basis-[22rem] p-4">
             <h3 className="text-foreground flex items-center gap-2 text-sm font-semibold">
               <Info size={14} className="text-muted-foreground" />
               What they do not show
