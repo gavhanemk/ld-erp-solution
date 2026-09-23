@@ -346,7 +346,7 @@ export const supplierOutstanding: ReportDefinition = {
           'A snapshot of today. Run it again tomorrow and the ageing moves by a day.',
           'Cancelled bills are excluded, and so is anything already paid in full.',
           'A bill with no due date is aged from its bill date, so it reads as due now rather than as not yet due.',
-          'Debit notes raised against a supplier are not netted off here.',
+          'Outstanding is net of posted debit and credit notes. One that has been raised and not posted has not come off — the Purchase Adjustment Report lists those, and they are what turns a payment here into an overpayment.',
         ],
       },
     }

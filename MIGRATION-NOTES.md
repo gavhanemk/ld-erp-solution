@@ -7,6 +7,55 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 23 Sep 2026 — a separate right to post
+
+**Migration:** none. This is a seed change.
+**Branch:** `fix/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+`post` was added to the permission matrix, so it now runs seven actions across
+thirteen modules — 91 rows rather than 78. Only one route guards on it:
+posting a purchase note.
+
+| Role | `purchase:post` |
+|---|---|
+| Admin | yes (and short-circuits everything anyway) |
+| MD | yes |
+| Accounts Manager | **yes — this is the point of the change** |
+| Store Manager | yes, via its existing `full('purchase')` |
+
+### Why not just use `approve`
+
+The accounts desk has to put a debit or credit note through the books. Under
+the old matrix that meant granting them `purchase:approve` — which would also
+have let them approve purchase orders, because permissions are per module and
+not per document. A purchase manager agreeing that the mill is owed money and
+accounts deciding when it comes off the payable are two different decisions by
+two different desks, and docs/04-business-rules.md keeps them apart.
+
+Verified over HTTP with a throwaway Accounts user, since none is seeded with a
+known password:
+
+```
+approve -> 403  purchase:approve
+create  -> 403  purchase:create
+post    -> 200  "ZZTEST-P1 posted. PB-2627-0001 now stands at ₹19,300."
+```
+
+The user, its audit row and the fixture note were removed afterwards.
+
+### How it was applied
+
+`seedCore` is upserts throughout, so from `packages/database`:
+
+```bash
+npx tsx prisma/seed.ts
+```
+
+It rewrites no data — it adds the thirteen new permission rows and the grants.
+
 ## 23 Sep 2026 — debit and credit notes against a supplier
 
 **Migration:** `20260923090000_purchase_debit_credit_notes`

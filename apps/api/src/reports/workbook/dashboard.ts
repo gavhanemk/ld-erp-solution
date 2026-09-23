@@ -318,7 +318,7 @@ export function buildDashboard(
       value.value = e.value
       value.numFmt =
         e.format === 'money'
-          ? FMT.money
+          ? FMT.moneySigned
           : e.format === 'percent'
             ? FMT.percent
             : e.format === 'qty'
@@ -703,6 +703,25 @@ export function buildDashboard(
       .map((key) => def.columns.find((c) => c.key === key))
       .filter((c): c is NonNullable<typeof c> => Boolean(c))
     const by = def.columns.find((c) => c.key === spec.by)
+
+    /*
+     * A key that matches no column used to be dropped here without a word,
+     * which is how a one-letter typo in a report's summary spec prints a
+     * table quietly missing a column — the sheet looks deliberate and the
+     * figure it was meant to carry is simply absent. `buildPivot` has warned
+     * about this since it was written; this did not.
+     */
+    const unknown = spec.columns.filter((key) => !def.columns.some((c) => c.key === key))
+    if (unknown.length) {
+      console.warn(
+        `[reports] ${def.id}: summary asks for ${unknown.map((k) => `"${k}"`).join(', ')}, which ${unknown.length === 1 ? 'is not a column' : 'are not columns'} — left out of the table`
+      )
+    }
+    if (!by) {
+      console.warn(
+        `[reports] ${def.id}: no summary table — nothing is keyed "${spec.by}" to sort it by`
+      )
+    }
 
     if (cols.length && by) {
       const limit = spec.limit ?? 12

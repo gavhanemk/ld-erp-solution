@@ -105,7 +105,7 @@ export function buildData(
         c.total === 'sum'
           ? { formula: `SUBTOTAL(109,${colLetter(i + 1)}${first}:${colLetter(i + 1)}${last})` }
           : i === 0
-            ? `Total · ${rows.length.toLocaleString('en-IN')} rows`
+            ? `Total · ${rows.length.toLocaleString('en-IN')} ${rows.length === 1 ? 'row' : 'rows'}`
             : null
       )
     )

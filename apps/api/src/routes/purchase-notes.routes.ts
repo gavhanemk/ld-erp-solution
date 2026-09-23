@@ -837,7 +837,7 @@ router.post('/:id/reopen', requirePermission(MODULE, 'edit'), async (req: AuthRe
  * payable without taking the cloth out of stock is how a godown ends up
  * holding fabric the books have already sent back.
  */
-router.post('/:id/post', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequest, res) => {
   const result = await prisma.$transaction(async (tx) => {
     const before = await tx.purchaseNote.findUnique({
       where: { id: req.params.id },

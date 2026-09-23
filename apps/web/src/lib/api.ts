@@ -178,6 +178,27 @@ export function masterResource<T>(resource: string) {
   }
 }
 
+/**
+ * Whether this user may do a thing, asked on the client.
+ *
+ * The server is the guard; this only decides whether to *offer* the control.
+ * Both matter: a menu item that always answers 403 is a menu nobody trusts,
+ * and a menu that hides what somebody may do is worse.
+ *
+ * Fails open. If the stored user carries no permission list — an older session,
+ * a cleared cache — the control is offered and the server refuses it with a
+ * sentence saying why. That is the safe direction for a UI hint: the wrong
+ * answer costs one confusing message, where failing closed would silently
+ * remove a button somebody needs and give them nothing to go on.
+ */
+export const can = (module: string, action: string): boolean => {
+  const user = currentUser() as { role?: string; permissions?: string[] } | null
+  if (!user) return true
+  if (user.role === 'Admin') return true
+  if (!Array.isArray(user.permissions)) return true
+  return user.permissions.includes(`${module}:${action}`) || user.permissions.includes(`${module}:*`)
+}
+
 export const currentUser = () => {
   if (typeof window === 'undefined') return null
   try {

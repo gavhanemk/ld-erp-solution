@@ -20,10 +20,20 @@ import {
   Trash2,
   XCircle,
 } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { RowPanel } from '@/components/tables/RowPanel'
+import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
+import {
+  asDate,
+  asNumber,
+  downloadRows,
+  fetchEveryPage,
+  type ExportColumn,
+  type ExportFormat,
+} from '@/lib/export'
 import { formatDate } from '@/lib/utils'
 import { PurchaseNoteDialog } from '@/components/purchase/PurchaseNoteDialog'
 import { NoteDetail } from '@/components/purchase/NoteDetail'
@@ -55,6 +65,54 @@ import {
 const PER_PAGE = 25
 
 type Summary = Record<string, { count: number; amount: number }>
+
+/**
+ * What a plain spreadsheet export carries.
+ *
+ * Wider than the table on screen: a column left out of a list to keep it
+ * readable is exactly the column somebody exports in order to have. The tax
+ * split is separated here for the same reason — on screen one "Tax" figure is
+ * enough, and in a spreadsheet somebody is going to want to reconcile CGST
+ * against a return.
+ */
+const EXPORT_COLUMNS: ExportColumn<PurchaseNote>[] = [
+  { header: 'Note No.', value: (n) => n.noteNumber },
+  { header: 'Date', value: (n) => asDate(n.noteDate) },
+  { header: 'Document', value: (n) => (n.noteType === 'DEBIT' ? 'Debit note' : 'Credit note') },
+  { header: 'Status', value: (n) => NOTE_STATUS[n.status]?.label ?? n.status },
+  { header: 'Supplier', value: (n) => n.supplier.name },
+  { header: 'Supplier Code', value: (n) => n.supplier.code },
+  { header: 'GSTIN', value: (n) => n.supplier.gstin ?? '' },
+  { header: 'Against Bill', value: (n) => n.bill?.billNumber ?? '' },
+  { header: 'Their Bill No.', value: (n) => n.bill?.supplierInvoiceNo ?? '' },
+  { header: 'Their Note No.', value: (n) => n.supplierDocNo ?? '' },
+  { header: 'Their Note Date', value: (n) => asDate(n.supplierDocDate) },
+  { header: 'What Happened', value: (n) => REASON_WORDS[n.reason] ?? n.reason },
+  { header: 'Detail', value: (n) => n.reasonNote ?? '' },
+  {
+    header: 'Effect',
+    value: (n) => (n.effect === 'REDUCES_PAYABLE' ? 'Reduces payable' : 'Increases payable'),
+  },
+  { header: 'Order No.', value: (n) => n.po?.poNumber ?? '' },
+  { header: 'Receipt No.', value: (n) => n.grn?.grnNumber ?? '' },
+  { header: 'Godown', value: (n) => n.warehouse?.name ?? '' },
+  { header: 'LR No.', value: (n) => n.lrNumber ?? '' },
+  { header: 'Vehicle', value: (n) => n.vehicleNo ?? '' },
+  { header: 'Lines', value: (n) => n.lines.length },
+  { header: 'Taxable', value: (n) => asNumber(n.taxableAmount) },
+  { header: 'CGST', value: (n) => asNumber(n.cgst) },
+  { header: 'SGST', value: (n) => asNumber(n.sgst) },
+  { header: 'IGST', value: (n) => asNumber(n.igst) },
+  { header: 'Other Charges', value: (n) => asNumber(n.otherCharges) },
+  { header: 'Discount', value: (n) => asNumber(n.discountAmount) },
+  { header: 'Round Off', value: (n) => asNumber(n.roundOff) },
+  { header: 'Note Total', value: (n) => asNumber(n.totalAmount) },
+  { header: 'Raised By', value: (n) => n.createdBy?.name ?? '' },
+  { header: 'Approved By', value: (n) => n.approvedBy?.name ?? '' },
+  { header: 'Posted On', value: (n) => asDate(n.postedAt) },
+  { header: 'Closed Reason', value: (n) => n.closedReason ?? '' },
+  { header: 'Notes', value: (n) => n.notes ?? '' },
+]
 
 export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
   const words = MODULE_WORDS[moduleType]
@@ -104,24 +162,41 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
     })()
   }, [])
 
+  /**
+   * The filter, written once.
+   *
+   * The list, the grid export and the report all read it. Three copies is how
+   * an Export button quietly hands back a different set of rows than the one
+   * on the screen it was pressed from — with nothing in the file to say so.
+   */
+  const filters = useCallback(() => {
+    const p: Record<string, string> = {}
+    if (debounced) p.q = debounced
+    if (status) p.status = status
+    if (reason) p.reason = reason
+    if (supplierId) p.supplierId = supplierId
+    if (fromDate) p.from = fromDate
+    if (toDate) p.to = toDate
+    return p
+  }, [debounced, status, reason, supplierId, fromDate, toDate])
+
+  const query = useCallback(
+    (p: number, limit: number) =>
+      `/purchase/notes?${new URLSearchParams({
+        ...filters(),
+        page: String(p),
+        limit: String(limit),
+        noteType: moduleType,
+      })}`,
+    [filters, moduleType]
+  )
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({
-        page: String(page),
-        limit: String(PER_PAGE),
-        noteType: moduleType,
-      })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      if (reason) qs.set('reason', reason)
-      if (supplierId) qs.set('supplierId', supplierId)
-      if (fromDate) qs.set('from', fromDate)
-      if (toDate) qs.set('to', toDate)
-
       const res = await api.get<Paginated<PurchaseNote> & { summary: Summary }>(
-        `/purchase/notes?${qs}`
+        query(page, PER_PAGE)
       )
       setRows(res.data)
       setSummary(res.summary ?? {})
@@ -138,11 +213,61 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
     } finally {
       setLoading(false)
     }
-  }, [page, moduleType, debounced, status, reason, supplierId, fromDate, toDate, words.one])
+  }, [query, page, words.one])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  /**
+   * The rows on screen, as a spreadsheet — every page of them, not just the
+   * twenty-five being looked at.
+   */
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const {
+        rows: all,
+        total: found,
+        truncated,
+      } = await fetchEveryPage<PurchaseNote>((p) => query(p, 100))
+      if (all.length === 0) {
+        setMessage(`Nothing to export — no ${words.one}s match these filters.`)
+        return
+      }
+      await downloadRows({
+        rows: all,
+        columns: EXPORT_COLUMNS,
+        name: moduleType === 'DEBIT' ? 'debit-notes' : 'credit-notes',
+        sheet: words.title,
+        format,
+      })
+      setMessage(
+        truncated
+          ? `Exported the first ${all.length} of ${found}. Narrow the filters to get the rest.`
+          : `Exported ${all.length} ${all.length === 1 ? words.one : `${words.one}s`}.`
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
+  }
+
+  /**
+   * The same filter, as a report rather than a grid.
+   *
+   * Every filter on this bar goes up with it, so the workbook answers the
+   * question the screen was showing. The report prints what was applied on its
+   * own face, which is what makes the two checkable against each other.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const id = moduleType === 'DEBIT' ? 'debit-note-register' : 'credit-note-register'
+      setMessage(describeReport(await downloadReport(id, 'xlsx', filters())))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
 
   const act = async (
     note: PurchaseNote,
@@ -209,16 +334,31 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
     }
   }
 
+  /*
+   * What this desk is allowed to do, read once.
+   *
+   * Posting has its own right, separate from approving: the purchase manager
+   * agrees the mill is owed the money and accounts decide when it comes off
+   * the payable. Read at the top rather than per row — the answer cannot
+   * change between two rows of the same table.
+   */
+  const mayEdit = can('purchase', 'edit')
+  const mayApprove = can('purchase', 'approve')
+  const mayPost = can('purchase', 'post')
+  const mayDelete = can('purchase', 'delete')
+  const mayCreate = can('purchase', 'create')
+
   /**
    * What can be done to this row, in the order of the workflow.
    *
-   * Offered by state rather than always shown and sometimes refused: a menu of
-   * six things of which four throw is a menu nobody trusts.
+   * Offered by state *and* by right, rather than always shown and sometimes
+   * refused: a menu of six things of which four throw is a menu nobody trusts.
+   * Print is always there — anybody who can see a note can put it on paper.
    */
   const rowActions = (n: PurchaseNote): RowAction[] => {
     const items: RowAction[] = []
 
-    if (n.status === 'DRAFT') {
+    if (n.status === 'DRAFT' && mayEdit) {
       items.push({
         key: 'edit',
         label: 'Edit',
@@ -236,7 +376,7 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
       })
     }
 
-    if (n.status === 'SUBMITTED') {
+    if (n.status === 'SUBMITTED' && mayApprove) {
       items.push({
         key: 'approve',
         label: 'Approve',
@@ -251,7 +391,7 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
       })
     }
 
-    if (n.status === 'APPROVED') {
+    if (n.status === 'APPROVED' && mayPost) {
       items.push({
         key: 'post',
         label: 'Post to the bill',
@@ -260,7 +400,7 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
       })
     }
 
-    if (n.status === 'REJECTED') {
+    if (n.status === 'REJECTED' && mayEdit) {
       items.push({
         key: 'reopen',
         label: 'Reopen as draft',
@@ -277,7 +417,7 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
       newTab: true,
     })
 
-    if (n.status !== 'CANCELLED') {
+    if (n.status !== 'CANCELLED' && mayEdit) {
       items.push({
         key: 'cancel',
         label: n.status === 'POSTED' ? 'Cancel and reverse' : 'Cancel note',
@@ -287,7 +427,7 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
       })
     }
 
-    if (n.status === 'DRAFT') {
+    if (n.status === 'DRAFT' && mayDelete) {
       items.push({
         key: 'delete',
         label: 'Delete draft',
@@ -349,17 +489,20 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <button
-            className="btn-primary"
-            onClick={() => {
-              setEditing(null)
-              setDialogOpen(true)
-            }}
-          >
-            <Plus size={15} />
-            <span className="hidden sm:inline">{words.newLabel}</span>
-            <span className="sm:hidden">New</span>
-          </button>
+          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
+          {mayCreate && (
+            <button
+              className="btn-primary"
+              onClick={() => {
+                setEditing(null)
+                setDialogOpen(true)
+              }}
+            >
+              <Plus size={15} />
+              <span className="hidden sm:inline">{words.newLabel}</span>
+              <span className="sm:hidden">New</span>
+            </button>
+          )}
         </div>
       </div>
 

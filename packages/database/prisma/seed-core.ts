@@ -399,7 +399,21 @@ export async function seedCore(prisma: PrismaClient) {
     'dashboard', 'masters', 'sales', 'purchase', 'inventory',
     'production', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin',
   ]
-  const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export']
+  /*
+   * `post` is separate from `approve` on purpose.
+   *
+   * A purchase note is agreed by one desk and put through the books by
+   * another: the purchase manager approves that the mill is owed the money,
+   * and accounts decides when it comes off the payable. Folding the second
+   * into `approve` would mean giving the accounts desk the right to approve
+   * purchase orders in order to let them post a debit note — which is the
+   * opposite of what separating the two is for.
+   *
+   * Seeded across every module rather than only purchase, because the matrix
+   * is a matrix and a sparse action is cheaper than a special case. Nothing
+   * else guards on it yet.
+   */
+  const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export', 'post']
 
   const permissionIds = new Map<string, string>()
   for (const module of MODULES) {
@@ -428,7 +442,7 @@ export async function seedCore(prisma: PrismaClient) {
     // MD/CEO reviews and signs off; they do not key in transactions.
     {
       roleId: mdRole.id,
-      grants: only(['view', 'approve', 'export'], ...MODULES),
+      grants: only(['view', 'approve', 'export', 'post'], ...MODULES),
     },
 
     {
@@ -437,6 +451,9 @@ export async function seedCore(prisma: PrismaClient) {
         ...full('accounts'),
         ...only(['view', 'export'], 'dashboard', 'masters', 'sales', 'purchase', 'ai'),
         ...only(['view'], 'inventory', 'production'),
+        // Accounts put debit and credit notes through the books. They still
+        // cannot raise one, approve one, or touch a purchase order.
+        ...only(['post'], 'purchase'),
       ],
     },
 

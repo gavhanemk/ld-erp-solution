@@ -48,6 +48,16 @@ export const FMT = {
   date: 'dd mmm yyyy',
   /** Charts plot lakhs, so their axis wants one decimal and no grouping band. */
   lakh: '#,##0.0',
+  /**
+   * The same grouping, with the symbol on it.
+   *
+   * For a money figure that stands on its own rather than in a column under a
+   * heading — the Needs Attention block, where "13,530.00" sat three rows
+   * under a KPI reading "₹58,080.00" and the two looked like different kinds
+   * of number. A money column on the Data sheet still uses `money`: a rupee
+   * sign repeated down four hundred rows is noise the header already carries.
+   */
+  moneySigned: '[>=10000000]"₹"##\,##\,##\,##0.00;[>=100000]"₹"##\,##\,##0.00;"₹"#,##0.00',
 } as const
 
 export function numberFormatFor(type: ColumnType): string | undefined {
