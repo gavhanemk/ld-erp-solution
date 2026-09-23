@@ -38,6 +38,22 @@
 
     --border: 217 33% 20%;
     --input: 217 33% 18%;
+
+    /*
+     * The edge of a box you type into, which is not the edge of a card.
+     *
+     * `--border` separates one surface from another and is meant to be quiet.
+     * A field border does a different job: it says where the box you can type
+     * in begins and ends, and at `--border` it was doing that at about 1.5:1
+     * against the fill — visible if you looked for it, invisible on a form of
+     * forty boxes seen at arm's length in a mill office.
+     *
+     * Set so the edge clears roughly 3:1 against the field it encloses, which
+     * is the floor WCAG 1.4.11 puts on a control's own boundary. Kept apart
+     * from `--border` on purpose: darkening that would have outlined every
+     * card, table row and divider in the application to fix the forms.
+     */
+    --field-border: 217 25% 44%;
     --ring: 173 80% 40%;
 
     /* What a form field is filled with.
@@ -162,6 +178,10 @@
 
     --border: 220 14% 85%;           /* visible enough to separate cards from the page */
     --input: 220 14% 88%;
+    /* See the dark theme for why this is its own token. The light form was the
+       one that prompted it: a 91%-light fill inside an 85%-light border on a
+       white card is three greys nobody can tell apart. */
+    --field-border: 220 13% 58%;
     --ring: 173 75% 33%;
 
     /* The sidebar stays dark in both themes: it anchors the layout and keeps
@@ -531,11 +551,19 @@
   /* Form Inputs */
   .form-input {
     @apply w-full px-3 py-2.5 rounded-lg text-sm
-           border border-border text-foreground
+           border text-foreground
            placeholder:text-muted-foreground
            focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500
            transition-colors duration-200;
     background: hsl(var(--field));
+    border-color: hsl(var(--field-border));
+  }
+
+  /* A disabled box is still a box — it keeps its edge and loses its contrast,
+     rather than dissolving into the card and reading as a gap in the form. */
+  .form-input:disabled {
+    border-color: hsl(var(--field-border) / 0.45);
+    @apply cursor-not-allowed opacity-70;
   }
 
   /* A dropdown is the same control as a text field and must look like one, but
@@ -654,8 +682,16 @@
      billing address, where the goods are going. Boxed so it is plainly not a
      field somebody failed to fill in. */
   :where(.po-form) .form-readout {
-    @apply border-border flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm;
+    @apply flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm;
     background: hsl(var(--field));
+    border-color: hsl(var(--field-border));
+  }
+
+  /* The icon that leads a readout — a pin on an address, a lorry on where the
+     goods are going. Muted, because it labels the box rather than competing
+     with what is in it. */
+  :where(.po-form) .form-readout > svg {
+    @apply text-muted-foreground mt-0.5 shrink-0;
   }
 
   /* The item table inside a purchase form. A quiet header band and a hairline

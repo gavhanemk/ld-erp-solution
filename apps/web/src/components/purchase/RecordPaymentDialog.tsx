@@ -265,9 +265,9 @@ export function RecordPaymentDialog({
      * landed an inch wide of the card. Escape and the two close controls still
      * work, because those are things a person means to do.
      */
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
-        className="glass-card po-form flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden"
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="pay-dialog-title"

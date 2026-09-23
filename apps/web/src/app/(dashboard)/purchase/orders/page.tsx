@@ -524,7 +524,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
             {/* One box for words. It reaches the supplier as well as the order
               number, so typing "ambika" finds every order raised against them
               just as typing "PO-0006" finds the one order. */}
-            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+            <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
               {/* The glass costs 22px of a row that has two date boxes in it
                 already, and a box you type into needs no icon to explain
                 itself. Desk only. */}

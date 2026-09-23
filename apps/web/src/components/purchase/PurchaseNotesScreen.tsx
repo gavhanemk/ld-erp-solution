@@ -35,6 +35,7 @@ import {
   type ExportFormat,
 } from '@/lib/export'
 import { formatDate } from '@/lib/utils'
+import { presetFor, presets, ymd } from '@/lib/period'
 import { PurchaseNoteDialog } from '@/components/purchase/PurchaseNoteDialog'
 import { NoteDetail } from '@/components/purchase/NoteDetail'
 import {
@@ -139,6 +140,14 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
   const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
+  /*
+   * Whether the two date boxes are showing.
+   *
+   * Held rather than derived from the dates: "Between…" has to stay chosen
+   * while both boxes are still empty, and a value derived from empty dates
+   * would close the boxes the moment they were opened.
+   */
+  const [custom, setCustom] = useState(false)
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
@@ -442,6 +451,21 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
 
   const anyFilter = Boolean(search || status || reason || supplierId || fromDate || toDate)
 
+  /** Which named period the dates are, or "custom" while the boxes are open. */
+  const period = custom ? 'custom' : presetFor(fromDate, toDate)
+
+  const pickPeriod = (value: string) => {
+    if (value === 'custom') {
+      setCustom(true)
+      return
+    }
+    setCustom(false)
+    const p = presets().find((x) => x.label === value)
+    // No period clears the dates rather than inventing a range.
+    setFromDate(p ? ymd(p.from) : '')
+    setToDate(p ? ymd(p.to) : '')
+  }
+
   const cards = useMemo(() => {
     const at = (k: NoteStatus) => summary[k] ?? { count: 0, amount: 0 }
     const waiting = {
@@ -536,103 +560,159 @@ export function PurchaseNotesScreen({ moduleType }: { moduleType: NoteType }) {
       </div>
 
       <div className="glass-card overflow-hidden p-0">
-        {/* One row of filters, the way the reports screen settled on. Each
-          control says what it is when nothing is chosen, so no labels are
-          needed above them and the bar stays one line deep. */}
-        <div className="border-border flex flex-wrap items-center gap-x-2 gap-y-2 border-b px-3 py-2">
-          <div className="border-border bg-secondary flex min-w-0 shrink grow basis-full items-center gap-2 rounded-lg border px-2.5 py-1.5 sm:min-w-[150px] sm:max-w-[240px] sm:basis-0">
-            <Search size={14} className="text-muted-foreground shrink-0" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Note or bill number, supplier…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label={`Search ${words.one}s`}
-            />
-          </div>
+        {/* ── Two rows, deliberately ──────────────────────────────────────
+         *
+         * **When** on the first row, **what** on the second. On a phone this
+         * used to be five stacked controls — the search on its own line, then
+         * each select on its own line, then the two dates — so half a small
+         * screen was filter before a single note appeared.
+         *
+         * The date range collapses to one control to make that possible. Two
+         * date boxes and a search field cannot share a 360px row and stay
+         * usable, so the named periods that the reports screen already offers
+         * do the ordinary case, and the two boxes appear underneath only when
+         * somebody asks for a range that is not one of them. On a desk both
+         * are on the row together and nothing is hidden.
+         */}
+        <div className="border-border space-y-2 border-b px-3 py-2">
+          {/* When */}
+          <div className="flex items-center gap-2">
+            <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5">
+              <Search size={14} className="text-muted-foreground shrink-0" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder="Note or bill number, supplier…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label={`Search ${words.one}s`}
+              />
+            </div>
 
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-36"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            aria-label="Filter by status"
-          >
-            <option value="">Any status</option>
-            {Object.entries(NOTE_STATUS).map(([v, s]) => (
-              <option key={v} value={v}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-40"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            aria-label="Filter by reason"
-          >
-            <option value="">Any reason</option>
-            {Object.entries(REASON_WORDS).map(([v, label]) => (
-              <option key={v} value={v}>
-                {label}
-              </option>
-            ))}
-          </select>
-
-          <select
-            className="form-input h-8 w-full min-w-0 py-0 text-xs sm:w-44"
-            value={supplierId}
-            onChange={(e) => setSupplierId(e.target.value)}
-            aria-label="Filter by supplier"
-          >
-            <option value="">All suppliers</option>
-            {suppliers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-
-          <div className="flex w-full min-w-0 shrink-0 items-center gap-1.5 sm:w-auto">
-            <span className="text-muted-foreground shrink-0 text-xs">Raised</span>
-            <input
-              type="date"
-              className="form-input h-8 min-w-0 flex-1 py-0 text-xs sm:w-[8.5rem] sm:flex-none"
-              value={fromDate}
-              max={toDate || undefined}
-              onChange={(e) => setFromDate(e.target.value)}
-              aria-label="Raised on or after"
-            />
-            <span className="text-muted-foreground shrink-0 text-xs">to</span>
-            <input
-              type="date"
-              className="form-input h-8 min-w-0 flex-1 py-0 text-xs sm:w-[8.5rem] sm:flex-none"
-              value={toDate}
-              min={fromDate || undefined}
-              onChange={(e) => setToDate(e.target.value)}
-              aria-label="Raised on or before"
-            />
-          </div>
-
-          {anyFilter && (
-            <button
-              className="btn-ghost h-8 shrink-0 px-2 text-xs"
-              onClick={() => {
-                setSearch('')
-                setStatus('')
-                setReason('')
-                setSupplierId('')
-                setFromDate('')
-                setToDate('')
-              }}
+            <select
+              className="form-input h-8 w-[8.25rem] shrink-0 py-0 text-xs"
+              value={period}
+              onChange={(e) => pickPeriod(e.target.value)}
+              aria-label="Period"
             >
-              Clear
-            </button>
+              <option value="">Any date</option>
+              {presets().map((x) => (
+                <option key={x.label} value={x.label}>
+                  {x.label}
+                </option>
+              ))}
+              <option value="custom">Between…</option>
+            </select>
+
+            {/* The two boxes, on the row on a desk and underneath on a phone. */}
+            <div className={`${custom ? 'flex' : 'hidden'} shrink-0 items-center gap-1.5 sm:flex`}>
+              <input
+                type="date"
+                className="form-input hidden h-8 w-[8.5rem] py-0 text-xs sm:block"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="Raised on or after"
+              />
+              <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input hidden h-8 w-[8.5rem] py-0 text-xs sm:block"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="Raised on or before"
+              />
+            </div>
+          </div>
+
+          {/* The same two boxes for a phone, once a custom range is asked for. */}
+          {custom && (
+            <div className="flex items-center gap-1.5 sm:hidden">
+              <input
+                type="date"
+                className="form-input h-8 min-w-0 flex-1 py-0 text-xs"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="Raised on or after"
+              />
+              <span className="text-muted-foreground shrink-0 text-xs">to</span>
+              <input
+                type="date"
+                className="form-input h-8 min-w-0 flex-1 py-0 text-xs"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="Raised on or before"
+              />
+            </div>
           )}
 
-          <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
-            {total} {total === 1 ? words.one : `${words.one}s`}
-          </span>
+          {/* What */}
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-36 sm:flex-none sm:basis-auto"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              aria-label="Filter by status"
+            >
+              <option value="">Any status</option>
+              {Object.entries(NOTE_STATUS).map(([v, st]) => (
+                <option key={v} value={v}>
+                  {st.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-40 sm:flex-none sm:basis-auto"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              aria-label="Filter by reason"
+            >
+              <option value="">Any reason</option>
+              {Object.entries(REASON_WORDS).map(([v, label]) => (
+                <option key={v} value={v}>
+                  {label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-44 sm:flex-none sm:basis-auto"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
+            >
+              <option value="">All suppliers</option>
+              {suppliers.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
+                </option>
+              ))}
+            </select>
+
+            {anyFilter && (
+              <button
+                className="btn-ghost h-8 shrink-0 px-2 text-xs"
+                onClick={() => {
+                  setSearch('')
+                  setStatus('')
+                  setReason('')
+                  setSupplierId('')
+                  setFromDate('')
+                  setToDate('')
+                  setCustom(false)
+                }}
+              >
+                Clear
+              </button>
+            )}
+
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {total} {total === 1 ? words.one : `${words.one}s`}
+            </span>
+          </div>
         </div>
 
         <div className="overflow-x-auto">

@@ -9,6 +9,7 @@ import {
   Minus,
   PackageCheck,
   Truck,
+  MapPin,
   ClipboardList,
   FileText,
   Paperclip,
@@ -22,6 +23,7 @@ import {
   type SupplierAddressRow,
 } from '@/components/purchase/PurchaseOrderDialog'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
+import { IconField, Readout } from '@/components/purchase/FormBits'
 
 /**
  * Booking in what arrived against an order.
@@ -659,9 +661,7 @@ export function ReceiveGoodsDialog({
         onChange={(e) => setField({ [field]: e.target.value } as Partial<Delivery>)}
         placeholder={opts.placeholder}
       />
-      {opts.help && (
-        <span className="text-muted-foreground mt-1 block text-[11px]">{opts.help}</span>
-      )}
+      {opts.help && <span className="form-help">{opts.help}</span>}
     </label>
   )
 
@@ -775,7 +775,7 @@ export function ReceiveGoodsDialog({
             </label>
           )}
 
-          <Section icon={Truck} title="The delivery">
+          <Section icon={FileText} title="Purchase &amp; Supplier Details">
             <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
               <label className="block">
                 <span className="form-label">Purchase order</span>
@@ -845,13 +845,18 @@ export function ReceiveGoodsDialog({
               together. Shown once an order is picked, since that is where
               both defaults come from. */}
             {order && (
-              <div className="border-border mt-2 grid gap-2 border-t pt-2 text-xs sm:grid-cols-2">
-                {order.supplier && (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-muted-foreground shrink-0">Supplier address</span>
-                    {supplierAddresses.length > 1 ? (
+              /* Boxed, and captioned above like every other field on the form.
+                 These were a bare line of 11px grey riding on a hairline rule:
+                 the address the delivery is checked against read as a footnote
+                 rather than as one of the two facts the store keeper is meant
+                 to confirm before signing for a lorry. A pin and a lorry say
+                 which is which without reading either caption. */
+              <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
+                {order.supplier &&
+                  (supplierAddresses.length > 1 ? (
+                    <IconField label="Supplier Address" icon={MapPin}>
                       <select
-                        className="form-input h-8 min-w-0 flex-1 py-0 text-xs"
+                        className="form-input pl-9"
                         value={supplierAddressId}
                         onChange={(e) => setSupplierAddressId(e.target.value)}
                         aria-label="Which of the supplier's addresses this delivery is checked against"
@@ -863,21 +868,19 @@ export function ReceiveGoodsDialog({
                           </option>
                         ))}
                       </select>
-                    ) : (
-                      <span className="text-foreground min-w-0 flex-1 truncate">
-                        {supplierAddresses[0]
-                          ? addressLine(supplierAddresses[0])
-                          : (order.supplierAddress ?? '—')}
-                      </span>
-                    )}
-                  </div>
-                )}
+                    </IconField>
+                  ) : (
+                    <Readout label="Supplier Address" icon={MapPin}>
+                      {supplierAddresses[0]
+                        ? addressLine(supplierAddresses[0])
+                        : (order.supplierAddress ?? '—')}
+                    </Readout>
+                  ))}
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-muted-foreground shrink-0">Shipping address</span>
-                  {warehouses.length > 1 ? (
+                {warehouses.length > 1 ? (
+                  <IconField label="Shipping Address" icon={Truck}>
                     <select
-                      className="form-input h-8 min-w-0 flex-1 py-0 text-xs"
+                      className="form-input pl-9"
                       value={shippingWarehouseId}
                       onChange={(e) => setShippingWarehouseId(e.target.value)}
                       aria-label="Which of the mill's stores this delivery arrived at"
@@ -889,14 +892,14 @@ export function ReceiveGoodsDialog({
                         </option>
                       ))}
                     </select>
-                  ) : (
-                    <span className="text-foreground min-w-0 flex-1 truncate">
-                      {warehouses[0]
-                        ? `${warehouses[0].name}${warehouses[0].address ? ` — ${warehouses[0].address}` : ''}`
-                        : '—'}
-                    </span>
-                  )}
-                </div>
+                  </IconField>
+                ) : (
+                  <Readout label="Shipping Address" icon={Truck}>
+                    {warehouses[0]
+                      ? `${warehouses[0].name}${warehouses[0].address ? ` — ${warehouses[0].address}` : ''}`
+                      : '—'}
+                  </Readout>
+                )}
               </div>
             )}
           </Section>
@@ -914,7 +917,7 @@ export function ReceiveGoodsDialog({
             in a walk-in delivery with no paperwork at all can fold it away. */}
           <Section
             icon={ClipboardList}
-            title="Delivery paperwork"
+            title="Delivery Paperwork"
             foldable
             openByDefault
             summary="Gate entry, challan, the supplier's invoice — all optional"
@@ -965,7 +968,7 @@ export function ReceiveGoodsDialog({
           {loadingOrder && <p className="text-muted-foreground py-6 text-sm">Opening the order…</p>}
 
           {order && !loadingOrder && (
-            <Section icon={FileText} title="What arrived">
+            <Section icon={PackageCheck} title="What Arrived">
               <div className="border-border hidden overflow-x-auto rounded-lg border sm:block">
                 {/* A floor, so the columns scroll rather than squash. Most of
                 them are figures being typed into, and a number box squeezed to

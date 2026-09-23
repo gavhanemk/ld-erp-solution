@@ -860,7 +860,7 @@ export function PurchaseBillDialog({
             )}
 
             {!isEdit && (
-              <Section icon={Download} title="Which deliveries is this bill for?">
+              <Section icon={Download} title="Deliveries Being Billed">
                 {receiptChoices.length === 0 ? (
                   <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
                     <Info size={12} className="mt-0.5 shrink-0 opacity-70" />
@@ -960,7 +960,7 @@ export function PurchaseBillDialog({
               </Section>
             )}
 
-            <Section icon={FileText} title="The bill">
+            <Section icon={FileText} title="Bill Details">
               <div className="grid grid-cols-1 gap-2.5 md:grid-cols-4">
                 <div className="md:col-span-2">
                   <label className="form-label" htmlFor="bill-supplier">
@@ -1207,7 +1207,7 @@ export function PurchaseBillDialog({
             {/* Lines */}
             <Section
               icon={Package}
-              title="What the supplier has charged for"
+              title="Item Details"
               actions={
                 <button
                   type="button"
@@ -1517,7 +1517,7 @@ export function PurchaseBillDialog({
             {chargeTypes.length > 0 && (
               <Section
                 icon={Percent}
-                title="Extras at the foot of the bill"
+                title="Other Charges"
                 actions={
                   <button
                     type="button"
@@ -1617,7 +1617,7 @@ export function PurchaseBillDialog({
 
             {/* What is typed on the left, what it comes to on the right. */}
             <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
-              <Section icon={MessageSquare} title="Deducted at source, and anything worth noting">
+              <Section icon={MessageSquare} title="TDS &amp; Notes">
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   <div>
                     <label className="form-label" htmlFor="bill-tds-section">

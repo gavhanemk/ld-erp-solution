@@ -541,7 +541,7 @@ export function PurchaseNoteDialog({
               First, and as buttons rather than a dropdown. This is the one
               choice on the form that decides three others, and a reader who
               scrolls past a closed select has decided nothing. */}
-            <Section icon={HelpCircle} title="What happened?">
+            <Section icon={HelpCircle} title="What Happened">
               <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
                 {reasons.map((r) => {
                   const on = reason === r.value
@@ -587,7 +587,7 @@ export function PurchaseNoteDialog({
               )}
 
               {rule && (
-                <div className="border-border bg-secondary mt-3 grid gap-2 rounded-lg border p-2.5 sm:grid-cols-2">
+                <div className="border-field-edge bg-field mt-3 grid gap-2 rounded-lg border p-2.5 sm:grid-cols-2">
                   {/* The two things the reason decided. Shown, and changeable:
                     a purchase return is normally our debit note, but if the
                     supplier sent their own credit note first, the same thing
@@ -634,7 +634,7 @@ export function PurchaseNoteDialog({
             {/* ── 2. The bill it adjusts ──────────────────────────────────── */}
             <Section
               icon={Link2}
-              title="Which bill does this adjust?"
+              title="Original Purchase Reference"
               actions={
                 <label className="text-muted-foreground flex cursor-pointer items-center gap-1.5 text-xs">
                   <input
@@ -754,7 +754,7 @@ export function PurchaseNoteDialog({
                   {/* What the chosen bill is, so nobody has to open it in
                     another tab to be sure they picked the right one. */}
                   {context && (
-                    <div className="border-border bg-secondary grid gap-x-4 gap-y-2 rounded-lg border p-3 sm:grid-cols-3 lg:grid-cols-4">
+                    <div className="border-field-edge bg-field grid gap-x-4 gap-y-2 rounded-lg border p-3 sm:grid-cols-3 lg:grid-cols-4">
                       <Fact label="Supplier" value={context.bill.supplier.name} />
                       <Fact
                         label="Their invoice"
@@ -798,7 +798,7 @@ export function PurchaseNoteDialog({
             {/* ── 3. The lines ────────────────────────────────────────────── */}
             <Section
               icon={Package}
-              title="What is coming off the bill?"
+              title="Item Details"
               actions={
                 picked.length > 0 ? (
                   <span className="text-muted-foreground text-xs tabular-nums">
@@ -1031,7 +1031,7 @@ export function PurchaseNoteDialog({
             {rule?.movesGoods && (
               <Section
                 icon={Truck}
-                title="The goods going back"
+                title="Goods &amp; Transport"
                 foldable
                 summary={warehouseId ? 'Godown set' : 'No godown named yet'}
               >
@@ -1100,7 +1100,7 @@ export function PurchaseNoteDialog({
             )}
 
             {/* ── 5. Dates and the supplier's own document ─────────────────── */}
-            <Section icon={MessageSquare} title="Dates, references and notes" foldable>
+            <Section icon={MessageSquare} title="Dates &amp; References" foldable>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div>
                   <label className="form-label" htmlFor="note-date">
@@ -1162,7 +1162,7 @@ export function PurchaseNoteDialog({
             {/* ── 6. Evidence ─────────────────────────────────────────────── */}
             <Section
               icon={Paperclip}
-              title="Evidence behind the claim"
+              title="Attachments"
               foldable
               openByDefault={false}
               summary={
@@ -1180,7 +1180,7 @@ export function PurchaseNoteDialog({
             </Section>
 
             {/* ── 7. Totals ───────────────────────────────────────────────── */}
-            <Section icon={Calculator} title="What this note comes to">
+            <Section icon={Calculator} title="Tax &amp; Amount">
               <div className="grid gap-3 lg:grid-cols-2">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>

@@ -2154,7 +2154,7 @@ export function PurchaseOrderDialog({
               and not the buttons. */}
             <Section
               icon={Package}
-              title="Items"
+              title="Item Details"
               actions={
                 <>
                   {/* Where the old ERP puts it: on the items bar, left of the
@@ -2925,7 +2925,7 @@ export function PurchaseOrderDialog({
                 whole row, and the form scrolling for no reason. The terms and
                 the note move up into that space instead. */}
               <div className="min-w-0 space-y-3">
-                <Section icon={Truck} title="Attachments and Deliver To">
+                <Section icon={Truck} title="Attachments &amp; Deliver To">
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                     <div className="space-y-2">
                       <h4 className="text-foreground text-xs font-semibold">Attachments</h4>
@@ -3149,7 +3149,7 @@ export function PurchaseOrderDialog({
                 <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
                   <Section
                     icon={ScrollText}
-                    title="Terms and conditions"
+                    title="Terms &amp; Conditions"
                     foldable
                     openByDefault={false}
                     summary={
@@ -3203,7 +3203,7 @@ export function PurchaseOrderDialog({
                 space the form was already paying for either way. */}
                 <Section
                   icon={Mail}
-                  title="Template and email"
+                  title="Template &amp; Email"
                   foldable
                   openByDefault={false}
                   summary="One template per document type; emailing is not built yet"

@@ -174,7 +174,7 @@ export function IndentItemsDialog({
         </div>
 
         <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-2.5">
-          <div className="border-border bg-secondary flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:max-w-sm">
+          <div className="border-field-edge bg-field flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:max-w-sm">
             <Search size={14} className="text-muted-foreground shrink-0" />
             <input
               className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"

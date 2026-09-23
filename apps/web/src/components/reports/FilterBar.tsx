@@ -2,6 +2,7 @@
 
 import { useMemo } from 'react'
 import { Check, Play, RotateCcw, SlidersHorizontal, X } from 'lucide-react'
+import { presetFor, presets, ymd } from '@/lib/period'
 
 /**
  * The filter bar above a report — one row of it.
@@ -31,38 +32,9 @@ export interface Filter {
 
 type Values = Record<string, string>
 
-const pad = (n: number) => String(n).padStart(2, '0')
-const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-
-/**
- * India's financial year runs April to March, so "this year" in a mill office
- * is not the calendar one. A preset labelled FY handing back January to
- * December would be wrong in a way nobody questions until filing.
- */
-function fyStart(d: Date): Date {
-  return new Date(d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1, 3, 1)
-}
-
-function presets(): Array<{ label: string; from: Date; to: Date }> {
-  const now = new Date()
-  const y = now.getFullYear()
-  const m = now.getMonth()
-  const fy = fyStart(now)
-  // Quarters are counted off April too, for the same reason.
-  const q = Math.floor(((m - 3 + 12) % 12) / 3)
-
-  return [
-    { label: 'This month', from: new Date(y, m, 1), to: now },
-    { label: 'Last month', from: new Date(y, m - 1, 1), to: new Date(y, m, 0) },
-    { label: 'This quarter', from: new Date(fy.getFullYear(), 3 + q * 3, 1), to: now },
-    { label: 'This FY', from: fy, to: now },
-    {
-      label: 'Last FY',
-      from: new Date(fy.getFullYear() - 1, 3, 1),
-      to: new Date(fy.getFullYear(), 2, 31),
-    },
-  ]
-}
+/* The presets and the financial-year rule live in `@/lib/period` — the notes
+   screens offer the same ones, and two copies would have been two definitions
+   of the financial year. */
 
 const DAY = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
 const pretty = (iso: string) => (iso ? DAY.format(new Date(`${iso}T00:00:00`)) : '')
@@ -104,8 +76,7 @@ export function FilterBar({
   const set = (key: string, value: string) => onChange({ ...values, [key]: value })
 
   /** Which named period the current dates are, if they are one. */
-  const activePreset =
-    presets().find((p) => values.from === ymd(p.from) && values.to === ymd(p.to))?.label ?? ''
+  const activePreset = presetFor(values.from ?? '', values.to ?? '')
 
   const chips = useMemo(() => {
     const out: Array<{ key: string; text: string; clears: string[] }> = []

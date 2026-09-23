@@ -642,7 +642,7 @@ export default function SupplierPaymentsPage() {
 
           {/* Row: what you type, and when. */}
           <div className="flex items-center gap-2 sm:contents">
-            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[260px] sm:basis-0 sm:px-2.5">
+            <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[260px] sm:basis-0 sm:px-2.5">
               <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
               <input
                 className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
