@@ -279,9 +279,9 @@ export function ReceiveGoodsDialog({
           api.get<Paginated<OrderOption>>(
             '/purchase/orders?status=PARTIALLY_RECEIVED&limit=100&view=picker'
           ),
-          masterResource<{ id: string; name: string; address?: string | null }>(
-            'warehouses'
-          ).list({ limit: 100 }),
+          masterResource<{ id: string; name: string; address?: string | null }>('warehouses').list({
+            limit: 100,
+          }),
         ])
         if (cancelled) return
         setOrders([...sent.data, ...partly.data])
@@ -701,7 +701,10 @@ export function ReceiveGoodsDialog({
               <PackageCheck size={19} className="text-primary" />
             </div>
             <div>
-              <h2 id="grn-dialog-title" className="text-foreground truncate text-xl font-semibold tracking-tight">
+              <h2
+                id="grn-dialog-title"
+                className="text-foreground truncate text-xl font-semibold tracking-tight"
+              >
                 {editing ? 'Correct a receipt' : 'Receive goods'}
               </h2>
               <p className="text-muted-foreground mt-0.5 text-[13px]">
@@ -1069,8 +1072,8 @@ export function ReceiveGoodsDialog({
                                       title={line.shortCloseReason ?? undefined}
                                     >
                                       Closed short
-                                      {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} — no
-                                      more expected
+                                      {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} —
+                                      no more expected
                                     </div>
                                   )}
                                 </td>

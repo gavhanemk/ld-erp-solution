@@ -1848,7 +1848,10 @@ export function PurchaseOrderDialog({
                 <ShoppingCart size={19} className="text-primary" />
               </div>
               <div>
-                <h2 id="po-dialog-title" className="text-foreground truncate text-xl font-semibold tracking-tight">
+                <h2
+                  id="po-dialog-title"
+                  className="text-foreground truncate text-xl font-semibold tracking-tight"
+                >
                   Purchase Order
                 </h2>
                 {/* The number moves down here rather than into the heading. The
@@ -2770,9 +2773,7 @@ export function PurchaseOrderDialog({
                             aria-label={`Row ${i + 1} quantity`}
                           />
                           {item?.uom?.symbol && (
-                            <p className="text-muted-foreground text-[10px]">
-                              {item.uom.symbol}
-                            </p>
+                            <p className="text-muted-foreground text-[10px]">{item.uom.symbol}</p>
                           )}
                         </div>
                         <div className="space-y-1">
