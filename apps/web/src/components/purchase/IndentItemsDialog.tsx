@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Search } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
@@ -154,12 +155,32 @@ export function IndentItemsDialog({
     'text-muted-foreground px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap'
   const TD = 'text-foreground px-3 py-2 align-middle text-xs'
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm">
-      <div className="border-border bg-card my-4 w-full max-w-6xl overflow-hidden rounded-xl border shadow-2xl">
-        <div className="border-border flex items-center gap-3 border-b px-4 py-3">
+  if (typeof document === 'undefined') return null
+
+  /*
+   * Portalled, like every other dialog here, and it has to be.
+   *
+   * This is opened from inside the purchase order form — which is itself
+   * portalled, and whose backdrop carries `backdrop-blur-sm`. A
+   * `backdrop-filter` makes that element the containing block for anything
+   * `position: fixed` inside it, so `inset-0` here was measuring from the
+   * order form's own backdrop rather than from the window: already inset past
+   * the sidebar, and about to be inset past it a second time. Out at the body
+   * it means the window, and the offset below is applied once.
+   */
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      <div
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="indent-items-title"
+      >
+        <div className="border-border flex shrink-0 items-center gap-3 border-b px-4 py-3">
           <div className="min-w-0">
-            <h3 className="text-foreground text-base font-semibold">Indent items</h3>
+            <h3 id="indent-items-title" className="text-foreground text-base font-semibold">
+              Indent Items
+            </h3>
             <p className="text-muted-foreground text-xs">
               What production has asked for and nobody has ordered yet
             </p>
@@ -173,7 +194,7 @@ export function IndentItemsDialog({
           </button>
         </div>
 
-        <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-2.5">
+        <div className="border-border flex shrink-0 flex-wrap items-center gap-3 border-b px-4 py-2.5">
           <div className="border-field-edge bg-field flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:max-w-sm">
             <Search size={14} className="text-muted-foreground shrink-0" />
             <input
@@ -197,7 +218,7 @@ export function IndentItemsDialog({
           </div>
         )}
 
-        <div className="max-h-[52vh] overflow-auto">
+        <div className="flex-1 overflow-auto">
           {loading ? (
             <p className="text-muted-foreground flex items-center gap-2 px-4 py-10 text-sm">
               <Loader2 size={15} className="animate-spin" /> Loading…
@@ -315,7 +336,7 @@ export function IndentItemsDialog({
           )}
         </div>
 
-        <div className="border-border flex flex-wrap items-center gap-3 border-t px-4 py-3">
+        <div className="border-border flex shrink-0 flex-wrap items-center gap-3 border-t px-4 py-3">
           {/* A warning, not a refusal. Ordering more than was asked for is
             ordinary — the supplier sells thread in full cones — and the extra
             simply is not credited against the request. */}
@@ -339,6 +360,7 @@ export function IndentItemsDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }

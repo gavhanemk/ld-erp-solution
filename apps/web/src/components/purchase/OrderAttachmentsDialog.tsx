@@ -89,11 +89,11 @@ export function OrderAttachmentsDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]"
       onClick={onClose}
     >
       <div
-        className="glass-card w-full max-w-md p-5"
+        className="glass-card po-form w-full max-w-md p-5"
         role="dialog"
         aria-modal="true"
         aria-labelledby="order-files-title"

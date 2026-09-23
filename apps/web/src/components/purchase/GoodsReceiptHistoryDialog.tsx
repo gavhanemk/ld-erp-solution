@@ -168,24 +168,24 @@ export function GoodsReceiptHistoryDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3"
       onClick={onClose}
     >
       <div
-        className="glass-card my-4 w-full max-w-4xl p-0"
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="grn-history-title"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="border-border flex items-start justify-between gap-3 border-b px-5 py-4">
+        <div className="border-border flex shrink-0 items-start justify-between gap-3 border-b px-5 py-4">
           <div className="min-w-0">
             <h2
               id="grn-history-title"
               className="text-foreground flex items-center gap-2 text-base font-semibold"
             >
               <PackageCheck size={17} className="text-primary shrink-0" />
-              Goods receipt history
+              Goods Receipt History
             </h2>
             <p className="text-muted-foreground mt-0.5 text-sm">
               What has arrived against <span className="text-foreground font-mono">{poNumber}</span>
@@ -202,7 +202,7 @@ export function GoodsReceiptHistoryDialog({
           </button>
         </div>
 
-        <div className="max-h-[75vh] space-y-4 overflow-y-auto px-5 py-4">
+        <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
           {loading ? (
             <p className="text-muted-foreground flex items-center gap-2 text-sm">
               <Loader2 size={14} className="animate-spin" /> Loading...
