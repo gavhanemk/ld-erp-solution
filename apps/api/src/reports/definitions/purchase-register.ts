@@ -194,6 +194,21 @@ export const purchaseRegister: ReportDefinition = {
       }))
       .filter((p) => p.value > 0)
 
+    /*
+     * The biggest suppliers, and what each of them is made of.
+     *
+     * Eight, because a stacked bar with three segments needs the bar to be
+     * tall enough to divide — past about eight the segments are hairlines and
+     * the chart says less than the ranking beside it already did.
+     */
+    const topSuppliers = [...bySupplier.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([name]) => name)
+
+    const sumBy = (supplier: string, pick: (r: (typeof live)[number]) => number) =>
+      round2(live.filter((r) => r.supplier === supplier).reduce((s, r) => s + pick(r), 0))
+
     const panels: Panel[] = [
       {
         title: 'Biggest suppliers by value billed',
@@ -204,6 +219,81 @@ export const purchaseRegister: ReportDefinition = {
           8
         ),
         note: 'Bill totals including tax. Cancelled bills are not counted.',
+      },
+      {
+        /*
+         * Concentration, which a ranking cannot show.
+         *
+         * A ranking says who is biggest. This says how much of the mill's
+         * buying rests on how few names — the question behind whether a
+         * supplier going quiet is an inconvenience or a stoppage.
+         */
+        title: 'How few suppliers make up the spend',
+        question: 'pareto',
+        format: 'money',
+        points: topWithRest(
+          [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
+          9
+        ),
+        note: 'The line is the share reached by that supplier and every bigger one, so it ends at 100%.',
+      },
+      {
+        title: 'Settled against still owed, by supplier',
+        question: 'split',
+        format: 'money',
+        points: topSuppliers.map((s) => ({ label: s, value: round2(bySupplier.get(s) ?? 0) })),
+        series: [
+          { name: 'Paid', values: topSuppliers.map((s) => sumBy(s, (r) => r.paid)) },
+          { name: 'Still owed', values: topSuppliers.map((s) => sumBy(s, (r) => r.balance)) },
+        ],
+        note: 'The eight biggest suppliers by value billed.',
+      },
+      {
+        /*
+         * The same three-way tax split as the doughnut, but per supplier.
+         *
+         * The doughnut says how much of the period carries IGST. This says
+         * which suppliers it comes from, which is the one a person can act
+         * on — an interstate supplier's credit is claimed on a different line
+         * of the return.
+         */
+        title: 'How each supplier was taxed',
+        question: 'split',
+        format: 'money',
+        points: topSuppliers.map((s) => ({ label: s, value: sumBy(s, (r) => r.taxable) })),
+        series: [
+          {
+            name: 'Within the state',
+            values: topSuppliers.map((s) =>
+              round2(
+                live
+                  .filter((r) => r.supplier === s && r.cgst > 0)
+                  .reduce((n, r) => n + r.taxable, 0)
+              )
+            ),
+          },
+          {
+            name: 'Other state (IGST)',
+            values: topSuppliers.map((s) =>
+              round2(
+                live
+                  .filter((r) => r.supplier === s && r.igst > 0)
+                  .reduce((n, r) => n + r.taxable, 0)
+              )
+            ),
+          },
+          {
+            name: 'No GST',
+            values: topSuppliers.map((s) =>
+              round2(
+                live
+                  .filter((r) => r.supplier === s && r.cgst === 0 && r.igst === 0)
+                  .reduce((n, r) => n + r.taxable, 0)
+              )
+            ),
+          },
+        ],
+        note: 'Taxable value, so each bar matches that supplier’s share of the taxable total.',
       },
       {
         title: 'Where the goods were taxed',

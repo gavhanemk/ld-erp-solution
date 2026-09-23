@@ -252,6 +252,59 @@ export const supplierOutstanding: ReportDefinition = {
                 8
               ),
             },
+            {
+              /*
+               * How concentrated the debt is.
+               *
+               * The ranking says who is owed most. This says how many
+               * conversations it would take to clear most of what is owed —
+               * which is the question when cash is short.
+               */
+              title: 'How few suppliers the debt sits with',
+              question: 'pareto',
+              format: 'money',
+              points: topWithRest(
+                [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
+                9
+              ),
+              note: 'The line is the share reached by that supplier and every bigger one, so it ends at 100%.',
+            },
+            {
+              /*
+               * The ageing chart, split by whether the clock is statutory.
+               *
+               * An MSME bill past 45 days accrues interest by law. Sitting
+               * inside the same bar as everything else it is invisible; as its
+               * own segment the band that needs paying first is obvious.
+               */
+              title: 'What is owed by age, and how much of it is MSME',
+              question: 'split',
+              format: 'money',
+              points: ageing.map((b) => ({ label: b.label, value: b.value })),
+              series: [
+                {
+                  name: 'MSME supplier',
+                  values: ageing.map((b) =>
+                    round2(
+                      rows
+                        .filter((r) => r.bucket === b.label && r.isMsme === 'Yes')
+                        .reduce((s, r) => s + r.balance, 0)
+                    )
+                  ),
+                },
+                {
+                  name: 'Everyone else',
+                  values: ageing.map((b) =>
+                    round2(
+                      rows
+                        .filter((r) => r.bucket === b.label && r.isMsme !== 'Yes')
+                        .reduce((s, r) => s + r.balance, 0)
+                    )
+                  ),
+                },
+              ],
+              note: 'An MSME bill past 45 days carries interest by law, whatever the agreed terms said.',
+            },
           ] as Panel[]
         ).filter((p) => p.points.length > 0),
         insights,

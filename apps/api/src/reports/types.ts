@@ -116,8 +116,18 @@ export interface Trend {
  *   ageing       how overdue                   → horizontal bar
  *   funnel       stages of one process         → horizontal bar
  *   composition  shares of one whole           → doughnut, 2-5 slices
+ *   split        what each category is made of → stacked bar
+ *   pareto       how few names make up the most→ column plus a running share
  */
-export type PanelQuestion = 'trend' | 'comparison' | 'ranking' | 'ageing' | 'funnel' | 'composition'
+export type PanelQuestion =
+  | 'trend'
+  | 'comparison'
+  | 'ranking'
+  | 'ageing'
+  | 'funnel'
+  | 'composition'
+  | 'split'
+  | 'pareto'
 
 export interface PanelPoint {
   label: string
@@ -131,6 +141,16 @@ export interface Panel {
   question: PanelQuestion
   format: 'money' | 'qty' | 'integer' | 'percent'
   points: PanelPoint[]
+  /**
+   * For `split`: what each category divides into, drawn as stacked segments.
+   *
+   * `points[i].value` stays the category's total, so a panel whose split
+   * cannot be computed still draws as a plain bar of totals rather than as
+   * nothing at all. The segments must be in a fixed order decided by the
+   * report — segments ordered by size would reshuffle between two periods and
+   * the colours would stop meaning anything.
+   */
+  series?: Array<{ name: string; values: Array<number | null> }>
   /** Printed under the chart. Where a caveat about this panel belongs. */
   note?: string
 }

@@ -163,10 +163,48 @@ const SYNTHETIC: { def: ReportDefinition; result: ReportResult } = {
             ],
           },
           {
-            title: 'One category only — must become a card, not a chart',
+            title: 'What each supplier billed, split by tax',
+            question: 'split',
+            format: 'money',
+            points: suppliers.map((s, i) => ({ label: s, value: 3400000 - i * 520000 })),
+            series: [
+              { name: 'CGST+SGST', values: suppliers.map((_, i) => 2100000 - i * 310000) },
+              { name: 'IGST', values: suppliers.map((_, i) => 900000 - i * 150000) },
+              // A hole in the middle segment, which must leave a gap in the
+              // stack rather than closing it up as though it were nought.
+              { name: 'No GST', values: suppliers.map((_, i) => (i === 2 ? null : 400000 - i * 60000)) },
+            ],
+          },
+          {
+            title: 'How few suppliers make up the spend',
+            question: 'pareto',
+            format: 'money',
+            points: suppliers.map((s, i) => ({ label: s, value: 3400000 - i * 520000 })),
+            note: 'The line is the share reached by that supplier and every bigger one.',
+          },
+          {
+            // One point now draws a single bar rather than degrading to a
+            // text row. This is the case that made every Dashboard on a new
+            // mill come out with no chart on it at all.
+            title: 'One category only — draws as a single bar',
             question: 'ranking',
             format: 'money',
             points: [{ label: 'Only supplier', value: 145000 }],
+          },
+          {
+            title: 'Two slices only — falls back from doughnut to bars',
+            question: 'composition',
+            format: 'money',
+            points: [
+              { label: 'Within the state', value: 9100000 },
+              { label: 'Other state', value: 3900000 },
+            ],
+          },
+          {
+            title: 'Nothing at all — the only shape that stays a card',
+            question: 'ranking',
+            format: 'money',
+            points: [],
           },
         ],
         matrix: {

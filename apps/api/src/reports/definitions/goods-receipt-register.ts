@@ -161,6 +161,29 @@ export const goodsReceiptRegister: ReportDefinition = {
 
     const rejectRate = received === 0 ? null : rejected / received
 
+    const bySupplier = new Map<string, number>()
+    for (const r of live) bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.accepted)
+
+    const byStore = new Map<string, number>()
+    for (const r of live) {
+      if (r.store) byStore.set(r.store, (byStore.get(r.store) ?? 0) + r.accepted)
+    }
+
+    /*
+     * The six biggest suppliers by what actually reached stock.
+     *
+     * Ranked on accepted rather than received, because a supplier who sends a
+     * great deal and has most of it refused is not a big supplier — they are
+     * a problem, and the split panel below is where that shows.
+     */
+    const topSuppliers = [...bySupplier.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name]) => name)
+
+    const supplierSum = (supplier: string, pick: (r: (typeof live)[number]) => number) =>
+      round2(live.filter((r) => r.supplier === supplier).reduce((s, r) => s + pick(r), 0))
+
     const insights: string[] = []
     if (rejected > 0) {
       insights.push(
@@ -257,6 +280,36 @@ export const goodsReceiptRegister: ReportDefinition = {
                 .sort((a, b) => b.value - a.value)
                 .slice(0, 6),
               note: 'Every bar here is an exception, so every bar is red.',
+            },
+            {
+              /*
+               * Quality, per supplier, in one bar each.
+               *
+               * The refusals ranking above says who was refused most in units,
+               * which flatters a small supplier and punishes a large one. This
+               * puts the refusal beside what the same supplier got right, so a
+               * short red tip on a long bar reads differently from a short red
+               * tip on a short one.
+               */
+              title: 'What each supplier delivered, and what was refused',
+              question: 'split',
+              format: 'qty',
+              points: topSuppliers.map((s) => ({ label: s, value: supplierSum(s, (r) => r.received) })),
+              series: [
+                { name: 'Into stock', values: topSuppliers.map((s) => supplierSum(s, (r) => r.accepted)) },
+                { name: 'Refused', values: topSuppliers.map((s) => supplierSum(s, (r) => r.rejected)) },
+              ],
+              note: 'The six biggest suppliers by what reached stock. Units differ by item.',
+            },
+            {
+              title: 'Where the goods were put away',
+              question: 'comparison',
+              format: 'qty',
+              points: [...byStore]
+                .map(([label, value]) => ({ label, value: round2(value) }))
+                .sort((a, b) => b.value - a.value)
+                .slice(0, 8),
+              note: 'Quantity into each store. A receipt split across stores counts in each.',
             },
           ] as Panel[]
         ).filter((p) => p.points.length > 0),

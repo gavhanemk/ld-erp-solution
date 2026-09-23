@@ -39,7 +39,22 @@ export function sheetRef(sheet: string, a1: string): string {
   return `${needsQuotes ? `'${sheet.replace(/'/g, "''")}'` : sheet}!${a1}`
 }
 
-export type ChartKind = 'bar' | 'column' | 'line' | 'doughnut'
+export type ChartKind =
+  | 'bar'
+  | 'column'
+  | 'line'
+  | 'doughnut'
+  /** Segments summed into one bar per category, rather than side by side. */
+  | 'stackedBar'
+  | 'stackedColumn'
+  /**
+   * Columns biggest-first with the running share on a second axis.
+   *
+   * The one chart here that answers a question a table cannot: not "who is
+   * biggest" but "how few of them make up the most of it". Series one is the
+   * value, series two the cumulative percentage.
+   */
+  | 'pareto'
 
 export interface ChartSeries {
   name: string
@@ -64,6 +79,14 @@ export interface ChartSpec {
   /** Where on the Dashboard it sits. Anchored from cell to cell. */
   anchor: { fromCol: number; fromRow: number; toCol: number; toRow: number }
   showLegend: boolean
+  /**
+   * Drops the number printed on each bar.
+   *
+   * For a stack of three or more segments, where the labels collide with each
+   * other and with the segment boundaries — and a number you cannot read is
+   * worse than no number, because it still takes the space.
+   */
+  hideLabels?: boolean
 }
 
 // ── Small shared pieces ─────────────────────────────────────────────────────
@@ -166,7 +189,7 @@ function barSeries(s: ChartSeries, i: number, spec: ChartSpec): string {
     `<c:spPr>${solidFill(s.colour ?? CHART_COLOURS.primary)}</c:spPr>` +
     '<c:invertIfNegative val="0"/>' +
     dataPoints(s.pointColours, spec.kind) +
-    dataLabels({ numFmt: spec.numFmt }) +
+    (spec.hideLabels ? '' : dataLabels({ numFmt: spec.numFmt })) +
     catRef(spec.categoriesRef, spec.categories) +
     valRef(s.valuesRef, s.values, spec.numFmt) +
     '</c:ser>'
@@ -205,22 +228,41 @@ function pieSeries(s: ChartSeries, i: number, spec: ChartSpec): string {
 
 const CAT_AX = 111111111
 const VAL_AX = 222222222
+/**
+ * The second pair, for the running-share line on a Pareto.
+ *
+ * A combo chart is two plot groups in one plotArea, and each group names its
+ * own axis pair. Sharing one pair between them puts a percentage that tops out
+ * at 100 on the same scale as rupees in lakhs, which flattens the line onto
+ * the floor — it draws, it is just useless, which is the worst of the three
+ * outcomes because nothing reports it.
+ */
+const CAT_AX2 = 333333333
+const VAL_AX2 = 444444444
 
 /**
  * catAx: axId, scaling, delete, axPos, majorGridlines, title, numFmt,
  * majorTickMark, minorTickMark, tickLblPos, spPr, txPr, crossAx, crosses,
  * auto, lblAlgn, lblOffset, noMultiLvlLbl
  */
-function categoryAxis(pos: 'b' | 'l', reverse: boolean): string {
+function categoryAxis(
+  pos: 'b' | 'l',
+  reverse: boolean,
+  opts: { id?: number; crossId?: number; deleted?: boolean } = {}
+): string {
+  const { id = CAT_AX, crossId = VAL_AX, deleted = false } = opts
   return (
-    `<c:catAx><c:axId val="${CAT_AX}"/>` +
+    `<c:catAx><c:axId val="${id}"/>` +
     `<c:scaling><c:orientation val="${reverse ? 'maxMin' : 'minMax'}"/></c:scaling>` +
-    `<c:delete val="0"/><c:axPos val="${pos}"/>` +
+    // A combo's second category axis is deleted, not omitted: the line group
+    // must still name a pair, and drawing both pairs prints the labels twice.
+    `<c:delete val="${deleted ? 1 : 0}"/><c:axPos val="${pos}"/>` +
     '<c:numFmt formatCode="General" sourceLinked="0"/>' +
-    '<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>' +
+    '<c:majorTickMark val="none"/><c:minorTickMark val="none"/>' +
+    `<c:tickLblPos val="${deleted ? 'none' : 'nextTo'}"/>` +
     `<c:spPr><a:ln w="9525">${solidFill(CHART_COLOURS.grid)}</a:ln></c:spPr>` +
     textProps(900, CHART_COLOURS.axis) +
-    `<c:crossAx val="${VAL_AX}"/><c:crosses val="autoZero"/>` +
+    `<c:crossAx val="${crossId}"/><c:crosses val="autoZero"/>` +
     '<c:auto val="1"/><c:lblAlgn val="ctr"/><c:lblOffset val="100"/><c:noMultiLvlLbl val="0"/>' +
     '</c:catAx>'
   )
@@ -231,17 +273,26 @@ function categoryAxis(pos: 'b' | 'l', reverse: boolean): string {
  * majorTickMark, minorTickMark, tickLblPos, spPr, txPr, crossAx, crosses,
  * crossBetween
  */
-function valueAxis(pos: 'l' | 'b', numFmt: string): string {
+function valueAxis(
+  pos: 'l' | 'b' | 'r',
+  numFmt: string,
+  opts: { id?: number; crossId?: number; crosses?: 'autoZero' | 'max'; gridlines?: boolean } = {}
+): string {
+  const { id = VAL_AX, crossId = CAT_AX, crosses = 'autoZero', gridlines = true } = opts
   return (
-    `<c:valAx><c:axId val="${VAL_AX}"/>` +
+    `<c:valAx><c:axId val="${id}"/>` +
     '<c:scaling><c:orientation val="minMax"/></c:scaling>' +
     `<c:delete val="0"/><c:axPos val="${pos}"/>` +
-    `<c:majorGridlines><c:spPr><a:ln w="9525">${solidFill(CHART_COLOURS.grid)}</a:ln></c:spPr></c:majorGridlines>` +
+    // Only one of a combo's two value axes draws gridlines. Two sets at
+    // different intervals is a grid nobody can read a value off.
+    (gridlines
+      ? `<c:majorGridlines><c:spPr><a:ln w="9525">${solidFill(CHART_COLOURS.grid)}</a:ln></c:spPr></c:majorGridlines>`
+      : '') +
     `<c:numFmt formatCode="${esc(numFmt)}" sourceLinked="0"/>` +
     '<c:majorTickMark val="none"/><c:minorTickMark val="none"/><c:tickLblPos val="nextTo"/>' +
     '<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>' +
     textProps(900, CHART_COLOURS.axis) +
-    `<c:crossAx val="${CAT_AX}"/><c:crosses val="autoZero"/><c:crossBetween val="between"/>` +
+    `<c:crossAx val="${crossId}"/><c:crosses val="${crosses}"/><c:crossBetween val="between"/>` +
     '</c:valAx>'
   )
 }
@@ -250,14 +301,19 @@ function valueAxis(pos: 'l' | 'b', numFmt: string): string {
 
 /** barChart: barDir, grouping, varyColors, ser…, dLbls, gapWidth, overlap, axId, axId */
 function barPlot(spec: ChartSpec): string {
-  const horizontal = spec.kind === 'bar'
+  const horizontal = spec.kind === 'bar' || spec.kind === 'stackedBar'
+  const stacked = spec.kind === 'stackedBar' || spec.kind === 'stackedColumn'
+  const many = spec.series.length > 1
   return (
     '<c:barChart>' +
     `<c:barDir val="${horizontal ? 'bar' : 'col'}"/>` +
-    '<c:grouping val="clustered"/><c:varyColors val="0"/>' +
+    `<c:grouping val="${stacked ? 'stacked' : 'clustered'}"/><c:varyColors val="0"/>` +
     spec.series.map((s, i) => barSeries(s, i, spec)).join('') +
-    `<c:gapWidth val="${spec.series.length > 1 ? 80 : 45}"/>` +
-    `<c:overlap val="${spec.series.length > 1 ? -20 : 0}"/>` +
+    `<c:gapWidth val="${many && !stacked ? 80 : 45}"/>` +
+    // Stacked segments must sit exactly on top of each other. Anything short
+    // of 100 leaves them offset, which reads as a clustered chart drawn wrong
+    // rather than as a stack.
+    `<c:overlap val="${stacked ? 100 : many ? -20 : 0}"/>` +
     `<c:axId val="${CAT_AX}"/><c:axId val="${VAL_AX}"/>` +
     '</c:barChart>' +
     // A horizontal bar reads top-down, so its category axis runs maxMin —
@@ -265,6 +321,45 @@ function barPlot(spec: ChartSpec): string {
     // backwards.
     categoryAxis(horizontal ? 'l' : 'b', horizontal) +
     valueAxis(horizontal ? 'b' : 'l', spec.numFmt)
+  )
+}
+
+/**
+ * Columns plus the running share, on two axis pairs.
+ *
+ * Two plot groups in one plotArea. Every group element comes first and every
+ * axis after — interleaving them is schema-invalid, and the way Excel reports
+ * that is by repairing the workbook into one with no chart in it.
+ *
+ * The second category axis is deleted rather than left out: the line group has
+ * to name an axis pair, and a drawn second axis prints the labels twice.
+ */
+function paretoPlot(spec: ChartSpec): string {
+  const [value, cumulative] = spec.series
+  return (
+    '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/>' +
+    barSeries(value, 0, spec) +
+    '<c:gapWidth val="45"/><c:overlap val="0"/>' +
+    `<c:axId val="${CAT_AX}"/><c:axId val="${VAL_AX}"/>` +
+    '</c:barChart>' +
+    '<c:lineChart><c:grouping val="standard"/><c:varyColors val="0"/>' +
+    lineSeries({ ...cumulative, colour: CHART_COLOURS.exception }, 1, {
+      ...spec,
+      // The share line is a percentage whatever the bars are counted in.
+      numFmt: '0%',
+    }) +
+    '<c:marker val="1"/>' +
+    `<c:axId val="${CAT_AX2}"/><c:axId val="${VAL_AX2}"/>` +
+    '</c:lineChart>' +
+    categoryAxis('b', false) +
+    valueAxis('l', spec.numFmt) +
+    valueAxis('r', '0%', {
+      id: VAL_AX2,
+      crossId: CAT_AX2,
+      crosses: 'max',
+      gridlines: false,
+    }) +
+    categoryAxis('b', false, { id: CAT_AX2, crossId: VAL_AX2, deleted: true })
   )
 }
 
@@ -305,7 +400,9 @@ export function chartPartXml(spec: ChartSpec): string {
       ? linePlot(spec)
       : spec.kind === 'doughnut'
         ? doughnutPlot(spec)
-        : barPlot(spec)
+        : spec.kind === 'pareto'
+          ? paretoPlot(spec)
+          : barPlot(spec)
 
   const title =
     '<c:title><c:tx><c:rich><a:bodyPr rot="0" spcFirstLastPara="1" vertOverflow="ellipsis" vert="horz" wrap="square" anchor="ctr" anchorCtr="1"/>' +

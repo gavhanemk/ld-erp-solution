@@ -86,6 +86,30 @@ app.use(cors({
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
+  /*
+   * Response headers the browser is allowed to read.
+   *
+   * A cross-origin fetch can see six headers by default and no others, so
+   * anything the server says about a file it is sending is invisible to the
+   * page unless it is named here. Both of ours were:
+   *
+   *   Content-Disposition  carries the file name, and the file name is where
+   *                        a truncated report says "_PARTIAL". Unreadable, the
+   *                        download fell back to a guessed name and a report
+   *                        that had dropped rows arrived looking complete.
+   *   X-Report-*           the counts measured off the finished workbook, which
+   *                        is the whole point of saying "6 charts" rather than
+   *                        predicting it from the row count.
+   *
+   * Neither failure raises anything. The fetch succeeds, the header reads as
+   * null, and the page quietly describes the file wrongly.
+   */
+  exposedHeaders: [
+    'Content-Disposition',
+    'X-Report-Charts',
+    'X-Report-Pivots',
+    'X-Report-Rows',
+  ],
 }))
 
 // Rate Limiting

@@ -1,6 +1,7 @@
 import type ExcelJS from 'exceljs'
 import type { Panel, ReportAnalysis, ReportDefinition, ReportParams } from '../types'
 import { CHART_COLOURS, sheetRef, type ChartSpec } from '../ooxml/chart-xml'
+import { colLetter } from '../ooxml/pivot-xml'
 import { FMT, INK, PAPER, TONE_INK, kpiText, toLakh } from './theme'
 
 /**
@@ -81,22 +82,46 @@ function sectionRule(ws: ExcelJS.Worksheet, row: number, text: string) {
 }
 
 /**
- * A panel with one category is a card, not a chart.
+ * Only a panel with nothing in it is a card.
  *
- * One bar carries no comparison, so the chart is pure decoration around a
- * number — and it costs the same fifteen rows as a chart that says something.
+ * This used to be "fewer than two points", on the reasoning that one bar
+ * carries no comparison. It is the wrong trade. A mill in its first month has
+ * one supplier and one bill, so every panel had one point, and the whole
+ * Dashboard degraded into a bulleted list with not one chart on it — at
+ * exactly the moment somebody is deciding whether the thing works. A single
+ * bar against a labelled axis still says what the figure is and what it is
+ * counted in, and it grows into a real chart as the second supplier arrives
+ * without the sheet changing shape underneath the reader.
+ *
+ * What genuinely cannot be drawn is a panel with no points at all.
  */
-const isCard = (p: Panel) => p.points.length < 2
+const isCard = (p: Panel) => p.points.length === 0
 
-/** Chart shape follows the question the panel asks, never the data it holds. */
+/**
+ * Chart shape follows the question the panel asks, never the data it holds.
+ *
+ * The one exception is a shape that is a lie at small sizes. A doughnut of a
+ * single slice is a circle labelled 100%; of two, it is a fact the eye reads
+ * more accurately as two bars. Those fall back to bars — the question is
+ * still "what are the shares", and the answer is still true, which is not
+ * the case for a chart that cannot be read.
+ */
 function shapeFor(p: Panel): ChartSpec['kind'] {
   switch (p.question) {
     case 'trend':
-      return 'line'
+      return p.points.length > 1 ? 'line' : 'column'
     case 'comparison':
       return 'column'
     case 'composition':
-      return 'doughnut'
+      return p.points.length >= 3 ? 'doughnut' : 'bar'
+    case 'split':
+      // A split with one segment is just the total, and a stack of one is a
+      // plain bar that took a legend to say so.
+      return p.series && p.series.length > 1 ? 'stackedBar' : 'bar'
+    case 'pareto':
+      // A running share over two names reaches 100% on the second one and
+      // has told you nothing you could not see.
+      return p.points.length >= 3 ? 'pareto' : 'bar'
     default:
       return 'bar' // ranking, ageing, funnel
   }
@@ -138,6 +163,27 @@ export function buildDashboard(
     h.font = { name: 'Calibri', size: 12, bold: true, color: { argb: PAPER.brand } }
     h.alignment = { wrapText: true, vertical: 'middle' }
     ws.getRow(row).height = 22
+    row += 2
+  }
+
+  /*
+   * Says so when there is barely anything to look at.
+   *
+   * A dashboard drawn over three rows is a row of single bars, and without
+   * this line the reader's conclusion is that the report is broken rather
+   * than that the period is empty. Cheaper to say it than to have somebody
+   * spend an afternoon deciding which.
+   */
+  if (meta.rowCount > 0 && meta.rowCount < 5) {
+    ws.mergeCells(row, 1, row, GRID)
+    const thin = ws.getCell(row, 1)
+    thin.value =
+      `This period holds ${meta.rowCount} ${meta.rowCount === 1 ? 'row' : 'rows'}, so the charts ` +
+      'below have very little to compare. They fill out as more documents are raised — nothing here is broken.'
+    thin.font = { name: 'Calibri', size: 9, italic: true, color: { argb: TONE_INK.warn } }
+    thin.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.warn } }
+    thin.alignment = { wrapText: true, vertical: 'middle', indent: 1 }
+    ws.getRow(row).height = 18
     row += 2
   }
 
@@ -241,14 +287,10 @@ export function buildDashboard(
     charts.forEach((p, i) => {
       const left = i % 2 === 0
       const anchorRow = row + Math.floor(i / 2) * (CHART_ROWS + 1)
+      const kind = shapeFor(p)
       const money = p.format === 'money'
-      const values = p.points.map((pt) => (money ? toLakh(pt.value) : pt.value))
-
-      const refs = hiddenWriter.write(
-        p.title,
-        p.points.map((pt) => pt.label),
-        [{ name: p.title, values }]
-      )
+      const scale = (v: number | null) => (v == null ? null : money ? toLakh(v) : v)
+      const labels = p.points.map((pt) => pt.label)
 
       // Colour carries status. A ranking is one hue shaded by rank; red is
       // reserved for the points the report itself marked as exceptions.
@@ -258,20 +300,76 @@ export function buildDashboard(
           : CHART_COLOURS.rankShades[Math.min(n, CHART_COLOURS.rankShades.length - 1)]
       )
 
-      specs.push({
-        kind: shapeFor(p),
-        title: money ? `${p.title} — ₹ lakh` : p.title,
-        categoriesRef: refs.categoriesRef,
-        categories: p.points.map((pt) => pt.label),
-        series: [
+      /*
+       * What the chart plots, which is not always one column of numbers.
+       *
+       * A stack plots one column per segment. A Pareto plots the values and
+       * the share they have reached by that point, which is computed here
+       * rather than asked of the report — it is arithmetic on the points the
+       * report already gave, and two reports deriving it separately is two
+       * chances to derive it differently.
+       */
+      let plotted: Array<{
+        name: string
+        values: Array<number | null>
+        colour?: string
+        pointColours?: string[]
+      }>
+
+      if (kind === 'stackedBar' && p.series) {
+        plotted = p.series.map((s, n) => ({
+          name: s.name,
+          values: s.values.map(scale),
+          colour: CHART_COLOURS.rankShades[n % CHART_COLOURS.rankShades.length],
+        }))
+      } else if (kind === 'pareto') {
+        const total = p.points.reduce((s, pt) => s + pt.value, 0)
+        let running = 0
+        const share = p.points.map((pt) => {
+          running += pt.value
+          // Null, not nought, when there is nothing to divide by — a share
+          // line sitting flat on zero reads as "nobody accounts for any of
+          // it", which is a claim rather than an absence.
+          return total > 0 ? Math.round((running / total) * 1000) / 1000 : null
+        })
+        plotted = [
           {
-            name: p.title,
-            valuesRef: refs.valueRefs[0],
-            values,
+            name: money ? 'Value (₹ lakh)' : 'Value',
+            values: p.points.map((pt) => scale(pt.value)),
             colour: CHART_COLOURS.primary,
             pointColours,
           },
-        ],
+          { name: 'Share reached', values: share },
+        ]
+      } else {
+        plotted = [
+          {
+            name: p.title,
+            values: p.points.map((pt) => scale(pt.value)),
+            colour: CHART_COLOURS.primary,
+            pointColours,
+          },
+        ]
+      }
+
+      const refs = hiddenWriter.write(
+        p.title,
+        labels,
+        plotted.map((s) => ({ name: s.name, values: s.values }))
+      )
+
+      specs.push({
+        kind,
+        title: money ? `${p.title} — ₹ lakh` : p.title,
+        categoriesRef: refs.categoriesRef,
+        categories: labels,
+        series: plotted.map((s, n) => ({
+          name: s.name,
+          valuesRef: refs.valueRefs[n],
+          values: s.values,
+          colour: s.colour,
+          pointColours: s.pointColours,
+        })),
         numFmt: money ? FMT.lakh : p.format === 'percent' ? FMT.percent : FMT.integer,
         anchor: {
           fromCol: left ? 0 : GRID / 2,
@@ -279,7 +377,12 @@ export function buildDashboard(
           toCol: left ? GRID / 2 : GRID,
           toRow: anchorRow - 1 + CHART_ROWS,
         },
-        showLegend: false,
+        // A chart with more than one series has to name them, or the reader
+        // is guessing which segment is which.
+        showLegend: plotted.length > 1,
+        // Three stacked segments put three numbers inside one bar, where they
+        // collide with each other and with the boundaries between them.
+        hideLabels: kind === 'stackedBar' && plotted.length > 2,
       })
 
       if (p.note) {
@@ -330,6 +433,7 @@ export function buildDashboard(
       cell.alignment = { horizontal: 'right' }
     })
     row += 1
+    const firstBodyRow = row
     m.rows.forEach((r) => {
       ws.getCell(row, 1).value = r.label
       ws.getCell(row, 1).font = { name: 'Calibri', size: 10, color: { argb: INK.body } }
@@ -343,6 +447,35 @@ export function buildDashboard(
       })
       row += 1
     })
+
+    /*
+     * The grid, shaded by size.
+     *
+     * A block of forty numbers is a block of forty numbers: the eye reads
+     * every one before it finds the big month. Shaded, the shape of the
+     * trading year is there before a single figure is read — which is the
+     * whole reason for laying it out as a grid instead of as a list.
+     *
+     * Two stops rather than three. A midpoint needs somebody to choose what
+     * "middle" means, and a wrong midpoint reads as a judgement the report
+     * never made. The cells holding a dash carry text, and a colour scale
+     * passes over text, so a hole stays a hole.
+     */
+    if (m.rows.length && m.columns.length) {
+      const lastBodyRow = row - 1
+      const lastCol = colLetter(1 + m.columns.length)
+      ws.addConditionalFormatting({
+        ref: `B${firstBodyRow}:${lastCol}${lastBodyRow}`,
+        rules: [
+          {
+            type: 'colorScale',
+            priority: 1,
+            cfvo: [{ type: 'min' }, { type: 'max' }],
+            color: [{ argb: 'FFF1F5F9' }, { argb: `FF${CHART_COLOURS.primary}` }],
+          },
+        ],
+      })
+    }
     row += 1
   }
 

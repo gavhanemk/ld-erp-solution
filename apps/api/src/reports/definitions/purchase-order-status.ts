@@ -194,6 +194,15 @@ export const purchaseOrderStatus: ReportDefinition = {
     for (const r of live)
       bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.orderValue)
 
+    /* Six, because a stacked bar needs height to divide legibly. */
+    const topSuppliers = [...bySupplier.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name]) => name)
+
+    const supplierSum = (supplier: string, pick: (r: (typeof live)[number]) => number) =>
+      round2(live.filter((r) => r.supplier === supplier).reduce((s, r) => s + pick(r), 0))
+
     const insights: string[] = []
     if (late.length) {
       insights.push(
@@ -276,6 +285,72 @@ export const purchaseOrderStatus: ReportDefinition = {
                 [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
                 8
               ),
+            },
+            {
+              title: 'How few suppliers the order book rests on',
+              question: 'pareto',
+              format: 'money',
+              points: topWithRest(
+                [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
+                9
+              ),
+              note: 'The line is the share reached by that supplier and every bigger one, so it ends at 100%.',
+            },
+            {
+              /*
+               * How long the open orders have been open.
+               *
+               * The stage chart says how many are open. This says how long
+               * they have been — which is the difference between a busy
+               * fortnight and an order everybody has forgotten about.
+               */
+              title: 'How long the open orders have waited',
+              question: 'ageing',
+              format: 'integer',
+              points: (
+                [
+                  { label: 'Within a week', max: 7 },
+                  { label: '8-15 days', max: 15 },
+                  { label: '16-30 days', max: 30 },
+                  { label: '31-60 days', max: 60 },
+                  { label: 'Over 60 days', max: Infinity },
+                ] as const
+              )
+                .map((band, i, all) => {
+                  const floor = i === 0 ? 1 : all[i - 1].max + 1
+                  return {
+                    label: band.label,
+                    value: openOrders.filter(
+                      (r) => r.daysOpen >= floor && r.daysOpen <= band.max
+                    ).length,
+                    // Only the oldest band is an exception. Everything else
+                    // is an order in progress, and colouring those red would
+                    // make the one that matters invisible.
+                    exception: band.max === Infinity,
+                  }
+                })
+                .filter((p) => p.value > 0),
+              note: 'Counted from the order date, for orders not yet fully received.',
+            },
+            {
+              title: 'Received against still due, by supplier',
+              question: 'split',
+              format: 'qty',
+              points: topSuppliers.map((s) => ({
+                label: s,
+                value: supplierSum(s, (r) => r.orderedQty),
+              })),
+              series: [
+                {
+                  name: 'Received',
+                  values: topSuppliers.map((s) => supplierSum(s, (r) => r.receivedQty)),
+                },
+                {
+                  name: 'Still due',
+                  values: topSuppliers.map((s) => supplierSum(s, (r) => r.pendingQty)),
+                },
+              ],
+              note: 'The six biggest suppliers by value ordered. Units are mixed across items.',
             },
           ] as Panel[]
         ).filter((p) => p.points.length > 0),
