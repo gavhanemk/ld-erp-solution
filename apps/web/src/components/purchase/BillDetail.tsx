@@ -21,6 +21,7 @@ import { Section } from './PurchaseOrderDialog'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { NOTE_STATUS, REASON_WORDS, type NoteStatus } from './noteTypes'
 
 const inr = (v: string | number | null | undefined) =>
   Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -37,12 +38,15 @@ const MODE_LABEL: Record<string, string> = {
   PDC: 'Post-dated cheque',
 }
 
-const NOTE_STATUS: Record<string, { label: string; cls: string }> = {
-  DRAFT: { label: 'Draft', cls: 'badge-warning' },
-  ISSUED: { label: 'Issued', cls: 'badge-info' },
-  SETTLED: { label: 'Settled', cls: 'badge-success' },
-  CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
-}
+/*
+ * The status words come from `noteTypes` now.
+ *
+ * This file used to keep its own map, and it had drifted: it carried ISSUED
+ * and SETTLED, of which SETTLED has never been a value the database can hold —
+ * the old enum's third state was ADJUSTED. A settled note therefore fell
+ * through to the bare enum name and printed as a grey "ADJUSTED" badge. One
+ * map, shared with the notes screens, is what stops that happening again.
+ */
 
 // Kept in step with the same map on the bills list, so a bill reads the same
 // badge whether it is glanced at in the table or opened in full.
@@ -329,7 +333,8 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
   const balance = Number(bill.balanceAmount ?? 0)
   const tds = Number(bill.tdsAmount ?? 0)
   const payments = bill.payments ?? []
-  const notes = bill.debitNotes ?? []
+  const notes = bill.adjustments ?? []
+  const adjusted = Number(bill.noteAdjustment ?? 0)
 
   const files = billFiles(bill)
 
@@ -382,12 +387,29 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             {[
               { label: 'Bill total', value: `₹${inr(bill.totalAmount)}`, color: 'text-foreground' },
               { label: 'Paid so far', value: `₹${inr(paid)}`, color: 'text-emerald-400' },
+              /* What notes have already taken off, beside what was paid —
+                 these are the two things that move the balance, and a reader
+                 seeing only one of them cannot make the third add up. */
+              ...(adjusted !== 0
+                ? [
+                    {
+                      label: adjusted > 0 ? 'Adjusted off' : 'Added by notes',
+                      value: `₹${inr(Math.abs(adjusted))}`,
+                      color: 'text-sky-400',
+                    },
+                  ]
+                : [
+                    {
+                      label: 'Items',
+                      value: String(bill.lines?.length ?? 0),
+                      color: 'text-teal-400',
+                    },
+                  ]),
               {
                 label: 'Still owed',
                 value: `₹${inr(balance)}`,
                 color: balance > 0 ? 'text-amber-400' : 'text-emerald-400',
               },
-              { label: 'Items', value: String(bill.lines?.length ?? 0), color: 'text-teal-400' },
             ].map((s) => (
               <div
                 key={s.label}
@@ -664,7 +686,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           </div>
 
           {notes.length > 0 && (
-            <Section icon={Undo2} title={`Claimed back from the supplier (${notes.length})`}>
+            <Section icon={Undo2} title={`Adjustments against this bill (${notes.length})`}>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -674,31 +696,64 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
                       <th className="py-2 pr-3 font-medium">Why</th>
                       <th className="py-2 pr-3 font-medium">Status</th>
                       <th className="py-2 text-right font-medium">Amount</th>
+                      <th className="py-2 pl-3 text-right font-medium">Effect</th>
                     </tr>
                   </thead>
                   <tbody>
                     {notes.map((n) => {
-                      const st = NOTE_STATUS[n.status] ?? {
+                      const st = NOTE_STATUS[n.status as NoteStatus] ?? {
                         label: n.status,
                         cls: 'badge-neutral',
+                        hint: '',
                       }
                       return (
                         <tr key={n.id} className="border-border/50 border-b last:border-0">
-                          <td className="py-2 pr-3 font-mono text-amber-400">{n.noteNumber}</td>
+                          <td className="py-2 pr-3">
+                            <span className="font-mono text-amber-400">{n.noteNumber}</span>
+                            <div className="text-muted-foreground text-[10px]">
+                              {n.noteType === 'DEBIT'
+                                ? 'our debit note'
+                                : `their credit note${n.supplierDocNo ? ` ${n.supplierDocNo}` : ''}`}
+                            </div>
+                          </td>
                           <td className="text-muted-foreground py-2 pr-3">
                             {formatDate(n.noteDate)}
                           </td>
-                          <td className="text-foreground py-2 pr-3">{n.reason ?? '—'}</td>
+                          <td className="text-foreground py-2 pr-3">
+                            {REASON_WORDS[n.reason] ?? n.reason}
+                            {n.reasonNote && (
+                              <div className="text-muted-foreground max-w-[14rem] truncate text-[10px]">
+                                {n.reasonNote}
+                              </div>
+                            )}
+                          </td>
                           <td className="py-2 pr-3">
-                            <span className={st.cls}>{st.label}</span>
-                            {n.status === 'DRAFT' && (
+                            <span className={st.cls} title={st.hint}>
+                              {st.label}
+                            </span>
+                            {n.status !== 'POSTED' && (
                               <div className="text-muted-foreground mt-0.5 text-[10px]">
-                                not sent to the supplier
+                                not off the bill yet
                               </div>
                             )}
                           </td>
                           <td className="text-foreground py-2 text-right font-medium tabular-nums">
                             ₹{inr(n.totalAmount)}
+                          </td>
+                          <td className="py-2 pl-3 text-right text-[10px]">
+                            {n.status === 'POSTED' ? (
+                              <span
+                                className={
+                                  n.effect === 'REDUCES_PAYABLE'
+                                    ? 'text-emerald-400'
+                                    : 'text-amber-400'
+                                }
+                              >
+                                {n.effect === 'REDUCES_PAYABLE' ? '− off payable' : '+ on payable'}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
                           </td>
                         </tr>
                       )

@@ -125,15 +125,28 @@ export interface PurchaseBill {
     chequeDate: string | null
     createdBy?: { id: string; name: string } | null
   }>
-  debitNotes?: Array<{
+  /**
+   * The debit and credit notes standing against this bill.
+   *
+   * Cancelled and rejected ones are left out by the API — they claim nothing,
+   * and a bill listing four notes of which two are void reads as though the
+   * supplier is being chased twice.
+   */
+  adjustments?: Array<{
     id: string
     noteNumber: string
+    noteType: 'DEBIT' | 'CREDIT'
     noteDate: string
-    reason: string | null
-    subtotal: string | number
+    reason: string
+    reasonNote: string | null
+    effect: 'REDUCES_PAYABLE' | 'INCREASES_PAYABLE'
+    supplierDocNo: string | null
+    taxableAmount: string | number
     totalAmount: string | number
     status: string
   }>
+  /** What POSTED notes have already taken off — positive reduces the payable. */
+  noteAdjustment?: string | number
 }
 
 interface Option {

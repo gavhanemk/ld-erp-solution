@@ -56,6 +56,11 @@ const DEFAULT_TITLES: Record<string, string> = {
   // What the mill's old system called it, word for word, because this is the
   // sheet a store keeper and a supplier's driver both already know by name.
   GRN: 'GOODS RECEIPT NOTE',
+  // Ours, addressed to the supplier — a claim for money back.
+  DN: 'DEBIT NOTE',
+  // Theirs. We are recording what they sent us, so the sheet says so rather
+  // than pretending the mill issued a credit note to itself.
+  SCN: "SUPPLIER'S CREDIT NOTE",
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {

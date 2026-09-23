@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
+import { priceNote } from '../services/purchaseNote.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import {
   MAX_FILES_PER_DOCUMENT,
@@ -3023,19 +3024,31 @@ const billInclude = {
       createdBy: { select: { id: true, name: true } },
     },
   },
-  debitNotes: {
+  /*
+   * The debit and credit notes raised against this bill.
+   *
+   * Cancelled and rejected ones are left out: they claim nothing and adjust
+   * nothing, and a bill detail listing four notes of which two are void reads
+   * as though the supplier is being chased twice.
+   */
+  adjustments: {
+    where: { status: { notIn: ['CANCELLED', 'REJECTED'] } },
     orderBy: { noteDate: 'desc' as const },
     select: {
       id: true,
       noteNumber: true,
+      noteType: true,
       noteDate: true,
       reason: true,
-      subtotal: true,
+      reasonNote: true,
+      effect: true,
+      supplierDocNo: true,
+      taxableAmount: true,
       totalAmount: true,
       status: true,
     },
   },
-}
+} satisfies Prisma.PurchaseInvoiceInclude
 
 /** One rate, split the way the two state codes say it must be split. */
 function taxSplit(taxableValue: number, gstRate: number, isIntraState: boolean) {
@@ -3676,50 +3689,82 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
      *
      * Raised as a draft, never sent. A debit note is a demand for money from
      * somebody the mill trades with, and it should leave the building because
-     * a person decided it should — not because a rate comparison did.
+     * a person decided it should — not because a rate comparison did. It still
+     * has to be submitted, approved and posted by hand like any other.
      *
      * Its own tax follows the goods it corrects: the difference is a change
      * to what was supplied, so it carries the line's GST rate and the same
      * intra- or inter-state split the bill was worked out on.
+     *
+     * Every line points at the bill line it corrects, which is what lets a
+     * later return against the same line know that this much of it is already
+     * claimed. `sortOrder` is the link: bill lines are written in the order
+     * they arrived, and `RateVariance.lineIndex` is a position in that same
+     * list.
      */
     if (toDebitNote.length) {
       const noteNumber = await nextDocumentNumber(tx, 'DN', billDate)
 
-      const noteLines = toDebitNote.map((v, i) => {
-        const taxableValue = round2(v.difference * v.qty)
-        const taxAmount = round2(taxableValue * (v.gstRate / 100))
-        return {
+      const billLines = await tx.purchaseInvoiceLine.findMany({
+        where: { billId: created.id },
+        select: { id: true, sortOrder: true },
+      })
+      const billLineAt = new Map(billLines.map((l) => [l.sortOrder, l.id]))
+
+      const priced = priceNote({
+        isIntraState: tax.isIntraState,
+        lines: toDebitNote.map((v) => ({
           itemId: v.itemId,
+          billLineId: billLineAt.get(v.lineIndex) ?? null,
           description: `Billed at ${v.billedRate.toFixed(2)} against ${v.poRate.toFixed(2)} on the order`,
           hsnCode: hsnById.get(v.itemId) ?? null,
+          originalQty: v.qty,
+          originalRate: v.billedRate,
           qty: v.qty,
           unitPrice: v.difference,
-          taxableValue,
           gstRate: v.gstRate,
-          amount: round2(taxableValue + taxAmount),
-          sortOrder: i,
-        }
+        })),
       })
 
-      const subtotal = round2(noteLines.reduce((s, l) => s + l.taxableValue, 0))
-      const taxTotal = round2(noteLines.reduce((s, l) => s + (l.amount - l.taxableValue), 0))
-      const { rounded, roundOff } = applyRoundOff(subtotal + taxTotal)
-
-      await tx.debitNote.create({
+      await tx.purchaseNote.create({
         data: {
           noteNumber,
+          noteType: 'DEBIT',
+          status: 'DRAFT',
+          reason: 'RATE_DIFFERENCE',
+          effect: 'REDUCES_PAYABLE',
           supplierId: data.supplierId,
           billId: created.id,
+          poId: created.poId,
           noteDate: billDate,
-          reason: `Rate difference on ${created.billNumber}`,
-          subtotal,
-          cgst: tax.isIntraState ? round2(taxTotal / 2) : 0,
-          sgst: tax.isIntraState ? round2(taxTotal / 2) : 0,
-          igst: tax.isIntraState ? 0 : taxTotal,
-          roundOff,
-          totalAmount: rounded,
-          status: 'DRAFT',
-          lines: { create: noteLines },
+          reasonNote: `Rate difference on ${created.billNumber}`,
+          isIntraState: tax.isIntraState,
+          taxableAmount: priced.taxableAmount,
+          cgst: priced.cgst,
+          sgst: priced.sgst,
+          igst: priced.igst,
+          roundOff: priced.roundOff,
+          totalAmount: priced.totalAmount,
+          createdById: req.user!.id,
+          lines: {
+            create: priced.lines.map((l, i) => ({
+              itemId: l.itemId,
+              billLineId: l.billLineId ?? null,
+              description: l.description ?? null,
+              hsnCode: l.hsnCode ?? null,
+              originalQty: l.originalQty ?? null,
+              originalRate: l.originalRate ?? null,
+              qty: l.qty,
+              unitPrice: l.unitPrice,
+              taxableValue: l.taxableValue,
+              gstRate: l.gstRate,
+              cgst: l.cgst,
+              sgst: l.sgst,
+              igst: l.igst,
+              amount: l.amount,
+              sortOrder: i,
+            })),
+          },
         },
       })
     }
@@ -4062,7 +4107,13 @@ const paymentInclude = {
 async function syncBillFromPayments(tx: Prisma.TransactionClient, billId: string) {
   const bill = await tx.purchaseInvoice.findUnique({
     where: { id: billId },
-    select: { id: true, totalAmount: true, tdsAmount: true, status: true },
+    select: {
+      id: true,
+      totalAmount: true,
+      tdsAmount: true,
+      noteAdjustment: true,
+      status: true,
+    },
   })
   if (!bill) throw new AppError('Purchase bill not found', 404, 'NOT_FOUND')
 
@@ -4081,7 +4132,21 @@ async function syncBillFromPayments(tx: Prisma.TransactionClient, billId: string
   // TDS is withheld from the supplier rather than paid to them, so the bill is
   // settled in full by the smaller payment. Counting it as outstanding would
   // leave a stub against every contractor forever.
-  const settleable = round2(Number(bill.totalAmount) - Number(bill.tdsAmount))
+  //
+  // A posted debit or credit note comes off the same way: it is money the
+  // supplier is no longer owed, so a bill fully covered by payments and an
+  // agreed return is settled. `noteAdjustment` is positive where the notes
+  // reduce the payable, which is the ordinary case — a supplier who
+  // undercharged and raised a debit note on us pushes it the other way.
+  //
+  // This has to agree with `syncBillAdjustments` in purchaseNote.service.ts,
+  // which computes the same figure from the other end. Both subtract TDS and
+  // the note adjustment before comparing against what has been paid; if the
+  // two ever disagree the balance flips every time a note or a payment is
+  // touched.
+  const settleable = round2(
+    Number(bill.totalAmount) - Number(bill.tdsAmount) - Number(bill.noteAdjustment)
+  )
   const balanceAmount = round2(Math.max(0, settleable - paidAmount - withheldAmount))
 
   // A cancelled bill keeps its own status — money against it is a separate

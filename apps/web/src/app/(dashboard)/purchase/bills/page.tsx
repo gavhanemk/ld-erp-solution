@@ -16,6 +16,7 @@ import {
   Eye,
   Paperclip,
   FileText,
+  Undo2,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
@@ -32,6 +33,7 @@ import {
   type ExportFormat,
 } from '@/lib/export'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { PurchaseNoteDialog } from '@/components/purchase/PurchaseNoteDialog'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
@@ -333,6 +335,9 @@ function PurchaseBillsTable() {
     (b.status === 'UNPAID' || b.status === 'PARTIAL')
 
   /** What can be done to one bill, in words, behind a single Actions button. */
+  /** The bill a note is being raised against, if any. */
+  const [adjusting, setAdjusting] = useState<PurchaseBill | null>(null)
+
   const billActions = (bill: PurchaseBill): RowAction[] => {
     const items: RowAction[] = [
       {
@@ -349,6 +354,27 @@ function PurchaseBillsTable() {
         newTab: true,
       },
     ]
+
+    /*
+     * Raising the adjustment from the bill it adjusts.
+     *
+     * This is where the accounts desk is standing when they find the problem —
+     * the invoice is open in front of them. Reaching the same place by opening
+     * Debit Notes, pressing New, picking the supplier and then finding this
+     * bill again is four steps to arrive where they already were.
+     *
+     * Offered on a cancelled bill too, and refused by the server with a reason,
+     * because "nothing left to adjust" is a better answer than a missing menu
+     * item somebody spends a minute hunting for.
+     */
+    if (bill.status !== 'CANCELLED') {
+      items.push({
+        key: 'adjust',
+        label: 'Raise a debit note',
+        icon: <Undo2 size={14} />,
+        onClick: () => setAdjusting(bill),
+      })
+    }
     // A bill can be corrected right up until a payment lands against it —
     // after that it is part of the payment record, and cancelling or a debit
     // note is how it is undone instead.
@@ -934,6 +960,16 @@ function PurchaseBillsTable() {
       )}
 
       {detail && <BillDetailDialog bill={detail} onClose={() => setDetail(null)} />}
+
+      {/* Opens straight onto the bill it was raised from, so the lines and
+        what is left of each are already on the screen. */}
+      <PurchaseNoteDialog
+        open={Boolean(adjusting)}
+        moduleType="DEBIT"
+        initialBillId={adjusting?.id ?? null}
+        onClose={() => setAdjusting(null)}
+        onSaved={() => void load()}
+      />
     </div>
   )
 }
