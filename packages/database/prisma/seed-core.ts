@@ -352,6 +352,27 @@ export async function seedCore(prisma: PrismaClient) {
   ]
 
   for (const s of series) {
+    /*
+     * One series per document type, not one per year.
+     *
+     * The upsert below is keyed on (company, docType, financialYear), which is
+     * the right unique key for the table and the wrong question to ask here.
+     * The mill numbers its purchase orders on a single running sequence with
+     * no year on it — `PO-0004`, not `PO-2627-0004` — so a re-seed did not
+     * match that row and quietly added a second PO series for the current
+     * year, sitting at zero. `nextDocumentNumber` prefers the series whose
+     * year matches the document's, so the next purchase order would have come
+     * out `PO-2627-0001` and restarted a sequence four orders in.
+     *
+     * Found on 23 Sep 2026, after exactly that happened. The seed's job is to
+     * make sure a type *has* a series, so that is what it now checks.
+     */
+    const already = await prisma.numberSeries.findFirst({
+      where: { companyId: company.id, docType: s.docType },
+      select: { id: true },
+    })
+    if (already) continue
+
     await prisma.numberSeries.upsert({
       where: {
         companyId_docType_financialYear: {
