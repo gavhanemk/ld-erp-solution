@@ -424,7 +424,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           </div>
 
           {/* The paperwork, and the trail behind it. */}
-          <Section icon={FileText} title="The bill">
+          <Section icon={FileText} title="Bill Details">
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
               <Field
                 label="Bill no. (the supplier's)"
@@ -488,7 +488,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             </dl>
           </Section>
 
-          <Section icon={Building2} title="The supplier">
+          <Section icon={Building2} title="Supplier Details">
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
               <Field label="Name" value={bill.supplier?.name ?? '—'} />
               <Field
@@ -533,12 +533,12 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             </dl>
           </Section>
 
-          <Section icon={Package} title={`Items (${bill.lines?.length ?? 0})`}>
+          <Section icon={Package} title={`Item Details (${bill.lines?.length ?? 0})`}>
             <BillItems bill={bill} />
           </Section>
 
           {bill.charges && bill.charges.length > 0 && (
-            <Section icon={Percent} title="Extra charges">
+            <Section icon={Percent} title="Other Charges">
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -569,7 +569,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           )}
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <Section icon={Calculator} title="What it adds up to">
+            <Section icon={Calculator} title="Totals">
               <dl className="space-y-1.5 text-sm">
                 {[
                   ['Goods', inr(bill.subtotal)],
@@ -624,7 +624,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
               </dl>
             </Section>
 
-            <Section icon={Wallet} title={`Payment history (${payments.length})`}>
+            <Section icon={Wallet} title={`Payment History (${payments.length})`}>
               {payments.length ? (
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
@@ -686,7 +686,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           </div>
 
           {notes.length > 0 && (
-            <Section icon={Undo2} title={`Adjustments against this bill (${notes.length})`}>
+            <Section icon={Undo2} title={`Adjustments (${notes.length})`}>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
