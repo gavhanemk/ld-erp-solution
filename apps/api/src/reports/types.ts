@@ -316,12 +316,37 @@ export interface ReportContext {
   rowCap: number
 }
 
+/**
+ * The management table at the foot of the Dashboard.
+ *
+ * Not the first twenty rows — the biggest twenty. A manager reading a single
+ * page wants the orders that account for the money, and the first rows of a
+ * date-sorted register are just the oldest ones. Every row is still on the
+ * Data sheet; this is the extract that fits on the page somebody prints.
+ *
+ * `columns` has to fit across twelve, so it is chosen rather than inherited:
+ * a register with twenty columns would run off the sheet and wrap into
+ * something unreadable.
+ */
+export interface SummaryTable {
+  /** Heading above it. Says what "top" means here. */
+  title: string
+  /** Column keys, in order. Six or seven at most. */
+  columns: string[]
+  /** Column key to order by, biggest first. */
+  by: string
+  /** How many rows. Twelve unless said otherwise. */
+  limit?: number
+}
+
 export interface ReportDefinition {
   id: string
   module: ReportModule
   title: string
   description: string
   columns: ReportColumn[]
+  /** The extract printed at the foot of the Dashboard sheet. */
+  summary?: SummaryTable
   filters: ReportFilter[]
   /** The Pivot sheet, where the rows repeat a key worth grouping by. */
   pivot?: PivotSpec

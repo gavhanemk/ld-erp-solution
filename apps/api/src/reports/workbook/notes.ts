@@ -1,5 +1,6 @@
 import type ExcelJS from 'exceljs'
 import type { ReportAnalysis, ReportDefinition, ReportParams } from '../types'
+import type { AppliedFilter } from '../filters'
 import { INK, PAPER } from './theme'
 
 /**
@@ -19,11 +20,17 @@ export function buildNotes(
     periodLabel: string
     rowCount: number
     truncatedFrom?: number
+    appliedFilters?: AppliedFilter[]
   }
 ) {
   const ws = wb.addWorksheet('Notes', { views: [{ showGridLines: false }] })
+  // White, said out loud — the same reason as the Dashboard: a column fill is
+  // one style each rather than a fill on every cell.
+  const white = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFFFFFF' } }
   ws.getColumn(1).width = 26
+  ws.getColumn(1).fill = white
   ws.getColumn(2).width = 78
+  ws.getColumn(2).fill = white
 
   let row = 1
   const heading = (text: string) => {
@@ -79,11 +86,19 @@ export function buildNotes(
   row += 1
 
   heading('Filters applied')
-  const applied = def.filters.filter((f) => params[f.key])
+  /*
+   * The names, not the ids.
+   *
+   * This printed `String(params[f.key])`, so a supplier filter recorded a
+   * UUID — which tells the person holding the file in three months nothing at
+   * all, and is worse than printing nothing because it looks deliberate. The
+   * values are resolved against the same transaction the rows came from.
+   */
+  const applied = meta.appliedFilters ?? []
   if (applied.length === 0) {
     line('None', 'Every row the report can see is included.')
   } else {
-    for (const f of applied) line(f.label, String(params[f.key]))
+    for (const f of applied) line(f.label, f.value)
   }
   row += 1
 

@@ -78,6 +78,15 @@ export const goodsReceiptRegister: ReportDefinition = {
     },
   ],
 
+  summary: {
+    // By what was refused, not by what arrived: the biggest delivery is
+    // rarely the one a manager needs to look at, and the worst one always is.
+    title: 'Most refused at the gate',
+    columns: ['grnDate', 'grnNumber', 'supplier', 'item', 'received', 'rejected', 'status'],
+    by: 'rejected',
+    limit: 12,
+  },
+
   /**
    * By supplier, with the unit on a slicer.
    *

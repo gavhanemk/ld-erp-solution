@@ -126,10 +126,16 @@ export function buildPivot(
   // ── The sheet ─────────────────────────────────────────────────────────────
   const at = { row: 6, col: 1 }
   const ws = wb.addWorksheet(PIVOT_SHEET)
+  // White, said out loud, and wide enough that the pivot has room to grow
+  // into as somebody re-fields it.
+  const white = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFFFFFF' } }
   ws.getColumn(1).width = 34
-  measures.forEach((_, i) => {
-    ws.getColumn(2 + i).width = 18
-  })
+  ws.getColumn(1).fill = white
+  for (let i = 0; i < Math.max(measures.length, 6); i++) {
+    const col = ws.getColumn(2 + i)
+    col.width = 18
+    col.fill = white
+  }
 
   const grouping = rowFields.map((i) => def.columns[i].label)
   heading(ws, 1, def.title, 14, INK.heading)

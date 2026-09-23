@@ -15,7 +15,7 @@ export const DATA_SHEET = 'Data'
  * room and a table cell is read with text sitting on it, so the same green
  * that works on a bar makes a word underneath it unreadable.
  */
-const BADGE_PAPER: Record<Tone, string> = {
+export const BADGE_PAPER: Record<Tone, string> = {
   good: 'FFDCFCE7',
   normal: 'FFCCFBF1',
   info: 'FFDBEAFE',
@@ -24,7 +24,7 @@ const BADGE_PAPER: Record<Tone, string> = {
   neutral: 'FFF1F5F9',
 }
 
-const BADGE_INK: Record<Tone, string> = {
+export const BADGE_INK: Record<Tone, string> = {
   good: 'FF166534',
   normal: 'FF115E59',
   info: 'FF1E40AF',

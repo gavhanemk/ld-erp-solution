@@ -3,6 +3,8 @@ import type { Panel, ReportAnalysis, ReportDefinition, ReportParams } from '../t
 import { CHART_COLOURS, sheetRef, type ChartSpec } from '../ooxml/chart-xml'
 import { colLetter } from '../ooxml/pivot-xml'
 import { FMT, INK, PAPER, TONE_INK, kpiText, toLakh } from './theme'
+import { BADGE_INK, BADGE_PAPER, formatFor, plainCell } from './data'
+import { filterLine, type AppliedFilter } from '../filters'
 
 /**
  * Lays out the Dashboard and says where each chart goes.
@@ -142,7 +144,14 @@ export function buildDashboard(
   def: ReportDefinition,
   analysis: ReportAnalysis,
   params: ReportParams,
-  meta: { periodLabel: string; rowCount: number; truncatedFrom?: number }
+  meta: {
+    periodLabel: string
+    rowCount: number
+    truncatedFrom?: number
+    appliedFilters?: AppliedFilter[]
+  },
+  /** For the management extract at the foot. The Data sheet still has them all. */
+  rows: Array<Record<string, unknown>> = []
 ): ChartSpec[] {
   const ws = wb.addWorksheet('Dashboard', {
     views: [{ showGridLines: false }],
@@ -152,7 +161,23 @@ export function buildDashboard(
   const hiddenWriter = new HiddenSheet(hidden)
   const specs: ChartSpec[] = []
 
-  for (let c = 1; c <= GRID; c++) ws.getColumn(c).width = 13
+  /*
+   * A white sheet, said out loud.
+   *
+   * Excel's default is white, so this looks like it changes nothing — until
+   * the file is opened by somebody whose workbook theme is not the default,
+   * or printed, or pasted into a deck. The pack should look the same
+   * everywhere it is read, and a column fill is one style each rather than a
+   * fill on every cell, which is the difference between a few bytes and a few
+   * hundred kilobytes on a sheet this tall.
+   *
+   * Set before anything is written, so every tint below overrides it.
+   */
+  for (let c = 1; c <= GRID; c++) {
+    const col = ws.getColumn(c)
+    col.width = 13
+    col.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFFFF' } }
+  }
 
   // ── Masthead ──────────────────────────────────────────────────────────
   ws.getRow(1).height = 30
@@ -164,7 +189,27 @@ export function buildDashboard(
   }`
   sub.font = { name: 'Calibri', size: 10, color: { argb: INK.muted } }
 
-  let row = 4
+  /*
+   * The filters, on the face of the sheet.
+   *
+   * The Notes tab has always recorded them, and a tab nobody opens is a tab
+   * that did not record anything. A figure that looks wrong and a supplier
+   * filter left set are the same picture until this line is read, and by the
+   * time the file has been mailed on, whoever reads it never saw the screen
+   * it was run from.
+   */
+  ws.mergeCells(3, 1, 3, GRID)
+  const applied = ws.getCell(3, 1)
+  applied.value = filterLine(meta.appliedFilters ?? [])
+  applied.font = {
+    name: 'Calibri',
+    size: 9,
+    italic: (meta.appliedFilters ?? []).length === 0,
+    color: { argb: (meta.appliedFilters ?? []).length ? INK.body : INK.muted },
+  }
+  applied.alignment = { vertical: 'middle' }
+
+  let row = 5
 
   if (analysis.headline) {
     ws.mergeCells(row, 1, row, GRID)
@@ -642,6 +687,75 @@ export function buildDashboard(
   // Caveats print on the Dashboard, not only in Notes. A caveat nobody reads
   // is a caveat that did not happen.
   words('What they do not show', analysis.caveats, TONE_INK.warn)
+
+  /*
+   * ── The management table ──────────────────────────────────────────────
+   *
+   * The biggest few, not the first few. A register sorted by date opens on
+   * its oldest rows, which are rarely the ones worth a page. Every row is
+   * still on the Data sheet, and the caption says so — an extract that does
+   * not admit it is an extract is how somebody totals twelve rows and
+   * believes it.
+   */
+  if (def.summary && rows.length) {
+    const spec = def.summary
+    const cols = spec.columns
+      .map((key) => def.columns.find((c) => c.key === key))
+      .filter((c): c is NonNullable<typeof c> => Boolean(c))
+    const by = def.columns.find((c) => c.key === spec.by)
+
+    if (cols.length && by) {
+      const limit = spec.limit ?? 12
+      const picked = [...rows]
+        .sort((a, b) => Number(b[spec.by] ?? 0) - Number(a[spec.by] ?? 0))
+        .slice(0, limit)
+
+      sectionRule(ws, row, spec.title)
+      row += 1
+
+      // Header. Figures right, words left — the same way round as the Data
+      // sheet, so the two do not read as different tables.
+      const isNumeric = (t: string) =>
+        t === 'money' || t === 'qty' || t === 'integer' || t === 'percent'
+      cols.forEach((c, i) => {
+        const cell = ws.getCell(row, 1 + i)
+        cell.value = c.label
+        cell.font = { name: 'Calibri', size: 9, bold: true, color: { argb: INK.onBrand } }
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.header } }
+        cell.alignment = { vertical: 'middle', horizontal: isNumeric(c.type) ? 'right' : 'left' }
+      })
+      row += 1
+
+      picked.forEach((r, n) => {
+        cols.forEach((c, i) => {
+          const cell = ws.getCell(row, 1 + i)
+          cell.value = plainCell(c, r[c.key])
+          const fmt = formatFor(c)
+          if (fmt) cell.numFmt = fmt
+          cell.font = { name: 'Calibri', size: 10, color: { argb: INK.body } }
+          cell.alignment = { horizontal: isNumeric(c.type) ? 'right' : 'left' }
+          const tone = c.type === 'badge' ? c.badgeTones?.[String(r[c.key])] : undefined
+          if (tone) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BADGE_PAPER[tone] } }
+            cell.font = { name: 'Calibri', size: 10, bold: true, color: { argb: BADGE_INK[tone] } }
+            cell.alignment = { horizontal: 'center' }
+          } else if (n % 2 === 1) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.card } }
+          }
+        })
+        row += 1
+      })
+
+      ws.mergeCells(row, 1, row, GRID)
+      const caption = ws.getCell(row, 1)
+      caption.value =
+        picked.length < rows.length
+          ? `The ${picked.length} biggest by ${by.label.toLowerCase()}. All ${rows.length.toLocaleString('en-IN')} rows are on the Data sheet.`
+          : `All ${rows.length.toLocaleString('en-IN')} ${rows.length === 1 ? 'row' : 'rows'}, biggest by ${by.label.toLowerCase()} first.`
+      caption.font = { name: 'Calibri', size: 8, italic: true, color: { argb: INK.muted } }
+      row += 2
+    }
+  }
 
   // ── The footnote the hidden sheet earns ───────────────────────────────
   ws.mergeCells(row, 1, row, GRID)

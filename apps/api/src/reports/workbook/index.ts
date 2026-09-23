@@ -5,6 +5,7 @@ import { buildData } from './data'
 import { buildNotes } from './notes'
 import { buildPivot } from './pivot'
 import { injectOoxml } from '../ooxml/inject'
+import type { AppliedFilter } from '../filters'
 
 /**
  * Turns one report's result into a workbook.
@@ -21,12 +22,15 @@ export async function buildWorkbook(opts: {
   params: ReportParams
   runBy: string
   periodLabel: string
+  /** What the reader asked for, already resolved to names. */
+  appliedFilters?: AppliedFilter[]
 }): Promise<{ buffer: Buffer; chartCount: number; pivotCount: number; partial: boolean }> {
-  const { def, result, params, runBy, periodLabel } = opts
+  const { def, result, params, runBy, periodLabel, appliedFilters = [] } = opts
   const meta = {
     runBy,
     runAt: new Date(),
     periodLabel,
+    appliedFilters,
     rowCount: result.rows.length,
     truncatedFrom:
       result.totalRows && result.totalRows > result.rows.length ? result.totalRows : undefined,
@@ -38,7 +42,7 @@ export async function buildWorkbook(opts: {
 
   // 1 — ordinary workbook building. Dashboard first, so it opens on it, then
   //     the Pivot to work in, then the rows it all comes from, then Notes.
-  const specs = buildDashboard(wb, def, result.analysis, params, meta)
+  const specs = buildDashboard(wb, def, result.analysis, params, meta, result.rows)
   const pivot = buildPivot(wb, def, result.rows)
   buildData(wb, def, result.rows)
   buildNotes(wb, def, result.analysis, params, meta)

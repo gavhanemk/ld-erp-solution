@@ -91,6 +91,19 @@ export const purchaseOrderStatus: ReportDefinition = {
   ],
 
   /**
+   * The orders that account for the money, for the page somebody prints.
+   *
+   * Ordered by value rather than by date: a register sorted by date opens on
+   * its oldest rows, which are rarely the ones worth a management page.
+   */
+  summary: {
+    title: 'Biggest orders in this period',
+    columns: ['poDate', 'poNumber', 'supplier', 'orderValue', 'billedValue', 'status', 'daysOpen'],
+    by: 'orderValue',
+    limit: 12,
+  },
+
+  /**
    * By order date, with suppliers nested inside it.
    *
    * The date outermost is what makes the sheet collapsible: shut the days and

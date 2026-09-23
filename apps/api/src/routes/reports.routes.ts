@@ -6,6 +6,7 @@ import { REPORTS, findReport } from '../reports/registry'
 import { ROW_CAP, type ReportParams, type ReportResult } from '../reports/types'
 import { periodLabel } from '../reports/definitions/shared'
 import { buildCsv, buildWorkbook } from '../reports/workbook'
+import { describeFilters, type AppliedFilter } from '../reports/filters'
 
 const router = Router()
 
@@ -41,7 +42,10 @@ router.get('/', async (req: AuthRequest, res) => {
  * counted twice and one deleted can vanish from a total it was part of, and
  * nothing in the finished file would say so.
  */
-async function runReport(id: string, params: ReportParams): Promise<ReportResult> {
+async function runReport(
+  id: string,
+  params: ReportParams
+): Promise<{ result: ReportResult; applied: AppliedFilter[] }> {
   const def = findReport(id)
   if (!def) throw new AppError('No such report', 404, 'NOT_FOUND')
 
@@ -51,10 +55,15 @@ async function runReport(id: string, params: ReportParams): Promise<ReportResult
     }
   }
 
-  return prisma.$transaction(async (tx) => def.run({ prisma, tx, params, rowCap: ROW_CAP }), {
-    timeout: 120_000,
-    maxWait: 15_000,
-  })
+  // The filter names are resolved inside the same transaction as the rows, so
+  // the caption cannot describe a supplier who was renamed halfway through.
+  return prisma.$transaction(
+    async (tx) => ({
+      result: await def.run({ prisma, tx, params, rowCap: ROW_CAP }),
+      applied: await describeFilters(def, params, tx),
+    }),
+    { timeout: 120_000, maxWait: 15_000 }
+  )
 }
 
 function guard(id: string, req: AuthRequest) {
@@ -70,13 +79,14 @@ function guard(id: string, req: AuthRequest) {
 router.get('/:id/run', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const params = req.query as ReportParams
-  const result = await runReport(def.id, params)
+  const { result, applied } = await runReport(def.id, params)
 
   res.json({
     success: true,
     data: {
       report: { id: def.id, title: def.title, description: def.description },
       periodLabel: periodLabel(params),
+      appliedFilters: applied,
       analysis: result.analysis,
       rowCount: result.rows.length,
       totalRows: result.totalRows ?? result.rows.length,
@@ -92,7 +102,7 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
   const def = guard(req.params.id, req)
   const format = req.query.format === 'csv' ? 'csv' : 'xlsx'
   const params = req.query as ReportParams
-  const result = await runReport(def.id, params)
+  const { result, applied } = await runReport(def.id, params)
 
   const stamp = new Date().toISOString().slice(0, 10)
   const partial = Boolean(result.totalRows && result.totalRows > result.rows.length)
@@ -111,6 +121,7 @@ router.get('/:id/export', async (req: AuthRequest, res) => {
     params,
     runBy: req.user?.name ?? 'Unknown',
     periodLabel: periodLabel(params),
+    appliedFilters: applied,
   })
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

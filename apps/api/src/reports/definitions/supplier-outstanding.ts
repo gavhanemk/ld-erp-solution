@@ -66,6 +66,13 @@ export const supplierOutstanding: ReportDefinition = {
     { key: 'isMsme', label: 'MSME', type: 'text', width: 8 },
   ],
 
+  summary: {
+    title: 'Largest balances still owed',
+    columns: ['supplier', 'supplierInvoiceNo', 'dueDate', 'daysOverdue', 'total', 'balance', 'isMsme'],
+    by: 'balance',
+    limit: 12,
+  },
+
   /**
    * By supplier, with ageing and MSME on slicers.
    *

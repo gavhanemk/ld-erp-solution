@@ -85,6 +85,13 @@ export const purchaseRegister: ReportDefinition = {
     { key: 'dueDate', label: 'Due', type: 'date', width: 14 },
   ],
 
+  summary: {
+    title: 'Biggest bills in this period',
+    columns: ['billDate', 'supplierInvoiceNo', 'supplier', 'taxable', 'total', 'balance', 'status'],
+    by: 'total',
+    limit: 12,
+  },
+
   /**
    * By supplier: billed, settled, and what is left of it.
    *
