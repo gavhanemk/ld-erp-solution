@@ -47,9 +47,11 @@ export function buildPivot(
 
   const indexOf = (key: string) => def.columns.findIndex((c) => c.key === key)
 
-  const rowField = indexOf(spec.rows)
-  if (rowField < 0) {
-    console.warn(`[reports] ${def.id}: no Pivot sheet — no column keyed "${spec.rows}"`)
+  const wantedRows = Array.isArray(spec.rows) ? spec.rows : [spec.rows]
+  const rowFields = wantedRows.map(indexOf)
+  const unknown = wantedRows.filter((_, i) => rowFields[i] < 0)
+  if (unknown.length) {
+    console.warn(`[reports] ${def.id}: no Pivot sheet — no column keyed "${unknown[0]}"`)
     return null
   }
 
@@ -72,7 +74,7 @@ export function buildPivot(
   // Only a field on an axis or behind a slicer gets shared items. Everything
   // else carries its value inline in the records, which keeps that part the
   // size of the data rather than the data plus an index nothing reads.
-  const wanted = new Set([rowField, ...(spec.slicers ?? []).map(indexOf).filter((i) => i >= 0)])
+  const wanted = new Set([...rowFields, ...(spec.slicers ?? []).map(indexOf).filter((i) => i >= 0)])
 
   const fields: PivotFieldPlan[] = def.columns.map((c, i) => {
     const kind = isNumeric(c) ? 'number' : c.type === 'date' ? 'date' : 'text'
@@ -116,7 +118,7 @@ export function buildPivot(
 
   const slicerFields = [...wanted].filter(
     (i) =>
-      i !== rowField &&
+      !rowFields.includes(i) &&
       (fields[i].items?.length ?? 0) > 0 &&
       fields[i].items!.length <= SLICER_ITEM_CAP
   )
@@ -129,11 +131,12 @@ export function buildPivot(
     ws.getColumn(2 + i).width = 18
   })
 
+  const grouping = rowFields.map((i) => def.columns[i].label)
   heading(ws, 1, def.title, 14, INK.heading)
   heading(
     ws,
     2,
-    `Grouped by ${def.columns[rowField].label}. Drag any field to regroup it — ` +
+    `Grouped by ${grouping.join(', then ')}. Drag any field to regroup it — ` +
       'the figures come from the Data sheet, so they always agree with it.',
     10,
     INK.muted
@@ -155,7 +158,7 @@ export function buildPivot(
     sourceSheet: DATA_SHEET,
     sourceRef,
     fields,
-    rowField,
+    rowFields,
     dataFields: measures,
     slicerFields,
     at,

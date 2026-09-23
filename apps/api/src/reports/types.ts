@@ -129,10 +129,39 @@ export type PanelQuestion =
   | 'split'
   | 'pareto'
 
+/**
+ * What a bar, a slice or a segment MEANS — which is the only thing allowed to
+ * decide its colour.
+ *
+ * One hue everywhere is drab; a different hue per chart is noise. Both were
+ * tried here. The way out is that colour carries meaning and is constant
+ * across every report in the ERP, so a reader learns it once:
+ *
+ *   good     finished, received, settled, in stock
+ *   normal   the ordinary measure — the house teal
+ *   info     a neutral stage or a total being broken down
+ *   warn     pending, outstanding, waiting on somebody
+ *   bad      overdue, refused, cancelled — an exception needing a decision
+ *   neutral  a remainder, an "everyone else", a draft
+ *
+ * Absent means `normal`. A ranking of suppliers is a list of equals and stays
+ * one colour on purpose: colouring it by rank would encode the bar's own
+ * length a second time.
+ */
+export type Tone = 'good' | 'normal' | 'info' | 'warn' | 'bad' | 'neutral'
+
 export interface PanelPoint {
   label: string
   value: number
-  /** Marks this point as the exception. The only thing that draws red. */
+  /** What this point means. Decides its colour. */
+  tone?: Tone
+  /**
+   * Marks this point as the exception.
+   *
+   * Kept as a shorthand for `tone: 'bad'` because it reads better at the call
+   * site for the thing it is usually used for — the one overdue band in an
+   * ageing chart.
+   */
   exception?: boolean
 }
 
@@ -150,7 +179,7 @@ export interface Panel {
    * report — segments ordered by size would reshuffle between two periods and
    * the colours would stop meaning anything.
    */
-  series?: Array<{ name: string; values: Array<number | null> }>
+  series?: Array<{ name: string; values: Array<number | null>; tone?: Tone }>
   /** Printed under the chart. Where a caveat about this panel belongs. */
   note?: string
 }
@@ -168,8 +197,14 @@ export interface Panel {
  * repeating key is the list again, with a Grand Total nobody asked for.
  */
 export interface PivotSpec {
-  /** Column key down the left. A `text` or `badge` column. */
-  rows: string
+  /**
+   * Column key(s) down the left, outermost first.
+   *
+   * More than one nests them, so the reader can collapse the outer level and
+   * read a subtotal off it — a date with suppliers under it, rather than a
+   * flat list of every supplier-day.
+   */
+  rows: string | string[]
   /** Column keys totalled in the body, in order. Each becomes a "Sum of …". */
   values: string[]
   /**

@@ -35,8 +35,39 @@ export const CHART_COLOURS = {
    * lightness band, the chroma floor, colour-blind separation and contrast.
    */
   series: ['0D9488', 'EB6834', '4A3AA7'],
+  /**
+   * Colour by meaning, constant across every report in the ERP.
+   *
+   * One hue everywhere is drab and a different hue per chart is noise — both
+   * were tried. What works is that a colour means the same thing on every
+   * sheet, so it is learned once and then read rather than decoded.
+   *
+   * Two pairs are checked and must never touch:
+   *
+   *   normal ↔ good   ΔE 10.7 to full colour vision, under the floor of 15.
+   *                   Teal beside green is one colour to most readers.
+   *   warn   ↔ bad    ΔE 14.4, same problem. Amber must not sit against red,
+   *                   which is why an ageing chart runs green → amber → red
+   *                   as separated bars and never as a stack.
+   *
+   * good ↔ warn sits at ΔE 6.5 under protanopia, inside the band that is
+   * allowed only with a second encoding. Every bar here carries its own
+   * printed value and its own axis label, and stacked segments are held apart
+   * by a gap, so that condition is met — but it is the reason these two are
+   * never the only difference between two things.
+   */
+  tone: {
+    good: '15803D',
+    normal: '0F766E',
+    info: '2A78D6',
+    warn: 'D97706',
+    bad: 'DC2626',
+    /** A remainder or an "everyone else". Below the chroma floor by design —
+        it must never be the only thing telling two series apart. */
+    neutral: '94A3B8',
+  },
   /** Reserved. Nothing is red unless it is an exception. */
-  exception: 'B91C1C',
+  exception: 'DC2626',
   /** Good and watch, for status only. */
   good: '15803D',
   warn: 'B45309',

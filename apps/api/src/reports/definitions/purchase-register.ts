@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client'
-import type { Panel, ReportDefinition } from '../types'
+import type { Panel, ReportDefinition, Tone } from '../types'
 import {
   byMonth,
   dateRangeFilters,
@@ -186,11 +186,20 @@ export const purchaseRegister: ReportDefinition = {
     const bySupplier = new Map<string, number>()
     for (const r of live) bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.total)
 
+    /** Settled is green, part paid is the ordinary case, unpaid is waiting. */
+    const STATUS_TONE: Record<string, Tone> = {
+      UNPAID: 'warn',
+      PARTIAL: 'info',
+      PAID: 'good',
+      CANCELLED: 'neutral',
+    }
+
     const byStatus = Object.keys(STATUS_WORDS)
       .filter((s) => s !== 'CANCELLED')
       .map((s) => ({
         label: STATUS_WORDS[s],
         value: live.filter((r) => r.status === s).length,
+        tone: STATUS_TONE[s],
       }))
       .filter((p) => p.value > 0)
 
@@ -243,8 +252,12 @@ export const purchaseRegister: ReportDefinition = {
         format: 'money',
         points: topSuppliers.map((s) => ({ label: s, value: round2(bySupplier.get(s) ?? 0) })),
         series: [
-          { name: 'Paid', values: topSuppliers.map((s) => sumBy(s, (r) => r.paid)) },
-          { name: 'Still owed', values: topSuppliers.map((s) => sumBy(s, (r) => r.balance)) },
+          { name: 'Paid', values: topSuppliers.map((s) => sumBy(s, (r) => r.paid)), tone: 'good' },
+          {
+            name: 'Still owed',
+            values: topSuppliers.map((s) => sumBy(s, (r) => r.balance)),
+            tone: 'warn',
+          },
         ],
         note: 'The eight biggest suppliers by value billed.',
       },

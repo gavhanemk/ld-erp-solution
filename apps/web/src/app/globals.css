@@ -89,6 +89,19 @@
     --viz-ramp-4: #14b8a6;
     --viz-ramp-5: #0d9488;
     --viz-ramp-6: #0f766e;
+
+    /* Colour by meaning, and the same meaning on every report in the ERP:
+       finished is green, the ordinary measure is teal, a neutral stage is
+       blue, waiting is amber, overdue or refused is red, a remainder is grey.
+       Two pairs are measured and must never touch — teal against green, and
+       amber against red — each being under the floor at which full colour
+       vision can separate them. */
+    --tone-good: #17a34a;
+    --tone-normal: #14b8a6;
+    --tone-info: #3987e5;
+    --tone-warn: #d97706;
+    --tone-bad: #dc2626;
+    --tone-neutral: #94a3b8;
   }
 
   /* Light mode is for a bright factory office, not a dark room. It is kept
@@ -100,6 +113,12 @@
        distinguishable from each other. Slot one holds — teal reads on both. */
     --viz-2: #eb6834;
     --viz-3: #4a3aa7;
+
+    /* Stepped for a white card, not flipped. Green and teal both darken;
+       amber and red already sit in the light band. */
+    --tone-good: #15803d;
+    --tone-normal: #0f766e;
+    --tone-info: #2a78d6;
 
     --background: 220 16% 93%;       /* soft warm grey, not white */
     --foreground: 222 40% 18%;       /* near-black would glare against it */

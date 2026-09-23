@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client'
-import type { Panel, ReportDefinition } from '../types'
+import type { Panel, ReportDefinition, Tone } from '../types'
 import {
   dateRangeFilters,
   dayRange,
@@ -62,18 +62,22 @@ export const purchaseOrderStatus: ReportDefinition = {
   ],
 
   /**
-   * By supplier, because a late order is chased with a supplier.
+   * By order date, with suppliers nested inside it.
    *
-   * Money only. The quantity columns add metres to pieces to kilograms, and
-   * while the Data sheet totals them the same way, a pivot invites the reader
-   * to trust a subtotal it puts in front of them — so this one does not offer
-   * a figure that cannot be trusted.
+   * The date outermost is what makes the sheet collapsible: shut the days and
+   * it is a daily total, open one and it is who was ordered from that day.
+   * Supplier alone gave a flat list that answered only one question.
+   *
+   * Quantity leads the measures even though it adds metres to pieces to
+   * kilograms across items. On one supplier on one day it is a real figure
+   * and the one a buyer asks for first; the note says what it is not, and the
+   * Data sheet carries the unit per line.
    */
   pivot: {
-    rows: 'supplier',
-    values: ['orderValue', 'billedValue'],
+    rows: ['poDate', 'supplier'],
+    values: ['orderedQty', 'orderValue', 'billedValue'],
     slicers: ['status'],
-    note: 'Ordered against billed, by supplier. Use the Status buttons to see only what is still open.',
+    note: 'Quantity adds across items of different units — read it per supplier, not as a sheet total.',
   },
 
   async run({ tx, params, rowCap }) {
@@ -180,14 +184,44 @@ export const purchaseOrderStatus: ReportDefinition = {
       (r) => r.deliveryDate != null && r.deliveryDate < startOfToday && r.pendingQty > 0
     )
 
-    const funnel = [
-      { label: 'Ordered', value: round2(live.reduce((s, r) => s + r.orderedQty, 0)) },
-      { label: 'Received', value: round2(live.reduce((s, r) => s + r.receivedQty, 0)) },
-      { label: 'Still due', value: round2(live.reduce((s, r) => s + r.pendingQty, 0)) },
-    ].filter((p) => p.value > 0)
+    // Colour says what each bar means, not how long it is: what was asked
+    // for, what has arrived, and what is still somebody's job.
+    const funnel = (
+      [
+        {
+          label: 'Ordered',
+          value: round2(live.reduce((s, r) => s + r.orderedQty, 0)),
+          tone: 'info' as const,
+        },
+        {
+          label: 'Received',
+          value: round2(live.reduce((s, r) => s + r.receivedQty, 0)),
+          tone: 'good' as const,
+        },
+        {
+          label: 'Still due',
+          value: round2(live.reduce((s, r) => s + r.pendingQty, 0)),
+          tone: 'warn' as const,
+        },
+      ]
+    ).filter((p) => p.value > 0)
+
+    /** A stage is a state, and every state here has a settled colour. */
+    const STATUS_TONE: Record<string, Tone> = {
+      DRAFT: 'neutral',
+      SENT: 'info',
+      PARTIALLY_RECEIVED: 'warn',
+      RECEIVED: 'good',
+      CANCELLED: 'neutral',
+      CLOSED: 'good',
+    }
 
     const byStatus = Object.keys(STATUS_WORDS)
-      .map((s) => ({ label: STATUS_WORDS[s], value: rows.filter((r) => r.status === s).length }))
+      .map((s) => ({
+        label: STATUS_WORDS[s],
+        value: rows.filter((r) => r.status === s).length,
+        tone: STATUS_TONE[s],
+      }))
       .filter((p) => p.value > 0)
 
     const bySupplier = new Map<string, number>()
@@ -344,10 +378,12 @@ export const purchaseOrderStatus: ReportDefinition = {
                 {
                   name: 'Received',
                   values: topSuppliers.map((s) => supplierSum(s, (r) => r.receivedQty)),
+                  tone: 'good',
                 },
                 {
                   name: 'Still due',
                   values: topSuppliers.map((s) => supplierSum(s, (r) => r.pendingQty)),
+                  tone: 'warn',
                 },
               ],
               note: 'The six biggest suppliers by value ordered. Units are mixed across items.',

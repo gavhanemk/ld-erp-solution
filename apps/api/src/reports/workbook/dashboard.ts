@@ -95,7 +95,17 @@ function sectionRule(ws: ExcelJS.Worksheet, row: number, text: string) {
  *
  * What genuinely cannot be drawn is a panel with no points at all.
  */
-const isCard = (p: Panel) => p.points.length === 0
+const isCard = (p: Panel) => p.points.length < 2
+
+/**
+ * A panel that would draw a chart saying nothing, and is dropped outright.
+ *
+ * A Pareto over two names reaches 100% on the second one, and the bars it
+ * draws are the same bars the ranking panel beside it already drew — the same
+ * information twice, which is worse than not drawing it. Falling back to a
+ * plain bar was the original behaviour and produced exactly that duplicate.
+ */
+const isPointless = (p: Panel) => p.question === 'pareto' && p.points.length < 3
 
 /**
  * Chart shape follows the question the panel asks, never the data it holds.
@@ -277,8 +287,9 @@ export function buildDashboard(
   }
 
   // ── Panels, two across. Cards take one row each instead. ──────────────
-  const cards = analysis.panels.filter(isCard)
-  const charts = analysis.panels.filter((p) => !isCard(p))
+  const usable = analysis.panels.filter((p) => !isPointless(p))
+  const cards = usable.filter(isCard)
+  const charts = usable.filter((p) => !isCard(p))
 
   if (charts.length) {
     sectionRule(ws, row, 'Analysis')
@@ -309,13 +320,18 @@ export function buildDashboard(
        * A doughnut's slices are categories that must be told apart, and its
        * own builder already shades them — nothing to override there.
        */
-      const ordered = p.question === 'ageing' || p.question === 'funnel'
+      const ordered = p.question === 'ageing'
       const shades = CHART_COLOURS.rankShades
       const pointColours =
         kind === 'doughnut'
           ? undefined
           : p.points.map((pt, n) => {
-              if (pt.exception) return CHART_COLOURS.exception
+              // What the point MEANS wins over everything else.
+              if (pt.exception) return CHART_COLOURS.tone.bad
+              if (pt.tone) return CHART_COLOURS.tone[pt.tone]
+              // An ageing band is ordered and nothing else about it is known,
+              // so it wears the ramp: light for the newest, dark for the
+              // oldest. That is information the bar's length does not carry.
               if (!ordered) return CHART_COLOURS.primary
               const step = Math.round(
                 (n / Math.max(1, p.points.length - 1)) * (shades.length - 1)
@@ -343,9 +359,14 @@ export function buildDashboard(
         plotted = p.series.map((s, n) => ({
           name: s.name,
           values: s.values.map(scale),
-          // Three hues, not three steps of one: adjacent segments of a stack
-          // are the hardest pair in any chart to tell apart.
-          colour: CHART_COLOURS.series[n % CHART_COLOURS.series.length],
+          // Meaning first — paid against outstanding is green against amber
+          // wherever it appears. Only a split whose parts carry no meaning of
+          // their own falls back to the categorical three, and those are three
+          // hues rather than three steps of one teal because adjacent segments
+          // of a stack are the hardest pair in any chart to tell apart.
+          colour: s.tone
+            ? CHART_COLOURS.tone[s.tone]
+            : CHART_COLOURS.series[n % CHART_COLOURS.series.length],
         }))
       } else if (kind === 'pareto') {
         const total = p.points.reduce((s, pt) => s + pt.value, 0)
@@ -423,25 +444,57 @@ export function buildDashboard(
     row += Math.ceil(charts.length / 2) * (CHART_ROWS + 1) + 1
   }
 
+  /*
+   * A single category is a figure, not a chart.
+   *
+   * One bar against an axis is a number wearing a chart's costume: it takes
+   * fifteen rows to say what a tile says in three, and on a young period —
+   * one supplier, one status — a whole screen of them reads as a dashboard
+   * that has failed rather than a business with one supplier.
+   *
+   * They are laid out as the KPI band is, four across, because that is what
+   * they are. A panel with no points at all says so in words: an empty chart
+   * frame is indistinguishable from a broken one.
+   */
   if (cards.length) {
     sectionRule(ws, row, 'Single figures')
     row += 1
-    cards.forEach((p) => {
+    const PER = 3
+    cards.forEach((p, i) => {
+      const tileRow = row + Math.floor(i / 4) * 4
+      const c1 = 1 + (i % 4) * PER
+      const c2 = c1 + PER - 1
       const pt = p.points[0]
-      ws.mergeCells(row, 1, row, 4)
-      const label = ws.getCell(row, 1)
-      label.value = `${p.title}${pt ? ` · ${pt.label}` : ''}`
-      label.font = { name: 'Calibri', size: 10, color: { argb: INK.body } }
-      const value = ws.getCell(row, 5)
-      value.value = pt ? pt.value : null
-      value.numFmt = p.format === 'money' ? FMT.money : FMT.integer
-      value.font = { name: 'Calibri', size: 11, bold: true, color: { argb: INK.heading } }
-      if (!pt) {
-        value.value = '—'
+      const paint = (r: number, fill: string) => {
+        ws.mergeCells(r, c1, r, c2)
+        const cell = ws.getCell(r, c1)
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill } }
+        cell.alignment = { vertical: 'middle', indent: 1, wrapText: true }
+        return cell
       }
-      row += 1
+
+      const label = paint(tileRow, PAPER.card)
+      label.value = p.title
+      label.font = { name: 'Calibri', size: 9, bold: true, color: { argb: INK.muted } }
+
+      const value = paint(tileRow + 1, PAPER.card)
+      if (pt) {
+        value.value = pt.value
+        value.numFmt =
+          p.format === 'money' ? FMT.money : p.format === 'percent' ? FMT.percent : FMT.integer
+        value.font = { name: 'Calibri', size: 16, bold: true, color: { argb: INK.heading } }
+      } else {
+        value.value = 'No data for this period'
+        value.font = { name: 'Calibri', size: 10, italic: true, color: { argb: INK.muted } }
+      }
+      ws.getRow(tileRow + 1).height = 24
+
+      const basis = paint(tileRow + 2, PAPER.card)
+      basis.value = pt ? pt.label : ''
+      basis.font = { name: 'Calibri', size: 8, color: { argb: INK.muted } }
+      basis.alignment = { vertical: 'top', indent: 1, wrapText: true }
     })
-    row += 1
+    row += Math.ceil(cards.length / 4) * 4 + 1
   }
 
   // ── The matrix, drawn as cells ────────────────────────────────────────

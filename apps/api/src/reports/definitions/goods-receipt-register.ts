@@ -296,8 +296,16 @@ export const goodsReceiptRegister: ReportDefinition = {
               format: 'qty',
               points: topSuppliers.map((s) => ({ label: s, value: supplierSum(s, (r) => r.received) })),
               series: [
-                { name: 'Into stock', values: topSuppliers.map((s) => supplierSum(s, (r) => r.accepted)) },
-                { name: 'Refused', values: topSuppliers.map((s) => supplierSum(s, (r) => r.rejected)) },
+                {
+                  name: 'Into stock',
+                  values: topSuppliers.map((s) => supplierSum(s, (r) => r.accepted)),
+                  tone: 'good',
+                },
+                {
+                  name: 'Refused',
+                  values: topSuppliers.map((s) => supplierSum(s, (r) => r.rejected)),
+                  tone: 'bad',
+                },
               ],
               note: 'The six biggest suppliers by what reached stock. Units differ by item.',
             },

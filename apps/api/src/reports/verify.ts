@@ -142,13 +142,45 @@ const SYNTHETIC: { def: ReportDefinition; result: ReportResult } = {
             ],
           },
           {
+            // Colour by meaning. Read back off the finished file, these must
+            // come out amber, blue and green — not three shades of one hue.
             title: 'Bills by settlement',
             question: 'comparison',
             format: 'integer',
             points: [
-              { label: 'Unpaid', value: 11 },
-              { label: 'Part paid', value: 7 },
-              { label: 'Paid', value: 12 },
+              { label: 'Unpaid', value: 11, tone: 'warn' },
+              { label: 'Part paid', value: 7, tone: 'info' },
+              { label: 'Paid', value: 12, tone: 'good' },
+            ],
+          },
+          {
+            title: 'Ordered, received, still due',
+            question: 'funnel',
+            format: 'qty',
+            points: [
+              { label: 'Ordered', value: 7500, tone: 'info' },
+              { label: 'Received', value: 4800, tone: 'good' },
+              { label: 'Still due', value: 2700, tone: 'warn' },
+            ],
+          },
+          {
+            // A split whose parts DO mean something, so it takes the tones
+            // rather than the categorical three.
+            title: 'Settled against still owed',
+            question: 'split',
+            format: 'money',
+            points: suppliers.map((s, i) => ({ label: s, value: 3400000 - i * 520000 })),
+            series: [
+              {
+                name: 'Paid',
+                tone: 'good',
+                values: suppliers.map((_, i) => 2000000 - i * 300000),
+              },
+              {
+                name: 'Still owed',
+                tone: 'warn',
+                values: suppliers.map((_, i) => 1400000 - i * 220000),
+              },
             ],
           },
           {

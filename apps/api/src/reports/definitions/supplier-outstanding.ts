@@ -283,7 +283,10 @@ export const supplierOutstanding: ReportDefinition = {
               points: ageing.map((b) => ({ label: b.label, value: b.value })),
               series: [
                 {
+                  // Amber: an MSME balance past 45 days is the part of this
+                  // chart that carries a legal clock rather than a phone call.
                   name: 'MSME supplier',
+                  tone: 'warn',
                   values: ageing.map((b) =>
                     round2(
                       rows
@@ -294,6 +297,7 @@ export const supplierOutstanding: ReportDefinition = {
                 },
                 {
                   name: 'Everyone else',
+                  tone: 'info',
                   values: ageing.map((b) =>
                     round2(
                       rows

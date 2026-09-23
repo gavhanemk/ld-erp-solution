@@ -114,8 +114,13 @@ export interface PivotPlan {
   /** Header row plus data rows — never the totals row. */
   sourceRef: string
   fields: PivotFieldPlan[]
-  /** Index into `fields`: the one down the left. */
-  rowField: number
+  /**
+   * Indexes into `fields`: what goes down the left, outermost first.
+   *
+   * More than one nests them — date, then supplier within it — which is what
+   * turns a flat list into something you can collapse and read a subtotal off.
+   */
+  rowFields: number[]
   dataFields: PivotDataField[]
   /** Indices into `fields` that get a slicer. */
   slicerFields: number[]
@@ -154,9 +159,15 @@ export function colLetter(n: number): string {
  * and nothing besides.
  */
 export function pivotExtent(plan: PivotPlan): { rows: number; cols: number } {
-  const f = plan.fields[plan.rowField]
-  const items = (f?.items?.length ?? 0) + (f?.blank ? 1 : 0)
-  return { rows: 1 + items + 1, cols: 1 + plan.dataFields.length }
+  const sizes = plan.rowFields.map((i) => {
+    const f = plan.fields[i]
+    return Math.max(1, (f?.items?.length ?? 0) + (f?.blank ? 1 : 0))
+  })
+  // Nested fields multiply, and each outer value adds a subtotal line. An
+  // over-estimate is harmless — the refresh rewrites the range, and the sheet
+  // holds nothing else for it to collide with. An under-estimate is not.
+  const body = sizes.reduce((a, b) => a * b, 1) + (sizes.length > 1 ? sizes[0] : 0)
+  return { rows: 1 + body + 1, cols: 1 + plan.dataFields.length }
 }
 
 export function pivotLocationRef(plan: PivotPlan): string {
@@ -267,7 +278,7 @@ export function pivotCacheRecordsXml(plan: PivotPlan): string {
 
 function pivotFieldXml(plan: PivotPlan, index: number): string {
   const f = plan.fields[index]
-  const isRow = index === plan.rowField
+  const isRow = plan.rowFields.includes(index)
   const isData = plan.dataFields.some((d) => d.field === index)
   const isSlicer = plan.slicerFields.includes(index)
 
@@ -288,9 +299,37 @@ function pivotFieldXml(plan: PivotPlan, index: number): string {
   return '<pivotField showAll="0"/>'
 }
 
+/**
+ * The row axis.
+ *
+ * With one field the rows are enumerated outright, so the pivot reads
+ * correctly even before Excel has refreshed it.
+ *
+ * With two or more, only the grand total is written. Nesting is expressed
+ * through an `r` attribute counting how many leading items each row repeats
+ * from the row above, plus a subtotal line per outer value — an encoding with
+ * no partial failure, where a miscount does not produce a wrong figure but a
+ * workbook Excel repairs by deleting the pivot. `refreshOnLoad` means Excel
+ * rebuilds this axis from the cache on open anyway, so the honest thing is to
+ * write the part that cannot be got wrong and let the refresh do the rest.
+ */
+function rowItemsXml(plan: PivotPlan): string {
+  if (plan.rowFields.length !== 1) {
+    return '<rowItems count="1"><i t="grand"><x/></i></rowItems>'
+  }
+  const f = plan.fields[plan.rowFields[0]]
+  const n = (f?.items?.length ?? 0) + (f?.blank ? 1 : 0)
+  return (
+    `<rowItems count="${n + 1}">` +
+    Array.from({ length: n }, (_, i) => (i === 0 ? '<i><x/></i>' : `<i><x v="${i}"/></i>`)).join(
+      ''
+    ) +
+    '<i t="grand"><x/></i>' +
+    '</rowItems>'
+  )
+}
+
 export function pivotTableXml(plan: PivotPlan): string {
-  const f = plan.fields[plan.rowField]
-  const rowCount = (f?.items?.length ?? 0) + (f?.blank ? 1 : 0)
   const many = plan.dataFields.length > 1
 
   const body =
@@ -298,13 +337,10 @@ export function pivotTableXml(plan: PivotPlan): string {
     `<pivotFields count="${plan.fields.length}">` +
     plan.fields.map((_, i) => pivotFieldXml(plan, i)).join('') +
     '</pivotFields>' +
-    `<rowFields count="1"><field x="${plan.rowField}"/></rowFields>` +
-    `<rowItems count="${rowCount + 1}">` +
-    Array.from({ length: rowCount }, (_, i) =>
-      i === 0 ? '<i><x/></i>' : `<i><x v="${i}"/></i>`
-    ).join('') +
-    '<i t="grand"><x/></i>' +
-    '</rowItems>' +
+    `<rowFields count="${plan.rowFields.length}">` +
+    plan.rowFields.map((i) => `<field x="${i}"/>`).join('') +
+    '</rowFields>' +
+    rowItemsXml(plan) +
     // With more than one measure the data fields themselves become the column
     // axis — that is what `x="-2"` means. With one there is no column axis at
     // all, and a single empty `<i/>` is the whole of it.

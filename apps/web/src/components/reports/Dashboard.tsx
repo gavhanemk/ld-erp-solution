@@ -1,6 +1,6 @@
 'use client'
 
-import { AlertTriangle, Lightbulb } from 'lucide-react'
+import { Info, Lightbulb } from 'lucide-react'
 
 /**
  * The dashboard, on screen.
@@ -10,18 +10,28 @@ import { AlertTriangle, Lightbulb } from 'lucide-react'
  * screens end up disagreeing with nothing on either to say which is right.
  *
  * The rules the engine enforces are enforced here too, for the same reasons:
- * only an empty panel is a card, the shape follows the question and never the
- * data, colour carries status, and a figure that cannot be computed shows a
- * dash rather than a nought.
+ * a single category is a figure rather than a chart, a panel that would only
+ * repeat its neighbour is dropped, the shape follows the question and never
+ * the data, and a figure that cannot be computed shows a dash, never a nought.
  *
- * Colour follows two rules that are easy to get wrong and were:
+ * Colour is decided by three rules, each of which was got wrong first:
  *
- *   - One series is one colour. Shading each bar darker-where-bigger on
- *     supplier names double-encodes the bar's own length as hue and spends
- *     the only free channel on something the length already says.
- *   - A ramp is for categories that genuinely have an order — an ageing band,
- *     a funnel stage — and it is one hue light to dark, never a rainbow.
+ *   - It carries MEANING, and the same meaning on every report — finished is
+ *     green, waiting is amber, overdue is red. One hue everywhere is drab; a
+ *     different hue per chart is noise. Both were tried.
+ *   - Where there is no meaning, one series is one colour. Shading a ranking
+ *     of supplier names darker-where-bigger encodes the bar's own length a
+ *     second time and spends the only free channel saying nothing new.
+ *   - A ramp is only for categories that really are ordered — an ageing band —
+ *     and it is one hue light to dark, never a rainbow.
+ *
+ * Amber is spent carefully. It means something needs attention, so it is not
+ * used for scope notes or for a quiet period: a report that shouts on every
+ * screen teaches the reader to stop looking.
  */
+
+/** Mirrors the server's `Tone`. What a bar means, which is what colours it. */
+export type Tone = 'good' | 'normal' | 'info' | 'warn' | 'bad' | 'neutral'
 
 export interface Kpi {
   label: string
@@ -50,9 +60,9 @@ export interface Panel {
     | 'split'
     | 'pareto'
   format: 'money' | 'qty' | 'integer' | 'percent'
-  points: Array<{ label: string; value: number; exception?: boolean }>
+  points: Array<{ label: string; value: number; tone?: Tone; exception?: boolean }>
   /** For `split`: what each bar divides into. */
-  series?: Array<{ name: string; values: Array<number | null> }>
+  series?: Array<{ name: string; values: Array<number | null>; tone?: Tone }>
   note?: string
 }
 
@@ -125,14 +135,38 @@ const TONE_EDGE = {
   bad: 'border-red-500/30',
 } as const
 
+/**
+ * Colour by meaning, and the same meaning on every report in the ERP:
+ * finished is green, the ordinary measure teal, a neutral stage blue, waiting
+ * amber, overdue or refused red, a remainder grey. A reader learns it once.
+ *
+ * Two pairs are measured and never touch — teal against green, amber against
+ * red — each below the separation at which full colour vision tells them
+ * apart. Green against amber is close enough to need the printed value beside
+ * it, which every bar here has.
+ */
+const TONE: Record<Tone, string> = {
+  good: 'var(--tone-good)',
+  normal: 'var(--tone-normal)',
+  info: 'var(--tone-info)',
+  warn: 'var(--tone-warn)',
+  bad: 'var(--tone-bad)',
+  neutral: 'var(--tone-neutral)',
+}
+
 /** Categories that genuinely have an order, and so may wear a ramp. */
 const ORDERED = new Set(['ageing', 'funnel'])
 const RAMP = [1, 2, 3, 4, 5, 6].map((n) => `var(--viz-ramp-${n})`)
 const SERIES = ['var(--viz-1)', 'var(--viz-2)', 'var(--viz-3)']
 
-function fillFor(panel: Panel, i: number, exception?: boolean): string {
-  // Red is reserved. Nothing else in a chart may use it.
-  if (exception) return 'rgb(220 38 38)'
+function fillFor(
+  panel: Panel,
+  i: number,
+  point?: { tone?: Tone; exception?: boolean }
+): string {
+  // What the bar MEANS wins over everything else.
+  if (point?.exception) return TONE.bad
+  if (point?.tone) return TONE[point.tone]
   if (!ORDERED.has(panel.question)) return SERIES[0]
   // An ordered ramp runs dark for the first band to light for the last, so
   // "oldest" is heaviest wherever the report chose to put it.
@@ -151,16 +185,16 @@ function Card({ title, note, children }: { title: string; note?: string; childre
 }
 
 /** Named, because identity must never rest on colour alone. */
-function Legend({ names }: { names: string[] }) {
+function Legend({ series }: { series: Array<{ name: string; tone?: Tone }> }) {
   return (
     <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
-      {names.map((n, i) => (
-        <span key={n} className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+      {series.map((s, i) => (
+        <span key={s.name} className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
           <span
             className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
-            style={{ background: SERIES[i % SERIES.length] }}
+            style={{ background: s.tone ? TONE[s.tone] : SERIES[i % SERIES.length] }}
           />
-          {n}
+          {s.name}
         </span>
       ))}
     </div>
@@ -189,7 +223,7 @@ function BarPanel({ panel }: { panel: Panel }) {
               className="h-full rounded-full"
               style={{
                 width: `${Math.max(2, (Math.abs(p.value) / max) * 100)}%`,
-                background: fillFor(panel, i, p.exception),
+                background: fillFor(panel, i, p),
               }}
             />
           </div>
@@ -214,7 +248,7 @@ function SplitPanel({ panel }: { panel: Panel }) {
       <div className="space-y-2.5">
         {panel.points.map((p, row) => {
           const parts = series
-            .map((s, i) => ({ name: s.name, value: s.values[row] ?? 0, i }))
+            .map((s, i) => ({ name: s.name, value: s.values[row] ?? 0, i, tone: s.tone }))
             .filter((s) => s.value > 0)
           return (
             <div key={p.label}>
@@ -238,7 +272,7 @@ function SplitPanel({ panel }: { panel: Panel }) {
                       className="h-full first:rounded-l-full last:rounded-r-full"
                       style={{
                         flexGrow: s.value,
-                        background: SERIES[s.i % SERIES.length],
+                        background: s.tone ? TONE[s.tone] : SERIES[s.i % SERIES.length],
                       }}
                     />
                   ))
@@ -248,7 +282,7 @@ function SplitPanel({ panel }: { panel: Panel }) {
           )
         })}
       </div>
-      <Legend names={series.map((s) => s.name)} />
+      <Legend series={series} />
     </>
   )
 }
@@ -340,7 +374,7 @@ function DonutPanel({ panel }: { panel: Panel }) {
               r={R}
               fill="none"
               strokeWidth="8"
-              stroke={p.exception ? 'rgb(220 38 38)' : SERIES[i % SERIES.length]}
+              stroke={fillFor(panel, i, p)}
               strokeDasharray={`${Math.max(0, dash - 1)} ${C - Math.max(0, dash - 1)}`}
               strokeDashoffset={-offset}
             >
@@ -356,7 +390,7 @@ function DonutPanel({ panel }: { panel: Panel }) {
           <div key={p.label} className="flex items-baseline gap-2 text-xs">
             <span
               className="mt-1 h-2.5 w-2.5 shrink-0 rounded-[3px]"
-              style={{ background: p.exception ? 'rgb(220 38 38)' : SERIES[i % SERIES.length] }}
+              style={{ background: fillFor(panel, i, p) }}
             />
             <span className="text-foreground min-w-0 flex-1 truncate">{p.label}</span>
             <span className="text-muted-foreground shrink-0 tabular-nums">
@@ -545,10 +579,23 @@ export function ReportDashboard({
   analysis: Analysis
   rowCount?: number
 }) {
-  // The same rule the workbook applies: only a panel with nothing in it is a
-  // card. A single bar against a labelled axis still says what the figure is.
-  const cards = analysis.panels.filter((p) => p.points.length === 0)
-  const charts = analysis.panels.filter((p) => p.points.length > 0)
+  /*
+   * The same three rules the workbook applies.
+   *
+   * A single category is a figure, not a chart: one bar against an axis is a
+   * number wearing a chart's costume, and a screen full of them reads as a
+   * dashboard that has failed rather than a business with one supplier.
+   *
+   * A Pareto over fewer than three names is dropped outright rather than
+   * falling back to bars — the bars it would draw are the ones the ranking
+   * panel beside it already drew, and the same information twice is worse
+   * than not drawing it.
+   */
+  const usable = analysis.panels.filter(
+    (p) => !(p.question === 'pareto' && p.points.length < 3)
+  )
+  const cards = usable.filter((p) => p.points.length < 2)
+  const charts = usable.filter((p) => p.points.length >= 2)
 
   return (
     <div className="space-y-5">
@@ -558,12 +605,15 @@ export function ReportDashboard({
 
       {/* Says so when there is barely anything to look at, rather than leaving
         the reader to decide whether the report is broken or the period empty. */}
+      {/* Quiet, not amber. A thin period is a fact about the data, not a
+        fault needing attention — and a yellow band across the top of every
+        report on a young system trains the reader to ignore yellow. */}
       {rowCount != null && rowCount > 0 && rowCount < 5 && (
-        <p className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-400">
-          <AlertTriangle size={14} className="mt-px shrink-0" />
-          This period holds {rowCount} {rowCount === 1 ? 'row' : 'rows'}, so the panels below have
-          very little to compare. They fill out as more documents are raised — nothing here is
-          broken.
+        <p className="border-border bg-secondary/40 text-muted-foreground flex items-start gap-2 rounded-lg border px-3 py-2 text-xs">
+          <Info size={14} className="mt-px shrink-0" />
+          This period holds {rowCount} {rowCount === 1 ? 'row' : 'rows'}, so most panels below are
+          shown as single figures rather than charts. They become charts as more documents are
+          raised — nothing here is broken.
         </p>
       )}
 
@@ -598,14 +648,38 @@ export function ReportDashboard({
         </div>
       )}
 
+      {/* One category is a figure. Laid out as the KPI band is, because that
+        is what it is — not a chart frame with a single bar in it. */}
       {cards.length > 0 && (
-        <div className="glass-card divide-border divide-y p-0">
-          {cards.map((p) => (
-            <div key={p.title} className="flex items-center justify-between gap-3 px-4 py-2.5">
-              <span className="text-foreground text-sm">{p.title}</span>
-              <span className="text-muted-foreground shrink-0 text-sm">Nothing in this period</span>
-            </div>
-          ))}
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {cards.map((p) => {
+            const pt = p.points[0]
+            return (
+              <div key={p.title} className="glass-card p-3">
+                <p className="text-muted-foreground text-xs leading-snug">{p.title}</p>
+                {pt ? (
+                  <>
+                    <p className="text-foreground mt-1 text-xl font-semibold tabular-nums">
+                      {short(pt.value, p.format)}
+                    </p>
+                    <p className="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-[11px]">
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{ background: fillFor(p, 0, pt) }}
+                      />
+                      {pt.label}
+                    </p>
+                  </>
+                ) : (
+                  // An empty chart frame is indistinguishable from a broken
+                  // one, so it says which in words.
+                  <p className="text-muted-foreground mt-1 text-sm italic">
+                    No data for this period
+                  </p>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 
@@ -630,16 +704,25 @@ export function ReportDashboard({
         )}
         {/* Caveats sit beside the insights, not below the fold. A caveat
           nobody reads is a caveat that did not happen. */}
+        {/* Set in ordinary text, not amber.
+          Amber means something needs attention. A caveat is scope — what the
+          figures were not counting — and four lines of warning colour for
+          scope both shouts at the reader and spends the one colour that was
+          supposed to mean "look here" on something that never does. The
+          heading carries the signal; the sentences carry the meaning. */}
         {analysis.caveats.length > 0 && (
           <div className="glass-card p-4">
             <h3 className="text-foreground flex items-center gap-2 text-sm font-semibold">
-              <AlertTriangle size={14} className="text-amber-400" />
+              <Info size={14} className="text-muted-foreground" />
               What they do not show
             </h3>
             <ul className="mt-2.5 space-y-2">
               {analysis.caveats.map((line) => (
-                <li key={line} className="flex gap-2 text-sm leading-snug text-amber-400/90">
-                  <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400/70" />
+                <li
+                  key={line}
+                  className="text-muted-foreground flex gap-2 text-sm leading-snug"
+                >
+                  <span className="bg-muted-foreground/40 mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full" />
                   {line}
                 </li>
               ))}
