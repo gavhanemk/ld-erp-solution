@@ -292,13 +292,36 @@ export function buildDashboard(
       const scale = (v: number | null) => (v == null ? null : money ? toLakh(v) : v)
       const labels = p.points.map((pt) => pt.label)
 
-      // Colour carries status. A ranking is one hue shaded by rank; red is
-      // reserved for the points the report itself marked as exceptions.
-      const pointColours = p.points.map((pt, n) =>
-        pt.exception
-          ? CHART_COLOURS.exception
-          : CHART_COLOURS.rankShades[Math.min(n, CHART_COLOURS.rankShades.length - 1)]
-      )
+      /*
+       * What colour each bar takes.
+       *
+       * One series is one colour. Shading a ranking of supplier names darker
+       * where the bar is longer encodes the bar's length twice — once as
+       * length, once as hue — and spends the only channel left on something
+       * the reader can already see. Suppliers have no order; the ramp says
+       * they do.
+       *
+       * The ramp belongs to categories that really are ordered: an ageing
+       * band, a funnel stage. There the oldest or last is heaviest, which is
+       * information the length alone does not carry.
+       *
+       * Red stays reserved for the points the report marked as exceptions.
+       * A doughnut's slices are categories that must be told apart, and its
+       * own builder already shades them — nothing to override there.
+       */
+      const ordered = p.question === 'ageing' || p.question === 'funnel'
+      const shades = CHART_COLOURS.rankShades
+      const pointColours =
+        kind === 'doughnut'
+          ? undefined
+          : p.points.map((pt, n) => {
+              if (pt.exception) return CHART_COLOURS.exception
+              if (!ordered) return CHART_COLOURS.primary
+              const step = Math.round(
+                (n / Math.max(1, p.points.length - 1)) * (shades.length - 1)
+              )
+              return shades[shades.length - 1 - step]
+            })
 
       /*
        * What the chart plots, which is not always one column of numbers.
@@ -320,7 +343,9 @@ export function buildDashboard(
         plotted = p.series.map((s, n) => ({
           name: s.name,
           values: s.values.map(scale),
-          colour: CHART_COLOURS.rankShades[n % CHART_COLOURS.rankShades.length],
+          // Three hues, not three steps of one: adjacent segments of a stack
+          // are the hardest pair in any chart to tell apart.
+          colour: CHART_COLOURS.series[n % CHART_COLOURS.series.length],
         }))
       } else if (kind === 'pareto') {
         const total = p.points.reduce((s, pt) => s + pt.value, 0)

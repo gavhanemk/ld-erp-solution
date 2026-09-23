@@ -2,22 +2,13 @@
 
 import { use, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, ArrowLeft, Play, RefreshCw } from 'lucide-react'
+import { AlertCircle, ArrowLeft, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, type Analysis } from '@/components/reports/Dashboard'
+import { FilterBar, type Filter } from '@/components/reports/FilterBar'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { formatDate } from '@/lib/utils'
-
-interface Filter {
-  key: string
-  label: string
-  type: 'date' | 'select' | 'text' | 'boolean'
-  required?: boolean
-  optionsFrom?: string
-  options?: Array<{ value: string; label: string }>
-  help?: string
-}
 
 interface Column {
   key: string
@@ -57,6 +48,9 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
   const [filters, setFilters] = useState<Filter[]>([])
   const [values, setValues] = useState<Record<string, string>>({})
+  /** What the result on screen was actually built from, so the bar can say
+      when the two have drifted apart. */
+  const [ranWith, setRanWith] = useState<Record<string, string>>({})
   const [result, setResult] = useState<RunResult | null>(null)
   const [options, setOptions] = useState<Record<string, Array<{ id: string; name: string }>>>({})
   const [loading, setLoading] = useState(false)
@@ -98,12 +92,18 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const run = useCallback(async () => {
     setLoading(true)
     setError(null)
+    const asked = Object.fromEntries(
+      Object.entries(values).filter(([, v]) => v)
+    ) as Record<string, string>
     try {
-      const qs = new URLSearchParams(
-        Object.entries(values).filter(([, v]) => v) as Array<[string, string]>
+      const res = await api.get<{ data: RunResult }>(
+        `/reports/${id}/run?${new URLSearchParams(asked)}`
       )
-      const res = await api.get<{ data: RunResult }>(`/reports/${id}/run?${qs}`)
       setResult(res.data)
+      // Recorded on success only. Marking the bar clean before the server has
+      // answered means a failed run leaves the screen showing the previous
+      // period's figures under the new period's filters.
+      setRanWith(asked)
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?'
@@ -167,59 +167,15 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
       )}
 
       {filters.length > 0 && (
-        <div className="glass-card flex flex-wrap items-end gap-3 p-3">
-          {filters.map((f) => (
-            <div key={f.key} className="min-w-[10rem]">
-              <label className="form-label text-[11px]" htmlFor={`f-${f.key}`}>
-                {f.label}
-                {f.required && <span className="ml-0.5 text-red-400">*</span>}
-              </label>
-              {f.type === 'boolean' ? (
-                <label className="text-foreground flex h-8 cursor-pointer items-center gap-2 text-xs">
-                  <input
-                    id={`f-${f.key}`}
-                    type="checkbox"
-                    checked={values[f.key] === 'true'}
-                    onChange={(e) =>
-                      setValues((v) => ({ ...v, [f.key]: e.target.checked ? 'true' : '' }))
-                    }
-                  />
-                  Yes
-                </label>
-              ) : f.type === 'select' ? (
-                <select
-                  id={`f-${f.key}`}
-                  className="form-input h-8 w-full py-0 text-xs"
-                  value={values[f.key] ?? ''}
-                  onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                >
-                  <option value="">All</option>
-                  {(f.options ?? []).map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                  {(options[f.optionsFrom ?? ''] ?? []).map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.name}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  id={`f-${f.key}`}
-                  type={f.type === 'date' ? 'date' : 'text'}
-                  className="form-input h-8 w-full py-0 text-xs"
-                  value={values[f.key] ?? ''}
-                  onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                />
-              )}
-            </div>
-          ))}
-          <button className="btn-primary h-8 text-xs" onClick={() => void run()} disabled={loading}>
-            <Play size={13} /> Run
-          </button>
-        </div>
+        <FilterBar
+          filters={filters}
+          values={values}
+          applied={ranWith}
+          options={options}
+          onChange={setValues}
+          onRun={() => void run()}
+          loading={loading}
+        />
       )}
 
       {loading && !result ? (
@@ -236,7 +192,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
             )}
           </p>
 
-          <ReportDashboard analysis={result.analysis} />
+          <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
 
           {result.preview.length > 0 && (
             <div className="glass-card overflow-hidden p-0">

@@ -254,7 +254,10 @@ async function main() {
       periodLabel: periodLabel(params),
     })
     writeFileSync(`${out}/${def.id}.xlsx`, buffer)
-    const chartable = result.analysis.panels.filter((p) => p.points.length >= 2).length
+    // The same rule the builder uses. Left at "two or more points" this
+    // printed "charts=6 panels=6 (0 chartable)" on one line, which reads as a
+    // failure report about a workbook that was fine.
+    const chartable = result.analysis.panels.filter((p) => p.points.length > 0).length
     console.log(
       `${def.id.padEnd(26)} rows=${String(result.rows.length).padEnd(6)}` +
         `charts=${chartCount} pivots=${pivotCount}  panels=${result.analysis.panels.length} (${chartable} chartable)  ` +

@@ -17,8 +17,24 @@
 export const CHART_COLOURS = {
   /** The one brand hue. Every ordinary series is this. */
   primary: '0F766E',
-  /** A ranking is one hue shaded by rank — these run light to dark. */
+  /**
+   * The ordinal ramp, dark to light.
+   *
+   * For categories that genuinely have an order — an ageing band, a funnel
+   * stage — and nothing else. Shading a ranking of supplier names by rank
+   * double-encodes the bar's own length as colour and spends the only free
+   * channel on something the length has already said.
+   */
   rankShades: ['134E4A', '0F766E', '14918A', '2FB3A8', '7FD1C7'],
+  /**
+   * Stacked segments, which are categories and must be told apart.
+   *
+   * Three hues rather than three steps of teal: a single-hue ramp used
+   * categorically is exactly the case where two adjacent segments become one
+   * segment to a colour-blind reader. Checked against a white sheet for the
+   * lightness band, the chroma floor, colour-blind separation and contrast.
+   */
+  series: ['0D9488', 'EB6834', '4A3AA7'],
   /** Reserved. Nothing is red unless it is an exception. */
   exception: 'B91C1C',
   /** Good and watch, for status only. */

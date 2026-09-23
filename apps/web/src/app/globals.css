@@ -69,12 +69,38 @@
     /* Row and button hover. White tint on dark; the light theme flips it. */
     --hover-overlay: rgba(255, 255, 255, 0.04);
     --hover-overlay-strong: rgba(255, 255, 255, 0.07);
+
+    /* Chart series — three slots, and they are not decoration.
+       Checked rather than chosen by eye: each theme's set clears the
+       lightness band, the chroma floor, colour-blind separation against its
+       neighbour, and contrast against the card behind it. The brand teal at
+       its usual --primary weight reads as grey in a chart fill, which is why
+       slot one is a step brighter than the buttons.
+       These are plain hex, not the HSL triples above: nothing tints them, and
+       a triple converted by hand is a colour nobody validated. */
+    --viz-1: #0d9488;
+    --viz-2: #d95926;
+    --viz-3: #9085e9;
+    /* Magnitude is one hue, light to dark — never a rainbow. Used for the
+       ordered panels (ageing bands, a funnel) and the matrix heat map. */
+    --viz-ramp-1: #ccfbf1;
+    --viz-ramp-2: #5eead4;
+    --viz-ramp-3: #2dd4bf;
+    --viz-ramp-4: #14b8a6;
+    --viz-ramp-5: #0d9488;
+    --viz-ramp-6: #0f766e;
   }
 
   /* Light mode is for a bright factory office, not a dark room. It is kept
      deliberately soft: a warm grey page rather than white, so the screen is not
      glaring over a long shift, with cards lifted slightly above it. */
   .light {
+    /* The same three slots stepped for a white card, not flipped: a dark
+       theme's colours inverted land outside the light band and stop being
+       distinguishable from each other. Slot one holds — teal reads on both. */
+    --viz-2: #eb6834;
+    --viz-3: #4a3aa7;
+
     --background: 220 16% 93%;       /* soft warm grey, not white */
     --foreground: 222 40% 18%;       /* near-black would glare against it */
 

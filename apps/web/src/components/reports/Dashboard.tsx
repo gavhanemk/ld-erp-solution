@@ -1,5 +1,7 @@
 'use client'
 
+import { AlertTriangle, Lightbulb } from 'lucide-react'
+
 /**
  * The dashboard, on screen.
  *
@@ -8,9 +10,17 @@
  * screens end up disagreeing with nothing on either to say which is right.
  *
  * The rules the engine enforces are enforced here too, for the same reasons:
- * one category is a card rather than a chart, the shape follows the question
- * and never the data, colour carries status, and a figure that cannot be
- * computed shows a dash rather than a nought.
+ * only an empty panel is a card, the shape follows the question and never the
+ * data, colour carries status, and a figure that cannot be computed shows a
+ * dash rather than a nought.
+ *
+ * Colour follows two rules that are easy to get wrong and were:
+ *
+ *   - One series is one colour. Shading each bar darker-where-bigger on
+ *     supplier names double-encodes the bar's own length as hue and spends
+ *     the only free channel on something the length already says.
+ *   - A ramp is for categories that genuinely have an order — an ageing band,
+ *     a funnel stage — and it is one hue light to dark, never a rainbow.
  */
 
 export interface Kpi {
@@ -30,9 +40,19 @@ export interface TrendPoint {
 
 export interface Panel {
   title: string
-  question: 'trend' | 'comparison' | 'ranking' | 'ageing' | 'funnel' | 'composition'
+  question:
+    | 'trend'
+    | 'comparison'
+    | 'ranking'
+    | 'ageing'
+    | 'funnel'
+    | 'composition'
+    | 'split'
+    | 'pareto'
   format: 'money' | 'qty' | 'integer' | 'percent'
   points: Array<{ label: string; value: number; exception?: boolean }>
+  /** For `split`: what each bar divides into. */
+  series?: Array<{ name: string; values: Array<number | null> }>
   note?: string
 }
 
@@ -86,16 +106,287 @@ function short(v: number, format: Panel['format']): string {
   return `₹${v.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
 }
 
+/** The exact figure, for the hover. The bar shows a rounded one. */
+function exact(v: number, format: Panel['format']): string {
+  if (format === 'percent') return `${(v * 100).toFixed(2)}%`
+  if (format === 'money') return `₹${inr(v)}`
+  return v.toLocaleString('en-IN', { maximumFractionDigits: 3 })
+}
+
 const TONE_TEXT = {
   good: 'text-emerald-400',
   warn: 'text-amber-400',
   bad: 'text-red-400',
 } as const
 
-/** One hue shaded by rank. Red only where the report marked an exception. */
-const SHADES = ['bg-teal-800', 'bg-teal-700', 'bg-teal-600', 'bg-teal-500', 'bg-teal-400']
-const shadeFor = (i: number, exception?: boolean) =>
-  exception ? 'bg-red-600' : SHADES[Math.min(i, SHADES.length - 1)]
+const TONE_EDGE = {
+  good: 'border-emerald-500/30',
+  warn: 'border-amber-500/30',
+  bad: 'border-red-500/30',
+} as const
+
+/** Categories that genuinely have an order, and so may wear a ramp. */
+const ORDERED = new Set(['ageing', 'funnel'])
+const RAMP = [1, 2, 3, 4, 5, 6].map((n) => `var(--viz-ramp-${n})`)
+const SERIES = ['var(--viz-1)', 'var(--viz-2)', 'var(--viz-3)']
+
+function fillFor(panel: Panel, i: number, exception?: boolean): string {
+  // Red is reserved. Nothing else in a chart may use it.
+  if (exception) return 'rgb(220 38 38)'
+  if (!ORDERED.has(panel.question)) return SERIES[0]
+  // An ordered ramp runs dark for the first band to light for the last, so
+  // "oldest" is heaviest wherever the report chose to put it.
+  const step = Math.round((i / Math.max(1, panel.points.length - 1)) * (RAMP.length - 1))
+  return RAMP[RAMP.length - 1 - step]
+}
+
+function Card({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
+  return (
+    <div className="glass-card flex flex-col p-4">
+      <h3 className="text-foreground text-sm font-semibold">{title}</h3>
+      <div className="mt-3 flex-1">{children}</div>
+      {note && <p className="text-muted-foreground mt-3 text-[11px] italic leading-snug">{note}</p>}
+    </div>
+  )
+}
+
+/** Named, because identity must never rest on colour alone. */
+function Legend({ names }: { names: string[] }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5">
+      {names.map((n, i) => (
+        <span key={n} className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+          <span
+            className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
+            style={{ background: SERIES[i % SERIES.length] }}
+          />
+          {n}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function BarPanel({ panel }: { panel: Panel }) {
+  const max = Math.max(...panel.points.map((p) => Math.abs(p.value)), 1)
+  const total = panel.points.reduce((s, p) => s + p.value, 0)
+
+  return (
+    <div className="space-y-2">
+      {panel.points.map((p, i) => (
+        <div key={p.label} title={`${p.label} — ${exact(p.value, panel.format)}`}>
+          <div className="flex items-baseline justify-between gap-3 text-xs">
+            <span className="text-foreground min-w-0 truncate">{p.label}</span>
+            <span className="text-muted-foreground shrink-0 tabular-nums">
+              {short(p.value, panel.format)}
+              {panel.question === 'composition' && total > 0 && (
+                <span className="ml-1 opacity-70">({Math.round((p.value / total) * 100)}%)</span>
+              )}
+            </span>
+          </div>
+          <div className="bg-secondary mt-1 h-2 w-full overflow-hidden rounded-full">
+            <div
+              className="h-full rounded-full"
+              style={{
+                width: `${Math.max(2, (Math.abs(p.value) / max) * 100)}%`,
+                background: fillFor(panel, i, p.exception),
+              }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * A stack: one bar per category, divided into its parts.
+ *
+ * A 2px gap between segments rather than a hairline border — a border is drawn
+ * inside the segment and eats the smallest ones entirely.
+ */
+function SplitPanel({ panel }: { panel: Panel }) {
+  const series = panel.series ?? []
+  const max = Math.max(...panel.points.map((p) => Math.abs(p.value)), 1)
+
+  return (
+    <>
+      <div className="space-y-2.5">
+        {panel.points.map((p, row) => {
+          const parts = series
+            .map((s, i) => ({ name: s.name, value: s.values[row] ?? 0, i }))
+            .filter((s) => s.value > 0)
+          return (
+            <div key={p.label}>
+              <div className="flex items-baseline justify-between gap-3 text-xs">
+                <span className="text-foreground min-w-0 truncate">{p.label}</span>
+                <span className="text-muted-foreground shrink-0 tabular-nums">
+                  {short(p.value, panel.format)}
+                </span>
+              </div>
+              <div
+                className="mt-1 flex h-2.5 w-full gap-[2px] overflow-hidden rounded-full"
+                style={{ width: `${Math.max(4, (Math.abs(p.value) / max) * 100)}%` }}
+              >
+                {parts.length === 0 ? (
+                  <div className="bg-secondary h-full w-full rounded-full" />
+                ) : (
+                  parts.map((s) => (
+                    <div
+                      key={s.name}
+                      title={`${p.label} · ${s.name} — ${exact(s.value, panel.format)}`}
+                      className="h-full first:rounded-l-full last:rounded-r-full"
+                      style={{
+                        flexGrow: s.value,
+                        background: SERIES[s.i % SERIES.length],
+                      }}
+                    />
+                  ))
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <Legend names={series.map((s) => s.name)} />
+    </>
+  )
+}
+
+/**
+ * A Pareto: how few names make up the most of it.
+ *
+ * Deliberately not the workbook's shape. Excel draws the classic combination —
+ * bars on rupees, the running share on a second axis — which is a named form
+ * its readers know. In a card this wide a second scale would be two axes whose
+ * alignment means nothing, so the share is put where it can be read directly:
+ * on each row, with the point it crosses four-fifths called out. Same figures,
+ * one scale.
+ */
+function ParetoPanel({ panel }: { panel: Panel }) {
+  const total = panel.points.reduce((s, p) => s + p.value, 0)
+  const max = Math.max(...panel.points.map((p) => Math.abs(p.value)), 1)
+
+  let running = 0
+  const rows = panel.points.map((p) => {
+    running += p.value
+    return { ...p, share: total > 0 ? running / total : null }
+  })
+  // How many names it takes to reach four fifths — the sentence the chart
+  // exists to produce, rather than something the reader has to add up.
+  const eighty = rows.findIndex((r) => r.share != null && r.share >= 0.8)
+
+  return (
+    <>
+      <div className="space-y-2">
+        {rows.map((p) => (
+          <div key={p.label} title={`${p.label} — ${exact(p.value, panel.format)}`}>
+            <div className="flex items-baseline justify-between gap-3 text-xs">
+              <span className="text-foreground min-w-0 truncate">{p.label}</span>
+              <span className="text-muted-foreground shrink-0 tabular-nums">
+                {short(p.value, panel.format)}
+                {p.share != null && (
+                  <span className="text-primary ml-2 font-medium">
+                    {Math.round(p.share * 100)}%
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="bg-secondary mt-1 h-2 w-full overflow-hidden rounded-full">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${Math.max(2, (Math.abs(p.value) / max) * 100)}%`,
+                  background: SERIES[0],
+                }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+      {eighty >= 0 && (
+        <p className="border-border text-foreground mt-3 border-t pt-2.5 text-xs">
+          The top{' '}
+          <span className="text-primary font-semibold">
+            {eighty + 1} of {rows.length}
+          </span>{' '}
+          make up {Math.round((rows[eighty].share ?? 0) * 100)}% of the total.
+        </p>
+      )}
+    </>
+  )
+}
+
+/** Shares of one whole, where there are enough slices for a ring to read. */
+function DonutPanel({ panel }: { panel: Panel }) {
+  const total = panel.points.reduce((s, p) => s + p.value, 0)
+  if (total <= 0) return <BarPanel panel={panel} />
+
+  const R = 16
+  const C = 2 * Math.PI * R
+  let offset = 0
+
+  return (
+    <div className="flex items-center gap-4">
+      <svg viewBox="0 0 44 44" className="h-28 w-28 shrink-0 -rotate-90">
+        {panel.points.map((p, i) => {
+          const frac = p.value / total
+          const dash = frac * C
+          const el = (
+            <circle
+              key={p.label}
+              cx="22"
+              cy="22"
+              r={R}
+              fill="none"
+              strokeWidth="8"
+              stroke={p.exception ? 'rgb(220 38 38)' : SERIES[i % SERIES.length]}
+              strokeDasharray={`${Math.max(0, dash - 1)} ${C - Math.max(0, dash - 1)}`}
+              strokeDashoffset={-offset}
+            >
+              <title>{`${p.label} — ${exact(p.value, panel.format)}`}</title>
+            </circle>
+          )
+          offset += dash
+          return el
+        })}
+      </svg>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        {panel.points.map((p, i) => (
+          <div key={p.label} className="flex items-baseline gap-2 text-xs">
+            <span
+              className="mt-1 h-2.5 w-2.5 shrink-0 rounded-[3px]"
+              style={{ background: p.exception ? 'rgb(220 38 38)' : SERIES[i % SERIES.length] }}
+            />
+            <span className="text-foreground min-w-0 flex-1 truncate">{p.label}</span>
+            <span className="text-muted-foreground shrink-0 tabular-nums">
+              {Math.round((p.value / total) * 100)}%
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function PanelCard({ panel }: { panel: Panel }) {
+  const body =
+    panel.question === 'split' && (panel.series?.length ?? 0) > 1 ? (
+      <SplitPanel panel={panel} />
+    ) : panel.question === 'pareto' && panel.points.length >= 3 ? (
+      <ParetoPanel panel={panel} />
+    ) : panel.question === 'composition' && panel.points.length >= 3 ? (
+      <DonutPanel panel={panel} />
+    ) : (
+      <BarPanel panel={panel} />
+    )
+
+  return (
+    <Card title={panel.title} note={panel.note}>
+      {body}
+    </Card>
+  )
+}
 
 /** Time on the x-axis, so a trend is a line. */
 function TrendChart({ trend }: { trend: NonNullable<Analysis['trend']> }) {
@@ -106,7 +397,7 @@ function TrendChart({ trend }: { trend: NonNullable<Analysis['trend']> }) {
   const H = 40
   const x = (i: number) => (pts.length === 1 ? W / 2 : (i / (pts.length - 1)) * W)
   const y = (v: number) => H - (v / max) * (H - 4)
-  const path = (pick: (p: TrendPoint) => number | null | undefined) => {
+  const line = (pick: (p: TrendPoint) => number | null | undefined) => {
     const d = pts
       .map((p, i) => {
         const v = pick(p)
@@ -115,11 +406,19 @@ function TrendChart({ trend }: { trend: NonNullable<Analysis['trend']> }) {
       .filter(Boolean)
     return d.length ? `M${d.join(' L')}` : ''
   }
+  const area = `${line((p) => p.value)} L${x(pts.length - 1)},${H} L${x(0)},${H} Z`
+  const hasCompare = pts.some((p) => p.compare != null)
 
   return (
     <div className="glass-card p-4">
       <h3 className="text-foreground text-sm font-semibold">{trend.title}</h3>
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="mt-3 h-40 w-full">
+        <defs>
+          <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--viz-1)" stopOpacity="0.28" />
+            <stop offset="100%" stopColor="var(--viz-1)" stopOpacity="0" />
+          </linearGradient>
+        </defs>
         {[0.25, 0.5, 0.75].map((f) => (
           <line
             key={f}
@@ -131,9 +430,10 @@ function TrendChart({ trend }: { trend: NonNullable<Analysis['trend']> }) {
             strokeWidth="0.2"
           />
         ))}
-        {pts.some((p) => p.compare != null) && (
+        {pts.length > 1 && <path d={area} fill="url(#trendFill)" stroke="none" />}
+        {hasCompare && (
           <path
-            d={path((p) => p.compare)}
+            d={line((p) => p.compare)}
             fill="none"
             className="stroke-muted-foreground"
             strokeWidth="0.6"
@@ -142,14 +442,16 @@ function TrendChart({ trend }: { trend: NonNullable<Analysis['trend']> }) {
           />
         )}
         <path
-          d={path((p) => p.value)}
+          d={line((p) => p.value)}
           fill="none"
-          className="stroke-primary"
+          stroke="var(--viz-1)"
           strokeWidth="1"
           vectorEffect="non-scaling-stroke"
         />
         {pts.map((p, i) => (
-          <circle key={p.label} cx={x(i)} cy={y(p.value)} r="0.8" className="fill-primary" />
+          <circle key={p.label} cx={x(i)} cy={y(p.value)} r="0.9" fill="var(--viz-1)">
+            <title>{`${p.label} — ${exact(p.value, trend.format)}`}</title>
+          </circle>
         ))}
       </svg>
       <div className="text-muted-foreground mt-2 flex justify-between text-[10px]">
@@ -159,58 +461,94 @@ function TrendChart({ trend }: { trend: NonNullable<Analysis['trend']> }) {
       </div>
       <p className="text-muted-foreground mt-2 text-xs">
         {trend.valueLabel}
-        {pts.some((p) => p.compare != null) &&
-          ` · dashed is ${trend.compareLabel ?? 'the previous period'}`}
+        {hasCompare && ` · dashed is ${trend.compareLabel ?? 'the previous period'}`}
       </p>
     </div>
   )
 }
 
 /**
- * A panel.
+ * The grid, shaded by size.
  *
- * Every shape here is drawn as bars, because on screen a horizontal bar reads
- * a ranking, an ageing and a funnel equally well and the label has room. What
- * does not change between here and the workbook is which panels become charts
- * at all, and what each one is called.
+ * A block of forty numbers is a block of forty numbers: the eye reads every
+ * one before it finds the big month. Shaded, the shape of the year is there
+ * before a single figure is read. One hue, and a cell that could not be
+ * computed stays empty rather than being shaded as nought.
  */
-function PanelCard({ panel }: { panel: Panel }) {
-  const max = Math.max(...panel.points.map((p) => Math.abs(p.value)), 1)
-  const total = panel.points.reduce((s, p) => s + p.value, 0)
+function MatrixHeat({ matrix }: { matrix: NonNullable<Analysis['matrix']> }) {
+  const all = matrix.rows.flatMap((r) => r.values.filter((v): v is number => v != null))
+  const max = Math.max(...all, 1)
 
   return (
-    <div className="glass-card p-4">
-      <h3 className="text-foreground text-sm font-semibold">{panel.title}</h3>
-      <div className="mt-3 space-y-2">
-        {panel.points.map((p, i) => (
-          <div key={p.label}>
-            <div className="flex items-baseline justify-between gap-3 text-xs">
-              <span className="text-foreground min-w-0 truncate">{p.label}</span>
-              <span className="text-muted-foreground shrink-0 tabular-nums">
-                {short(p.value, panel.format)}
-                {panel.question === 'composition' && total > 0 && (
-                  <span className="ml-1 opacity-70">({Math.round((p.value / total) * 100)}%)</span>
-                )}
-              </span>
-            </div>
-            <div className="bg-secondary mt-1 h-2 w-full overflow-hidden rounded-full">
-              <div
-                className={`h-full rounded-full ${shadeFor(i, p.exception)}`}
-                style={{ width: `${Math.max(2, (Math.abs(p.value) / max) * 100)}%` }}
-              />
-            </div>
-          </div>
-        ))}
+    <div className="glass-card overflow-hidden p-0">
+      <div className="border-border flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
+        <h3 className="text-foreground text-sm font-semibold">{matrix.title}</h3>
+        <span className="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+          Low
+          <span className="flex">
+            {RAMP.map((c) => (
+              <span key={c} className="h-2.5 w-4" style={{ background: c }} />
+            ))}
+          </span>
+          High
+        </span>
       </div>
-      {panel.note && <p className="text-muted-foreground mt-3 text-[11px] italic">{panel.note}</p>}
+      <div className="overflow-x-auto">
+        <table className="subtable w-full">
+          <thead>
+            <tr>
+              <th>{matrix.rowLabel}</th>
+              {matrix.columns.map((c) => (
+                <th key={c} className="text-right">
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.rows.map((r) => (
+              <tr key={r.label}>
+                <td className="whitespace-nowrap">{r.label}</td>
+                {r.values.map((v, i) => (
+                  <td
+                    key={i}
+                    className="text-right tabular-nums"
+                    title={
+                      v == null
+                        ? `${r.label} · ${matrix.columns[i]} — nothing`
+                        : `${r.label} · ${matrix.columns[i]} — ${exact(v, matrix.format)}`
+                    }
+                    style={
+                      v == null
+                        ? undefined
+                        : {
+                            background: `color-mix(in srgb, var(--viz-1) ${Math.round((v / max) * 70)}%, transparent)`,
+                          }
+                    }
+                  >
+                    {v == null ? '—' : short(v, matrix.format)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
 
-export function ReportDashboard({ analysis }: { analysis: Analysis }) {
-  // One bar is not a chart. The same rule the workbook applies.
-  const cards = analysis.panels.filter((p) => p.points.length < 2)
-  const charts = analysis.panels.filter((p) => p.points.length >= 2)
+export function ReportDashboard({
+  analysis,
+  rowCount,
+}: {
+  analysis: Analysis
+  rowCount?: number
+}) {
+  // The same rule the workbook applies: only a panel with nothing in it is a
+  // card. A single bar against a labelled axis still says what the figure is.
+  const cards = analysis.panels.filter((p) => p.points.length === 0)
+  const charts = analysis.panels.filter((p) => p.points.length > 0)
 
   return (
     <div className="space-y-5">
@@ -218,13 +556,27 @@ export function ReportDashboard({ analysis }: { analysis: Analysis }) {
         <p className="text-primary text-base font-semibold">{analysis.headline}</p>
       )}
 
+      {/* Says so when there is barely anything to look at, rather than leaving
+        the reader to decide whether the report is broken or the period empty. */}
+      {rowCount != null && rowCount > 0 && rowCount < 5 && (
+        <p className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-400">
+          <AlertTriangle size={14} className="mt-px shrink-0" />
+          This period holds {rowCount} {rowCount === 1 ? 'row' : 'rows'}, so the panels below have
+          very little to compare. They fill out as more documents are raised — nothing here is
+          broken.
+        </p>
+      )}
+
       {analysis.kpis.length > 0 && (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {analysis.kpis.map((k) => (
-            <div key={k.label} className="glass-card p-3">
+            <div
+              key={k.label}
+              className={`glass-card p-3 ${k.tone ? `border ${TONE_EDGE[k.tone]}` : ''}`}
+            >
               <p className="text-muted-foreground text-xs">{k.label}</p>
               <p
-                className={`mt-1 text-lg font-semibold tabular-nums ${k.tone ? TONE_TEXT[k.tone] : 'text-foreground'}`}
+                className={`mt-1 text-xl font-semibold tabular-nums ${k.tone ? TONE_TEXT[k.tone] : 'text-foreground'}`}
               >
                 {kpiText(k)}
               </p>
@@ -250,63 +602,26 @@ export function ReportDashboard({ analysis }: { analysis: Analysis }) {
         <div className="glass-card divide-border divide-y p-0">
           {cards.map((p) => (
             <div key={p.title} className="flex items-center justify-between gap-3 px-4 py-2.5">
-              <span className="text-foreground text-sm">
-                {p.title}
-                {p.points[0] && (
-                  <span className="text-muted-foreground"> · {p.points[0].label}</span>
-                )}
-              </span>
-              <span className="text-foreground shrink-0 text-sm font-medium tabular-nums">
-                {p.points[0] ? short(p.points[0].value, p.format) : '—'}
-              </span>
+              <span className="text-foreground text-sm">{p.title}</span>
+              <span className="text-muted-foreground shrink-0 text-sm">Nothing in this period</span>
             </div>
           ))}
         </div>
       )}
 
-      {analysis.matrix && (
-        <div className="glass-card overflow-hidden p-0">
-          <h3 className="border-border text-foreground border-b px-4 py-2.5 text-sm font-semibold">
-            {analysis.matrix.title}
-          </h3>
-          <div className="overflow-x-auto">
-            <table className="subtable w-full">
-              <thead>
-                <tr>
-                  <th>{analysis.matrix.rowLabel}</th>
-                  {analysis.matrix.columns.map((c) => (
-                    <th key={c} className="text-right">
-                      {c}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {analysis.matrix.rows.map((r) => (
-                  <tr key={r.label}>
-                    <td>{r.label}</td>
-                    {r.values.map((v, i) => (
-                      <td key={i} className="text-right tabular-nums">
-                        {v == null ? '—' : short(v, analysis.matrix!.format)}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {analysis.matrix && <MatrixHeat matrix={analysis.matrix} />}
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {analysis.insights.length > 0 && (
           <div className="glass-card p-4">
-            <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">
+            <h3 className="text-foreground flex items-center gap-2 text-sm font-semibold">
+              <Lightbulb size={14} className="text-primary" />
               What the figures show
             </h3>
-            <ul className="mt-2 space-y-1.5">
+            <ul className="mt-2.5 space-y-2">
               {analysis.insights.map((line) => (
-                <li key={line} className="text-foreground text-sm leading-snug">
+                <li key={line} className="text-foreground flex gap-2 text-sm leading-snug">
+                  <span className="bg-primary mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full" />
                   {line}
                 </li>
               ))}
@@ -317,12 +632,14 @@ export function ReportDashboard({ analysis }: { analysis: Analysis }) {
           nobody reads is a caveat that did not happen. */}
         {analysis.caveats.length > 0 && (
           <div className="glass-card p-4">
-            <h3 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">
+            <h3 className="text-foreground flex items-center gap-2 text-sm font-semibold">
+              <AlertTriangle size={14} className="text-amber-400" />
               What they do not show
             </h3>
-            <ul className="mt-2 space-y-1.5">
+            <ul className="mt-2.5 space-y-2">
               {analysis.caveats.map((line) => (
-                <li key={line} className="text-sm leading-snug text-amber-400/90">
+                <li key={line} className="flex gap-2 text-sm leading-snug text-amber-400/90">
+                  <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400/70" />
                   {line}
                 </li>
               ))}
