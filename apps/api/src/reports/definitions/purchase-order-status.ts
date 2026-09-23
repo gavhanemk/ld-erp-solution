@@ -11,13 +11,35 @@ import {
   topWithRest,
 } from './shared'
 
+/*
+ * The five states an order can actually be in.
+ *
+ * These are `PurchaseOrderStatus` in the schema and must stay level with it.
+ * They had drifted: this map carried RECEIVED and CLOSED, which the enum has
+ * never had, and was missing COMPLETED, which it does. Three things were
+ * quietly wrong because of it — the Status filter offered two options that
+ * matched no row and returned an empty report with no explanation, the
+ * "Orders by stage" chart never counted a completed order, and the Data sheet
+ * printed a bare COMPLETED where every other row had a word.
+ *
+ * None of it raised anything. A word map with a key nothing uses is silent,
+ * and a missing key falls through to the raw value, which looks like a
+ * styling slip rather than a filter that cannot work.
+ */
+const STATUS_TONE: Record<string, Tone> = {
+  DRAFT: 'neutral',
+  SENT: 'info',
+  PARTIALLY_RECEIVED: 'warn',
+  COMPLETED: 'good',
+  CANCELLED: 'neutral',
+}
+
 const STATUS_WORDS: Record<string, string> = {
   DRAFT: 'Draft',
   SENT: 'Sent',
   PARTIALLY_RECEIVED: 'Part received',
-  RECEIVED: 'Received',
+  COMPLETED: 'Completed',
   CANCELLED: 'Cancelled',
-  CLOSED: 'Closed',
 }
 
 /**
@@ -57,7 +79,14 @@ export const purchaseOrderStatus: ReportDefinition = {
     { key: 'pendingQty', label: 'Still Due', type: 'qty', total: 'sum' },
     { key: 'orderValue', label: 'Order Value', type: 'money', total: 'sum' },
     { key: 'billedValue', label: 'Billed', type: 'money', total: 'sum' },
-    { key: 'status', label: 'Status', type: 'badge', badges: STATUS_WORDS, width: 15 },
+    {
+      key: 'status',
+      label: 'Status',
+      type: 'badge',
+      badges: STATUS_WORDS,
+      badgeTones: STATUS_TONE,
+      width: 15,
+    },
     { key: 'daysOpen', label: 'Days Open', type: 'integer', width: 11 },
   ],
 
@@ -206,16 +235,6 @@ export const purchaseOrderStatus: ReportDefinition = {
       ]
     ).filter((p) => p.value > 0)
 
-    /** A stage is a state, and every state here has a settled colour. */
-    const STATUS_TONE: Record<string, Tone> = {
-      DRAFT: 'neutral',
-      SENT: 'info',
-      PARTIALLY_RECEIVED: 'warn',
-      RECEIVED: 'good',
-      CANCELLED: 'neutral',
-      CLOSED: 'good',
-    }
-
     const byStatus = Object.keys(STATUS_WORDS)
       .map((s) => ({
         label: STATUS_WORDS[s],
@@ -259,6 +278,33 @@ export const purchaseOrderStatus: ReportDefinition = {
       rows,
       totalRows,
       analysis: {
+        exceptions: [
+          {
+            label: 'Past the wanted date',
+            value: late.length || null,
+            format: 'integer',
+            basis: late.length
+              ? `orders overdue, ${round2(late.reduce((n, r) => n + r.orderValue, 0)).toLocaleString('en-IN')} in value`
+              : 'nothing overdue with goods outstanding',
+            tone: 'bad',
+          },
+          {
+            label: 'Open more than a month',
+            value: openOrders.filter((r) => r.daysOpen > 30).length || null,
+            format: 'integer',
+            basis: 'orders raised over 30 days ago and not fully received',
+            tone: 'warn',
+          },
+          {
+            label: 'Still to deliver',
+            value: stillDue.length
+              ? round2(stillDue.reduce((n, r) => n + r.orderValue - r.billedValue, 0))
+              : null,
+            format: 'money',
+            basis: `across ${stillDue.length} ${stillDue.length === 1 ? 'order' : 'orders'} with goods outstanding`,
+            tone: 'warn',
+          },
+        ],
         headline:
           live.length === 0
             ? 'No orders were raised in this period.'

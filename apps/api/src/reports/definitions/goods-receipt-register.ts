@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client'
-import type { Panel, ReportDefinition } from '../types'
+import type { Panel, ReportDefinition, Tone } from '../types'
 import {
   byMonth,
   dateRangeFilters,
@@ -11,6 +11,15 @@ import {
   itemFilter,
   topWithRest,
 } from './shared'
+
+/** Refused is the one state on a receipt that needs somebody to act. */
+const STATUS_TONE: Record<string, Tone> = {
+  DRAFT: 'neutral',
+  QC_PENDING: 'warn',
+  ACCEPTED: 'good',
+  REJECTED: 'bad',
+  CANCELLED: 'neutral',
+}
 
 const STATUS_WORDS: Record<string, string> = {
   DRAFT: 'Draft',
@@ -59,7 +68,14 @@ export const goodsReceiptRegister: ReportDefinition = {
     { key: 'rejected', label: 'Rejected', type: 'qty', total: 'sum' },
     { key: 'accepted', label: 'Into Stock', type: 'qty', total: 'sum' },
     { key: 'store', label: 'Store', type: 'text', width: 22 },
-    { key: 'status', label: 'Status', type: 'badge', badges: STATUS_WORDS, width: 18 },
+    {
+      key: 'status',
+      label: 'Status',
+      type: 'badge',
+      badges: STATUS_WORDS,
+      badgeTones: STATUS_TONE,
+      width: 18,
+    },
   ],
 
   /**
@@ -207,6 +223,31 @@ export const goodsReceiptRegister: ReportDefinition = {
       rows,
       totalRows,
       analysis: {
+        exceptions: [
+          {
+            label: 'Refused at the gate',
+            value: rejected || null,
+            format: 'qty',
+            basis: `of ${received.toLocaleString('en-IN')} received — raise a debit note if it has been billed`,
+            tone: 'bad',
+          },
+          {
+            label: 'Refusal rate',
+            // Only when it is above the two percent the mill treats as
+            // ordinary wastage. Below that it is a KPI, not an exception.
+            value: rejectRate != null && rejectRate > 0.02 ? rejectRate : null,
+            format: 'percent',
+            basis: 'above the 2% treated as ordinary wastage',
+            tone: 'bad',
+          },
+          {
+            label: 'Waiting for checking',
+            value: live.filter((r) => r.status === 'QC_PENDING').length || null,
+            format: 'integer',
+            basis: 'receipt lines booked in but not yet passed or refused',
+            tone: 'warn',
+          },
+        ],
         headline:
           live.length === 0
             ? 'Nothing was booked in during this period.'

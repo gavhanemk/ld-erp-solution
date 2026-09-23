@@ -88,6 +88,38 @@ const SYNTHETIC: { def: ReportDefinition; result: ReportResult } = {
       ),
       analysis: {
         headline: '₹1,42,80,000 billed across 30 bills from 5 suppliers.',
+        exceptions: [
+          {
+            label: 'Past the due date',
+            value: 2840000,
+            format: 'money',
+            basis: 'across 6 bills already due',
+            tone: 'bad',
+          },
+          {
+            label: 'Still owed',
+            value: 4120000,
+            format: 'money',
+            basis: 'of ₹1,42,80,000 billed in this period',
+            tone: 'warn',
+          },
+          {
+            // Nought, so it must not be printed. A block of noughts teaches
+            // the reader the block is decorative.
+            label: 'Nothing refused — must not appear',
+            value: 0,
+            format: 'integer',
+            basis: 'this line exists to prove the filter works',
+            tone: 'warn',
+          },
+          {
+            label: 'Oldest unpaid',
+            value: 73,
+            format: 'days',
+            basis: 'past its due date',
+            tone: 'warn',
+          },
+        ],
         kpis: [
           { label: 'Taxable value', value: 14280000, format: 'money', basis: 'across 30 bills' },
           {

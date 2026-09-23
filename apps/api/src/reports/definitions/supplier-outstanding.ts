@@ -200,6 +200,29 @@ export const supplierOutstanding: ReportDefinition = {
        */
       totalRows: bills.length >= rowCap ? totalRows : undefined,
       analysis: {
+        exceptions: [
+          {
+            label: 'MSME past 45 days',
+            value: msmeLateAmount || null,
+            format: 'money',
+            basis: `across ${msmeLate.length} ${msmeLate.length === 1 ? 'bill' : 'bills'} — interest accrues by law`,
+            tone: 'bad',
+          },
+          {
+            label: 'Past the due date',
+            value: overdueAmount || null,
+            format: 'money',
+            basis: `across ${overdue.length} ${overdue.length === 1 ? 'bill' : 'bills'}`,
+            tone: 'bad',
+          },
+          {
+            label: 'Oldest unpaid',
+            value: oldest || null,
+            format: 'days',
+            basis: 'past its due date',
+            tone: 'warn',
+          },
+        ],
         headline:
           rows.length === 0
             ? 'Nothing is outstanding — every supplier bill is paid in full.'

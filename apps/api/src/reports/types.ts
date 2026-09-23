@@ -35,6 +35,14 @@ export interface ReportColumn {
   /** For `badge`: the word to print for each stored value. */
   badges?: Record<string, string>
   /**
+   * For `badge`: what each stored value means, which tints its cell.
+   *
+   * Declared, never inferred from the word. "Closed" is good on an order and
+   * bad on a complaint, and a builder guessing from the text would be right
+   * until the day it silently was not.
+   */
+  badgeTones?: Record<string, Tone>
+  /**
    * Whether the Data sheet's last row totals this column.
    *
    * `sum` for money and quantities that add up. `none` for anything that does
@@ -228,10 +236,42 @@ export interface Matrix {
   format: 'money' | 'qty' | 'integer' | 'percent'
 }
 
+/**
+ * One line of the Needs Attention block.
+ *
+ * The difference between this and a KPI is what the reader is meant to do.
+ * A KPI is the position — ₹32 lakh billed, 47 bills. An exception is a
+ * decision somebody has to take: money past its due date, goods refused at
+ * the gate, an order nobody has chased in two months. A dashboard where both
+ * sit in the same band makes the reader work out which is which every time,
+ * and on a busy morning they will not.
+ *
+ * `value` is null when the figure cannot be computed. An exception with
+ * nothing in it is not listed at all — a block of noughts trains the reader
+ * that the block is decorative.
+ */
+export interface Exception {
+  label: string
+  value: number | null
+  format: 'money' | 'qty' | 'integer' | 'percent' | 'days'
+  unit?: string
+  /** What it is out of, or what to do about it. */
+  basis: string
+  /** Amber for watch, red for act. Nothing here is neutral. */
+  tone: 'warn' | 'bad'
+}
+
 export interface ReportAnalysis {
   /** One sentence naming what the period actually did. */
   headline?: string
   kpis: Kpi[]
+  /**
+   * What needs a decision rather than a reading.
+   *
+   * Printed in its own block, above the charts on screen and on the sheet —
+   * a reader who looks at nothing else should still see these.
+   */
+  exceptions?: Exception[]
   trend?: Trend
   panels: Panel[]
   matrix?: Matrix

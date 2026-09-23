@@ -12,6 +12,14 @@ import {
   topWithRest,
 } from './shared'
 
+/** Settled is green, part paid is the ordinary case, unpaid is waiting. */
+const STATUS_TONE: Record<string, Tone> = {
+  UNPAID: 'warn',
+  PARTIAL: 'info',
+  PAID: 'good',
+  CANCELLED: 'neutral',
+}
+
 const STATUS_WORDS: Record<string, string> = {
   UNPAID: 'Unpaid',
   PARTIAL: 'Part paid',
@@ -66,7 +74,14 @@ export const purchaseRegister: ReportDefinition = {
     { key: 'tds', label: 'TDS', type: 'money', total: 'sum' },
     { key: 'paid', label: 'Paid', type: 'money', total: 'sum' },
     { key: 'balance', label: 'Outstanding', type: 'money', total: 'sum' },
-    { key: 'status', label: 'Status', type: 'badge', badges: STATUS_WORDS, width: 12 },
+    {
+      key: 'status',
+      label: 'Status',
+      type: 'badge',
+      badges: STATUS_WORDS,
+      badgeTones: STATUS_TONE,
+      width: 12,
+    },
     { key: 'dueDate', label: 'Due', type: 'date', width: 14 },
   ],
 
@@ -183,16 +198,16 @@ export const purchaseRegister: ReportDefinition = {
     const otherState = round2(live.filter((r) => r.igst > 0).reduce((s, r) => s + r.taxable, 0))
     const noGst = round2(taxable - withinState - otherState)
 
+    // Past the due date and not settled. Counted here rather than in the
+    // panels because it is the one figure on this report somebody has to do
+    // something about today.
+    const pastDue = live.filter(
+      (r) => r.balance > 0 && r.dueDate != null && r.dueDate < new Date()
+    )
+    const pastDueAmount = round2(pastDue.reduce((s, r) => s + r.balance, 0))
+
     const bySupplier = new Map<string, number>()
     for (const r of live) bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.total)
-
-    /** Settled is green, part paid is the ordinary case, unpaid is waiting. */
-    const STATUS_TONE: Record<string, Tone> = {
-      UNPAID: 'warn',
-      PARTIAL: 'info',
-      PAID: 'good',
-      CANCELLED: 'neutral',
-    }
 
     const byStatus = Object.keys(STATUS_WORDS)
       .filter((s) => s !== 'CANCELLED')
@@ -368,6 +383,22 @@ export const purchaseRegister: ReportDefinition = {
       rows,
       totalRows,
       analysis: {
+        exceptions: [
+          {
+            label: 'Past the due date',
+            value: pastDueAmount || null,
+            format: 'money',
+            basis: `across ${pastDue.length} ${pastDue.length === 1 ? 'bill' : 'bills'} already due`,
+            tone: 'bad',
+          },
+          {
+            label: 'Still owed',
+            value: outstanding || null,
+            format: 'money',
+            basis: `of ₹${billed.toLocaleString('en-IN')} billed in this period`,
+            tone: 'warn',
+          },
+        ],
         headline:
           live.length === 0
             ? 'No bills were booked in this period.'

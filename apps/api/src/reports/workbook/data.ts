@@ -1,5 +1,5 @@
 import type ExcelJS from 'exceljs'
-import type { ReportColumn, ReportDefinition } from '../types'
+import type { ReportColumn, ReportDefinition, Tone } from '../types'
 import { FMT, INK, PAPER, numberFormatFor } from './theme'
 
 /**
@@ -7,6 +7,31 @@ import { FMT, INK, PAPER, numberFormatFor } from './theme'
  * apart over a rename.
  */
 export const DATA_SHEET = 'Data'
+
+/**
+ * A status badge's paper and ink.
+ *
+ * Paler than the chart tones on purpose: a chart fill is read from across the
+ * room and a table cell is read with text sitting on it, so the same green
+ * that works on a bar makes a word underneath it unreadable.
+ */
+const BADGE_PAPER: Record<Tone, string> = {
+  good: 'FFDCFCE7',
+  normal: 'FFCCFBF1',
+  info: 'FFDBEAFE',
+  warn: 'FFFEF3C7',
+  bad: 'FFFEE2E2',
+  neutral: 'FFF1F5F9',
+}
+
+const BADGE_INK: Record<Tone, string> = {
+  good: 'FF166534',
+  normal: 'FF115E59',
+  info: 'FF1E40AF',
+  warn: 'FF92400E',
+  bad: 'FF991B1B',
+  neutral: 'FF475569',
+}
 
 /**
  * Every row, one header, an autofilter.
@@ -38,9 +63,15 @@ export function buildData(
     cell.alignment = { vertical: 'middle', wrapText: true }
   })
 
-  for (const r of rows) {
+  rows.forEach((r, n) => {
     const added = ws.addRow(def.columns.map((c) => cellValue(c, r[c.key])))
     added.font = { name: 'Calibri', size: 10, color: { argb: INK.body } }
+
+    // Every other row a shade off white. Twenty columns of figures is where
+    // the eye loses its place mid-row and reads one order's quantity against
+    // another's value — banding is what stops that, and it costs nothing.
+    const banded = n % 2 === 1
+
     def.columns.forEach((c, i) => {
       const cell = added.getCell(i + 1)
       const fmt = formatFor(c)
@@ -48,8 +79,19 @@ export function buildData(
       if (c.type === 'money' || c.type === 'qty' || c.type === 'integer' || c.type === 'percent') {
         cell.alignment = { horizontal: 'right' }
       }
+
+      // A status reads as a badge: its own tint and its own ink, so a
+      // cancelled row is findable by scrolling rather than by reading.
+      const tone = c.type === 'badge' ? c.badgeTones?.[String(r[c.key])] : undefined
+      if (tone) {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BADGE_PAPER[tone] } }
+        cell.font = { name: 'Calibri', size: 10, bold: true, color: { argb: BADGE_INK[tone] } }
+        cell.alignment = { horizontal: 'center' }
+      } else if (banded) {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.card } }
+      }
     })
-  }
+  })
 
   // Totals, only where the column said it adds up. There is deliberately no
   // average: a mean of a column nobody weighted looks like an answer and is

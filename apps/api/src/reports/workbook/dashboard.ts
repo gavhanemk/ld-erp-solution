@@ -245,6 +245,58 @@ export function buildDashboard(
     row += Math.ceil(analysis.kpis.length / 4) * 4 + 1
   }
 
+  /*
+   * ── Needs attention ───────────────────────────────────────────────────
+   *
+   * Above the charts, because a reader who looks at nothing else should still
+   * see these. A KPI is the position; this is the list of things somebody has
+   * to decide about, and mixing the two makes the reader sort them every time.
+   *
+   * Only lines with something in them. A block of noughts teaches the reader
+   * that the block is decorative, and then the one month it is not, they skip
+   * it anyway.
+   */
+  const exceptions = (analysis.exceptions ?? []).filter((e) => e.value != null && e.value !== 0)
+  if (exceptions.length) {
+    sectionRule(ws, row, 'Needs attention')
+    row += 1
+    exceptions.forEach((e) => {
+      const paper = e.tone === 'bad' ? PAPER.bad : PAPER.warn
+      ws.mergeCells(row, 1, row, 4)
+      const label = ws.getCell(row, 1)
+      label.value = e.label
+      label.font = { name: 'Calibri', size: 10, bold: true, color: { argb: TONE_INK[e.tone] } }
+      label.alignment = { vertical: 'middle', indent: 1 }
+
+      ws.mergeCells(row, 5, row, 6)
+      const value = ws.getCell(row, 5)
+      value.value = e.value
+      value.numFmt =
+        e.format === 'money'
+          ? FMT.money
+          : e.format === 'percent'
+            ? FMT.percent
+            : e.format === 'qty'
+              ? FMT.qty
+              : FMT.integer
+      value.font = { name: 'Calibri', size: 11, bold: true, color: { argb: TONE_INK[e.tone] } }
+      value.alignment = { horizontal: 'right', vertical: 'middle' }
+
+      ws.mergeCells(row, 7, row, GRID)
+      const basis = ws.getCell(row, 7)
+      basis.value = e.basis
+      basis.font = { name: 'Calibri', size: 9, color: { argb: TONE_INK[e.tone] } }
+      basis.alignment = { vertical: 'middle', indent: 1 }
+
+      for (let c = 1; c <= GRID; c++) {
+        ws.getCell(row, c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: paper } }
+      }
+      ws.getRow(row).height = 18
+      row += 1
+    })
+    row += 1
+  }
+
   // ── The headline trend, full width ────────────────────────────────────
   if (analysis.trend && analysis.trend.points.length > 1) {
     const t = analysis.trend

@@ -45,7 +45,7 @@ export const FMT = {
   qty: '#,##0.###',
   integer: '#,##0',
   percent: '0.0%',
-  date: 'dd-mmm-yyyy',
+  date: 'dd mmm yyyy',
   /** Charts plot lakhs, so their axis wants one decimal and no grouping band. */
   lakh: '#,##0.0',
 } as const

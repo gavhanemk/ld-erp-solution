@@ -1,6 +1,6 @@
 'use client'
 
-import { Info, Lightbulb } from 'lucide-react'
+import { AlertTriangle, Info, Lightbulb } from 'lucide-react'
 
 /**
  * The dashboard, on screen.
@@ -66,9 +66,20 @@ export interface Panel {
   note?: string
 }
 
+/** What needs a decision rather than a reading. */
+export interface Exception {
+  label: string
+  value: number | null
+  format: 'money' | 'qty' | 'integer' | 'percent' | 'days'
+  unit?: string
+  basis: string
+  tone: 'warn' | 'bad'
+}
+
 export interface Analysis {
   headline?: string
   kpis: Kpi[]
+  exceptions?: Exception[]
   trend?: {
     title: string
     valueLabel: string
@@ -637,6 +648,48 @@ export function ReportDashboard({
           ))}
         </div>
       )}
+
+      {/* Above the charts, because a reader who looks at nothing else should
+        still see these. A KPI is the position; this is what somebody has to
+        decide about. Only lines with something in them — a block of noughts
+        teaches the reader the block is decorative. */}
+      {(() => {
+        const live = (analysis.exceptions ?? []).filter((e) => e.value != null && e.value !== 0)
+        if (!live.length) return null
+        return (
+          <div className="glass-card overflow-hidden p-0">
+            <h3 className="border-border text-foreground flex items-center gap-2 border-b px-4 py-2.5 text-sm font-semibold">
+              <AlertTriangle size={14} className="text-amber-400" />
+              Needs attention
+            </h3>
+            <ul className="divide-border divide-y">
+              {live.map((e) => (
+                <li
+                  key={e.label}
+                  className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5"
+                >
+                  <span
+                    className="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+                    style={{ background: e.tone === 'bad' ? TONE.bad : TONE.warn }}
+                  />
+                  <span className="text-foreground text-sm font-medium">{e.label}</span>
+                  <span
+                    className="shrink-0 text-sm font-semibold tabular-nums"
+                    style={{ color: e.tone === 'bad' ? TONE.bad : TONE.warn }}
+                  >
+                    {e.value == null
+                      ? '—'
+                      : e.format === 'days'
+                        ? `${Math.round(e.value)} ${Math.round(e.value) === 1 ? 'day' : 'days'}`
+                        : short(e.value, e.format)}
+                  </span>
+                  <span className="text-muted-foreground ml-auto text-xs">{e.basis}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )
+      })()}
 
       {analysis.trend && analysis.trend.points.length > 1 && <TrendChart trend={analysis.trend} />}
 
