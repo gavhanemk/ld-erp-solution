@@ -25,7 +25,7 @@ import {
   type PurchaseOrder,
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
-import type { EnquiryRecord } from '@/components/purchase/PurchaseEnquiryDialog'
+import type { EnquiryQuote, EnquiryRecord } from '@/components/purchase/enquiryTypes'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
@@ -137,7 +137,10 @@ export default function PurchaseOrdersPage() {
    * itself is fetched here, so what the form prefills from is what the server
    * currently holds and not a copy of a row that may be minutes stale.
    */
-  const [fromEnquiry, setFromEnquiry] = useState<EnquiryRecord | null>(null)
+  const [fromEnquiry, setFromEnquiry] = useState<{
+    enquiry: EnquiryRecord
+    quote: EnquiryQuote
+  } | null>(null)
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
   const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
@@ -155,14 +158,22 @@ export default function PurchaseOrdersPage() {
    * order by hand, which is what they would have done before any of this.
    */
   useEffect(() => {
-    const id = new URLSearchParams(window.location.search).get('fromEnquiry')
-    if (!id) return
+    const params = new URLSearchParams(window.location.search)
+    const id = params.get('fromEnquiry')
+    const quoteId = params.get('fromQuote')
+    if (!id || !quoteId) return
     let alive = true
     void api
       .get<{ data: EnquiryRecord }>(`/purchase/enquiries/${id}`)
       .then((res) => {
         if (!alive) return
-        setFromEnquiry(res.data)
+        const quote = res.data.quotes.find((q) => q.id === quoteId)
+        if (!quote) {
+          setError('That supplier is no longer on the enquiry.')
+          setDialog({ open: true, record: null })
+          return
+        }
+        setFromEnquiry({ enquiry: res.data, quote })
         setDialog({ open: true, record: null })
       })
       .catch((err) => {

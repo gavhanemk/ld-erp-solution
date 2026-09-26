@@ -33,7 +33,10 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
-import type { EnquiryRecord } from '@/components/purchase/PurchaseEnquiryDialog'
+import type {
+  EnquiryQuote,
+  EnquiryRecord as EnquiryLite,
+} from '@/components/purchase/enquiryTypes'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 
@@ -525,11 +528,14 @@ export function PurchaseOrderDialog({
    * the enquiry row, because the reference a price is defended with must come
    * from the recorded document rather than from a form.
    */
-  fromEnquiry?: EnquiryRecord | null
+  fromEnquiry?: { enquiry: EnquiryLite; quote: EnquiryQuote } | null
 }) {
   const isEdit = Boolean(record)
   /** Only for a new order — see the prop's note. */
-  const enquiry = isEdit ? null : (fromEnquiry ?? null)
+  const source = isEdit ? null : (fromEnquiry ?? null)
+  const enquiry = source?.enquiry ?? null
+  /** Whose answer the order is being built on — the rates come off this. */
+  const quote = source?.quote ?? null
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<Option[]>([])
@@ -650,7 +656,7 @@ export function PurchaseOrderDialog({
 
   useEffect(() => {
     if (!open) return
-    setSupplierId(record?.supplierId ?? enquiry?.supplier?.id ?? '')
+    setSupplierId(record?.supplierId ?? quote?.supplier.id ?? '')
     // A new order starts without a discount: most of this mill's carry none,
     // and a discount column that is live by default invites a figure nobody
     // agreed to.
@@ -732,7 +738,23 @@ export function PurchaseOrderDialog({
              * request still traces back to the job through the enquiry.
              */
             enquiry.lines.map((l) => {
-              const cat = categories.find((c) => c.id === (l.item as { category?: { id: string } })?.category?.id)
+              const cat = categories.find(
+                (c) => c.id === (l.item as { category?: { id: string } })?.category?.id
+              )
+              /*
+               * What THIS supplier said about this line.
+               *
+               * Looked up per line rather than read off the line itself: three
+               * suppliers answered the same enquiry and only the winner's rates
+               * belong on this order.
+               *
+               * The quantity follows what he offered where he offered less than
+               * was asked — a supplier who can manage 800 of the 1,240 has said
+               * so, and ordering 1,240 from him puts a figure on the document he
+               * never agreed to. The other 440 stays unplaced on the enquiry,
+               * which is where the buyer goes to split it.
+               */
+              const ql = quote?.lines.find((x) => x.enquiryLineId === l.id) ?? null
               return {
                 itemId: l.itemId,
                 codeText: l.item.code ?? '',
@@ -741,11 +763,11 @@ export function PurchaseOrderDialog({
                 description: l.description ?? '',
                 styleNo: '',
                 styleId: '',
-                qty: String(Number(l.qty)),
-                unitRate: l.quotedRate == null ? '' : String(Number(l.quotedRate)),
+                qty: String(Number(ql?.offeredQty ?? l.qty)),
+                unitRate: ql?.quotedRate == null ? '' : String(Number(ql.quotedRate)),
                 discount: '0',
                 discountUnit: '%' as const,
-                gstRate: l.gstRate == null ? '' : String(Number(l.gstRate)),
+                gstRate: ql?.gstRate == null ? '' : String(Number(ql.gstRate)),
                 mrLineId: l.mrLineId ?? null,
                 mrNumber: l.mrLine?.mr?.mrNumber ?? null,
                 enquiryLineId: l.id,
@@ -776,7 +798,7 @@ export function PurchaseOrderDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- categories is
     // read for the category dropdowns and would re-run this reset every time
     // the master list loads, wiping what the buyer had typed.
-  }, [open, record, enquiry])
+  }, [open, record, enquiry, quote])
 
   /*
    * The chosen supplier's addresses.
@@ -1659,6 +1681,7 @@ export function PurchaseOrderDialog({
     // The link, not the reference. The server fills `enquiryNo` and
     // `enquiryDate` from the enquiry's own PI row.
     enquiryId: enquiry?.id ?? null,
+    enquiryQuoteId: quote?.id ?? null,
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     poDate: poDate || undefined,
@@ -1977,31 +2000,48 @@ export function PurchaseOrderDialog({
               the rate, not a rule of ours, and he usually honours it anyway;
               refusing the order would mean retyping the whole thing by hand
               to place something he has already agreed to. */}
-            {enquiry && (
+            {enquiry && quote && (
               <div className="border-border/70 bg-secondary/30 flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-lg border px-3 py-2">
                 <span className="text-muted-foreground text-[11px]">
                   Raised from{' '}
                   <span className="text-foreground font-mono">{enquiry.enquiryNumber}</span>
+                  {/* Which of them won, said out loud. An enquiry that went to
+                    three suppliers gives three different prices, and an order
+                    that named only the enquiry would not say whose it is on. */}
+                  {enquiry.supplierCount > 1 && (
+                    <>
+                      {' · '}
+                      <span className="text-foreground">{quote.supplier.name}</span>
+                      {' of ' + enquiry.supplierCount}
+                    </>
+                  )}
                 </span>
-                {enquiry.piNumber && (
+                {quote.piNumber && (
                   <span className="text-muted-foreground text-[11px]">
-                    against PI{' '}
-                    <span className="text-foreground font-mono">{enquiry.piNumber}</span>
-                    {enquiry.piDate && ' dated ' + new Date(enquiry.piDate).toLocaleDateString("en-IN")}
+                    against PI <span className="text-foreground font-mono">{quote.piNumber}</span>
+                    {quote.piDate && ' dated ' + new Date(quote.piDate).toLocaleDateString('en-IN')}
                   </span>
                 )}
-                {enquiry.piValidUntil &&
-                  (new Date(enquiry.piValidUntil).getTime() < Date.now() ? (
+                {quote.piValidUntil &&
+                  (new Date(quote.piValidUntil).getTime() < Date.now() ? (
                     <span className="text-[11px] font-medium text-amber-400">
                       his price lapsed on{' '}
-                      {new Date(enquiry.piValidUntil).toLocaleDateString("en-IN")} — worth
-                      confirming before you send this
+                      {new Date(quote.piValidUntil).toLocaleDateString('en-IN')} — worth confirming
+                      before you send this
                     </span>
                   ) : (
                     <span className="text-muted-foreground text-[11px]">
-                      price held to {new Date(enquiry.piValidUntil).toLocaleDateString("en-IN")}
+                      price held to {new Date(quote.piValidUntil).toLocaleDateString('en-IN')}
                     </span>
                   ))}
+                {/* Ordering the one that is not cheapest is a decision, not a
+                  mistake — lead time and quality are not on that comparison —
+                  but it should be a decision taken knowingly. */}
+                {enquiry.best && enquiry.best.quoteId !== quote.id && (
+                  <span className="text-[11px] font-medium text-amber-400">
+                    {enquiry.best.supplierName} quoted less
+                  </span>
+                )}
               </div>
             )}
             <Section icon={FileText} title="Basic Details">

@@ -119,6 +119,12 @@ const createSchema = z.object({
    * form somebody could type anything into.
    */
   enquiryId: z.string().optional().nullable(),
+  /*
+   * Which supplier's answer on that enquiry. One enquiry goes to several
+   * suppliers, so the enquiry alone does not say whose price this order is
+   * built on — and that is the document the rate has to be traceable to.
+   */
+  enquiryQuoteId: z.string().optional().nullable(),
   // Which quotation this order answers, and whatever the mill quotes back.
   // Free text on purpose: every mill numbers these its own way.
   enquiryNo: z.string().max(50).optional().nullable(),
@@ -909,32 +915,47 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
    * and goes through. Refusing it would leave the buyer retyping the whole
    * order by hand to place something the supplier has already agreed to.
    */
-  const enquiry = data.enquiryId
-    ? await prisma.purchaseEnquiry.findUnique({
-        where: { id: data.enquiryId },
+  const quote = data.enquiryQuoteId
+    ? await prisma.purchaseEnquiryQuote.findUnique({
+        where: { id: data.enquiryQuoteId },
         select: {
           id: true,
-          enquiryNumber: true,
           supplierId: true,
-          status: true,
-          deletedAt: true,
           piNumber: true,
           piDate: true,
-          lines: { select: { id: true } },
+          supplier: { select: { name: true } },
+          enquiry: {
+            select: {
+              id: true,
+              enquiryNumber: true,
+              status: true,
+              deletedAt: true,
+              lines: { select: { id: true } },
+            },
+          },
         },
       })
     : null
 
-  if (data.enquiryId) {
-    if (!enquiry || enquiry.deletedAt) {
+  const enquiry = quote?.enquiry ?? null
+
+  if (data.enquiryQuoteId) {
+    if (!quote || !enquiry || enquiry.deletedAt) {
       throw new AppError('That enquiry no longer exists', 400, 'BAD_ENQUIRY')
     }
-    if (enquiry.supplierId !== data.supplierId) {
+    if (quote.supplierId !== data.supplierId) {
       throw new AppError(
-        `${enquiry.enquiryNumber} was sent to a different supplier. An order can only be raised ` +
-          `from an enquiry to the supplier it is being placed with.`,
+        `That quote on ${enquiry.enquiryNumber} is ${quote.supplier.name}'s. An order can only be ` +
+          `raised from the quote belonging to the supplier it is being placed with.`,
         400,
         'ENQUIRY_WRONG_SUPPLIER'
+      )
+    }
+    if (data.enquiryId && data.enquiryId !== enquiry.id) {
+      throw new AppError(
+        'That quote belongs to a different enquiry',
+        400,
+        'ENQUIRY_QUOTE_MISMATCH'
       )
     }
     if (enquiry.status === 'CLOSED') {
@@ -955,6 +976,12 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         )
       }
     }
+  } else if (data.enquiryId) {
+    throw new AppError(
+      "An order raised from an enquiry has to say which supplier's quote it is built on",
+      400,
+      'ENQUIRY_WITHOUT_QUOTE'
+    )
   } else if (data.lines.some((l) => l.enquiryLineId)) {
     throw new AppError(
       'A line cannot come off an enquiry unless the order says which enquiry',
@@ -1009,6 +1036,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         deliveryAddress: destination?.address ?? null,
         supplierAddress: await supplierBillingAddress(tx, data.supplierId, data.supplierAddressId),
         enquiryId: enquiry?.id ?? null,
+        enquiryQuoteId: quote?.id ?? null,
         /*
          * The supplier's own PI number wins over anything typed.
          *
@@ -1017,8 +1045,8 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
          * was typed is only used when there is no enquiry behind the order —
          * answering a quote that never became one on this system.
          */
-        enquiryNo: enquiry?.piNumber ?? data.enquiryNo ?? null,
-        enquiryDate: enquiry?.piDate ?? data.enquiryDate ?? null,
+        enquiryNo: quote?.piNumber ?? data.enquiryNo ?? null,
+        enquiryDate: quote?.piDate ?? data.enquiryDate ?? null,
         reference: data.reference ?? null,
         remark: data.remark ?? null,
         placeOfSupplyCode: tax.placeOfSupply,

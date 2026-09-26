@@ -1,14 +1,15 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
-  CalendarDays,
   ClipboardList,
   FileText,
   Loader2,
+  MapPin,
   Package,
+  Paperclip,
   Plus,
   Trash2,
   Truck,
@@ -16,11 +17,20 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
-import { Readout } from '@/components/purchase/FormBits'
+import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
+import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
 
 /**
  * Raising or correcting a purchase enquiry.
+ *
+ * Laid out as the mill's old ERP lays it out, because the people using this
+ * spent years on that form: Location, Purchase Enquiry No., Reference, Enquiry
+ * Date and Remark across the head; *Select Items From Indent Items* over the
+ * item table; Item Code, Category, Subcategory and Item down it; and the
+ * suppliers at the foot. The number is the one box that is read-only — it is
+ * allotted by the server on save, so two people raising an enquiry at once
+ * cannot be handed the same one.
  *
  * Deliberately smaller than the order form, which runs to four thousand lines.
  * An enquiry has no tax to split, no discount to place, no delivery address to
@@ -28,61 +38,21 @@ import { IndentItemsDialog, type IndentPick } from '@/components/purchase/Indent
  * the whole document is a question. Putting the order form's totals block on it
  * would be inventing figures nobody has quoted.
  *
- * The one rate here is `expectedRate`, and it is optional and labelled as an
- * estimate. What the supplier says goes on through `RecordQuoteDialog`, against
- * his PI number — never typed into this form, so a price on the system always
- * has a document behind it.
+ * No rate any supplier gave is typed here. What each of them says goes in
+ * against his own PI number through `RecordQuoteDialog`, so a price on the
+ * system always has a document behind it.
  */
-
-export interface EnquiryRecord {
-  id: string
-  enquiryNumber: string
-  enquiryDate: string
-  requiredDate: string | null
-  status: string
-  sentAt: string | null
-  piNumber: string | null
-  piDate: string | null
-  piAmount: string | null
-  piValidUntil: string | null
-  placeOfSupplyCode: string | null
-  notes: string | null
-  terms: string | null
-  remark: string | null
-  closeReason: string | null
-  supplier: {
-    id: string
-    code: string
-    name: string
-    gstin: string | null
-    stateCode: string | null
-  } | null
-  lines: Array<{
-    id: string
-    itemId: string
-    description: string | null
-    qty: string
-    expectedRate: string | null
-    quotedRate: string | null
-    gstRate: string | null
-    mrLineId: string | null
-    item: {
-      id: string
-      code: string
-      name: string
-      hsnCode: string | null
-      uom: { symbol: string } | null
-    }
-    mrLine: { id: string; mr: { id: string; mrNumber: string } } | null
-  }>
-}
 
 interface Supplier {
   id: string
   code: string
   name: string
-  gstin: string | null
-  stateCode: string | null
+}
+
+interface Category {
+  id: string
+  name: string
+  parentId: string | null
 }
 
 interface Item {
@@ -91,7 +61,12 @@ interface Item {
   name: string
   hsnCode: string | null
   uom: { symbol: string } | null
-  taxRate: { id: string; rate: string | number } | null
+  category: { id: string; name: string; parentId: string | null } | null
+}
+
+interface Warehouse {
+  id: string
+  name: string
 }
 
 /** One editable row. `id` is kept so the server can tell a correction from a swap. */
@@ -99,16 +74,15 @@ interface Line {
   key: string
   id: string | null
   itemId: string
-  itemLabel: string
-  uom: string
+  /** What was typed in the Item Code box, which may not have matched anything yet. */
+  codeText: string
+  categoryId: string
+  subcategoryId: string
   qty: string
   expectedRate: string
-  gstRate: string
   description: string
   mrLineId: string | null
   mrNumber: string | null
-  /** Set once the supplier has priced it, and shown read-only. */
-  quotedRate: string | null
 }
 
 const num = (v: string) => {
@@ -128,18 +102,28 @@ export function PurchaseEnquiryDialog({
 }: {
   record: EnquiryRecord | null
   onClose: () => void
-  onSaved: (message: string) => void
+  /** The id comes back so the list can open the new enquiry straight away. */
+  onSaved: (message: string, id?: string) => void
 }) {
   const editing = Boolean(record)
 
-  const [supplierId, setSupplierId] = useState(record?.supplier?.id ?? '')
   const [enquiryDate, setEnquiryDate] = useState(
     iso(record?.enquiryDate) || new Date().toISOString().slice(0, 10)
   )
   const [requiredDate, setRequiredDate] = useState(iso(record?.requiredDate))
+  const [locationId, setLocationId] = useState(record?.locationId ?? '')
+  const [reference, setReference] = useState(record?.reference ?? '')
   const [notes, setNotes] = useState(record?.notes ?? '')
   const [terms, setTerms] = useState(record?.terms ?? '')
   const [remark, setRemark] = useState(record?.remark ?? '')
+
+  /*
+   * Who to ask. Only settable while raising: once the enquiry exists the
+   * suppliers are added and removed from the comparison panel, where their
+   * answers live — a form that could silently drop a supplier would take his
+   * recorded PI with him.
+   */
+  const [supplierIds, setSupplierIds] = useState<string[]>([])
 
   const [lines, setLines] = useState<Line[]>(
     record
@@ -147,39 +131,45 @@ export function PurchaseEnquiryDialog({
           key: nextKey(),
           id: l.id,
           itemId: l.itemId,
-          itemLabel: l.item.code + ' · ' + l.item.name,
-          uom: l.item.uom?.symbol ?? '',
+          codeText: l.item.code,
+          categoryId: '',
+          subcategoryId: '',
           qty: String(Number(l.qty)),
           expectedRate: l.expectedRate == null ? '' : String(Number(l.expectedRate)),
-          gstRate: l.gstRate == null ? '' : String(Number(l.gstRate)),
           description: l.description ?? '',
           mrLineId: l.mrLineId,
           mrNumber: l.mrLine?.mr.mrNumber ?? null,
-          quotedRate: l.quotedRate == null ? null : String(Number(l.quotedRate)),
         }))
       : []
   )
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [items, setItems] = useState<Item[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
   const [loadingRefs, setLoadingRefs] = useState(true)
   const [indentOpen, setIndentOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const filesRef = useRef<AttachmentsBoxHandle>(null)
 
   useEffect(() => {
     let alive = true
     Promise.all([
       api.get<{ data: Supplier[] }>('/masters/suppliers?limit=500&active=true'),
       api.get<{ data: Item[] }>('/masters/items?limit=1000&active=true'),
+      api.get<{ data: Category[] }>('/masters/categories?limit=500'),
+      api.get<{ data: Warehouse[] }>('/masters/warehouses?limit=200&active=true'),
     ])
-      .then(([s, i]) => {
+      .then(([s, i, c, w]) => {
         if (!alive) return
         setSuppliers(s.data)
         setItems(i.data)
+        setCategories(c.data)
+        setWarehouses(w.data)
       })
       .catch(() => {
-        if (alive) setError('Could not load suppliers and items. Close and try again.')
+        if (alive) setError('Could not load the masters. Close and try again.')
       })
       .finally(() => {
         if (alive) setLoadingRefs(false)
@@ -189,30 +179,27 @@ export function PurchaseEnquiryDialog({
     }
   }, [])
 
-  const supplier = useMemo(
-    () => suppliers.find((s) => s.id === supplierId) ?? null,
-    [suppliers, supplierId]
+  const topCategories = useMemo(() => categories.filter((c) => !c.parentId), [categories])
+  const subsOf = useCallback(
+    (parentId: string) => categories.filter((c) => c.parentId === parentId),
+    [categories]
   )
 
-  const addLine = useCallback(() => {
-    setLines((prev) => [
-      ...prev,
-      {
-        key: nextKey(),
-        id: null,
-        itemId: '',
-        itemLabel: '',
-        uom: '',
-        qty: '',
-        expectedRate: '',
-        gstRate: '',
-        description: '',
-        mrLineId: null,
-        mrNumber: null,
-        quotedRate: null,
-      },
-    ])
-  }, [])
+  const blank = (): Line => ({
+    key: nextKey(),
+    id: null,
+    itemId: '',
+    codeText: '',
+    categoryId: '',
+    subcategoryId: '',
+    qty: '',
+    expectedRate: '',
+    description: '',
+    mrLineId: null,
+    mrNumber: null,
+  })
+
+  const addLine = useCallback(() => setLines((p) => [...p, blank()]), [])
 
   const setLine = useCallback((key: string, patch: Partial<Line>) => {
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)))
@@ -222,16 +209,47 @@ export function PurchaseEnquiryDialog({
     setLines((prev) => prev.filter((l) => l.key !== key))
   }, [])
 
-  /** Picking an item fills the unit and the GST rate the master carries. */
+  /**
+   * Typing a code straight into the Item Code box, as the old form allows.
+   *
+   * Matched exactly and case-insensitively, and only on an exact match — a
+   * partial match that guessed would put the wrong item on an enquiry that goes
+   * out to three suppliers. What was typed is kept either way, so nothing is
+   * silently discarded and the dropdown beside it is still there to pick from.
+   */
+  const pickByCode = useCallback(
+    (key: string, code: string) => {
+      const hit = items.find((i) => (i.code ?? '').toLowerCase() === code.trim().toLowerCase())
+      if (!hit) {
+        setLine(key, { codeText: code, itemId: '' })
+        return
+      }
+      const cat = categories.find((c) => c.id === hit.category?.id)
+      setLine(key, {
+        codeText: code,
+        itemId: hit.id,
+        categoryId: cat?.parentId ?? cat?.id ?? '',
+        subcategoryId: cat?.parentId ? cat.id : '',
+      })
+    },
+    [items, categories, setLine]
+  )
+
+  /** Items on offer for a row, narrowed by whatever category it has chosen. */
+  const itemsFor = useCallback(
+    (l: Line) => {
+      const want = l.subcategoryId || l.categoryId
+      if (!want) return items
+      const ids = new Set([want, ...subsOf(want).map((c) => c.id)])
+      return items.filter((i) => (i.category ? ids.has(i.category.id) : false))
+    },
+    [items, subsOf]
+  )
+
   const pickItem = useCallback(
     (key: string, itemId: string) => {
       const item = items.find((i) => i.id === itemId)
-      setLine(key, {
-        itemId,
-        itemLabel: item ? item.code + ' · ' + item.name : '',
-        uom: item?.uom?.symbol ?? '',
-        gstRate: item?.taxRate ? String(Number(item.taxRate.rate)) : '',
-      })
+      setLine(key, { itemId, codeText: item?.code ?? '' })
     },
     [items, setLine]
   )
@@ -241,43 +259,45 @@ export function PurchaseEnquiryDialog({
    *
    * The same picker the order form uses, because it answers the same question —
    * what has production asked for that nobody has bought. Taking them onto an
-   * enquiry rather than straight onto an order is the honest route when the rate
-   * is not known: the request keeps its link to the job through `mrLineId`, and
-   * it travels from here onto the order when one is raised.
+   * enquiry rather than straight onto an order is the honest route when the
+   * rate is not known: the request keeps its link to the job through
+   * `mrLineId`, and that travels on to the order when one is raised.
    */
-  const takeIndent = useCallback((picks: IndentPick[]) => {
-    setIndentOpen(false)
-    setLines((prev) => [
-      ...prev,
-      ...picks.map((p) => ({
-        key: nextKey(),
-        id: null,
-        itemId: p.row.item.id,
-        itemLabel: p.row.item.code + ' · ' + p.row.item.name,
-        uom: p.row.item.uom?.symbol ?? '',
-        qty: String(p.qty),
-        expectedRate: '',
-        gstRate: p.row.item.taxRate ? String(Number(p.row.item.taxRate.rate)) : '',
-        description: '',
-        mrLineId: p.row.mrLineId,
-        mrNumber: p.row.mrNumber,
-        quotedRate: null,
-      })),
-    ])
-  }, [])
+  const takeIndent = useCallback(
+    (picks: IndentPick[]) => {
+      setIndentOpen(false)
+      setLines((prev) => [
+        ...prev,
+        ...picks.map((p) => {
+          const cat = categories.find(
+            (c) => c.id === (p.row.item as { category?: { id: string } }).category?.id
+          )
+          return {
+            key: nextKey(),
+            id: null,
+            itemId: p.row.item.id,
+            codeText: p.row.item.code,
+            categoryId: cat?.parentId ?? cat?.id ?? '',
+            subcategoryId: cat?.parentId ? cat.id : '',
+            qty: String(p.qty),
+            expectedRate: '',
+            description: '',
+            mrLineId: p.row.mrLineId,
+            mrNumber: p.row.mrNumber,
+          }
+        }),
+      ])
+    },
+    [categories]
+  )
 
   const estimate = useMemo(
-    () =>
-      lines.reduce((t, l) => {
-        const rate = l.quotedRate != null ? num(l.quotedRate) : num(l.expectedRate)
-        return t + num(l.qty) * rate
-      }, 0),
+    () => lines.reduce((t, l) => t + num(l.qty) * num(l.expectedRate), 0),
     [lines]
   )
 
   const problems = useMemo(() => {
     const out: string[] = []
-    if (!supplierId) out.push('Pick a supplier')
     if (lines.length === 0) out.push('Add at least one item')
     if (lines.some((l) => !l.itemId)) out.push('Every line needs an item')
     if (lines.some((l) => num(l.qty) <= 0)) out.push('Every line needs a quantity above zero')
@@ -285,7 +305,7 @@ export function PurchaseEnquiryDialog({
       out.push('The date needed cannot be before the enquiry date')
     }
     return out
-  }, [supplierId, lines, requiredDate, enquiryDate])
+  }, [lines, requiredDate, enquiryDate])
 
   const save = useCallback(async () => {
     if (problems.length) return
@@ -293,9 +313,10 @@ export function PurchaseEnquiryDialog({
     setError(null)
 
     const payload = {
-      supplierId,
       enquiryDate,
       requiredDate: requiredDate || null,
+      locationId: locationId || null,
+      reference: reference.trim() || null,
       notes: notes.trim() || null,
       terms: terms.trim() || null,
       remark: remark.trim() || null,
@@ -308,24 +329,34 @@ export function PurchaseEnquiryDialog({
         description: l.description.trim() || null,
         qty: num(l.qty),
         expectedRate: l.expectedRate === '' ? null : num(l.expectedRate),
-        gstRate: l.gstRate === '' ? null : num(l.gstRate),
         mrLineId: l.mrLineId,
       })),
+      ...(editing ? {} : { supplierIds }),
     }
 
     try {
       if (record) {
-        const res = await api.patch<{ data: { enquiryNumber: string } }>(
+        const res = await api.patch<{ data: EnquiryRecord }>(
           '/purchase/enquiries/' + record.id,
           payload
         )
-        onSaved(res.data.enquiryNumber + ' updated.')
+        onSaved(res.data.enquiryNumber + ' updated.', res.data.id)
       } else {
-        const res = await api.post<{ data: { enquiryNumber: string } }>(
-          '/purchase/enquiries',
-          payload
+        const res = await api.post<{ data: EnquiryRecord }>('/purchase/enquiries', payload)
+        // Files chosen before the enquiry existed have somewhere to go now.
+        const pending = await filesRef.current?.uploadPending(res.data.id)
+        onSaved(
+          res.data.enquiryNumber +
+            ' raised' +
+            (supplierIds.length
+              ? ' for ' + supplierIds.length + ' supplier' + (supplierIds.length > 1 ? 's' : '')
+              : '') +
+            '.' +
+            (pending?.failed.length
+              ? ' These files did not send: ' + pending.failed.join(', ')
+              : ''),
+          res.data.id
         )
-        onSaved(res.data.enquiryNumber + ' raised. Send it to the supplier when it is ready.')
       }
     } catch (err) {
       setError(apiErrorMessage(err, 'Could not save the enquiry.'))
@@ -334,13 +365,16 @@ export function PurchaseEnquiryDialog({
     }
   }, [
     problems,
-    supplierId,
     enquiryDate,
     requiredDate,
+    locationId,
+    reference,
     notes,
     terms,
     remark,
     lines,
+    supplierIds,
+    editing,
     record,
     onSaved,
   ])
@@ -355,22 +389,25 @@ export function PurchaseEnquiryDialog({
   }, [onClose, saving])
 
   return createPortal(
-    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm">
+    /* The module's own shell: offset past the sidebar so the menu stays
+      reachable, full height, and `po-form` so the labels and fields match the
+      order, bill and receipt forms rather than inventing a third look. */
+    <div className="fixed inset-0 z-40 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
-        className="glass-card my-4 w-full max-w-5xl p-0"
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="enquiry-dialog-title"
       >
-        <div className="border-border/70 bg-card sticky top-0 z-10 flex items-center justify-between gap-3 rounded-t-xl border-b px-5 py-3">
+        <div className="border-border flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
           <div className="min-w-0">
             <h2 id="enquiry-dialog-title" className="text-foreground text-base font-semibold">
               {editing ? 'Correct ' + record!.enquiryNumber : 'New purchase enquiry'}
             </h2>
             <p className="text-muted-foreground mt-0.5 text-xs">
               {editing
-                ? 'Quantities the supplier has already been asked about. Rates he quoted are kept.'
-                : 'Quantities now, prices when he answers. The number is allotted on save.'}
+                ? 'Quantities the suppliers have already been asked about. Rates they quoted are kept.'
+                : 'Quantities now, prices when they answer. The number is allotted on save.'}
             </p>
           </div>
           <button
@@ -384,7 +421,7 @@ export function PurchaseEnquiryDialog({
           </button>
         </div>
 
-        <div className="space-y-3 p-5">
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {error && (
             <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
               <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
@@ -393,43 +430,75 @@ export function PurchaseEnquiryDialog({
           )}
 
           {/* Said once, at the top, rather than discovered when the order is
-              raised. An enquiry that reads like an order is the one way this
-              document could do harm. */}
+            raised. An enquiry that reads like an order is the one way this
+            document could do harm. */}
           <p className="text-muted-foreground border-border/70 bg-secondary/30 rounded-lg border px-3 py-2 text-xs">
             Nothing here commits the mill. No stock is expected, nothing is owed, and the indent
             this answers still shows as needing to be ordered until a purchase order is raised.
           </p>
 
-          <Section icon={Truck} title="Supplier">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Section icon={FileText} title="Basic Details">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
               <div>
-                <label className="form-label" htmlFor="enq-supplier">
-                  Supplier
+                <label className="form-label" htmlFor="enq-location">
+                  Location
                 </label>
-                <select
-                  id="enq-supplier"
-                  value={supplierId}
-                  onChange={(e) => setSupplierId(e.target.value)}
-                  disabled={loadingRefs}
-                  className="form-input"
-                >
-                  <option value="">{loadingRefs ? 'Loading suppliers…' : 'Pick a supplier'}</option>
-                  {suppliers.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
+                <div className="relative">
+                  <MapPin
+                    size={14}
+                    className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                  />
+                  <select
+                    id="enq-location"
+                    value={locationId}
+                    onChange={(e) => setLocationId(e.target.value)}
+                    className="form-input pl-9"
+                  >
+                    <option value="">Head office</option>
+                    {warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="enq-no">
+                  Purchase Enquiry No.
+                </label>
+                {/* Read-only, and said so. The number is allotted by the server
+                  on save so two people raising an enquiry at the same moment
+                  cannot be handed the same one. */}
+                <input
+                  id="enq-no"
+                  value={record?.enquiryNumber ?? 'Allotted on save'}
+                  readOnly
+                  disabled
+                  className="form-input font-mono"
+                />
               </div>
               <div>
                 <label className="form-label" htmlFor="enq-date">
-                  Enquiry date
+                  Enquiry Date
                 </label>
                 <input
                   id="enq-date"
                   type="date"
                   value={enquiryDate}
                   onChange={(e) => setEnquiryDate(e.target.value)}
+                  className="form-input"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="enq-ref">
+                  Reference
+                </label>
+                <input
+                  id="enq-ref"
+                  value={reference}
+                  onChange={(e) => setReference(e.target.value)}
+                  placeholder="Job no, indent slip, your own reference"
                   className="form-input"
                 />
               </div>
@@ -444,15 +513,19 @@ export function PurchaseEnquiryDialog({
                   onChange={(e) => setRequiredDate(e.target.value)}
                   className="form-input"
                 />
-                <p className="text-muted-foreground mt-1 text-[11px]">
-                  Printed, so he quotes against a date.
-                </p>
               </div>
-              {supplier && (
-                <Readout label="GSTIN" icon={FileText}>
-                  {supplier.gstin || 'Not on file'}
-                </Readout>
-              )}
+              <div>
+                <label className="form-label" htmlFor="enq-remark">
+                  Remark
+                </label>
+                <input
+                  id="enq-remark"
+                  value={remark}
+                  onChange={(e) => setRemark(e.target.value)}
+                  placeholder="Internal — never printed"
+                  className="form-input"
+                />
+              </div>
             </div>
           </Section>
 
@@ -465,9 +538,10 @@ export function PurchaseEnquiryDialog({
                   type="button"
                   onClick={() => setIndentOpen(true)}
                   className="btn-ghost text-xs"
+                  title="What production has asked for and nobody has ordered yet"
                 >
                   <ClipboardList size={14} />
-                  Select from indent
+                  Select Items From Indent Items
                 </button>
                 <button type="button" onClick={addLine} className="btn-ghost text-xs">
                   <Plus size={14} />
@@ -485,43 +559,104 @@ export function PurchaseEnquiryDialog({
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead className="text-muted-foreground text-[11px] uppercase">
-                    <tr>
-                      <th className="px-2 py-1.5 text-left font-medium">Item</th>
-                      <th className="w-24 px-2 py-1.5 text-right font-medium">Qty</th>
-                      <th className="w-16 px-2 py-1.5 text-left font-medium">Unit</th>
-                      <th className="w-28 px-2 py-1.5 text-right font-medium">Expected rate</th>
-                      <th className="w-20 px-2 py-1.5 text-right font-medium">GST %</th>
-                      <th className="w-28 px-2 py-1.5 text-right font-medium">Quoted</th>
-                      <th className="w-10 px-2 py-1.5" />
+                <table className="subtable w-full">
+                  <thead>
+                    <tr className="bg-secondary/60">
+                      <th className="text-left" style={{ width: 140 }}>
+                        Item Code
+                      </th>
+                      <th className="text-left">Item &amp; Description</th>
+                      <th style={{ width: 110, textAlign: 'right' }}>Quantity</th>
+                      <th style={{ width: 110, textAlign: 'right' }}>Expected rate</th>
+                      <th style={{ width: 40 }} />
                     </tr>
                   </thead>
-                  <tbody className="divide-border/60 divide-y">
+                  <tbody>
                     {lines.map((l) => (
                       <tr key={l.key}>
-                        <td className="px-2 py-1.5">
+                        <td>
+                          <input
+                            value={l.codeText}
+                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
+                            onBlur={(e) => pickByCode(l.key, e.target.value)}
+                            placeholder="Items Code"
+                            className={`form-input font-mono ${
+                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
+                            }`}
+                            aria-label="Item code"
+                          />
+                          {l.codeText && !l.itemId && (
+                            <p className="mt-0.5 text-[10px] text-amber-400">
+                              no item with that code
+                            </p>
+                          )}
+                        </td>
+                        <td>
+                          {/* Category over subcategory over item, as the old
+                            form has it. Each narrows the one below, and
+                            leaving them empty offers every item — a buyer who
+                            knows what they want should not have to file it
+                            first. */}
+                          <div className="flex flex-wrap gap-1.5">
+                            <select
+                              value={l.categoryId}
+                              onChange={(e) =>
+                                setLine(l.key, { categoryId: e.target.value, subcategoryId: '' })
+                              }
+                              className="form-input w-auto min-w-[120px] flex-1"
+                              aria-label="Category"
+                            >
+                              <option value="">Category …</option>
+                              {topCategories.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={l.subcategoryId}
+                              onChange={(e) => setLine(l.key, { subcategoryId: e.target.value })}
+                              disabled={!l.categoryId}
+                              className="form-input w-auto min-w-[120px] flex-1"
+                              aria-label="Subcategory"
+                            >
+                              <option value="">Subcategory …</option>
+                              {subsOf(l.categoryId).map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                           <select
                             value={l.itemId}
                             onChange={(e) => pickItem(l.key, e.target.value)}
                             disabled={loadingRefs}
-                            className="form-input"
+                            className="form-input mt-1.5"
                             aria-label="Item"
                           >
-                            <option value="">Pick an item</option>
-                            {items.map((i) => (
+                            <option value="">{loadingRefs ? 'Loading items…' : 'Items'}</option>
+                            {itemsFor(l).map((i) => (
                               <option key={i.id} value={i.id}>
                                 {i.code} · {i.name}
                               </option>
                             ))}
                           </select>
+                          <textarea
+                            value={l.description}
+                            onChange={(e) => setLine(l.key, { description: e.target.value })}
+                            rows={2}
+                            placeholder="In our own words, if it differs"
+                            className="form-input mt-1.5"
+                            aria-label="Description"
+                          />
                           {l.mrNumber && (
                             <p className="text-muted-foreground mt-0.5 text-[10px]">
                               against indent {l.mrNumber}
                             </p>
                           )}
                         </td>
-                        <td className="px-2 py-1.5">
+                        <td>
                           <input
                             type="number"
                             step="0.001"
@@ -532,8 +667,11 @@ export function PurchaseEnquiryDialog({
                             aria-label="Quantity"
                           />
                         </td>
-                        <td className="text-muted-foreground px-2 py-1.5 text-xs">{l.uom}</td>
-                        <td className="px-2 py-1.5">
+                        <td>
+                          {/* Ours, not theirs, and labelled as an estimate
+                            wherever it is shown. What a supplier quotes is
+                            recorded against his PI number and never typed on
+                            this form. */}
                           <input
                             type="number"
                             step="0.01"
@@ -545,32 +683,7 @@ export function PurchaseEnquiryDialog({
                             aria-label="Expected rate"
                           />
                         </td>
-                        <td className="px-2 py-1.5">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            max="100"
-                            value={l.gstRate}
-                            onChange={(e) => setLine(l.key, { gstRate: e.target.value })}
-                            className="form-input text-right"
-                            aria-label="GST rate"
-                          />
-                        </td>
-                        <td className="px-2 py-1.5 text-right">
-                          {/* Read-only on purpose: it belongs to his PI, and it
-                              is recorded against a PI number or not at all. */}
-                          {l.quotedRate != null ? (
-                            <span className="text-xs font-medium tabular-nums">
-                              {Number(l.quotedRate).toLocaleString('en-IN', {
-                                minimumFractionDigits: 2,
-                              })}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground/60 text-xs">—</span>
-                          )}
-                        </td>
-                        <td className="px-2 py-1.5 text-right">
+                        <td style={{ textAlign: 'right' }}>
                           <button
                             type="button"
                             onClick={() => removeLine(l.key)}
@@ -588,19 +701,83 @@ export function PurchaseEnquiryDialog({
             )}
           </Section>
 
+          {/* Suppliers only while raising. Once the enquiry exists they are
+            added and removed from the comparison panel, where their answers
+            live — a form that could drop a supplier would take his recorded PI
+            with him, and the order that quotes it would be left pointing at
+            nothing. */}
+          {!editing && (
+            <Section
+              icon={Truck}
+              title="Suppliers to ask"
+              summary={supplierIds.length ? supplierIds.length + ' chosen' : 'None yet'}
+            >
+              <p className="text-muted-foreground mb-2 text-xs">
+                Tick everybody you want a rate from. Asking two or three is what makes the
+                comparison worth reading — and you can add more once it is raised.
+              </p>
+              <div className="grid max-h-56 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+                {suppliers.map((s) => {
+                  const on = supplierIds.includes(s.id)
+                  return (
+                    <label
+                      key={s.id}
+                      className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                        on
+                          ? 'border-primary/40 bg-primary/5'
+                          : 'border-border/70 hover:bg-secondary/40'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() =>
+                          setSupplierIds((prev) =>
+                            prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id]
+                          )
+                        }
+                        className="accent-primary"
+                      />
+                      <span className="min-w-0 truncate">{s.name}</span>
+                    </label>
+                  )
+                })}
+              </div>
+            </Section>
+          )}
+
           <Section
-            icon={CalendarDays}
+            icon={Paperclip}
+            title="Drawings and specifications"
+            foldable
+            openByDefault={false}
+            summary="What every supplier gets a copy of"
+          >
+            <p className="text-muted-foreground mb-2 text-xs">
+              Files here go to everybody asked. A supplier&rsquo;s own proforma invoice is filed
+              against him when you record it, not here.
+            </p>
+            <AttachmentsBox
+              ref={filesRef}
+              basePath="/purchase/enquiries"
+              linkBasePath="/purchase/enquiries/attachments"
+              recordId={record?.id}
+              filter={(a) => !(a as { quoteId?: string | null }).quoteId}
+              onError={setError}
+            />
+          </Section>
+
+          <Section
+            icon={FileText}
             title="Notes and terms"
             foldable
             openByDefault={false}
-            summary={
-              notes || terms || remark ? 'Filled in' : 'The mill’s standing terms, nothing extra'
-            }
+            summary={notes || terms ? 'Filled in' : 'The mill’s standing terms, nothing extra'}
           >
-            <div className="grid gap-3 lg:grid-cols-3">
+            <div className="grid gap-3 lg:grid-cols-2">
               <div>
                 <label className="form-label" htmlFor="enq-notes">
-                  Notes to the supplier
+                  Notes to the suppliers
                 </label>
                 <textarea
                   id="enq-notes"
@@ -608,7 +785,7 @@ export function PurchaseEnquiryDialog({
                   onChange={(e) => setNotes(e.target.value)}
                   rows={3}
                   className="form-input"
-                  placeholder="Printed on his copy"
+                  placeholder="Printed on their copies"
                 />
               </div>
               <div>
@@ -621,34 +798,19 @@ export function PurchaseEnquiryDialog({
                   onChange={(e) => setTerms(e.target.value)}
                   rows={3}
                   className="form-input"
-                  placeholder="Printed on his copy"
-                />
-              </div>
-              <div>
-                <label className="form-label" htmlFor="enq-remark">
-                  Internal remark
-                </label>
-                <textarea
-                  id="enq-remark"
-                  value={remark}
-                  onChange={(e) => setRemark(e.target.value)}
-                  rows={3}
-                  className="form-input"
-                  placeholder="Never printed"
+                  placeholder="Printed on their copies"
                 />
               </div>
             </div>
           </Section>
         </div>
 
-        <div className="border-border/70 bg-card sticky bottom-0 flex flex-wrap items-center justify-between gap-3 rounded-b-xl border-t px-5 py-3">
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-4 py-3">
           <div className="min-w-0">
             {/* Labelled an estimate every time it is shown. It is built from
-                rates nobody has agreed to unless the supplier has quoted them,
-                and a bare total here would read as a price. */}
-            <p className="text-muted-foreground text-[11px]">
-              {lines.some((l) => l.quotedRate != null) ? 'At quoted rates' : 'Rough estimate'}
-            </p>
+              rates nobody has agreed to, and a bare total here would read as a
+              price. */}
+            <p className="text-muted-foreground text-[11px]">Our own estimate</p>
             <p className="text-foreground text-sm font-semibold tabular-nums">
               ₹
               {estimate.toLocaleString('en-IN', {

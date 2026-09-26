@@ -7,11 +7,11 @@ import { AppError } from '../middleware/errorHandler'
  * Two of them do all the work:
  *
  *   1. **An enquiry's status is derived, never stored as an opinion.** It is
- *      read back from what actually exists — is there a live order on it, is
- *      there a PI recorded, has it been sent — in the same way a receipt's
- *      billed state is read off its bills rather than written onto it. That is
- *      what makes cancelling an order put its quantity back on the enquiry
- *      immediately, with nothing to remember to undo.
+ *      read back from what actually exists — is there a live order on it, has
+ *      any supplier answered, has any supplier been sent it — in the same way a
+ *      receipt's billed state is read off its bills rather than written onto
+ *      it. That is what makes cancelling an order put its quantity back on the
+ *      enquiry immediately, with nothing to remember to undo.
  *
  *   2. **An enquiry is a question, not a purchase.** Nothing here reduces what
  *      an indent still needs ordered, and nothing here makes goods receivable.
@@ -55,11 +55,12 @@ export async function orderedQtyByEnquiryLine(
 /**
  * Puts the enquiry's status back in step with what exists.
  *
- * Called after anything that could change the answer: a PI recorded, an order
- * raised, an order cancelled, an order binned or restored. Deliberately does
- * not touch a CLOSED enquiry — that was a decision, and quietly reopening it
- * because an order got cancelled would resurrect a document somebody had
- * finished with.
+ * Called after anything that could change the answer: a supplier added or
+ * removed, a PI recorded, an order raised, cancelled, binned or restored.
+ *
+ * Deliberately does not touch a CLOSED enquiry — that was a decision, and
+ * quietly reopening it because an order got cancelled would resurrect a
+ * document somebody had finished with.
  */
 export async function syncEnquiryStatus(
   tx: Prisma.TransactionClient,
@@ -67,16 +68,20 @@ export async function syncEnquiryStatus(
 ): Promise<void> {
   const enquiry = await tx.purchaseEnquiry.findUnique({
     where: { id: enquiryId },
-    select: { id: true, status: true, sentAt: true, piNumber: true },
+    select: { id: true, status: true },
   })
   if (!enquiry || enquiry.status === 'CLOSED') return
 
-  const ordered = await tx.purchaseOrder.count({
-    where: { enquiryId, ...LIVE_ORDER },
-  })
+  const [ordered, quoted, sent] = await Promise.all([
+    tx.purchaseOrder.count({ where: { enquiryId, ...LIVE_ORDER } }),
+    // Any one supplier answering is enough to call the enquiry quoted. Waiting
+    // for all three would leave it reading as unanswered while a usable price
+    // sat on it, which is the state the buyer most needs to see.
+    tx.purchaseEnquiryQuote.count({ where: { enquiryId, piNumber: { not: null } } }),
+    tx.purchaseEnquiryQuote.count({ where: { enquiryId, sentAt: { not: null } } }),
+  ])
 
-  const next =
-    ordered > 0 ? 'ORDERED' : enquiry.piNumber ? 'QUOTED' : enquiry.sentAt ? 'SENT' : 'DRAFT'
+  const next = ordered > 0 ? 'ORDERED' : quoted > 0 ? 'QUOTED' : sent > 0 ? 'SENT' : 'DRAFT'
 
   if (next !== enquiry.status) {
     await tx.purchaseEnquiry.update({ where: { id: enquiryId }, data: { status: next } })
@@ -84,10 +89,10 @@ export async function syncEnquiryStatus(
 }
 
 /**
- * Refuses to cancel, close or bin an enquiry that an order is standing on.
+ * Refuses to close or bin an enquiry that an order is standing on.
  *
  * The same test the rest of purchase uses: does this change leave every other
- * document still true? A purchase order carries its enquiry's PI number as the
+ * document still true? A purchase order carries its quote's PI number as the
  * reference its price is defended with, so an enquiry dropped out from under a
  * live order leaves that order quoting a document nobody can produce.
  *
@@ -118,8 +123,35 @@ export async function refuseIfOrdered(
 }
 
 /**
- * Refuses an edit that would leave an order claiming more than the enquiry
- * quotes.
+ * Refuses to take a supplier off an enquiry his price is holding up an order.
+ *
+ * Removing the quote would take the PI with it, and the order carries that PI
+ * number as the reference its price is defended with.
+ */
+export async function refuseIfQuoteOrdered(
+  tx: Prisma.TransactionClient,
+  quote: { id: string; supplierName: string },
+  what: 'removed' | 'passed over'
+): Promise<void> {
+  const orders = await tx.purchaseOrder.findMany({
+    where: { enquiryQuoteId: quote.id, ...LIVE_ORDER },
+    select: { poNumber: true },
+    orderBy: { poNumber: 'asc' },
+  })
+  if (orders.length === 0) return
+
+  const which = orders.map((o) => o.poNumber).join(', ')
+  throw new AppError(
+    `${quote.supplierName} cannot be ${what} — ${which} ${orders.length > 1 ? 'were' : 'was'} ` +
+      `raised against his proforma invoice. Cancel ${orders.length > 1 ? 'those orders' : which} first.`,
+    409,
+    'QUOTE_ORDERED'
+  )
+}
+
+/**
+ * Refuses an edit that would leave an order claiming more than the enquiry asks
+ * for.
  *
  * Editing is left open on purpose, exactly as correcting a goods receipt is. An
  * enquiry for 1,240 with 600 ordered can have the other 640 corrected without
@@ -174,4 +206,40 @@ export async function assertEditKeepsOrdersTrue(
       )
     }
   }
+}
+
+/**
+ * What one supplier's answer comes to at the rates he gave.
+ *
+ * Returned alongside his stated PI total rather than instead of it. The two
+ * disagreeing is ordinary — usually a charge he has added — and the comparison
+ * has to show the buyer both rather than pick one.
+ *
+ * `pricedLines` is what makes the comparison honest: a supplier who priced two
+ * of seven lines will always look cheapest on totals alone, and the screen has
+ * to be able to say so.
+ */
+export function quoteValue(
+  lines: Array<{ enquiryLineId: string; quotedRate: unknown; offeredQty?: unknown }>,
+  qtyByLine: Map<string, number>
+): { value: number; pricedLines: number } {
+  let value = 0
+  let pricedLines = 0
+  for (const l of lines) {
+    if (l.quotedRate == null) continue
+    /*
+     * Priced on what he can supply, not on what was asked.
+     *
+     * A supplier who quotes 11.50 but can only manage 800 of the 1,240 will
+     * cost the mill 800 of them; valuing him on 1,240 credits him with goods he
+     * has said he does not have, and makes him look cheaper than a supplier who
+     * can actually fill the order. Empty means all of it, which is the usual
+     * answer.
+     */
+    const asked = qtyByLine.get(l.enquiryLineId) ?? 0
+    const supplying = l.offeredQty == null ? asked : Number(l.offeredQty)
+    value += supplying * Number(l.quotedRate)
+    pricedLines++
+  }
+  return { value: Math.round(value * 100) / 100, pricedLines }
 }
