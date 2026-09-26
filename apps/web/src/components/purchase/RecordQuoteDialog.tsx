@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Loader2, Receipt, X } from 'lucide-react'
+import { AlertCircle, IndianRupee, Loader2, Paperclip, Receipt, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
+import { Section } from '@/components/purchase/Section'
 import {
   money,
   qty as fmtQty,
@@ -234,67 +235,70 @@ export function RecordQuoteDialog({
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div>
-              <label className="form-label" htmlFor="pi-no">
-                PI number
-              </label>
-              <input
-                id="pi-no"
-                value={piNumber}
-                onChange={(e) => setPiNumber(e.target.value)}
-                placeholder="As he wrote it"
-                className="form-input font-mono"
-              />
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                Goes onto the purchase order.
-              </p>
+          <Section icon={Receipt} title="The document">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <label className="form-label" htmlFor="pi-no">
+                  PI number
+                </label>
+                <input
+                  id="pi-no"
+                  value={piNumber}
+                  onChange={(e) => setPiNumber(e.target.value)}
+                  placeholder="As he wrote it"
+                  className="form-input font-mono"
+                />
+                <p className="text-muted-foreground mt-1 text-[11px]">
+                  Goes onto the purchase order.
+                </p>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="pi-date">
+                  PI date
+                </label>
+                <input
+                  id="pi-date"
+                  type="date"
+                  value={piDate}
+                  onChange={(e) => setPiDate(e.target.value)}
+                  className="form-input"
+                />
+              </div>
+              <div>
+                <label className="form-label" htmlFor="pi-valid">
+                  Holds price until
+                </label>
+                <input
+                  id="pi-valid"
+                  type="date"
+                  value={validUntil}
+                  onChange={(e) => setValidUntil(e.target.value)}
+                  className="form-input"
+                />
+                <p className="text-muted-foreground mt-1 text-[11px]">
+                  Left empty if he did not say.
+                </p>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="pi-amount">
+                  Total on his PI
+                </label>
+                <input
+                  id="pi-amount"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="form-input text-right"
+                />
+                <p className="text-muted-foreground mt-1 text-[11px]">Stored as he stated it.</p>
+              </div>
             </div>
-            <div>
-              <label className="form-label" htmlFor="pi-date">
-                PI date
-              </label>
-              <input
-                id="pi-date"
-                type="date"
-                value={piDate}
-                onChange={(e) => setPiDate(e.target.value)}
-                className="form-input"
-              />
-            </div>
-            <div>
-              <label className="form-label" htmlFor="pi-valid">
-                Holds price until
-              </label>
-              <input
-                id="pi-valid"
-                type="date"
-                value={validUntil}
-                onChange={(e) => setValidUntil(e.target.value)}
-                className="form-input"
-              />
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                Left empty if he did not say.
-              </p>
-            </div>
-            <div>
-              <label className="form-label" htmlFor="pi-amount">
-                Total on his PI
-              </label>
-              <input
-                id="pi-amount"
-                type="number"
-                step="0.01"
-                min="0"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                className="form-input text-right"
-              />
-              <p className="text-muted-foreground mt-1 text-[11px]">Stored as he stated it.</p>
-            </div>
-          </div>
+          </Section>
 
-          {/* Fixed widths, or every cell sizes itself off its own input and
+          <Section icon={IndianRupee} title="His rates">
+            {/* Fixed widths, or every cell sizes itself off its own input and
             the three typed columns balloon to a third of the row each — which
             is what this table was doing: a 300px box holding the word "all",
             right-aligned, floating in the middle of nothing.
@@ -302,166 +306,191 @@ export function RecordQuoteDialog({
             What we are told sits narrow and grey; what he tells us is typed
             and therefore wider. The two are not interchangeable and the table
             should not pretend they are. */}
-          <div className="border-border/70 overflow-x-auto rounded-lg border">
-            <table className="subtable w-full table-fixed">
-              <thead>
-                <tr className="bg-secondary/60">
-                  <th className="text-left" style={{ width: '26%' }}>
-                    Item
-                  </th>
-                  <th style={{ width: '13%', textAlign: 'right' }}>Asked</th>
-                  <th style={{ width: '12%', textAlign: 'right' }}>We expected</th>
-                  <th style={{ width: '13%', textAlign: 'right' }}>He can supply</th>
-                  <th style={{ width: '13%', textAlign: 'right' }}>He quotes</th>
-                  <th style={{ width: '10%', textAlign: 'right' }}>GST %</th>
-                  <th style={{ width: '13%', textAlign: 'right' }}>Line</th>
-                </tr>
-              </thead>
-              <tbody>
-                {enquiry.lines.map((l) => {
-                  const r = rows[l.id]
-                  const expected = l.expectedRate == null ? null : Number(l.expectedRate)
-                  const quoted = r?.quotedRate === '' ? null : num(r?.quotedRate ?? '')
-                  /* Flagged, not refused. A rate above what the buyer expected
+            <div className="border-border/70 overflow-x-auto rounded-lg border">
+              <table className="subtable w-full table-fixed">
+                <thead>
+                  <tr className="bg-secondary/60">
+                    <th className="text-left" style={{ width: '26%' }}>
+                      Item
+                    </th>
+                    <th style={{ width: '13%', textAlign: 'right' }}>Asked</th>
+                    <th style={{ width: '12%', textAlign: 'right' }}>We expected</th>
+                    <th style={{ width: '13%', textAlign: 'right' }}>
+                      He can supply
+                      <span className="text-muted-foreground block text-[9px] font-normal normal-case">
+                        empty = all of it
+                      </span>
+                    </th>
+                    <th style={{ width: '13%', textAlign: 'right' }}>He quotes</th>
+                    <th style={{ width: '10%', textAlign: 'right' }}>GST %</th>
+                    <th style={{ width: '13%', textAlign: 'right' }}>Line</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {enquiry.lines.map((l) => {
+                    const r = rows[l.id]
+                    const expected = l.expectedRate == null ? null : Number(l.expectedRate)
+                    const quoted = r?.quotedRate === '' ? null : num(r?.quotedRate ?? '')
+                    /* Flagged, not refused. A rate above what the buyer expected
                      is a negotiating position, not an error — but it is the one
                      thing they are reading this screen to find. */
-                  const over = expected != null && quoted != null && quoted > expected
-                  const useQty =
-                    r?.offeredQty === '' || r?.offeredQty == null
-                      ? Number(l.qty)
-                      : num(r.offeredQty)
-                  const short = useQty < Number(l.qty)
-                  return (
-                    <tr key={l.id}>
-                      <td>
-                        <p className="text-xs font-medium">{l.item.name}</p>
-                        <p className="text-muted-foreground font-mono text-[10px]">{l.item.code}</p>
-                      </td>
-                      <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                        {fmtQty(l.qty)}
-                        <span className="text-muted-foreground ml-1 text-[10px]">
-                          {l.item.uom?.symbol}
-                        </span>
-                      </td>
-                      <td
-                        style={{ textAlign: 'right' }}
-                        className="text-muted-foreground text-xs tabular-nums"
-                      >
-                        {expected == null ? '—' : money(expected)}
-                      </td>
-                      <td>
-                        {/* Empty means all of it, which is the usual answer.
-                          Typing a smaller figure is how a buyer records that
-                          he is short — and it is what the order carries, so
-                          the balance stays unplaced on the enquiry. */}
-                        <input
-                          type="number"
-                          step="0.001"
-                          min="0"
-                          value={r?.offeredQty ?? ''}
-                          onChange={(e) => setRow(l.id, { offeredQty: e.target.value })}
-                          placeholder="all"
-                          className={`form-input text-right ${short ? 'border-amber-500/60' : ''}`}
-                          aria-label={'Quantity offered for ' + l.item.name}
-                        />
-                        {short && (
-                          <p className="mt-0.5 text-right text-[10px] text-amber-400">
-                            {fmtQty(Number(l.qty) - useQty)} short
+                    const over = expected != null && quoted != null && quoted > expected
+                    const useQty =
+                      r?.offeredQty === '' || r?.offeredQty == null
+                        ? Number(l.qty)
+                        : num(r.offeredQty)
+                    const short = useQty < Number(l.qty)
+                    return (
+                      <tr key={l.id}>
+                        <td>
+                          <p className="text-xs font-medium">{l.item.name}</p>
+                          <p className="text-muted-foreground font-mono text-[10px]">
+                            {l.item.code}
                           </p>
-                        )}
-                      </td>
-                      <td>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          value={r?.quotedRate ?? ''}
-                          onChange={(e) => setRow(l.id, { quotedRate: e.target.value })}
-                          placeholder="—"
-                          className={`form-input text-right ${over ? 'border-amber-500/60' : ''}`}
-                          aria-label={'Quoted rate for ' + l.item.name}
-                        />
-                        {over && (
-                          <p className="mt-0.5 text-right text-[10px] text-amber-400">
-                            above estimate
-                          </p>
-                        )}
-                      </td>
-                      <td>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          max="100"
-                          value={r?.gstRate ?? ''}
-                          onChange={(e) => setRow(l.id, { gstRate: e.target.value })}
-                          className="form-input text-right"
-                          aria-label={'GST rate for ' + l.item.name}
-                        />
-                      </td>
-                      <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                        {quoted == null ? (
-                          <span className="text-muted-foreground/60">—</span>
-                        ) : (
-                          money(useQty * quoted)
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+                        </td>
+                        <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
+                          {fmtQty(l.qty)}
+                          <span className="text-muted-foreground ml-1 text-[10px]">
+                            {l.item.uom?.symbol}
+                          </span>
+                        </td>
+                        <td
+                          style={{ textAlign: 'right' }}
+                          className="text-muted-foreground text-xs tabular-nums"
+                        >
+                          {expected == null ? '—' : money(expected)}
+                        </td>
+                        <td>
+                          {/* The placeholder is the quantity asked for, not the
+                          word "all".
+                          "all" looked like a value somebody had entered, and a
+                          buyer reading the row could not tell whether the
+                          supplier had committed to the full quantity or the box
+                          was simply empty. Showing the figure it falls back to
+                          says the same thing and cannot be misread: leave it
+                          and he supplies 1,000; type 800 and he supplies 800,
+                          with the other 200 left unplaced on the enquiry. */}
+                          <input
+                            type="number"
+                            step="0.001"
+                            min="0"
+                            value={r?.offeredQty ?? ''}
+                            onChange={(e) => setRow(l.id, { offeredQty: e.target.value })}
+                            placeholder={fmtQty(l.qty)}
+                            title={'Leave empty if he can supply all ' + fmtQty(l.qty)}
+                            className={`form-input text-right ${short ? 'border-amber-500/60' : ''}`}
+                            aria-label={
+                              'Quantity ' +
+                              quote.supplier.name +
+                              ' can supply of ' +
+                              l.item.name +
+                              ', empty for all ' +
+                              fmtQty(l.qty)
+                            }
+                          />
+                          {short && (
+                            <p className="mt-0.5 text-right text-[10px] text-amber-400">
+                              {fmtQty(Number(l.qty) - useQty)} short
+                            </p>
+                          )}
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={r?.quotedRate ?? ''}
+                            onChange={(e) => setRow(l.id, { quotedRate: e.target.value })}
+                            placeholder="—"
+                            className={`form-input text-right ${over ? 'border-amber-500/60' : ''}`}
+                            aria-label={'Quoted rate for ' + l.item.name}
+                          />
+                          {over && (
+                            <p className="mt-0.5 text-right text-[10px] text-amber-400">
+                              above estimate
+                            </p>
+                          )}
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max="100"
+                            value={r?.gstRate ?? ''}
+                            onChange={(e) => setRow(l.id, { gstRate: e.target.value })}
+                            className="form-input text-right"
+                            aria-label={'GST rate for ' + l.item.name}
+                          />
+                        </td>
+                        <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
+                          {quoted == null ? (
+                            <span className="text-muted-foreground/60">—</span>
+                          ) : (
+                            money(useQty * quoted)
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
 
-          {/* Both figures, side by side, with neither corrected into the other.
+            {/* Both figures, side by side, with neither corrected into the other.
             The buyer decides whether the gap is a charge he added or a slip
             worth a call — this screen only makes sure they see it. */}
-          {mismatch && (
-            <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
-              <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-400" />
-              <div className="text-xs">
-                <p className="font-medium text-amber-400">His total and his rates do not agree.</p>
-                <p className="text-muted-foreground mt-0.5">
-                  The PI states ₹{money(mismatch.stated)}; the rates above come to ₹
-                  {money(mismatch.ours)} before tax — a difference of ₹
-                  {money(Math.abs(mismatch.stated - mismatch.ours))}. Often a charge he has added.
-                  Both are kept as they are.
+            {mismatch && (
+              <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
+                <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-400" />
+                <div className="text-xs">
+                  <p className="font-medium text-amber-400">
+                    His total and his rates do not agree.
+                  </p>
+                  <p className="text-muted-foreground mt-0.5">
+                    The PI states ₹{money(mismatch.stated)}; the rates above come to ₹
+                    {money(mismatch.ours)} before tax — a difference of ₹
+                    {money(Math.abs(mismatch.stated - mismatch.ours))}. Often a charge he has added.
+                    Both are kept as they are.
+                  </p>
+                </div>
+              </div>
+            )}
+          </Section>
+
+          <Section icon={Paperclip} title="Notes and the scan">
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div>
+                <label className="form-label" htmlFor="pi-remark">
+                  Note about his answer
+                </label>
+                <textarea
+                  id="pi-remark"
+                  value={remark}
+                  onChange={(e) => setRemark(e.target.value)}
+                  rows={2}
+                  placeholder="Lead time, packing, anything he said on the phone. Internal."
+                  className="form-input"
+                />
+              </div>
+              <div>
+                <span className="form-label">Scan of the PI</span>
+                <AttachmentsBox
+                  ref={filesRef}
+                  basePath="/purchase/enquiries"
+                  linkBasePath="/purchase/enquiries/attachments"
+                  recordId={enquiry.id}
+                  extraBody={{ quoteId: quote.id }}
+                  filter={(a) => (a as { quoteId?: string | null }).quoteId === quote.id}
+                  onError={setError}
+                />
+                <p className="text-muted-foreground mt-1 text-[11px]">
+                  Filed against {quote.supplier.name}, so two other suppliers&rsquo; PIs do not end
+                  up in one unlabelled list.
                 </p>
               </div>
             </div>
-          )}
-
-          <div className="grid gap-3 lg:grid-cols-2">
-            <div>
-              <label className="form-label" htmlFor="pi-remark">
-                Note about his answer
-              </label>
-              <textarea
-                id="pi-remark"
-                value={remark}
-                onChange={(e) => setRemark(e.target.value)}
-                rows={2}
-                placeholder="Lead time, packing, anything he said on the phone. Internal."
-                className="form-input"
-              />
-            </div>
-            <div>
-              <span className="form-label">His proforma invoice</span>
-              <AttachmentsBox
-                ref={filesRef}
-                basePath="/purchase/enquiries"
-                linkBasePath="/purchase/enquiries/attachments"
-                recordId={enquiry.id}
-                extraBody={{ quoteId: quote.id }}
-                filter={(a) => (a as { quoteId?: string | null }).quoteId === quote.id}
-                onError={setError}
-              />
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                Filed against {quote.supplier.name}, not against the enquiry — so three suppliers do
-                not leave three unlabelled PDFs in one list.
-              </p>
-            </div>
-          </div>
+          </Section>
 
           {priced === 0 && (
             <p className="text-muted-foreground text-xs">
