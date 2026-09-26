@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   Pencil,
+  FileText,
   Plus,
   Printer,
   RefreshCw,
@@ -27,10 +28,12 @@ import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { PurchaseEnquiryDialog } from '@/components/purchase/PurchaseEnquiryDialog'
-import { EnquiryDetail } from '@/components/purchase/EnquiryDetail'
+import { EnquiryCompareDialog } from '@/components/purchase/EnquiryCompareDialog'
+import { RowPanel } from '@/components/tables/RowPanel'
 import {
   ENQUIRY_STATUS,
   money,
+  qty,
   waitingFor,
   type EnquiryRecord,
   type EnquiryStatus,
@@ -66,6 +69,28 @@ const CARD_FILTERS: Record<string, Record<string, string>> = {
   QUOTED: { status: 'QUOTED' },
   expiring: { expired: 'true' },
 }
+
+/*
+ * The columns of the table inside an expanded row.
+ *
+ * Percentages, because the panel is as wide as the list is and the list moves
+ * with the sidebar. Declared here rather than inline so the header and the
+ * cells cannot drift apart — the order list keeps its own the same way.
+ */
+const INNER_COLS: Array<{ label: string; width: string }> = [
+  { label: 'Item code', width: '14%' },
+  { label: 'Item', width: '34%' },
+  { label: 'HSN', width: '10%' },
+  /* Which indent line this answers, where it came off one. Empty on an enquiry
+     about something nobody requisitioned, which is ordinary. */
+  { label: 'Against indent', width: '14%' },
+  { label: 'Qty', width: '14%' },
+  /* Ours, and the only rate on this table. What a supplier quoted is his, and
+     it lives on the comparison window with his PI number beside it. */
+  { label: 'We expected', width: '14%' },
+]
+
+const INNER_NUMERIC = ['Qty', 'We expected']
 
 interface Meta {
   page: number
@@ -105,6 +130,8 @@ export default function PurchaseEnquiriesPage() {
   /** Which enquiry is open underneath its row, comparing what came back. */
   const [open, setOpen] = useState<string | null>(null)
   const [closing, setClosing] = useState<EnquiryRecord | null>(null)
+  /** Which enquiry's answers are open in their own window. */
+  const [comparing, setComparing] = useState<EnquiryRecord | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -216,9 +243,9 @@ export default function PurchaseEnquiriesPage() {
 
     items.push({
       key: 'compare',
-      label: e.supplierCount > 1 ? 'Compare suppliers' : 'Open enquiry',
+      label: e.supplierCount > 1 ? 'Compare what came back' : 'Suppliers and rates',
       icon: <Scale size={15} />,
-      onClick: () => setOpen((cur) => (cur === e.id ? null : e.id)),
+      onClick: () => setComparing(e),
     })
 
     if (can(MODULE, 'edit') && e.quotes.some((q) => !q.sentAt)) {
@@ -556,15 +583,23 @@ export default function PurchaseEnquiriesPage() {
                       {expanded ? 'Hide items' : 'Item details'}
                     </button>
                     {expanded && (
-                      <div className="border-border bg-secondary/30 mt-2 rounded-lg border">
-                        <EnquiryDetail
-                          enquiryId={e.id}
-                          onChanged={(msg) => {
-                            if (msg) setMessage(msg)
-                            void load()
-                          }}
-                          onError={setError}
-                        />
+                      <div className="border-border divide-border/40 mt-2 divide-y rounded-lg border">
+                        {e.lines.map((l) => (
+                          <div key={l.id} className="flex items-start justify-between gap-3 p-2">
+                            <div className="min-w-0">
+                              <p className="truncate text-xs">{l.item.name}</p>
+                              <p className="text-muted-foreground font-mono text-[10px]">
+                                {l.item.code}
+                              </p>
+                            </div>
+                            <p className="shrink-0 text-xs tabular-nums">
+                              {qty(l.qty)}
+                              <span className="text-muted-foreground ml-1 text-[10px]">
+                                {l.item.uom?.symbol}
+                              </span>
+                            </p>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -719,17 +754,75 @@ export default function PurchaseEnquiriesPage() {
                             />
                           </td>
                         </tr>
-                        {expanded && (
+                        {expanded && e.lines.length > 0 && (
                           <tr>
-                            <td colSpan={10} className="bg-secondary/20 p-0">
-                              <EnquiryDetail
-                                enquiryId={e.id}
-                                onChanged={(msg) => {
-                                  if (msg) setMessage(msg)
-                                  void load()
-                                }}
-                                onError={setError}
-                              />
+                            {/* The lines, and nothing else. The chevron on the
+                              order list opens into exactly this, and a row that
+                              opened into three supplier cards, a rates grid and
+                              a strip of buttons was a row that opened into a
+                              wall. What came back from the suppliers has its own
+                              window, off the Actions menu. */}
+                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <RowPanel
+                                icon={FileText}
+                                title="Item Details"
+                                note={`${e.lines.length} ${
+                                  e.lines.length === 1 ? 'line' : 'lines'
+                                } on ${e.enquiryNumber}`}
+                              >
+                                <table className="subtable w-full table-fixed">
+                                  <thead className="sticky top-0 z-10">
+                                    <tr>
+                                      {INNER_COLS.map(({ label: h, width }) => (
+                                        <th
+                                          key={h}
+                                          style={{ width }}
+                                          className={
+                                            INNER_NUMERIC.includes(h) ? 'text-right' : undefined
+                                          }
+                                        >
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {e.lines.map((l, i) => (
+                                      <tr
+                                        key={l.id}
+                                        className="border-border/40 border-b last:border-0"
+                                      >
+                                        <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                          {l.item.code}
+                                        </td>
+                                        <td className="px-3 py-1.5">
+                                          <p className="text-xs">{l.item.name}</p>
+                                          {l.description && (
+                                            <p className="text-muted-foreground text-[10px]">
+                                              {l.description}
+                                            </p>
+                                          )}
+                                        </td>
+                                        <td className="text-muted-foreground px-3 py-1.5 text-xs">
+                                          {l.hsnCode ?? '—'}
+                                        </td>
+                                        <td className="text-muted-foreground px-3 py-1.5 text-xs">
+                                          {l.mrLine?.mr.mrNumber ?? '—'}
+                                        </td>
+                                        <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                          {qty(l.qty)}
+                                          <span className="text-muted-foreground ml-1 text-[10px]">
+                                            {l.item.uom?.symbol}
+                                          </span>
+                                        </td>
+                                        <td className="text-muted-foreground px-3 py-1.5 text-right text-xs tabular-nums">
+                                          {l.expectedRate == null ? '—' : money(l.expectedRate)}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </RowPanel>
                             </td>
                           </tr>
                         )}
@@ -757,6 +850,19 @@ export default function PurchaseEnquiriesPage() {
             if (id) setOpen(id)
             void load()
           }}
+        />
+      )}
+
+      {comparing && (
+        <EnquiryCompareDialog
+          enquiryId={comparing.id}
+          enquiryNumber={comparing.enquiryNumber}
+          onClose={() => setComparing(null)}
+          onChanged={(msg) => {
+            if (msg) setMessage(msg)
+            void load()
+          }}
+          onError={setError}
         />
       )}
 

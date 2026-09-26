@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import {
   AlertCircle,
@@ -14,6 +15,7 @@ import {
   ThumbsDown,
   Trash2,
   Undo2,
+  X,
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
@@ -30,8 +32,14 @@ import {
 } from '@/components/purchase/enquiryTypes'
 
 /**
- * One enquiry opened up: who was asked, what each of them said, and which of
+ * Comparing what came back: who was asked, what each of them said, and which of
  * them is cheapest.
+ *
+ * A window of its own rather than a panel under the row. The row's chevron
+ * answers "what is on this enquiry" and nothing else, exactly as the purchase
+ * order list's does; everything below — three supplier cards, a rates grid, and
+ * the buttons that send, record, pass over and order — is a second job, and
+ * putting both under one chevron made a row that opened into a wall.
  *
  * This is the stage the old ERP calls *Supplier Rates*, and it is the reason
  * the enquiry is its own document rather than a status on a purchase order.
@@ -52,12 +60,17 @@ import {
 
 const MODULE = 'purchase'
 
-export function EnquiryDetail({
+export function EnquiryCompareDialog({
   enquiryId,
+  enquiryNumber,
+  onClose,
   onChanged,
   onError,
 }: {
   enquiryId: string
+  /** Known before the fetch returns, so the title bar is never blank. */
+  enquiryNumber: string
+  onClose: () => void
   /** Tells the list to reload, with a sentence for the banner where there is one. */
   onChanged: (message?: string) => void
   onError: (message: string) => void
@@ -145,102 +158,56 @@ export function EnquiryDetail({
     return suppliers.filter((s) => !on.has(s.id))
   }, [suppliers, enquiry])
 
+  const shell = (body: React.ReactNode) =>
+    createPortal(
+      <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+        <div
+          className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="compare-title"
+        >
+          <div className="border-border flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
+            <div className="min-w-0">
+              <h2 id="compare-title" className="text-foreground text-base font-semibold">
+                What came back
+              </h2>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                {enquiryNumber}
+                {enquiry
+                  ? ' · ' +
+                    enquiry.answeredCount +
+                    ' of ' +
+                    enquiry.supplierCount +
+                    ' have answered'
+                  : ''}
+              </p>
+            </div>
+            <button type="button" onClick={onClose} className="btn-ghost" aria-label="Close">
+              <X size={16} />
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
+        </div>
+      </div>,
+      document.body
+    )
+
   if (loading && !enquiry) {
-    return (
+    return shell(
       <div className="text-muted-foreground flex items-center justify-center gap-2 p-6 text-sm">
         <Loader2 size={15} className="animate-spin" />
         Opening enquiry
       </div>
     )
   }
-  if (!enquiry) return null
+  if (!enquiry) return shell(null)
 
   const editable = enquiry.status !== 'CLOSED' && !enquiry.deletedAt
   const lines = enquiry.lines
 
-  return (
+  return shell(
     <div className="space-y-4 p-4">
-      {/* ── What was asked for ────────────────────────────────────────────
-
-        First, because this is what the row's chevron promises: the items. Same
-        `.subtable` as the order, receipt and bill lists open into, so a person
-        moving between the five screens is reading the same table each time.
-
-        Ordered and unplaced sit here rather than only on the comparison,
-        because part-ordering is ordinary — 600 of the 1,240 now, the rest when
-        somebody can hold the price — and "what is left on this enquiry" is the
-        question that sends a buyer back to it weeks later. */}
-      <section>
-        <h4 className="text-foreground mb-2 text-sm font-semibold">
-          Items on this enquiry
-          <span className="text-muted-foreground ml-2 text-xs font-normal">
-            {lines.length} line{lines.length === 1 ? '' : 's'}
-          </span>
-        </h4>
-        <div className="border-border/70 overflow-x-auto rounded-lg border">
-          <table className="subtable w-full">
-            <thead>
-              <tr className="bg-secondary/60">
-                <th className="text-left" style={{ width: 34 }}>
-                  #
-                </th>
-                <th className="text-left">Item &amp; description</th>
-                <th className="text-left">HSN</th>
-                <th className="text-left">Against indent</th>
-                <th style={{ textAlign: 'right' }}>Asked</th>
-                <th style={{ textAlign: 'right' }}>We expected</th>
-                <th style={{ textAlign: 'right' }}>Ordered</th>
-                <th style={{ textAlign: 'right' }}>Still unplaced</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.map((l, i) => {
-                const unplaced = Number(l.pendingQty ?? Number(l.qty))
-                return (
-                  <tr key={l.id}>
-                    <td className="text-muted-foreground">{i + 1}</td>
-                    <td>
-                      <p className="text-xs font-medium">{l.item.name}</p>
-                      <p className="text-muted-foreground font-mono text-[10px]">{l.item.code}</p>
-                      {l.description && (
-                        <p className="text-muted-foreground text-[10px]">{l.description}</p>
-                      )}
-                    </td>
-                    <td className="text-muted-foreground text-[11px]">{l.hsnCode ?? '—'}</td>
-                    <td className="text-muted-foreground text-[11px]">
-                      {l.mrLine?.mr.mrNumber ?? '—'}
-                    </td>
-                    <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                      {qty(l.qty)}
-                      <span className="text-muted-foreground ml-1 text-[10px]">
-                        {l.item.uom?.symbol}
-                      </span>
-                    </td>
-                    {/* Ours, and greyed, because it is a guess. It must never
-                      read as a price somebody quoted. */}
-                    <td
-                      style={{ textAlign: 'right' }}
-                      className="text-muted-foreground text-xs tabular-nums"
-                    >
-                      {l.expectedRate == null ? '—' : money(l.expectedRate)}
-                    </td>
-                    <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                      {qty(l.orderedQty ?? 0)}
-                    </td>
-                    <td
-                      style={{ textAlign: 'right' }}
-                      className={`text-xs tabular-nums ${unplaced > 0 ? '' : 'text-muted-foreground'}`}
-                    >
-                      {qty(unplaced)}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
       {/* ── Who was asked ─────────────────────────────────────────────────── */}
       <section>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
