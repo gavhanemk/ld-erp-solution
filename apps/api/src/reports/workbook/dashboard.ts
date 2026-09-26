@@ -212,12 +212,34 @@ export function buildDashboard(
   let row = 5
 
   if (analysis.headline) {
+    /*
+     * The headline, given the weight it is worth.
+     *
+     * It was brand-coloured text on bare paper, at twelve point — the same
+     * visual weight as the caveat under it and less than the block of tiles
+     * below, so the one sentence summarising the period was not where the eye
+     * landed. On its own tinted band, a size up, with a rule down the left in
+     * the brand colour, it is the entry point to the sheet. The screen's
+     * dashboard now opens exactly the same way; a report that reads one way in
+     * the browser and another in Excel is two reports to learn.
+     */
     ws.mergeCells(row, 1, row, GRID)
     const h = ws.getCell(row, 1)
     h.value = analysis.headline
-    h.font = { name: 'Calibri', size: 12, bold: true, color: { argb: PAPER.brand } }
-    h.alignment = { wrapText: true, vertical: 'middle' }
-    ws.getRow(row).height = 22
+    h.font = { name: 'Calibri', size: 14, bold: true, color: { argb: INK.heading } }
+    h.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.brandSoft } }
+    h.alignment = { wrapText: true, vertical: 'middle', indent: 1 }
+    h.border = { left: { style: 'thick', color: { argb: PAPER.brand } } }
+    ws.getRow(row).height = 30
+    // The band is one merged cell, so the fill has to be painted across the
+    // constituent cells or it stops at the first column.
+    for (let c = 2; c <= GRID; c++) {
+      ws.getCell(row, c).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: PAPER.brandSoft },
+      }
+    }
     row += 2
   }
 
@@ -268,12 +290,28 @@ export function buildDashboard(
       const c1 = 1 + (i % 4) * perTile
       const c2 = c1 + perTile - 1
 
+      /*
+       * A rail down the left of each tile, in the colour its tone means.
+       *
+       * The tiles were four identical grey boxes whose only difference was a
+       * fill behind the value on a warn or a bad, which is invisible until
+       * something is already wrong. The rail carries the meaning instead —
+       * green where a figure is good, amber where it wants watching, brand
+       * where it is just the ordinary measure — and it is the one piece of
+       * colour on the tile, so it is the piece that gets noticed.
+       */
+      const rail = k.tone ? TONE_INK[k.tone] : PAPER.brand
+      const railed = (r: number) => {
+        ws.getCell(r, c1).border = { left: { style: 'medium', color: { argb: rail } } }
+      }
+
       ws.mergeCells(tileRow, c1, tileRow, c2)
       const label = ws.getCell(tileRow, c1)
       label.value = k.label
       label.font = { name: 'Calibri', size: 9, bold: true, color: { argb: INK.muted } }
       label.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.card } }
       label.alignment = { vertical: 'middle', indent: 1 }
+      railed(tileRow)
 
       ws.mergeCells(tileRow + 1, c1, tileRow + 1, c2)
       const value = ws.getCell(tileRow + 1, c1)
@@ -292,6 +330,7 @@ export function buildDashboard(
         },
       }
       value.alignment = { vertical: 'middle', indent: 1 }
+      railed(tileRow + 1)
       ws.getRow(tileRow + 1).height = 24
 
       // The denominator, always. A figure without one invites the reader to
@@ -302,6 +341,7 @@ export function buildDashboard(
       basis.font = { name: 'Calibri', size: 8, color: { argb: INK.muted } }
       basis.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.card } }
       basis.alignment = { vertical: 'top', indent: 1, wrapText: true }
+      railed(tileRow + 2)
     })
     row += Math.ceil(analysis.kpis.length / 4) * 4 + 1
   }

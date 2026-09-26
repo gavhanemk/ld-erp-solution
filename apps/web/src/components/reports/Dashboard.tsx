@@ -195,6 +195,26 @@ function fillFor(
  * instead (see the panel grid), where a short card is simply short and the
  * next one starts under it.
  */
+/**
+ * A heading with a hairline running off it, above each band of the dashboard.
+ *
+ * The page had none: headline, then boxes, then boxes, then charts, then more
+ * boxes, with nothing saying which band was which or where one ended. Four
+ * quiet rules turn a wall into sections, and cost a line of 10px text each —
+ * the same device the exported sheet has always used, so the screen and the
+ * workbook now read the same way round.
+ */
+function SectionRule({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-2.5 flex items-center gap-3">
+      <h3 className="text-muted-foreground shrink-0 text-[10px] font-semibold uppercase tracking-wider">
+        {children}
+      </h3>
+      <span className="bg-border h-px flex-1" aria-hidden />
+    </div>
+  )
+}
+
 function Card({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
     <div className="glass-card mb-3 break-inside-avoid p-4">
@@ -620,8 +640,29 @@ export function ReportDashboard({
 
   return (
     <div className="space-y-5">
+      {/* The headline, given the weight it is worth.
+        It was a line of 16px teal text above a grey notice, which put the one
+        sentence summarising the whole period at the same size as the caveat
+        under it and below the visual weight of nine identical white boxes. A
+        reader scanning the page found no entry point. Here it is the entry
+        point: the largest type on the screen, on its own tinted ground, with
+        a rule down the left in the measure colour the charts below use. */}
       {analysis.headline && (
-        <p className="text-primary text-base font-semibold">{analysis.headline}</p>
+        <div className="border-border bg-card relative overflow-hidden rounded-xl border p-4 sm:p-5">
+          <span
+            className="absolute inset-y-0 left-0 w-1"
+            style={{ background: 'var(--viz-1)' }}
+            aria-hidden
+          />
+          <div
+            className="pointer-events-none absolute inset-0 opacity-[0.06]"
+            style={{ background: 'radial-gradient(60rem 12rem at 0% 0%, var(--viz-1), transparent)' }}
+            aria-hidden
+          />
+          <p className="text-foreground relative pl-3 text-lg font-semibold leading-snug sm:text-xl">
+            {analysis.headline}
+          </p>
+        </div>
       )}
 
       {/* Says so when there is barely anything to look at, rather than leaving
@@ -644,24 +685,44 @@ export function ReportDashboard({
         width they are given instead: two take a half each, three a third,
         five wrap to three and two. */}
       {analysis.kpis.length > 0 && (
-        <div className="flex flex-wrap gap-3">
-          {analysis.kpis.map((k) => (
-            <div
-              key={k.label}
-              className={`glass-card min-w-0 flex-1 basis-[13rem] p-3 ${k.tone ? `border ${TONE_EDGE[k.tone]}` : ''}`}
-            >
-              <p className="text-muted-foreground text-xs">{k.label}</p>
-              <p
-                className={`mt-1 text-xl font-semibold tabular-nums ${k.tone ? TONE_TEXT[k.tone] : 'text-foreground'}`}
+        <section>
+          <SectionRule>The period at a glance</SectionRule>
+          <div className="flex flex-wrap gap-3">
+            {analysis.kpis.map((k) => (
+              /* A rail in the tone's colour, and the figure a size up.
+                These were flat white boxes, indistinguishable from the
+                collapsed panels further down — so nine things competed at one
+                weight and none of them led. The rail is the whole difference:
+                it is the only place on the card carrying colour, so a tone
+                means something at a glance instead of being a border tint
+                nobody notices. An untoned KPI gets the measure colour, which
+                is what the charts use for the ordinary case. */
+              <div
+                key={k.label}
+                className="glass-card relative min-w-0 flex-1 basis-[13rem] overflow-hidden p-3 pl-4"
               >
-                {kpiText(k)}
-              </p>
-              {/* The denominator, always. A figure without one invites the
-                reader to supply their own. */}
-              <p className="text-muted-foreground mt-0.5 text-[11px] leading-snug">{k.basis}</p>
-            </div>
-          ))}
-        </div>
+                <span
+                  className="absolute inset-y-0 left-0 w-[3px]"
+                  style={{ background: k.tone ? TONE[k.tone] : 'var(--viz-1)' }}
+                  aria-hidden
+                />
+                <p className="text-muted-foreground text-[11px] font-medium uppercase tracking-wide">
+                  {k.label}
+                </p>
+                <p
+                  className={`mt-1.5 text-2xl font-semibold tabular-nums leading-none ${
+                    k.tone ? TONE_TEXT[k.tone] : 'text-foreground'
+                  }`}
+                >
+                  {kpiText(k)}
+                </p>
+                {/* The denominator, always. A figure without one invites the
+                  reader to supply their own. */}
+                <p className="text-muted-foreground mt-1.5 text-[11px] leading-snug">{k.basis}</p>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       {/* Above the charts, because a reader who looks at nothing else should
@@ -715,46 +776,66 @@ export function ReportDashboard({
         be its own height and the next one start directly under it, which is
         the whole of the empty space this used to have. */}
       {charts.length > 0 && (
-        <div className="gap-3 lg:columns-2 [&>*]:break-inside-avoid">
-          {charts.map((p) => (
-            <PanelCard key={p.title} panel={p} />
-          ))}
-        </div>
+        <section>
+          <SectionRule>Analysis</SectionRule>
+          <div className="gap-3 lg:columns-2 [&>*]:break-inside-avoid">
+            {charts.map((p) => (
+              <PanelCard key={p.title} panel={p} />
+            ))}
+          </div>
+        </section>
       )}
 
       {/* One category is a figure. Laid out as the KPI band is, because that
         is what it is — not a chart frame with a single bar in it. */}
       {cards.length > 0 && (
-        <div className="flex flex-wrap gap-3">
-          {cards.map((p) => {
-            const pt = p.points[0]
-            return (
-              <div key={p.title} className="glass-card min-w-0 flex-1 basis-[13rem] p-3">
-                <p className="text-muted-foreground text-xs leading-snug">{p.title}</p>
-                {pt ? (
-                  <>
-                    <p className="text-foreground mt-1 text-xl font-semibold tabular-nums">
-                      {short(pt.value, p.format)}
+        <section>
+          <SectionRule>
+            Single figures
+            <span className="text-muted-foreground/70 ml-2 font-normal normal-case tracking-normal">
+              one of something, so a number rather than a chart
+            </span>
+          </SectionRule>
+          {/* Deliberately quieter than the KPIs above.
+            These used to be the same box at the same size, so the period's
+            headline figures and a chart that happened to collapse looked
+            equally important — and with five of them they outnumbered and
+            outweighed the four that actually matter. Smaller type, no rail,
+            and the category's own colour carried by the dot. */}
+          <div className="flex flex-wrap gap-2.5">
+            {cards.map((p) => {
+              const pt = p.points[0]
+              return (
+                <div
+                  key={p.title}
+                  className="border-border bg-secondary/30 min-w-0 flex-1 basis-[12rem] rounded-lg border px-3 py-2.5"
+                >
+                  <p className="text-muted-foreground text-[11px] leading-snug">{p.title}</p>
+                  {pt ? (
+                    <>
+                      <p className="text-foreground mt-1 text-base font-semibold tabular-nums leading-none">
+                        {short(pt.value, p.format)}
+                      </p>
+                      <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-[11px]">
+                        <span
+                          className="h-2 w-2 shrink-0 rounded-full"
+                          style={{ background: fillFor(p, 0, pt) }}
+                        />
+                        <span className="truncate">{pt.label}</span>
+                      </p>
+                    </>
+                  ) : (
+                    // An empty chart frame is indistinguishable from a broken
+                    // one, so it says which in words.
+                    <p className="text-muted-foreground mt-1 text-sm italic">
+                      No data for this period
                     </p>
-                    <p className="text-muted-foreground mt-0.5 flex items-center gap-1.5 text-[11px]">
-                      <span
-                        className="h-2 w-2 shrink-0 rounded-full"
-                        style={{ background: fillFor(p, 0, pt) }}
-                      />
-                      {pt.label}
-                    </p>
-                  </>
-                ) : (
-                  // An empty chart frame is indistinguishable from a broken
-                  // one, so it says which in words.
-                  <p className="text-muted-foreground mt-1 text-sm italic">
-                    No data for this period
-                  </p>
-                )}
-              </div>
-            )
-          })}
-        </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </section>
       )}
 
       {analysis.matrix && <MatrixHeat matrix={analysis.matrix} />}
