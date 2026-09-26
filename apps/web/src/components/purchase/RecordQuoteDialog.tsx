@@ -184,9 +184,13 @@ export function RecordQuoteDialog({
   }, [onClose, saving])
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+    /* Centred and sized to its content, not stretched to the window.
+      The order and enquiry forms are full height because they are long; this
+      one is four fields and a short table, and at full height two thirds of it
+      was empty grey with the buttons stranded at the bottom of the screen. */
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
       <div
-        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        className="glass-card po-form flex max-h-full w-full max-w-5xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="quote-dialog-title"
@@ -212,7 +216,7 @@ export function RecordQuoteDialog({
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+        <div className="min-h-0 space-y-4 overflow-y-auto p-4">
           {error && (
             <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
               <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
@@ -280,17 +284,27 @@ export function RecordQuoteDialog({
             </div>
           </div>
 
+          {/* Fixed widths, or every cell sizes itself off its own input and
+            the three typed columns balloon to a third of the row each — which
+            is what this table was doing: a 300px box holding the word "all",
+            right-aligned, floating in the middle of nothing.
+
+            What we are told sits narrow and grey; what he tells us is typed
+            and therefore wider. The two are not interchangeable and the table
+            should not pretend they are. */}
           <div className="border-border/70 overflow-x-auto rounded-lg border">
-            <table className="subtable w-full">
+            <table className="subtable w-full table-fixed">
               <thead>
                 <tr className="bg-secondary/60">
-                  <th className="text-left">Item</th>
-                  <th style={{ textAlign: 'right' }}>Asked</th>
-                  <th style={{ textAlign: 'right' }}>He can supply</th>
-                  <th style={{ textAlign: 'right' }}>We expected</th>
-                  <th style={{ textAlign: 'right' }}>He quotes</th>
-                  <th style={{ textAlign: 'right' }}>GST %</th>
-                  <th style={{ textAlign: 'right' }}>Line</th>
+                  <th className="text-left" style={{ width: '26%' }}>
+                    Item
+                  </th>
+                  <th style={{ width: '13%', textAlign: 'right' }}>Asked</th>
+                  <th style={{ width: '12%', textAlign: 'right' }}>We expected</th>
+                  <th style={{ width: '13%', textAlign: 'right' }}>He can supply</th>
+                  <th style={{ width: '13%', textAlign: 'right' }}>He quotes</th>
+                  <th style={{ width: '10%', textAlign: 'right' }}>GST %</th>
+                  <th style={{ width: '13%', textAlign: 'right' }}>Line</th>
                 </tr>
               </thead>
               <tbody>
@@ -319,6 +333,12 @@ export function RecordQuoteDialog({
                           {l.item.uom?.symbol}
                         </span>
                       </td>
+                      <td
+                        style={{ textAlign: 'right' }}
+                        className="text-muted-foreground text-xs tabular-nums"
+                      >
+                        {expected == null ? '—' : money(expected)}
+                      </td>
                       <td>
                         {/* Empty means all of it, which is the usual answer.
                           Typing a smaller figure is how a buyer records that
@@ -334,12 +354,11 @@ export function RecordQuoteDialog({
                           className={`form-input text-right ${short ? 'border-amber-500/60' : ''}`}
                           aria-label={'Quantity offered for ' + l.item.name}
                         />
-                      </td>
-                      <td
-                        style={{ textAlign: 'right' }}
-                        className="text-muted-foreground text-xs tabular-nums"
-                      >
-                        {expected == null ? '—' : money(expected)}
+                        {short && (
+                          <p className="mt-0.5 text-right text-[10px] text-amber-400">
+                            {fmtQty(Number(l.qty) - useQty)} short
+                          </p>
+                        )}
                       </td>
                       <td>
                         <input

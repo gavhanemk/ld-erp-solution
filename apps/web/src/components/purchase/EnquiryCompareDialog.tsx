@@ -160,9 +160,13 @@ export function EnquiryCompareDialog({
 
   const shell = (body: React.ReactNode) =>
     createPortal(
-      <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      /* Sized to what came back, not to the window. Two suppliers and two
+        lines is a short document; at full height it was half a screen of empty
+        grey under it. It still grows — `max-h-full` with the body scrolling —
+        so eight suppliers fill the screen and no more. */
+      <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
         <div
-          className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+          className="glass-card po-form flex max-h-full w-full max-w-6xl flex-col overflow-hidden"
           role="dialog"
           aria-modal="true"
           aria-labelledby="compare-title"
@@ -187,7 +191,7 @@ export function EnquiryCompareDialog({
               <X size={16} />
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">{body}</div>
+          <div className="min-h-0 overflow-y-auto">{body}</div>
         </div>
       </div>,
       document.body
