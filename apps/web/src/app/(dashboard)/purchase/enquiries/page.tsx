@@ -607,7 +607,7 @@ export default function PurchaseEnquiriesPage() {
               })}
             </div>
 
-            <div className="list-rows w-full">
+            <div className="list-rows w-full overflow-x-auto">
               <table className="data-table table-compact w-full">
                 <thead>
                   {/* Filled, not just underlined. Eight columns of small grey
@@ -627,24 +627,26 @@ export default function PurchaseEnquiriesPage() {
                       full at 1390px and up, then wide, then roomy. Never
                       dropped: the number, the value, the status and the
                       actions. */}
-                    <th>Enquiry</th>
-                    <th className="col-full">Location</th>
-                    <th className="col-roomy">Date</th>
-                    <th className="col-full">Needed by</th>
-                    <th className="col-full">Reference</th>
-                    <th className="col-wide" style={{ textAlign: 'right' }}>
+                    <th className="whitespace-nowrap">Enquiry</th>
+                    <th className="col-full whitespace-nowrap">Location</th>
+                    <th className="col-roomy whitespace-nowrap">Date</th>
+                    <th className="col-full whitespace-nowrap">Needed by</th>
+                    <th className="col-full whitespace-nowrap">Reference</th>
+                    <th className="col-wide whitespace-nowrap" style={{ textAlign: 'right' }}>
                       Items
                     </th>
-                    <th className="col-roomy" style={{ textAlign: 'right' }}>
+                    <th className="col-roomy whitespace-nowrap" style={{ textAlign: 'right' }}>
                       Asked
                     </th>
-                    <th className="col-wide" style={{ textAlign: 'right' }}>
+                    <th className="col-wide whitespace-nowrap" style={{ textAlign: 'right' }}>
                       Answered
                     </th>
-                    <th>Best quote</th>
-                    <th style={{ textAlign: 'right' }}>Value</th>
-                    <th>Status</th>
-                    <th className="col-roomy">Order</th>
+                    <th className="whitespace-nowrap">Best quote</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Value
+                    </th>
+                    <th className="whitespace-nowrap">Status</th>
+                    <th className="col-roomy whitespace-nowrap">Order</th>
                     <th />
                   </tr>
                 </thead>
@@ -678,24 +680,28 @@ export default function PurchaseEnquiriesPage() {
                               href={'/print/purchase-enquiry/' + e.id}
                               target="_blank"
                               rel="noreferrer"
-                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              className="whitespace-nowrap font-mono text-xs font-semibold text-teal-400 hover:underline"
                               title={'Open the printed sheet for ' + e.enquiryNumber}
                             >
                               {e.enquiryNumber}
                             </a>
                           </td>
-                          <td className="col-full text-muted-foreground text-xs">
-                            {e.location?.name ?? 'Head office'}
+                          <td className="col-full text-muted-foreground max-w-[9rem] truncate text-xs">
+                            <span title={e.location?.name ?? 'Head office'}>
+                              {e.location?.name ?? 'Head office'}
+                            </span>
                           </td>
-                          <td className="col-roomy text-xs">{formatDate(e.enquiryDate)}</td>
-                          <td className="col-full text-xs">
+                          <td className="col-roomy whitespace-nowrap text-xs">
+                            {formatDate(e.enquiryDate)}
+                          </td>
+                          <td className="col-full whitespace-nowrap text-xs">
                             {e.requiredDate ? (
                               formatDate(e.requiredDate)
                             ) : (
                               <span className="text-muted-foreground/60">—</span>
                             )}
                           </td>
-                          <td className="col-full">
+                          <td className="col-full whitespace-nowrap">
                             {e.reference ? (
                               <span className="font-mono text-xs">{e.reference}</span>
                             ) : (
@@ -736,7 +742,12 @@ export default function PurchaseEnquiriesPage() {
                           <td>
                             {e.best ? (
                               <>
-                                <p className="text-sm">{e.best.supplierName}</p>
+                                <p
+                                  className="max-w-[11rem] truncate text-sm"
+                                  title={e.best.supplierName}
+                                >
+                                  {e.best.supplierName}
+                                </p>
                                 {!e.comparable && (
                                   <p className="text-[11px] text-amber-400">
                                     priced {e.best.pricedLines} of {e.lines.length}
@@ -752,7 +763,7 @@ export default function PurchaseEnquiriesPage() {
                           <td style={{ textAlign: 'right' }}>
                             {e.best ? (
                               <>
-                                <p className="text-sm font-medium tabular-nums">
+                                <p className="whitespace-nowrap text-sm font-medium tabular-nums">
                                   ₹{money(e.best.amount)}
                                 </p>
                                 {e.expired && (
