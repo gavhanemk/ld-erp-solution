@@ -283,6 +283,7 @@ model User {
   approvedNotes        PurchaseNote[]              @relation("NoteApprovedBy")
   postedNotes          PurchaseNote[]              @relation("NotePostedBy")
   closedNotes          PurchaseNote[]              @relation("NoteClosedBy")
+  gstTreatedNotes      PurchaseNote[]              @relation("NoteGstTreatedBy")
   uploadedNoteFiles    PurchaseNoteAttachment[]    @relation("NoteAttachmentUploadedBy")
 
   @@index([email])
@@ -392,6 +393,7 @@ model Company {
   departments  Department[]
   numberSeries NumberSeries[]
   taxRates     TaxRate[]
+  tdsSections  TdsSection[]
   settings     AppSetting[]
   documents    DocumentTemplate[]
 
@@ -449,6 +451,22 @@ model TaxRate {
 
   @@unique([companyId, name])
   @@map("tax_rates")
+}
+
+model TdsSection {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  section   String // e.g. "194C"
+  label     String // e.g. "Contractor payments — Individual/HUF"
+  rate      Decimal  @db.Decimal(5, 2)
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, section, label])
+  @@map("tds_sections")
 }
 
 /// One row per preference. A key/value table rather than columns, so adding a
@@ -1364,6 +1382,7 @@ model GRNLine {
   amount       Decimal            @default(0) @db.Decimal(12, 2)
 
   billLines PurchaseInvoiceLine[]
+  noteLines PurchaseNoteLine[]
 
   @@map("grn_lines")
 }
@@ -2539,43 +2558,89 @@ model CreditNoteLine {
 // PURCHASE ADJUSTMENTS
 // ═══════════════════════════════════════════
 
-/// Which document this is, in the plain sense of who wrote it.
+/// Who raised the adjustment — ours or theirs.
 ///
-/// DEBIT is ours — the mill claims money back from a supplier. CREDIT is
-/// theirs — the supplier grants a reduction and we record their document.
-/// Neither word decides what happens to the payable; see `effect`.
-enum PurchaseNoteType {
-  DEBIT
-  CREDIT
+/// Held on its own because it is the one fact a purchase clerk always knows
+/// for certain, and because it is not the same question as what kind of
+/// document resulted. We can raise a claim the supplier never answers; the
+/// supplier can send a note we never asked for.
+enum PurchaseAdjustmentIssuer {
+  OUR_COMPANY
+  SUPPLIER
+}
+
+/// What kind of document this actually is.
+///
+/// Deliberately NOT two values. "Debit note" and "credit note" are a pair only
+/// if you assume every adjustment comes off the bill, and that assumption is
+/// what this enum exists to break: a supplier who undercharged raises a debit
+/// note ON us and the payable goes UP. Collapsing that into a DEBIT/CREDIT
+/// flag moved money the wrong way and read as correct while doing it.
+///
+/// OUR_DEBIT_NOTE is a commercial claim, not a GST document. Whether it ever
+/// becomes one is the accounts desk's call — see `gstTreatment`. That is the
+/// whole reason the two are separate columns.
+enum PurchaseAdjustmentDoc {
+  /// Our own commercial debit note or claim on the supplier.
+  OUR_DEBIT_NOTE
+  /// Their document, reducing the value of their own invoice.
+  SUPPLIER_CREDIT_NOTE
+  /// Their document, increasing the value of their own invoice.
+  SUPPLIER_DEBIT_NOTE
+  /// Anything the accounts desk configures that is none of the above.
+  OTHER
+}
+
+/// How the accounts desk has classified this for GST — and nobody else.
+///
+/// A purchase clerk records that twelve rolls came back damaged. Whether that
+/// becomes a section 34 credit note, an ITC reversal, or stays a purely
+/// commercial claim with no GST consequence at all is a question about the
+/// supplier's filing, the month, and whether they ever issued a document. The
+/// purchase office cannot answer it and must not be asked to, so this column
+/// starts at NOT_REVIEWED and only an accounts hand may move it.
+enum PurchaseGstTreatment {
+  /// The default. Accounts has not looked at this yet.
+  NOT_REVIEWED
+  /// Supplier issued a credit note under s.34(1); our ITC reduces.
+  GST_CREDIT_NOTE
+  /// Supplier issued a debit note under s.34(3); further ITC is available.
+  GST_DEBIT_NOTE
+  /// No supplier document — we reverse the input credit ourselves.
+  ITC_REVERSAL_ONLY
+  /// Commercial only. The invoice and the input credit both stand.
+  NO_GST_IMPACT
 }
 
 /// What happened, in the words the purchase office already uses.
 ///
-/// The reason is the only thing a buyer is asked to choose. The document type
-/// and the accounting effect are derived from it, because a buyer knows
-/// whether cloth came back damaged and does not know whether that is a debit
-/// or a credit against the supplier's ledger.
+/// This is a description of an event in the godown or on the bill. It is NOT
+/// a document type and NOT an accounting position, and nothing here may be
+/// read as implying either: the same damaged lot can end up as our claim, as
+/// their credit note, or as neither, depending on what the supplier does next.
+///
+/// `EXCESS_QUANTITY_BILLED` was dropped as a duplicate — "the bill shows more
+/// than the challan" and SHORT_QUANTITY's "billed for more than arrived" are
+/// one event written twice, and offering both only split the reporting.
 enum PurchaseNoteReason {
   PURCHASE_RETURN
   SHORT_QUANTITY
   DAMAGED_MATERIAL
   QUALITY_REJECTION
   WRONG_MATERIAL
-  EXCESS_QUANTITY_BILLED
-  RATE_DIFFERENCE
+  WRONG_RATE
   EXCESS_BILLING
   POST_PURCHASE_DISCOUNT
   OTHER
 }
 
-/// What the note does to the money owed — held apart from the document type
-/// on purpose.
+/// What the adjustment does to the money owed.
 ///
-/// A debit note we raise almost always reduces the payable, and a supplier's
-/// credit note does too. But a supplier who undercharged raises a debit note
-/// ON us, and that increases it. Reading the direction off the document's
-/// name would be right until the day it silently was not, and what a wrong
-/// answer moves is the money.
+/// Decided by the DOCUMENT, never by the reason. Damaged goods reduce the bill
+/// when we claim for them and when the supplier credits them; the identical
+/// damaged goods increase it if the supplier's answer is a debit note for the
+/// replacement they sent. The event does not carry a direction — only the
+/// document does.
 enum PurchaseNoteEffect {
   REDUCES_PAYABLE
   INCREASES_PAYABLE
@@ -2599,22 +2664,51 @@ enum PurchaseNoteStatus {
 /// An adjustment to what a supplier is owed, raised after their bill was
 /// booked.
 ///
-/// One table for both documents. A debit note and a supplier's credit note
-/// carry the same fields, adjust the same bill, validate against the same
-/// remaining balance and print on the same sheet — the difference between
-/// them is who signed it, which is one column. Two tables would have been two
-/// of everything above, drifting apart from the first change onwards.
+/// One table for every kind. Our commercial claim, the supplier's credit note
+/// and the supplier's debit note carry the same fields, point at the same
+/// bill, validate against the same remaining balance and print on the same
+/// sheet. What differs between them is who issued it, which way the money
+/// goes and how GST sees it — three columns, not three tables.
+///
+/// The bill it adjusts is never edited. `PurchaseInvoice.noteAdjustment` is a
+/// roll-up recomputed from the posted notes, so the invoice's own lines and
+/// totals stand exactly as the supplier sent them, however many adjustments
+/// accumulate against it.
 model PurchaseNote {
   id         String             @id @default(cuid())
   /// Ours, always. A supplier's credit note is filed under our own reference
   /// so it can be found; their number is `supplierDocNo`.
   noteNumber String             @unique
-  noteType   PurchaseNoteType
   status     PurchaseNoteStatus @default(DRAFT)
+
+  // ── The three facts, kept apart ────────────────────────────────────────
+  //
+  // One column used to carry all three and could therefore express only two
+  // of the eight combinations that occur. They are separate because they are
+  // answered by different people from different evidence: the godown says
+  // what happened, the post says who issued what, and the accounts desk says
+  // what it means for GST.
+
+  /// What happened. A description of an event, carrying no direction.
   reason     PurchaseNoteReason
   /// Required when the reason is OTHER; a free remark otherwise.
   reasonNote String?
-  effect     PurchaseNoteEffect
+
+  /// Who raised it. Ours or theirs.
+  issuedBy PurchaseAdjustmentIssuer @default(OUR_COMPANY)
+  /// What kind of document resulted.
+  docType  PurchaseAdjustmentDoc    @default(OUR_DEBIT_NOTE)
+
+  /// Which way the money moves. Follows `docType`, never `reason`.
+  effect PurchaseNoteEffect
+
+  /// The accounts desk's classification. Purchase cannot set it; posting is
+  /// refused until somebody with the accounts permission has.
+  gstTreatment   PurchaseGstTreatment @default(NOT_REVIEWED)
+  gstNote        String?
+  gstTreatedById String?
+  gstTreatedBy   User?                @relation("NoteGstTreatedBy", fields: [gstTreatedById], references: [id])
+  gstTreatedAt   DateTime?
 
   supplierId String
   supplier   Supplier @relation(fields: [supplierId], references: [id])
@@ -2696,14 +2790,15 @@ model PurchaseNote {
   lines       PurchaseNoteLine[]
   attachments PurchaseNoteAttachment[]
 
-  /// A supplier's credit note booked twice claims the reduction twice, which
-  /// is the same mistake the duplicate-bill guard exists for. Postgres treats
-  /// NULLs as distinct, so our own debit notes — which carry no supplier
+  /// A supplier's own document booked twice claims the same adjustment twice,
+  /// which is the mistake the duplicate-bill guard exists for. Postgres treats
+  /// NULLs as distinct, so our own commercial claims — which carry no supplier
   /// document number — are unaffected.
   @@unique([supplierId, supplierDocNo])
   @@index([supplierId])
   @@index([billId])
-  @@index([noteType, status])
+  @@index([docType, status])
+  @@index([issuedBy, status])
   @@map("purchase_notes")
 }
 
@@ -2725,6 +2820,17 @@ model PurchaseNoteLine {
   /// adjusted claimable all over again.
   billLineId String?
   billLine   PurchaseInvoiceLine? @relation(fields: [billLineId], references: [id], onDelete: Restrict)
+
+  /// The receipt line this adjusts, on a note raised with no bill behind it.
+  ///
+  /// Goods rejected at the gate are never billed, so there is no bill line to
+  /// point at — this is what "how much of this GRN line is still left to
+  /// note" is worked out from instead, the same way `billLineId` answers that
+  /// for a note that does have a bill. `Restrict`, matching `billLineId`: a
+  /// receipt line deleted out from under a posted note would leave the note
+  /// pointing at nothing and its quantity claimable all over again.
+  grnLineId String?
+  grnLine   GRNLine? @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
 
   description String?
   hsnCode     String?
@@ -2750,6 +2856,7 @@ model PurchaseNoteLine {
 
   @@index([noteId])
   @@index([billLineId])
+  @@index([grnLineId])
   @@map("purchase_note_lines")
 }
 

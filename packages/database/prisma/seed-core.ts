@@ -343,7 +343,19 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'DC', prefix: 'DC' },
     { docType: 'JW', prefix: 'JW' },
     { docType: 'CN', prefix: 'CN' },
+    // The four adjustment series, one per kind of document.
+    //
+    // Separate runs rather than one shared one: our own claim, the supplier's
+    // credit note and the supplier's debit note are three different documents
+    // with three different signatures on them, and a shared series makes
+    // "DN-2627-0007" ambiguous about whose it is while punching holes in a run
+    // that has to be unbroken. DN was already here; the other three were added
+    // when the model stopped pretending an adjustment was either a debit or a
+    // credit.
     { docType: 'DN', prefix: 'DN' },
+    { docType: 'SCN', prefix: 'SCN' },
+    { docType: 'SDN', prefix: 'SDN' },
+    { docType: 'PADJ', prefix: 'PADJ' },
     { docType: 'VCH', prefix: 'VCH' },
     // Stock moving between our own stores, and a correction after a count.
     // Both used to leave nothing but a ledger row tagged with the clock.
@@ -409,6 +421,25 @@ export async function seedCore(prisma: PrismaClient) {
       where: { companyId_name: { companyId: company.id, name: t.name } },
       // isDefault is corrected on an existing install too — an earlier seed
       // marked 12% as the default, which is not the rate LD charges.
+      update: { rate: t.rate, isDefault: t.isDefault },
+      create: { ...t, companyId: company.id },
+    })
+  }
+
+  // 9c. TDS sections. Only the entries LD confirmed a rate for are seeded —
+  // commission (194H), rent (194I) and salary showed up in their old system
+  // too, but without a readable rate, so those are left for LD to add
+  // themselves from Settings rather than guessed at here.
+  const tdsSections = [
+    { section: '194C', label: 'Contractor payments — Individual/HUF', rate: 1, isDefault: false },
+    { section: '194C', label: 'Contractor payments — Company/Others', rate: 2, isDefault: false },
+    { section: '194J', label: 'Technical services fees', rate: 2, isDefault: false },
+    { section: '194J', label: 'Professional fees', rate: 10, isDefault: false },
+  ]
+
+  for (const t of tdsSections) {
+    await prisma.tdsSection.upsert({
+      where: { companyId_section_label: { companyId: company.id, section: t.section, label: t.label } },
       update: { rate: t.rate, isDefault: t.isDefault },
       create: { ...t, companyId: company.id },
     })
