@@ -21,6 +21,7 @@ import { Section } from './PurchaseOrderDialog'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { DOC_WORDS, NOTE_STATUS, REASON_WORDS, type NoteStatus } from './noteTypes'
 
 const inr = (v: string | number | null | undefined) =>
   Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -37,12 +38,15 @@ const MODE_LABEL: Record<string, string> = {
   PDC: 'Post-dated cheque',
 }
 
-const NOTE_STATUS: Record<string, { label: string; cls: string }> = {
-  DRAFT: { label: 'Draft', cls: 'badge-warning' },
-  ISSUED: { label: 'Issued', cls: 'badge-info' },
-  SETTLED: { label: 'Settled', cls: 'badge-success' },
-  CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
-}
+/*
+ * The status words come from `noteTypes` now.
+ *
+ * This file used to keep its own map, and it had drifted: it carried ISSUED
+ * and SETTLED, of which SETTLED has never been a value the database can hold —
+ * the old enum's third state was ADJUSTED. A settled note therefore fell
+ * through to the bare enum name and printed as a grey "ADJUSTED" badge. One
+ * map, shared with the notes screens, is what stops that happening again.
+ */
 
 // Kept in step with the same map on the bills list, so a bill reads the same
 // badge whether it is glanced at in the table or opened in full.
@@ -100,6 +104,23 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
               </td>
               <td className="text-muted-foreground col-wide font-mono">
                 {l.grnLine?.grn?.grnNumber ?? 'Direct'}
+                {/* The bill claims the whole delivery, rejected part
+                  included — said here so it stays visible after the bill is
+                  saved, not only while it is being pulled in. Amber only for
+                  what is still unclaimed: a rejection already noted straight
+                  off the receipt, before this bill existed, is not still
+                  waiting on one. */}
+                {(() => {
+                  const rejected = Number(l.grnLine?.rejectedQty ?? 0)
+                  if (!rejected) return null
+                  const noted = Number(l.grnLine?.rejectedNotedQty ?? 0)
+                  const remaining = Math.max(0, rejected - noted)
+                  return remaining > 0 ? (
+                    <div className="text-amber-500">{qtyFmt(remaining)} rejected</div>
+                  ) : (
+                    <div className="text-muted-foreground">{qtyFmt(rejected)} rejected · noted</div>
+                  )
+                })()}
               </td>
               <td className="text-foreground text-right tabular-nums">
                 {qtyFmt(l.qty)}
@@ -149,7 +170,22 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
 }
 
 /** A file behind a bill, tagged with which document it actually hangs off. */
-export type BillFile = BillAttachment & { kind: 'order' | 'receipt'; source: string }
+export type BillFile = BillAttachment & { kind: FileKind; source: string }
+
+/**
+ * Which table a file lives in, and so which route signs its download link.
+ *
+ * `payment` is the one that hangs off the money rather than the goods — the
+ * bank advice or the cheque counterfoil, attached when the payment was
+ * recorded. It only ever appears on a payment's own row.
+ */
+export type FileKind = 'order' | 'receipt' | 'payment'
+
+const FILE_ROUTES: Record<FileKind, string> = {
+  order: 'attachments',
+  receipt: 'grn-attachments',
+  payment: 'payment-attachments',
+}
 
 /**
  * Every file behind a bill, from its order and from each of its receipts.
@@ -164,13 +200,21 @@ export interface FileTrail {
   lines?: Array<{
     grnLine?: { grn: { grnNumber: string; attachments?: BillAttachment[] } } | null
   }>
+  /** Set only when the trail is being shown for one payment. */
+  payment?: { paymentNumber: string; attachments?: BillAttachment[] } | null
 }
 
 export function billFiles(bill: FileTrail): BillFile[] {
   const seen = new Map<string, BillFile>()
 
+  // The payment's own files lead, where there are any: somebody opening this
+  // from a payment row came for the advice or the counterfoil, not for the
+  // quotation that was agreed two months earlier.
+  for (const f of bill.payment?.attachments ?? []) {
+    seen.set(f.id, { ...f, kind: 'payment', source: bill.payment!.paymentNumber })
+  }
   for (const f of bill.po?.attachments ?? []) {
-    seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
+    if (!seen.has(f.id)) seen.set(f.id, { ...f, kind: 'order', source: bill.po!.poNumber })
   }
   for (const line of bill.lines ?? []) {
     const grn = line.grnLine?.grn
@@ -204,13 +248,13 @@ function Attachments({ files }: { files: BillFile[] }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const open = async (file: { id: string; kind: 'order' | 'receipt' }) => {
+  const open = async (file: { id: string; kind: FileKind }) => {
     setBusy(file.id)
     setError(null)
     try {
       // The link is signed and short-lived, so it is fetched at the moment it
       // is wanted rather than put in the page and left to go stale.
-      const path = file.kind === 'order' ? 'attachments' : 'grn-attachments'
+      const path = FILE_ROUTES[file.kind]
       const res = await api.get<{ data: { url: string } }>(`/purchase/${path}/${file.id}/link`)
       window.open(res.data.url, '_blank', 'noopener')
     } catch (err) {
@@ -306,7 +350,8 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
   const balance = Number(bill.balanceAmount ?? 0)
   const tds = Number(bill.tdsAmount ?? 0)
   const payments = bill.payments ?? []
-  const notes = bill.debitNotes ?? []
+  const notes = bill.adjustments ?? []
+  const adjusted = Number(bill.noteAdjustment ?? 0)
 
   const files = billFiles(bill)
 
@@ -359,12 +404,29 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             {[
               { label: 'Bill total', value: `₹${inr(bill.totalAmount)}`, color: 'text-foreground' },
               { label: 'Paid so far', value: `₹${inr(paid)}`, color: 'text-emerald-400' },
+              /* What notes have already taken off, beside what was paid —
+                 these are the two things that move the balance, and a reader
+                 seeing only one of them cannot make the third add up. */
+              ...(adjusted !== 0
+                ? [
+                    {
+                      label: adjusted > 0 ? 'Adjusted off' : 'Added by notes',
+                      value: `₹${inr(Math.abs(adjusted))}`,
+                      color: 'text-sky-400',
+                    },
+                  ]
+                : [
+                    {
+                      label: 'Items',
+                      value: String(bill.lines?.length ?? 0),
+                      color: 'text-teal-400',
+                    },
+                  ]),
               {
                 label: 'Still owed',
                 value: `₹${inr(balance)}`,
                 color: balance > 0 ? 'text-amber-400' : 'text-emerald-400',
               },
-              { label: 'Items', value: String(bill.lines?.length ?? 0), color: 'text-teal-400' },
             ].map((s) => (
               <div
                 key={s.label}
@@ -379,7 +441,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           </div>
 
           {/* The paperwork, and the trail behind it. */}
-          <Section icon={FileText} title="The bill">
+          <Section icon={FileText} title="Bill Details">
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
               <Field
                 label="Bill no. (the supplier's)"
@@ -443,7 +505,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             </dl>
           </Section>
 
-          <Section icon={Building2} title="The supplier">
+          <Section icon={Building2} title="Supplier Details">
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
               <Field label="Name" value={bill.supplier?.name ?? '—'} />
               <Field
@@ -488,12 +550,12 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
             </dl>
           </Section>
 
-          <Section icon={Package} title={`Items (${bill.lines?.length ?? 0})`}>
+          <Section icon={Package} title={`Item Details (${bill.lines?.length ?? 0})`}>
             <BillItems bill={bill} />
           </Section>
 
           {bill.charges && bill.charges.length > 0 && (
-            <Section icon={Percent} title="Extra charges">
+            <Section icon={Percent} title="Other Charges">
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -524,7 +586,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           )}
 
           <div className="grid gap-4 lg:grid-cols-2">
-            <Section icon={Calculator} title="What it adds up to">
+            <Section icon={Calculator} title="Totals">
               <dl className="space-y-1.5 text-sm">
                 {[
                   ['Goods', inr(bill.subtotal)],
@@ -579,7 +641,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
               </dl>
             </Section>
 
-            <Section icon={Wallet} title={`Payment history (${payments.length})`}>
+            <Section icon={Wallet} title={`Payment History (${payments.length})`}>
               {payments.length ? (
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
@@ -641,7 +703,7 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
           </div>
 
           {notes.length > 0 && (
-            <Section icon={Undo2} title={`Claimed back from the supplier (${notes.length})`}>
+            <Section icon={Undo2} title={`Adjustments (${notes.length})`}>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead>
@@ -651,31 +713,63 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
                       <th className="py-2 pr-3 font-medium">Why</th>
                       <th className="py-2 pr-3 font-medium">Status</th>
                       <th className="py-2 text-right font-medium">Amount</th>
+                      <th className="py-2 pl-3 text-right font-medium">Effect</th>
                     </tr>
                   </thead>
                   <tbody>
                     {notes.map((n) => {
-                      const st = NOTE_STATUS[n.status] ?? {
+                      const st = NOTE_STATUS[n.status as NoteStatus] ?? {
                         label: n.status,
                         cls: 'badge-neutral',
+                        hint: '',
                       }
                       return (
                         <tr key={n.id} className="border-border/50 border-b last:border-0">
-                          <td className="py-2 pr-3 font-mono text-amber-400">{n.noteNumber}</td>
+                          <td className="py-2 pr-3">
+                            <span className="font-mono text-amber-400">{n.noteNumber}</span>
+                            <div className="text-muted-foreground text-[10px]">
+                              {DOC_WORDS[n.docType]?.short.toLowerCase() ?? n.docType}
+                              {n.supplierDocNo ? ` ${n.supplierDocNo}` : ''}
+                            </div>
+                          </td>
                           <td className="text-muted-foreground py-2 pr-3">
                             {formatDate(n.noteDate)}
                           </td>
-                          <td className="text-foreground py-2 pr-3">{n.reason ?? '—'}</td>
+                          <td className="text-foreground py-2 pr-3">
+                            {REASON_WORDS[n.reason] ?? n.reason}
+                            {n.reasonNote && (
+                              <div className="text-muted-foreground max-w-[14rem] truncate text-[10px]">
+                                {n.reasonNote}
+                              </div>
+                            )}
+                          </td>
                           <td className="py-2 pr-3">
-                            <span className={st.cls}>{st.label}</span>
-                            {n.status === 'DRAFT' && (
+                            <span className={st.cls} title={st.hint}>
+                              {st.label}
+                            </span>
+                            {n.status !== 'POSTED' && (
                               <div className="text-muted-foreground mt-0.5 text-[10px]">
-                                not sent to the supplier
+                                not off the bill yet
                               </div>
                             )}
                           </td>
                           <td className="text-foreground py-2 text-right font-medium tabular-nums">
                             ₹{inr(n.totalAmount)}
+                          </td>
+                          <td className="py-2 pl-3 text-right text-[10px]">
+                            {n.status === 'POSTED' ? (
+                              <span
+                                className={
+                                  n.effect === 'REDUCES_PAYABLE'
+                                    ? 'text-emerald-400'
+                                    : 'text-amber-400'
+                                }
+                              >
+                                {n.effect === 'REDUCES_PAYABLE' ? '− off payable' : '+ on payable'}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
                           </td>
                         </tr>
                       )

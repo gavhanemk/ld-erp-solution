@@ -22,6 +22,7 @@ import {
   createStyleSchema,
   createSupplierSchema,
   createUomSchema,
+  createBankAccountSchema,
   createWarehouseSchema,
   createWorkstationSchema,
   updateBomSchema,
@@ -41,6 +42,7 @@ import {
   updateStyleSchema,
   updateSupplierSchema,
   updateUomSchema,
+  updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
 } from '../schemas/master.schemas'
@@ -330,6 +332,22 @@ router.use(
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
     include: { sizeGroup: { select: { id: true, name: true } } },
+  }),
+)
+
+// No `injectOnCreate`: a bank account belongs to the business, not to one
+// of its stores, and the model carries no companyId to fill in.
+router.use(
+  '/bank-accounts',
+  crudRouter({
+    model: 'bankAccount',
+    module: MODULE,
+    entityType: 'BankAccount',
+    createSchema: createBankAccountSchema,
+    updateSchema: updateBankAccountSchema,
+    searchFields: ['accountName', 'bankName', 'accountNumber'],
+    sortableFields: ['accountName', 'bankName'],
+    defaultSort: { field: 'accountName', order: 'asc' },
   }),
 )
 

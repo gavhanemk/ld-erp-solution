@@ -553,9 +553,8 @@ export default function PrintGoodsReceipt() {
           <Panel title="Against">
             <Fact label="PO No" value={grn.po.poNumber} mono />
             <Fact label="PO date" value={longDate(grn.po.poDate)} />
-            <Fact label="Bill No" value={grn.supplierBillNo} mono />
-            <Fact label="Invoice No" value={grn.supplierInvoiceNo} mono />
-            <Fact label="Invoice date" value={longDate(grn.supplierInvoiceDate)} />
+            <Fact label="Bill No" value={grn.supplierInvoiceNo} mono />
+            <Fact label="Bill date" value={longDate(grn.supplierInvoiceDate)} />
             <Fact label="Form No" value={grn.formNo} mono />
             <Fact label="Client" value={grn.clientName} />
             <Fact label="Ordered by" value={grn.orderedBy} />

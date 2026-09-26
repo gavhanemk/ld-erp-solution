@@ -4,11 +4,11 @@ import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
   Plus,
   Pencil,
+  History,
   Printer,
   Search,
   RefreshCw,
   AlertCircle,
-  Send,
   Ban,
   Trash2,
   ChevronDown,
@@ -16,9 +16,7 @@ import {
   CalendarDays,
   FileText,
   Info,
-  Undo2,
   PackageCheck,
-  History,
   Paperclip,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
@@ -28,12 +26,25 @@ import {
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
+import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
+import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
+import {
+  asDate,
+  asNumber,
+  downloadRows,
+  fetchEveryPage,
+  type ExportColumn,
+  type ExportFormat,
+} from '@/lib/export'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, itemsPreview } from '@/lib/utils'
+import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -119,6 +130,7 @@ export default function PurchaseOrdersPage() {
   })
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
+  const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
 
   /*
    * Every supplier and every item, for the two filter dropdowns.
@@ -162,14 +174,7 @@ export default function PurchaseOrdersPage() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      if (supplierId) qs.set('supplierId', supplierId)
-      if (itemId) qs.set('itemId', itemId)
-      if (fromDate) qs.set('from', fromDate)
-      if (toDate) qs.set('to', toDate)
-      const res = await api.get<Paginated<PurchaseOrder>>(`/purchase/orders?${qs}`)
+      const res = await api.get<Paginated<PurchaseOrder>>(query(page, rowsPerPage))
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
@@ -198,6 +203,24 @@ export default function PurchaseOrdersPage() {
 
   const anyFilter = Boolean(search || status || supplierId || itemId || fromDate || toDate)
 
+  /**
+   * The list's query string, built once.
+   *
+   * The export calls this too. An exporter that assembled its own filters
+   * would be one `if` away from handing somebody a spreadsheet of a different
+   * list than the one on their screen, and nothing about the file would say so.
+   */
+  const query = (p: number, limit: number) => {
+    const qs = new URLSearchParams({ page: String(p), limit: String(limit) })
+    if (debounced) qs.set('q', debounced)
+    if (status) qs.set('status', status)
+    if (supplierId) qs.set('supplierId', supplierId)
+    if (itemId) qs.set('itemId', itemId)
+    if (fromDate) qs.set('from', fromDate)
+    if (toDate) qs.set('to', toDate)
+    return `/purchase/orders?${qs}`
+  }
+
   const clearFilters = () => {
     setSearch('')
     setStatus('')
@@ -207,25 +230,149 @@ export default function PurchaseOrdersPage() {
     setToDate('')
   }
 
-  const act = async (po: PurchaseOrder, what: 'send' | 'cancel' | 'reopen') => {
-    if (what === 'cancel' && !confirm(`Cancel ${po.poNumber}?`)) return
-    /*
-     * Reopening is asked about, because it is the one action here that makes
-     * a document somebody already holds wrong. The prompt says that rather
-     * than "are you sure?": the supplier has the old sheet, and the person
-     * clicking is the one who has to send them the new one.
-     */
-    if (
-      what === 'reopen' &&
-      !confirm(
-        `Reopen ${po.poNumber} as a draft?
+  /**
+   * What goes in the spreadsheet.
+   *
+   * The eight columns on screen, plus the five that are on the order but not
+   * on the row — the tax split, the discount and the delivery date. A list is
+   * read; a spreadsheet is worked on, and the figures somebody is going to
+   * total are exactly the ones the row had no width for.
+   */
+  const EXPORT_COLUMNS: ExportColumn<PurchaseOrder>[] = [
+    { header: 'Order No.', value: (po) => po.poNumber },
+    { header: 'Order Date', value: (po) => asDate(po.poDate) },
+    { header: 'Status', value: (po) => STATUS[po.status]?.label ?? po.status },
+    { header: 'Supplier', value: (po) => po.supplier?.name ?? '' },
+    { header: 'Supplier Code', value: (po) => po.supplier?.code ?? '' },
+    { header: 'GSTIN', value: (po) => po.supplier?.gstin ?? '' },
+    { header: 'Reference', value: (po) => po.reference ?? '' },
+    { header: 'Enquiry No.', value: (po) => po.enquiryNo ?? '' },
+    { header: 'Delivery Date', value: (po) => asDate(po.deliveryDate) },
+    { header: 'Items', value: (po) => (po.lines ?? []).length },
+    { header: 'Subtotal', value: (po) => asNumber(po.subtotal) },
+    { header: 'Discount', value: (po) => asNumber(po.discountAmount) },
+    { header: 'Taxable', value: (po) => asNumber(po.taxableAmount) },
+    { header: 'CGST', value: (po) => asNumber(po.cgst) },
+    { header: 'SGST', value: (po) => asNumber(po.sgst) },
+    { header: 'IGST', value: (po) => asNumber(po.igst) },
+    { header: 'Other Charges', value: (po) => asNumber(po.otherCharges) },
+    { header: 'Total', value: (po) => asNumber(po.totalAmount) },
+    { header: 'Files', value: (po) => po._count?.attachments ?? 0 },
+    { header: 'Remark', value: (po) => po.remark ?? '' },
+  ]
 
-` +
-          'The supplier already has this order. Their copy will be out of date ' +
-          'until you send it again. This is recorded against your name.'
+  /**
+   * Every order the filters allow, not the twenty-five on this page.
+   *
+   * The API caps a request at 200, so this walks the pages. Somebody who has
+   * filtered to a supplier and a month wants that month, and a file holding
+   * only its first page would be wrong in the quietest possible way.
+   */
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const {
+        rows: all,
+        total,
+        truncated,
+      } = await fetchEveryPage<PurchaseOrder>((p) => query(p, 200))
+      if (all.length === 0) {
+        setMessage('Nothing to export — no orders match these filters.')
+        return
+      }
+      await downloadRows({
+        rows: all,
+        columns: EXPORT_COLUMNS,
+        name: 'purchase-orders',
+        sheet: 'Purchase Orders',
+        format,
+      })
+      setMessage(
+        truncated
+          ? `Exported the first ${all.length} of ${total} orders. Narrow the filters to get the rest.`
+          : `Exported ${all.length} ${all.length === 1 ? 'order' : 'orders'}.`
       )
-    )
-      return
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
+  }
+
+  /**
+   * The same filters, built as a report rather than as a grid.
+   *
+   * Every filter on this screen goes up with it — the search box and the item
+   * picker included, which the report learned to take for exactly this. A
+   * report that answered a different question from the one on screen, and
+   * said nothing about it, would be worse than no button.
+   *
+   * The server does the work: it reads inside one transaction, so the file is
+   * one moment rather than a stitch of several, and it is the only thing that
+   * can count the charts in the finished file.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const params: Record<string, string> = {}
+      if (debounced) params.q = debounced
+      if (status) params.status = status
+      if (supplierId) params.supplierId = supplierId
+      if (itemId) params.itemId = itemId
+      if (fromDate) params.from = fromDate
+      if (toDate) params.to = toDate
+      setMessage(describeReport(await downloadReport('purchase-order-status', 'xlsx', params)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
+
+  /*
+   * Closing one line short, from the order it belongs to.
+   *
+   * The same two endpoints the goods-receipt screen has always called, the
+   * same dialog, the same required reason — nothing about what happens is
+   * different here. Only where it can be reached from is: this decision is
+   * about an order, and a buyer chasing a supplier is looking at the order,
+   * not at the receipts screen where it used to live alone.
+   *
+   * `pendingQty` is pinned to zero on the server and `receivedQty` is left
+   * exactly as it was, so this never touches stock, a bill, or anything
+   * already received. Reversible by the same reopen it always was.
+   */
+  const [lineConfirm, setLineConfirm] = useState<{
+    type: 'close' | 'reopen'
+    po: PurchaseOrder
+    lineId: string
+    itemName: string
+    /** Decides whether the word is "Cancel" or "Close short". */
+    receivedQty: string | number | null | undefined
+  } | null>(null)
+
+  const lineAction = async (
+    po: PurchaseOrder,
+    lineId: string,
+    what: 'short-close' | 'reopen',
+    reason?: string
+  ) => {
+    setBusy(true)
+    setMessage(null)
+    setError(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${lineId}/${what}`,
+        what === 'short-close' ? { reason } : {}
+      )
+      setLineConfirm(null)
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const act = async (po: PurchaseOrder, what: 'cancel') => {
+    if (!confirm(`Cancel ${po.poNumber}?`)) return
     setBusy(true)
     setMessage(null)
     try {
@@ -256,7 +403,15 @@ export default function PurchaseOrdersPage() {
     const warning =
       `Delete ${po.poNumber} for good? This removes the order, its lines and anything ` +
       'attached to it, and is not the same as cancelling — nothing will be left saying ' +
-      `it was called off. The number ${po.poNumber} will not be reused.`
+      `it was called off. The number ${po.poNumber} will not be reused.` +
+      // Deleting one the supplier holds leaves them working from paper for an
+      // order that is no longer on the list. Cancelling is usually what was
+      // meant, so the prompt says so rather than quietly allowing it.
+      (po.status === 'SENT'
+        ? `
+
+The supplier already has this order. If it was real and fell through, cancel it instead so the file still shows what happened.`
+        : '')
     if (!confirm(warning)) return
     setBusy(true)
     setMessage(null)
@@ -271,13 +426,24 @@ export default function PurchaseOrdersPage() {
     }
   }
 
-  /**
-   * What can be done to one order.
+  /*
+   * What can be done to one order — five things, in the order somebody
+   * reaches for them.
    *
    * Shared by the table and the phone cards. Written once because these
-   * conditions are the rules — only a draft may be edited or sent, only a
-   * draft or a cancelled order may be deleted — and a second copy would
-   * eventually disagree with this one about a live document.
+   * conditions are the rules, and a second copy would eventually disagree
+   * with this one about a live document.
+   *
+   * "Reopen as a draft" is gone. Correcting an order the supplier already had
+   * used to mean pulling it back to a draft first, then editing, then sending
+   * it again — three decisions for one intention, and it left the order
+   * sitting as a draft if the buyer was interrupted halfway. Edit is offered
+   * straight away now and the order stays sent; the note after saving is what
+   * reminds them to send the new copy.
+   *
+   * "Mark as sent to supplier" is gone because saving the form already does
+   * it, and "Goods receipt history" because it belongs on the goods receipt
+   * screen, which is where it only ever led.
    */
   const rowActions = (po: PurchaseOrder): RowAction[] => {
     const items: RowAction[] = [
@@ -290,11 +456,20 @@ export default function PurchaseOrdersPage() {
       },
     ]
 
-    // Booking in a delivery, and the deliveries already booked in. The mill's
-    // old ERP carried Add GRN and View History of GRN on the order row itself,
-    // and that is where somebody looks for them: they are holding this order's
-    // paperwork. Both lead to the receipt screen rather than opening a form
-    // here, so the store keeper lands where the rest of the receiving work is.
+    // Correctable right up until the first delivery. After that the receipts
+    // reconcile against these very lines, and the server refuses — replacing
+    // a line that a receipt points at would cut the receipt loose.
+    if (po.status === 'DRAFT' || po.status === 'SENT') {
+      items.push({
+        key: 'edit',
+        label: 'Edit order',
+        icon: <Pencil size={15} />,
+        onClick: () => setDialog({ open: true, record: po }),
+      })
+    }
+
+    // Leads to the receipt screen rather than opening a form here, so the
+    // store keeper lands where the rest of the receiving work is.
     if (po.status === 'SENT' || po.status === 'PARTIALLY_RECEIVED') {
       items.push({
         key: 'receive',
@@ -303,44 +478,18 @@ export default function PurchaseOrdersPage() {
         href: `/purchase/grn?receive=${po.id}`,
       })
     }
+
+    // A draft cannot have had anything arrive against it, so it is the one
+    // status with nothing to show.
     if (po.status !== 'DRAFT') {
       items.push({
         key: 'history',
         label: 'Goods receipt history',
         icon: <History size={15} />,
-        href: `/purchase/grn?q=${encodeURIComponent(po.poNumber)}`,
+        onClick: () => setHistoryFor(po),
       })
     }
 
-    // A sent order cannot be edited in place — the supplier is working from
-    // paper. It can be pulled back to a draft, which is a decision rather than
-    // a slip: it asks first and it is written to the activity log. Gone once a
-    // receipt or a bill exists against the order, because those reconcile
-    // against it line by line.
-    if (po.status === 'SENT') {
-      items.push({
-        key: 'reopen',
-        label: 'Reopen as a draft',
-        icon: <Undo2 size={15} />,
-        onClick: () => void act(po, 'reopen'),
-      })
-    }
-    if (po.status === 'DRAFT') {
-      items.push(
-        {
-          key: 'edit',
-          label: 'Edit order',
-          icon: <Pencil size={15} />,
-          onClick: () => setDialog({ open: true, record: po }),
-        },
-        {
-          key: 'send',
-          label: 'Mark as sent to supplier',
-          icon: <Send size={15} />,
-          onClick: () => void act(po, 'send'),
-        }
-      )
-    }
     if (po.status !== 'CANCELLED' && po.status !== 'COMPLETED') {
       items.push({
         key: 'cancel',
@@ -350,10 +499,15 @@ export default function PurchaseOrdersPage() {
         danger: true,
       })
     }
-    if (po.status === 'DRAFT' || po.status === 'CANCELLED') {
+
+    // The server allows this only while nothing has been received or billed
+    // against the order, and those two are exactly the statuses that can still
+    // be true. Offering it on a partly or fully received order would be a
+    // button that always failed.
+    if (po.status === 'DRAFT' || po.status === 'SENT' || po.status === 'CANCELLED') {
       items.push({
         key: 'delete',
-        label: 'Delete for good',
+        label: 'Delete order',
         icon: <Trash2 size={15} />,
         onClick: () => void remove(po),
         danger: true,
@@ -370,20 +524,30 @@ export default function PurchaseOrdersPage() {
 
   return (
     <div className="space-y-5">
-      <div className="page-header flex-wrap gap-3">
-        <div>
-          <h1 className="page-title">Purchase Orders</h1>
+      {/* `gap-3` without `flex-wrap` — refresh, Export and the primary
+        button sit beside the title on every width instead of dropping to
+        a row of their own under it. The title takes a size down and the
+        primary button loses its words below `sm`, which between them is
+        what leaves the row enough space to still fit. */}
+      <div className="page-header gap-3">
+        <div className="min-w-0">
+          <h1 className="page-title text-xl sm:text-2xl">Purchase Orders</h1>
           {/* Desk only. On a phone the screen is short and the heading
             already says what this is — the sentence under it cost a line of
             a list somebody is scrolling. */}
           <p className="page-subtitle hidden sm:block">What you have ordered from your suppliers</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
-            <Plus size={15} /> New Purchase Order
+          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
+          <button
+            className="btn-primary"
+            onClick={() => setDialog({ open: true, record: null })}
+            aria-label="New Purchase Order"
+          >
+            <Plus size={15} /> <span className="hidden sm:inline">New Purchase Order</span>
           </button>
         </div>
       </div>
@@ -413,11 +577,17 @@ export default function PurchaseOrdersPage() {
           per layout, which is how these bars end up disagreeing with
           themselves. */}
         <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
-          <div className="flex items-center gap-2 sm:contents">
+          {/* Search on its own line at a phone width, the two dates on the
+            one under it — sharing a row with a fixed-width date pair left
+            the search box too narrow to read what was typed into it. See
+            the same fix on Supplier Payments. `sm:contents` still
+            dissolves both back into the one row a tablet or a desk has
+            the width for. */}
+          <div className="flex flex-col gap-2 sm:contents">
             {/* One box for words. It reaches the supplier as well as the order
               number, so typing "ambika" finds every order raised against them
               just as typing "PO-0006" finds the one order. */}
-            <div className="border-border bg-secondary flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+            <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
               {/* The glass costs 22px of a row that has two date boxes in it
                 already, and a box you type into needs no icon to explain
                 itself. Desk only. */}
@@ -439,7 +609,7 @@ export default function PurchaseOrdersPage() {
             <div className="flex shrink-0 items-center gap-1">
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={fromDate}
                 max={toDate || undefined}
                 onChange={(e) => setFromDate(e.target.value)}
@@ -448,7 +618,7 @@ export default function PurchaseOrdersPage() {
               <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={toDate}
                 min={fromDate || undefined}
                 onChange={(e) => setToDate(e.target.value)}
@@ -566,9 +736,18 @@ export default function PurchaseOrdersPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-foreground font-mono text-xs font-semibold">
+                          {/* The number is the way to the printed order. The
+                            goods receipt screen already puts this link on the
+                            order it names, so one habit covers both screens. */}
+                          <a
+                            href={`/print/purchase-order/${po.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                            title={`Open the printed sheet for ${po.poNumber}`}
+                          >
                             {po.poNumber}
-                          </span>
+                          </a>
                           <span className={s.cls}>{s.label}</span>
                           {po._count?.attachments ? (
                             <button
@@ -805,9 +984,15 @@ export default function PurchaseOrdersPage() {
                             </button>
                           </td>
                           <td>
-                            <div className="text-foreground font-mono text-xs font-semibold">
+                            <a
+                              href={`/print/purchase-order/${po.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              title={`Open the printed sheet for ${po.poNumber}`}
+                            >
                               {po.poNumber}
-                            </div>
+                            </a>
                           </td>
                           <td>
                             {/* Capped, because nothing else caps it. Under
@@ -1012,7 +1197,26 @@ export default function PurchaseOrdersPage() {
                                                 className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
                                                 title={line.shortCloseReason ?? undefined}
                                               >
-                                                Closed short
+                                                {shortCloseNoun(line.receivedQty)}
+                                                {line.id &&
+                                                  (po.status === 'SENT' ||
+                                                    po.status === 'PARTIALLY_RECEIVED') && (
+                                                    <button
+                                                      type="button"
+                                                      className="text-muted-foreground hover:text-foreground ml-1.5 underline underline-offset-2"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'reopen',
+                                                          po,
+                                                          lineId: line.id!,
+                                                          itemName: line.item?.name ?? 'this line',
+                                                          receivedQty: line.receivedQty,
+                                                        })
+                                                      }
+                                                    >
+                                                      Reopen
+                                                    </button>
+                                                  )}
                                               </div>
                                             ) : (
                                               (po.status === 'SENT' ||
@@ -1020,6 +1224,28 @@ export default function PurchaseOrdersPage() {
                                               Number(line.pendingQty) > 0 && (
                                                 <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
                                                   {Number(line.pendingQty)} pending
+                                                  {/* Beside the number it acts on, rather
+                                                    than in a menu at the end of the row —
+                                                    the decision is about this line's
+                                                    balance and nothing else on the row. */}
+                                                  {line.id && (
+                                                    <button
+                                                      type="button"
+                                                      className="text-muted-foreground hover:text-foreground ml-1.5 underline underline-offset-2"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'close',
+                                                          po,
+                                                          lineId: line.id!,
+                                                          itemName: line.item?.name ?? 'this line',
+                                                          receivedQty: line.receivedQty,
+                                                        })
+                                                      }
+                                                      title={`Say the rest of ${line.item?.name ?? 'this line'} is not coming`}
+                                                    >
+                                                      {shortCloseVerb(line.receivedQty)}
+                                                    </button>
+                                                  )}
                                                 </div>
                                               )
                                             )}
@@ -1077,8 +1303,9 @@ export default function PurchaseOrdersPage() {
         <div className="border-border bg-secondary/40 flex items-start gap-2 border-t px-4 py-2">
           <Info size={14} className="text-primary mt-0.5 shrink-0" />
           <p className="text-muted-foreground text-xs">
-            An order can be changed while it is a draft. Once it is marked sent, raise a new one
-            instead — the supplier is holding the old paper.
+            An order can be changed until the first delivery arrives against it. Change one the
+            supplier already has, and send them the new print — they are working from the old paper
+            until you do.
           </p>
         </div>
       </div>
@@ -1087,14 +1314,67 @@ export default function PurchaseOrdersPage() {
         open={dialog.open}
         record={dialog.record}
         onClose={() => setDialog({ open: false, record: null })}
-        onSaved={() => void load()}
+        onSaved={() => {
+          // Correcting an order the supplier already holds makes their copy
+          // wrong, and nothing else in the system will tell them. This does.
+          if (dialog.record?.status === 'SENT') {
+            setMessage(
+              `${dialog.record.poNumber} has been changed. The supplier is holding the old paper — send them the new print.`
+            )
+          }
+          void load()
+        }}
       />
+
+      {historyFor && (
+        <GoodsReceiptHistoryDialog
+          poId={historyFor.id}
+          poNumber={historyFor.poNumber}
+          supplierName={historyFor.supplier?.name}
+          onClose={() => setHistoryFor(null)}
+        />
+      )}
 
       {filesFor && (
         <OrderAttachmentsDialog
           docId={filesFor.id}
           docNumber={filesFor.poNumber}
           onClose={() => setFilesFor(null)}
+        />
+      )}
+
+      {/* The same dialog and the same words as the receipts screen, because it
+        is the same decision being taken from a different desk. */}
+      {lineConfirm && (
+        <ReasonDialog
+          title={
+            lineConfirm.type === 'close'
+              ? `${shortCloseVerb(lineConfirm.receivedQty)} ${lineConfirm.itemName}?`
+              : `Reopen ${lineConfirm.itemName}?`
+          }
+          description={
+            lineConfirm.type === 'close'
+              ? wasNeverReceived(lineConfirm.receivedQty)
+                ? `Nothing has ever been received against this line on ${lineConfirm.po.poNumber} — it will be marked as never coming.`
+                : `This says the rest of it is not coming — it does not touch what has already ` +
+                  `been received against ${lineConfirm.po.poNumber}.`
+              : `It will count as pending again on ${lineConfirm.po.poNumber}.`
+          }
+          confirmLabel={
+            lineConfirm.type === 'close' ? shortCloseVerb(lineConfirm.receivedQty) : 'Reopen'
+          }
+          danger={lineConfirm.type === 'close'}
+          requireReason={lineConfirm.type === 'close'}
+          busy={busy}
+          onCancel={() => setLineConfirm(null)}
+          onConfirm={(reason) =>
+            void lineAction(
+              lineConfirm.po,
+              lineConfirm.lineId,
+              lineConfirm.type === 'close' ? 'short-close' : 'reopen',
+              reason
+            )
+          }
         />
       )}
     </div>

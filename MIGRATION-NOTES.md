@@ -7,6 +7,378 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 23 Sep 2026 — a separate right to post
+
+**Migration:** none. This is a seed change.
+**Branch:** `fix/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+`post` was added to the permission matrix, so it now runs seven actions across
+thirteen modules — 91 rows rather than 78. Only one route guards on it:
+posting a purchase note.
+
+| Role | `purchase:post` |
+|---|---|
+| Admin | yes (and short-circuits everything anyway) |
+| MD | yes |
+| Accounts Manager | **yes — this is the point of the change** |
+| Store Manager | yes, via its existing `full('purchase')` |
+
+### Why not just use `approve`
+
+The accounts desk has to put a debit or credit note through the books. Under
+the old matrix that meant granting them `purchase:approve` — which would also
+have let them approve purchase orders, because permissions are per module and
+not per document. A purchase manager agreeing that the mill is owed money and
+accounts deciding when it comes off the payable are two different decisions by
+two different desks, and docs/04-business-rules.md keeps them apart.
+
+Verified over HTTP with a throwaway Accounts user, since none is seeded with a
+known password:
+
+```
+approve -> 403  purchase:approve
+create  -> 403  purchase:create
+post    -> 200  "ZZTEST-P1 posted. PB-2627-0001 now stands at ₹19,300."
+```
+
+The user, its audit row and the fixture note were removed afterwards.
+
+### How it was applied
+
+`seedCore` is upserts throughout, so from `packages/database`:
+
+```bash
+npx tsx prisma/seed.ts
+```
+
+It rewrites no data — it adds the thirteen new permission rows and the grants.
+
+## 23 Sep 2026 — debit and credit notes against a supplier
+
+**Migration:** `20260923090000_purchase_debit_credit_notes`
+**Branch:** `fix/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Purely additive. Three new tables, four new enums, one new column. **Nothing
+was renamed and nothing was dropped**, which was a deliberate choice — see
+below.
+
+| Table | Holds |
+|---|---|
+| `purchase_notes` | One row per debit or credit note against a supplier |
+| `purchase_note_lines` | What is coming off, each pointing at the bill line it adjusts |
+| `purchase_note_attachments` | The evidence — rejection report, photo, their note |
+
+| Column | Holds |
+|---|---|
+| `purchase_invoices.noteAdjustment` | Net effect of POSTED notes. `NOT NULL DEFAULT 0` |
+
+New enums: `PurchaseNoteType`, `PurchaseNoteReason`, `PurchaseNoteEffect`,
+`PurchaseNoteStatus`.
+
+The migration also inserts an `SCN` numbering series for every company that has
+none, taking the financial year from `company.currentFY`. Its own series rather
+than the existing `CN`, which belongs to the sales credit note — that is an
+outward document whose numbering has to be unbroken under Rule 46, and sharing
+it would punch holes in it from the purchase office.
+
+### Why `debit_notes` is still there
+
+`PurchaseNote` replaces `DebitNote` entirely. Nothing in the application reads
+or writes the old two tables any more. They were **not** dropped, and the models
+are still in `schema.prisma` under an `AWAITING REMOVAL` banner, because the API
+deployed on Render runs from `main` — and `main`'s `billInclude` joins
+`debit_notes` on **every read of a purchase bill**. Dropping or renaming that
+table would have broken the live bill list and every bill detail on the deployed
+site, days before the branch that replaced it merges.
+
+Both old tables were empty when this ran, so nothing had to be migrated across.
+
+**When this branch merges and Render redeploys:** delete `DebitNote`,
+`DebitNoteLine` and their three relation fields — `Supplier.debitNotes`,
+`Item.debitLines`, `PurchaseInvoice.debitNotes` — and let the next migration
+drop the tables.
+
+### The one behaviour change outside the new tables
+
+`syncBillFromPayments` in `purchase.routes.ts` now subtracts `noteAdjustment`
+alongside TDS when working out what is left to settle:
+
+```
+settleable = totalAmount − tdsAmount − noteAdjustment
+```
+
+`syncBillAdjustments` in `purchaseNote.service.ts` computes the same figure from
+the other end. **The two must agree.** If they ever diverge the balance will
+flip every time a note or a payment is touched.
+
+### How it was applied
+
+From `packages/database`, on 23 Sep 2026:
+
+```bash
+PRISMA_SCHEMA_DISABLE_ADVISORY_LOCK=true npx prisma migrate deploy
+```
+
+The environment variable is needed because the advisory lock Prisma takes does
+not survive Supabase's connection pooler — without it the deploy times out
+after ten seconds on `pg_advisory_lock`.
+
+### A note on the shared database's drift
+
+Unrelated to this change, and found while generating the migration:
+`prisma migrate diff --from-schema-datasource` reports that the live database
+still has `bom.approvedById`, `bom.status`, `bom.color`, `items.styleId`,
+`items.color` and the `bom_line_sizes` table, none of which `schema.prisma`
+declares any more. `prisma migrate status` says "up to date" because it only
+compares migration *names*.
+
+This migration was generated by diffing schema against schema, so it carries
+none of that. But the next person who runs `prisma migrate dev` will be offered
+a migration that **drops those columns and that table**. Worth settling before
+somebody accepts it without reading.
+
+---
+
+## 22 Sep 2026 — a record may not outlive what it describes
+
+**Migration:** `20260922160000_purchase_integrity_and_payment_reversal`
+**Branch:** `fix/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changed
+
+Three foreign keys moved from `ON DELETE SET NULL` to `ON DELETE RESTRICT`, and a
+supplier payment gained a status so it can be reversed rather than deleted.
+
+| Key | Was | Now |
+|---|---|---|
+| `purchase_invoice_lines.grnLineId` | SET NULL | RESTRICT |
+| `grn_lines.poLineId` | SET NULL | RESTRICT |
+| `supplier_payments.invoiceId` | SET NULL | RESTRICT |
+
+| Column | Holds |
+|---|---|
+| `supplier_payments.status` | `POSTED` or `REVERSED`. `NOT NULL DEFAULT 'POSTED'` |
+| `reversedAt`, `reversedById`, `reversalReason` | Who reversed it, when, and why |
+
+Plus a check constraint, `supplier_payments_reversal_is_explained`: a row marked
+REVERSED must carry all three. A reversal with no reason is unauditable, and
+the database is the only place that can insist on it.
+
+### Why the three keys
+
+Every one of them had a guard in the API that could never fire.
+
+The goods receipt delete route catches Postgres error P2003 and answers
+"that receipt has a bill matched against it — remove it from that bill
+first." P2003 was impossible: the database nulled the bill line instead. So
+the receipt went, its stock came back out, and the bill kept a line pointing
+at nothing — never three-way matched again, with nothing on it to say why.
+
+That was proved in a rolled-back transaction before the change, and the same
+script proves it shut after:
+
+```
+DELETE receipt  -> REFUSED by the database (P2003). Hole shut.
+DELETE PO line  -> REFUSED by the database (P2003). Hole shut.
+REVERSED with no reason -> REFUSED by the check constraint.
+```
+
+### The one thing that had to change with it
+
+Correcting a goods receipt used to delete every line and write fresh ones,
+which gave each a new id. Under the restrict key that would have refused any
+edit to a receipt that had been billed — including correcting its vehicle
+number. So the receipt patch now diffs: a line still on the receipt keeps its
+identity and is updated in place, only a line genuinely gone is deleted, and a
+line a bill is holding cannot go at all.
+
+It also now refuses to correct a line *down* below what a bill already claims:
+
+> Collar Clip is billed at 650 on PB-2627-0001, so this receipt cannot be
+> corrected down to 400. Correct the bill first.
+
+That check never existed. `checkAgainstReceipts` asks whether a bill is running
+ahead of its receipts; nothing asked whether a receipt was being corrected
+back behind its bills.
+
+### How it was applied
+
+From `packages/database`, on 22 Sep 2026:
+
+```bash
+npx prisma db execute --file prisma/migrations/20260922160000_purchase_integrity_and_payment_reversal/migration.sql --schema prisma/schema.prisma
+npx prisma migrate resolve --applied 20260922160000_purchase_integrity_and_payment_reversal
+```
+
+Changing a referential action is a DROP and re-ADD of the constraint. No row
+is read or written by it; the re-ADD validates that existing values still
+point at rows that exist, which was checked first and found clean — 0 of 2
+bill lines and 0 of 2 receipt lines were already orphaned.
+
+Row counts before and after — **identical on every table**: purchase_orders 4,
+purchase_order_lines 6, grn 2, grn_lines 2, purchase_invoices 1,
+purchase_invoice_lines 2, supplier_payments 0, debit_notes 0, suppliers 17,
+items 43, stock_ledger 93, users 5, bom 5, bom_lines 42.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+Without `db:generate` your Prisma client does not know `supplier_payments.status`
+exists and every read of a payment fails.
+
+---
+
+## 22 Sep 2026 — a supplier payment records what the mill's own voucher records
+
+**Migration:** `20260922060000_supplier_payment_voucher_details`
+**Branch:** `fix/purchase`
+**Status: already applied to the shared database.** Nobody needs to apply it.
+
+### What changes
+
+Four nullable-or-defaulted columns on `supplier_payments`, two foreign keys,
+and one new table. Additive only: nothing renamed, nothing dropped, no existing
+row rewritten. There are **no payments on the system at all**, so nothing can
+be affected either way.
+
+| Column | Holds |
+|---|---|
+| `warehouseId` | Where the payment is booked — the old ERP's "Location". Empty is head office |
+| `bankAccountId` | The account the money left — the old ERP's "Paid Through" |
+| `chequeNo` | As written on the cheque |
+| `tdsAmount` | Tax withheld from this payment. `DECIMAL(12,2) NOT NULL DEFAULT 0` |
+
+| Table | Holds |
+|---|---|
+| `supplier_payment_attachments` | The bank advice, the counterfoil, the UTR screenshot |
+
+### Why
+
+Surveyed against the mill's Absolute ERP payment voucher. Its form has ten
+boxes; ours had five, and the five that were missing are the ones an accounts
+query actually turns on — which account the money left, which cheque it was,
+and the papers that prove it. A payment nobody can tie to a line on a bank
+statement is a payment nobody can defend.
+
+`chequeNo` is the odd one out: we were already asking for a cheque number and
+writing it into `referenceNo`, which sat beside a `chequeDate` that had
+nothing to pair with. It has its own column now, and `referenceNo` goes back to
+meaning the UTR or transaction reference.
+
+### The two decisions worth knowing
+
+**Both foreign keys are `ON DELETE RESTRICT`, not `SET NULL`.** A payment
+that has forgotten which account it came out of cannot be reconciled, and that
+is the single thing the record exists to support. Retiring an account or a
+store is what their `isActive` flags are for. (This is the same trap that
+makes `purchase_invoice_lines.grnLineId` orphan a bill line when a billed
+receipt is deleted — worth not repeating.)
+
+**Tax is deducted once.** A bill already carries `tdsSection`, `tdsRate` and
+`tdsAmount`, and `syncBillFromPayments` already settles the bill net of it.
+The new column is for the other case — the deduction decided at payment time,
+which previously had nowhere to go and left the bill sitting part-paid for
+ever. The API refuses a payment-level deduction on a bill that already carries
+one, and the dialog does not offer the tick there at all.
+
+Both now count toward settling: `balance = (total − bill TDS) − paid −
+withheld at payment`.
+
+### Why it is hand-written
+
+Same reason as every entry below. `prisma migrate diff` against the live
+database on 22 Sep still wants to:
+
+```sql
+DROP TABLE "bom_line_sizes";
+DROP COLUMN "styleId";          -- items
+DROP COLUMN "approvedById";     -- bom, and seven more
+DROP TYPE "BOMStatus";
+```
+
+That is the other team's applied work. **The answer is still no.** The SQL in
+the migration folder is the four columns, the two keys, the table and its
+indexes, and nothing else.
+
+### How it was applied
+
+From `packages/database`, on 22 Sep 2026:
+
+```bash
+npx prisma db execute --file prisma/migrations/20260922060000_supplier_payment_voucher_details/migration.sql --schema prisma/schema.prisma
+npx prisma migrate resolve --applied 20260922060000_supplier_payment_voucher_details
+```
+
+`db execute` runs the file and never diffs the schema, so it cannot offer to
+reset anything. `migrate resolve` then records it as applied. Every statement
+is guarded with `IF NOT EXISTS`, so running it twice is safe.
+
+Then, with the API stopped — Windows locks the Prisma engine file:
+
+```bash
+pnpm db:generate
+```
+
+Row counts taken immediately before and again immediately after — **identical
+on every table**:
+
+| Table | Before | After |
+|---|---|---|
+| `purchase_orders` | 4 | 4 |
+| `purchase_order_lines` | 6 | 6 |
+| `grn` | 2 | 2 |
+| `grn_lines` | 2 | 2 |
+| `purchase_invoices` | 1 | 1 |
+| `supplier_payments` | 0 | 0 |
+| `suppliers` | 17 | 17 |
+| `items` | 43 | 43 |
+| `stock_ledger` | 93 | 93 |
+| `users` | 5 | 5 |
+| `bom` | 5 | 5 |
+| `bom_lines` | 42 | 42 |
+| `bank_accounts` | 3 | 3 |
+| `warehouses` | 5 | 5 |
+
+The BOM tables the generated diff wanted to drop were checked afterwards and
+are all still there: `bom` (5), `bom_lines` (42), `bom_line_sizes` and `items.styleId`
+both intact.
+
+The route's own query was then run against the migrated database — the full
+`paymentInclude`, and the aggregate the bill-settling math depends on. Both
+returned cleanly.
+
+### What you have to do
+
+Nothing to the database.
+
+```bash
+git pull
+pnpm install
+pnpm db:generate     # stop the API first — Windows locks the Prisma engine file
+```
+
+Without `db:generate` your Prisma client does not know the four columns exist
+and every read of `supplier_payments` fails with `The column
+supplier_payments.warehouseId does not exist` — which is exactly what the
+Supplier Payments screen showed between the code landing and the SQL running.
+Orders, receipts, bills, stock and the masters are unaffected.
+
+---
+
 ## 18 Sep 2026 — a goods receipt records the delivery it came from
 
 **Migration:** `20260918064500_grn_delivery_details`

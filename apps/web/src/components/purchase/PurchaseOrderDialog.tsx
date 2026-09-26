@@ -32,7 +32,8 @@ import {
   ChevronUp,
   ChevronDown,
 } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { Section } from '@/components/purchase/Section'
+import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 
 /**
@@ -365,98 +366,12 @@ const COL = {
   amount: 'w-32',
 } as const
 
-/**
- * One titled panel of the form.
- *
- * White (or the card colour in the dark theme) on the page's grey, rather
- * than grey on grey. The sections used to be tinted a shade off the page and
- * held white fields, which put three greys on top of each other and gave the
- * form no order at all — every box the same weight as the one above it. A
- * panel that sits above the ground reads as a panel; the eye finds five of
- * them instead of scanning one long sheet.
- *
- * `actions` is the right-hand side of the title bar, for the one control that
- * governs the whole section — the order type over the item table. It belongs
- * up here: a control that decides which cells below are live is read before
- * them, and in its own row it was a third size of text in a row of its own.
+/*
+ * `Section` moved to its own file so the payment form can wear the same
+ * chrome without pulling this module in behind it. Re-exported because three
+ * other forms already import it from here.
  */
-/**
- * One titled panel of a purchase form.
- *
- * Exported so the receiving form wears the same chrome. Two forms in the same
- * module that draw their own panels drift apart within a month, and the mill
- * then has two ideas of what a section looks like.
- */
-export function Section({
-  icon: Icon,
-  title,
-  actions,
-  children,
-  foldable = false,
-  openByDefault = true,
-  summary,
-}: {
-  icon: React.ElementType
-  title: string
-  actions?: React.ReactNode
-  children: React.ReactNode
-  /**
-   * Whether this section can be folded away.
-   *
-   * Four of the seven panels here — the terms, the notes, the attachments,
-   * the template — are not touched on most orders: the terms are the mill's
-   * standing ones and the notes are usually empty. Left open they push the
-   * totals and the save buttons off the bottom of the screen on every order,
-   * so raising a two-line purchase order means scrolling past four panels
-   * nobody is going to fill in.
-   *
-   * Folded, not removed. A section that is not there reads as forgotten, and
-   * the buyer who does need to change the terms this once has to be able to
-   * find them.
-   */
-  foldable?: boolean
-  openByDefault?: boolean
-  /** Shown on the closed header, so a folded panel still says what it holds. */
-  summary?: React.ReactNode
-}) {
-  const [open, setOpen] = useState(openByDefault)
-  const shut = foldable && !open
-
-  return (
-    <section className="border-border bg-card rounded-xl border">
-      <div
-        className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3.5 py-2 ${
-          shut ? '' : 'border-border/70 border-b'
-        }`}
-      >
-        {foldable ? (
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="text-foreground hover:text-primary flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] transition-colors"
-            aria-expanded={open}
-          >
-            <Icon size={14} className="text-primary shrink-0" />
-            {title}
-            {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          </button>
-        ) : (
-          <h3 className="text-foreground flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em]">
-            <Icon size={14} className="text-primary shrink-0" />
-            {title}
-          </h3>
-        )}
-        {shut && summary && (
-          <span className="text-muted-foreground min-w-0 truncate text-xs">{summary}</span>
-        )}
-        {actions && !shut && (
-          <div className="ml-auto flex shrink-0 items-center gap-2 [&>*]:ml-0">{actions}</div>
-        )}
-      </div>
-      {!shut && <div className="p-3.5">{children}</div>}
-    </section>
-  )
-}
+export { Section }
 
 /**
  * A control for something the ERP cannot do yet.
@@ -601,7 +516,7 @@ export function PurchaseOrderDialog({
 
   // Header
   const [supplierId, setSupplierId] = useState('')
-  const [poType, setPoType] = useState<PoType>('ITEM_LEVEL')
+  const [poType, setPoType] = useState<PoType>('NONE')
   const [indentOpen, setIndentOpen] = useState(false)
   const [warehouseId, setWarehouseId] = useState('')
   /// The date on the order. Asked for now, so a back-dated order lands in the
@@ -710,10 +625,21 @@ export function PurchaseOrderDialog({
   useEffect(() => {
     if (!open) return
     setSupplierId(record?.supplierId ?? '')
-    // Orders raised before this form asked carry the old default, which meant
-    // a discount per line — so they reopen as that rather than as a blank.
+    // A new order starts without a discount: most of this mill's carry none,
+    // and a discount column that is live by default invites a figure nobody
+    // agreed to.
+    //
+    // An order being reopened is a different question and keeps what it was
+    // raised as. Orders raised before this form asked hold "STANDARD" in the
+    // column — the database's own default, which is none of the three the
+    // form offers — and those meant a discount per line, so they must still
+    // reopen as that rather than quietly losing it.
     setPoType(
-      record?.poType === 'ORDER_LEVEL' || record?.poType === 'NONE' ? record.poType : 'ITEM_LEVEL'
+      !record
+        ? 'NONE'
+        : record.poType === 'ORDER_LEVEL' || record.poType === 'NONE'
+          ? record.poType
+          : 'ITEM_LEVEL'
     )
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
@@ -1727,12 +1653,23 @@ export function PurchaseOrderDialog({
       // The names of whatever did not make it are reported instead, and they
       // can be added by reopening the order.
       if (pendingFiles.length && id) {
-        const failed: string[] = []
+        // The reason is kept, not just the name. Naming a file that failed
+        // without saying why leaves the person at the desk — and whoever they
+        // ring about it — with nowhere at all to go.
+        const failed: Array<{ name: string; why: string }> = []
         for (const file of pendingFiles) {
           try {
             await uploadOne(file, id)
-          } catch {
-            failed.push(file.name)
+          } catch (err) {
+            failed.push({
+              name: file.name,
+              why:
+                err instanceof ApiError
+                  ? err.message
+                  : err instanceof Error
+                    ? err.message
+                    : 'no reason given',
+            })
           }
         }
         setPendingFiles([])
@@ -1740,14 +1677,22 @@ export function PurchaseOrderDialog({
         if (failed.length) {
           onSaved()
           setError(
-            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach: ${failed.join(', ')}. Reopen the order to try again.`
+            `The order was saved, but ${failed.length === 1 ? 'this file' : 'these files'} did not attach — ` +
+              failed.map((f) => `${f.name}: ${f.why}`).join(' · ') +
+              '. Reopen the order to try again.'
           )
           setSaving(null)
           return
         }
       }
 
-      if (mode !== 'draft' && id) {
+      // Only a draft needs sending. An order that is already with the supplier
+      // stays sent when it is corrected, and asking the server to send it a
+      // second time fails — which would then tell the buyer, wrongly, that
+      // their order is waiting as a draft.
+      const alreadySent = isEdit && record?.status !== 'DRAFT'
+
+      if (mode !== 'draft' && id && !alreadySent) {
         try {
           await api.patch(`/purchase/orders/${id}/send`, {})
         } catch (err) {
@@ -1780,7 +1725,7 @@ export function PurchaseOrderDialog({
       onSaved()
       onClose()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
+      setError(apiErrorMessage(err, 'Could not save. Is the API running?'))
     } finally {
       setSaving(null)
     }
@@ -1897,19 +1842,22 @@ export function PurchaseOrderDialog({
           aria-labelledby="po-dialog-title"
         >
           {/* Header — stays put while the body scrolls, so it is always clear what is being filled in */}
-          <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
-            <div className="flex items-center gap-2.5">
-              <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
-                <ShoppingCart size={16} className="text-primary" />
+          <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+                <ShoppingCart size={19} className="text-primary" />
               </div>
               <div>
-                <h2 id="po-dialog-title" className="text-foreground text-base font-semibold">
+                <h2
+                  id="po-dialog-title"
+                  className="text-foreground truncate text-xl font-semibold tracking-tight"
+                >
                   Purchase Order
                 </h2>
                 {/* The number moves down here rather than into the heading. The
                   heading says what the form is; the line under it says which
                   one and what may be done to it. */}
-                <p className="text-muted-foreground mt-0.5 text-xs">
+                <p className="text-muted-foreground mt-0.5 text-[13px]">
                   {isEdit
                     ? `${record?.poNumber} — only a draft order can be changed`
                     : 'New order to a supplier'}
@@ -1941,8 +1889,17 @@ export function PurchaseOrderDialog({
               a box of its own — it is one dropdown, and a box to itself left a
               column of empty space beside it. */}
             <Section icon={FileText} title="Basic Details">
-              <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-3">
-                <div>
+              {/* `auto-fit`, not a fixed two columns, so each pairs with
+                the field beside it instead of stacking six deep on a
+                phone — where it's going with who it's from, which order
+                this is with when — but a track that cannot hold a date
+                input drops to one column instead of clipping it to
+                "dd-m". `order` moves them back into the desktop's three
+                grouped rows (location/number/date, then supplier/
+                reference/remark) without changing the DOM, so tab order
+                still matches what is on screen at every width. */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
+                <div className="order-1 md:order-1">
                   <label className="form-label" htmlFor="po-location">
                     Location
                   </label>
@@ -1972,7 +1929,7 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
 
-                <div>
+                <div className="order-3 md:order-2">
                   <label className="form-label" htmlFor="po-number">
                     Purchase order<span className="ml-0.5 text-red-500">*</span>
                   </label>
@@ -1996,7 +1953,7 @@ export function PurchaseOrderDialog({
                   )}
                 </div>
 
-                <div>
+                <div className="order-4 md:order-3">
                   <label className="form-label" htmlFor="po-date">
                     Date
                   </label>
@@ -2014,23 +1971,20 @@ export function PurchaseOrderDialog({
                   />
                 </div>
 
-                <div>
+                <div className="order-2 md:order-4">
                   <label className="form-label" htmlFor="po-supplier">
                     Supplier<span className="ml-0.5 text-red-500">*</span>
                   </label>
                   <div className="relative">
                     <User
                       size={14}
-                      className={`pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 ${
-                        supplierMissing ? 'text-red-500' : 'text-muted-foreground'
-                      }`}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                     />
                     <select
                       id="po-supplier"
-                      className={`form-input pl-9 ${supplierMissing ? 'border-red-500' : ''}`}
+                      className="form-input pl-9"
                       value={supplierId}
                       onChange={(e) => setSupplierId(e.target.value)}
-                      aria-invalid={supplierMissing}
                       aria-describedby={supplierMissing ? 'po-supplier-error' : undefined}
                     >
                       <option value="">Choose supplier</option>
@@ -2041,23 +1995,21 @@ export function PurchaseOrderDialog({
                       ))}
                     </select>
                   </div>
-                  {/* Marked at the field from the start, not held back until a
-                    save is attempted. Every Save on this form is disabled while
-                    the supplier is empty, so waiting for a click that cannot
-                    happen would leave the buttons greyed out with nothing on
-                    screen saying which field is holding them. */}
+                  {/* A prompt, not an alarm. Every Save on this form is
+                    disabled while the supplier is empty, so this still says
+                    which field is holding them back — but in the same grey a
+                    blank box on a form nobody has filled in yet gets
+                    everywhere else on this screen. Red is for a mistake
+                    already made, and choosing nothing on a form just opened
+                    is not one. */}
                   {supplierMissing ? (
-                    <p
-                      id="po-supplier-error"
-                      className="mt-1 flex items-center gap-1.5 text-xs text-red-500"
-                    >
-                      <AlertCircle size={13} className="shrink-0" />
-                      Supplier is required
+                    <p id="po-supplier-error" className="text-muted-foreground mt-1 text-xs">
+                      Choose the supplier to save this order
                     </p>
                   ) : null}
                 </div>
 
-                <div>
+                <div className="order-5 md:order-5">
                   <label className="form-label" htmlFor="po-reference">
                     Reference
                   </label>
@@ -2076,7 +2028,7 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
 
-                <div>
+                <div className="order-6 md:order-6">
                   <label className="form-label" htmlFor="po-remark">
                     Remark
                   </label>
@@ -2206,7 +2158,7 @@ export function PurchaseOrderDialog({
               and not the buttons. */}
             <Section
               icon={Package}
-              title="Items"
+              title="Item Details"
               actions={
                 <>
                   {/* Where the old ERP puts it: on the items bar, left of the
@@ -2250,7 +2202,7 @@ export function PurchaseOrderDialog({
                     : 'No discount on this order. Both the per-line cells and the order-level box are switched off.'}
               </p>
 
-              <div className="border-border bg-card overflow-x-auto rounded-lg border">
+              <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
                 <table className="w-full min-w-[1180px] table-fixed border-collapse text-sm">
                   <thead>
                     <tr className="bg-secondary">
@@ -2504,9 +2456,13 @@ export function PurchaseOrderDialog({
                           </td>
 
                           <td className={COL.qty}>
+                            {/* The wheel and the arrow keys move this by whole units.
+                             Not 0.001, which moved it by a thousandth of a piece; and not 1,
+                             which would refuse 1500.5 metres of fabric outright. "any" steps
+                             by one while still accepting a decimal that is typed. */}
                             <input
                               type="number"
-                              step="0.001"
+                              step="any"
                               min={0}
                               className={`${cell} text-right ${needsQty ? 'border-amber-500/70' : ''}`}
                               placeholder="0"
@@ -2657,6 +2613,303 @@ export function PurchaseOrderDialog({
                 </table>
               </div>
 
+              {/* Same rows, one card each, for a screen too narrow for
+                thirteen columns. The sideways-scrolling table above stays
+                for a desk; here every field for a line sits under the last
+                so nothing is typed sight-unseen off the right edge. */}
+              <div className="space-y-3 sm:hidden">
+                {lines.map((line, i) => {
+                  const item = itemById.get(line.itemId)
+                  const filed = categories.find((c) => c.id === item?.categoryId)
+                  const view = {
+                    ...line,
+                    categoryId: line.categoryId || filed?.parentId || filed?.id || '',
+                    subcategoryId: line.subcategoryId || (filed?.parentId ? filed.id : ''),
+                  }
+                  const subs = subCategoriesOf(view.categoryId)
+                  const choices = itemsFor(view)
+                  const money = priceOf(line)
+                  const needsQty = Boolean(line.itemId) && num(line.qty) <= 0
+                  const needsRate = Boolean(line.itemId) && String(line.unitRate).trim() === ''
+                  const cell = 'form-input h-9 px-2 text-xs w-full'
+                  const lastRate = line.itemId ? rateHistory[line.itemId]?.[0] : undefined
+                  const fieldLabel =
+                    'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+
+                  return (
+                    <div key={i} className="border-border bg-card rounded-lg border p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-muted-foreground text-xs font-semibold tabular-nums">
+                          Row {i + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeRow(i)}
+                          className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                          aria-label={`Remove row ${i + 1}`}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className={fieldLabel}>Item</label>
+                        {/* Code and name side by side rather than stacked — the
+                          code is short enough that giving it a full row of its
+                          own on a phone was one more screen of scrolling per
+                          line for nothing the width needed. */}
+                        <div className="flex gap-1.5">
+                          {/* `cell` carries `w-full`, which would fight a
+                            flex-basis override here — spelled out without it
+                            so the fixed code column and the flexible name
+                            column actually hold the widths they are given. */}
+                          <input
+                            className="form-input h-9 w-24 shrink-0 px-2 font-mono text-xs"
+                            list={`po-codes-m-${i}`}
+                            placeholder="Code"
+                            value={line.codeText ?? ''}
+                            onChange={(e) => typeCodeFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item code`}
+                          />
+                          <datalist id={`po-codes-m-${i}`}>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.code ?? ''} label={it.name} />
+                            ))}
+                          </datalist>
+                          <select
+                            className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
+                            value={line.itemId}
+                            onChange={(e) => pickItemFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item`}
+                          >
+                            <option value="">
+                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
+                            </option>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.id}>
+                                {it.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {(item?.hsnCode || line.mrNumber) && (
+                          <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
+                            {item?.hsnCode && (
+                              <span className="text-muted-foreground">HSN {item.hsnCode}</span>
+                            )}
+                            {line.mrNumber && (
+                              <span
+                                className="text-primary"
+                                title={`Raised against ${line.mrNumber}`}
+                              >
+                                {line.mrNumber}
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Category</label>
+                          <select
+                            className={cell}
+                            value={view.categoryId}
+                            onChange={(e) =>
+                              setLine(i, { categoryId: e.target.value, subcategoryId: '' })
+                            }
+                            aria-label={`Row ${i + 1} category`}
+                          >
+                            <option value="">All categories</option>
+                            {topCategories.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Sub-category</label>
+                          <select
+                            className={cell}
+                            value={view.subcategoryId}
+                            disabled={subs.length === 0}
+                            onChange={(e) => setLine(i, { subcategoryId: e.target.value })}
+                            aria-label={`Row ${i + 1} subcategory`}
+                          >
+                            <option value="">{subs.length === 0 ? 'None' : 'All'}</option>
+                            {subs.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Style no.</label>
+                          <input
+                            className={cell}
+                            placeholder="Style"
+                            value={(line.styleNo as string) ?? ''}
+                            onChange={(e) => typeStyleFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} style number`}
+                          />
+                          {line.styleNo && !line.styleId && (
+                            <p className="text-muted-foreground text-[10px]">Not in master</p>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Description</label>
+                          <input
+                            className={cell}
+                            placeholder="Optional"
+                            value={(line.description as string) ?? ''}
+                            onChange={(e) => setLine(i, { description: e.target.value })}
+                            aria-label={`Row ${i + 1} description`}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Qty</label>
+                          <input
+                            type="number"
+                            step="any"
+                            min={0}
+                            className={`${cell} ${needsQty ? 'border-amber-500/70' : ''}`}
+                            placeholder="0"
+                            value={String(line.qty)}
+                            onChange={(e) => setLine(i, { qty: e.target.value })}
+                            aria-label={`Row ${i + 1} quantity`}
+                          />
+                          {item?.uom?.symbol && (
+                            <p className="text-muted-foreground text-[10px]">{item.uom.symbol}</p>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Rate</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            className={`${cell} ${needsRate ? 'border-amber-500/70' : ''}`}
+                            placeholder="0.00"
+                            value={String(line.unitRate)}
+                            onChange={(e) => setLine(i, { unitRate: e.target.value })}
+                            aria-label={`Row ${i + 1} rate`}
+                          />
+                          {lastRate && (
+                            <div>
+                              <p className="text-muted-foreground whitespace-nowrap text-[10px]">
+                                Last {inr(num(lastRate.unitRate))}
+                              </p>
+                              <button
+                                type="button"
+                                onClick={() => setHistoryFor(line.itemId)}
+                                className="text-primary whitespace-nowrap text-[10px] hover:underline"
+                              >
+                                View history
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Discount</label>
+                          {/* `cell` carries `w-full`, which fights a
+                            fixed-width override the same way it did on the
+                            item code cell — spelled out without it so the
+                            unit select actually holds `w-14` instead of
+                            stretching to match the number box and pushing
+                            the row past the card's right edge. */}
+                          <div className="flex items-stretch gap-1">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
+                              className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
+                              placeholder="0"
+                              disabled={poType !== 'ITEM_LEVEL'}
+                              value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
+                              onChange={(e) => setLine(i, { discount: e.target.value })}
+                              aria-label={`Row ${i + 1} discount`}
+                            />
+                            <select
+                              className="form-input h-9 w-14 shrink-0 px-1 text-xs"
+                              disabled={poType !== 'ITEM_LEVEL'}
+                              value={line.discountUnit ?? '%'}
+                              onChange={(e) =>
+                                setLine(i, { discountUnit: e.target.value as '%' | 'INR' })
+                              }
+                              aria-label={`Row ${i + 1} discount in percent or rupees`}
+                            >
+                              <option value="%">%</option>
+                              <option value="INR">₹</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <label className={fieldLabel}>Tax %</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            max={100}
+                            className={cell}
+                            placeholder="0"
+                            disabled={taxMode === 'NONE'}
+                            value={taxMode === 'NONE' ? '' : String(line.gstRate)}
+                            onChange={(e) => setLine(i, { gstRate: e.target.value })}
+                            aria-label={`Row ${i + 1} tax percent`}
+                          />
+                          {line.itemId && (
+                            <label className="text-muted-foreground flex cursor-pointer items-center gap-1 text-[10px]">
+                              <input
+                                type="checkbox"
+                                className="scale-75"
+                                disabled={taxMode === 'NONE'}
+                                checked={num(line.gstRate) === 0}
+                                onChange={(e) =>
+                                  setLine(i, {
+                                    gstRate: e.target.checked
+                                      ? '0'
+                                      : item?.taxRate
+                                        ? String(item.taxRate.rate)
+                                        : '',
+                                  })
+                                }
+                              />
+                              Exempt
+                            </label>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="border-border/70 mt-2.5 flex items-center justify-between border-t pt-2">
+                        <span className={fieldLabel}>Amount</span>
+                        <div className="text-right">
+                          <div className="font-medium tabular-nums">
+                            {inr(totals.lineAmounts[i] ?? 0)}
+                          </div>
+                          {money.netPrice > 0 && (
+                            <p className="text-muted-foreground text-[10px] tabular-nums leading-tight">
+                              {inr(money.netPrice)} each
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+
               <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
                 <button
                   type="button"
@@ -2692,7 +2945,7 @@ export function PurchaseOrderDialog({
                 whole row, and the form scrolling for no reason. The terms and
                 the note move up into that space instead. */}
               <div className="min-w-0 space-y-3">
-                <Section icon={Truck} title="Attachments and Deliver To">
+                <Section icon={Truck} title="Attachments &amp; Deliver To">
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                     <div className="space-y-2">
                       <h4 className="text-foreground text-xs font-semibold">Attachments</h4>
@@ -2916,7 +3169,7 @@ export function PurchaseOrderDialog({
                 <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2">
                   <Section
                     icon={ScrollText}
-                    title="Terms and conditions"
+                    title="Terms &amp; Conditions"
                     foldable
                     openByDefault={false}
                     summary={
@@ -2970,7 +3223,7 @@ export function PurchaseOrderDialog({
                 space the form was already paying for either way. */}
                 <Section
                   icon={Mail}
-                  title="Template and email"
+                  title="Template &amp; Email"
                   foldable
                   openByDefault={false}
                   summary="One template per document type; emailing is not built yet"
@@ -3134,15 +3387,25 @@ export function PurchaseOrderDialog({
                         const helperOpen = pctOpen === c.chargeTypeId
                         return (
                           <div key={c.chargeTypeId}>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-muted-foreground min-w-0">
-                                {c.name} @{c.gstRate}%
+                            {/* `flex-wrap`, with the name given a floor it
+                              will not shrink under — a name like "Dyeing
+                              Charges (Processing)" broke mid-word onto a
+                              second line while the button and the box sat
+                              centred beside whichever half of it fit, which
+                              read as broken rather than as a long name. Past
+                              that floor the whole button-and-box group wraps
+                              to its own line under the name instead, which
+                              is the same shape every field on this form
+                              already takes on a phone. */}
+                            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                              <span className="text-muted-foreground min-w-[9rem] flex-1">
+                                {c.name}
                               </span>
                               {/* The amount box stays where the other boxes are
                                 and the helper button goes to its left, so the
                                 right edge of every figure on this panel still
                                 lines up down one column. */}
-                              <div className="flex shrink-0 items-center gap-1.5">
+                              <div className="ml-auto flex shrink-0 items-center gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => setPctOpen(helperOpen ? null : c.chargeTypeId)}
@@ -3226,11 +3489,14 @@ export function PurchaseOrderDialog({
                   {/* Carries no GST of its own and is added after tax, which is
                     how the mill's old system had it. */}
                   <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <label htmlFor="po-other-charges" className="text-muted-foreground min-w-0">
+                    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                      <label
+                        htmlFor="po-other-charges"
+                        className="text-muted-foreground min-w-[9rem] flex-1"
+                      >
                         Other charges
                       </label>
-                      <div className="flex shrink-0 items-center gap-1.5">
+                      <div className="ml-auto flex shrink-0 items-center gap-1.5">
                         {/* No rate of its own, so this helper opens empty. It
                           is here because the sum is the same one — a
                           percentage of the goods — and a helper on every box
@@ -3305,7 +3571,7 @@ export function PurchaseOrderDialog({
           </div>
 
           {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
-          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-4 py-3">
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-5 py-3.5">
             {incomplete && (
               <p className="warn-text mr-auto flex max-w-xl items-start gap-1.5 text-xs">
                 <AlertCircle size={13} className="mt-px shrink-0" />
@@ -3656,7 +3922,7 @@ export function PurchaseOrderDialog({
                       <h3 id="po-history-title" className="text-foreground text-base font-semibold">
                         Previous purchases
                       </h3>
-                      <p className="text-muted-foreground mt-0.5 text-xs">
+                      <p className="text-muted-foreground mt-0.5 text-[13px]">
                         {itemById.get(historyFor)?.name ?? 'This item'}
                       </p>
                     </div>

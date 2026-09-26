@@ -70,6 +70,15 @@ export interface TaxRate {
   isActive: boolean
 }
 
+export interface TdsSection {
+  id: string
+  section: string
+  label: string
+  rate: number
+  isDefault: boolean
+  isActive: boolean
+}
+
 export interface PreferenceDefinition {
   key: string
   label: string
@@ -196,6 +205,14 @@ export const settingsApi = {
     update: (id: string, data: Record<string, unknown>) =>
       api.patch<Single<TaxRate>>(`/settings/tax-rates/${id}`, data),
     remove: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/tax-rates/${id}`),
+  },
+
+  tdsSections: {
+    list: () => api.get<ListResponse<TdsSection>>('/settings/tds-sections'),
+    create: (data: Record<string, unknown>) => api.post<Single<TdsSection>>('/settings/tds-sections', data),
+    update: (id: string, data: Record<string, unknown>) =>
+      api.patch<Single<TdsSection>>(`/settings/tds-sections/${id}`, data),
+    remove: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/tds-sections/${id}`),
   },
 
   preferences: {

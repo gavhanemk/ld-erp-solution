@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
+  BarChart3,
   LayoutDashboard, ShoppingCart, Package, Warehouse, Factory,
   BookOpen, Users, Wrench, Bot, Settings, ChevronLeft, ChevronRight,
   LogOut, Bell, Zap, ChevronDown, ChevronRight as ChevronRightIcon,
@@ -13,9 +14,16 @@ import { cn } from '@/lib/utils'
 import { api, currentUser, tokens } from '@/lib/api'
 import { useAppSettings } from '@/lib/appSettings'
 
-/** "Mahesh Ghavane" -> "MG"; a single name gives its first two letters. */
+/**
+ * "Mahesh Gavhane" -> "MG"; a single name gives its first two letters.
+ *
+ * `\s+`, not `s+`. It was splitting on the letter "s", so "Mahesh Gavhane"
+ * became ["Mahe", "h Gavhane"] and the avatar read "MH" — wrong for any name
+ * containing an s, right for every name that does not, which is why it
+ * survived.
+ */
 function initialsOf(name: string): string {
-  const parts = name.trim().split(/s+/).filter(Boolean)
+  const parts = name.trim().split(/\s+/).filter(Boolean)
   if (parts.length === 0) return '?'
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
@@ -44,6 +52,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { label: 'Reports', href: '/reports', icon: BarChart3 },
   {
     label: 'Masters', icon: Layers,
     children: [
@@ -58,6 +67,7 @@ const navItems: NavItem[] = [
       { label: 'Workstations', href: '/masters/workstations' },
       { label: 'Extra Charges', href: '/masters/charges' },
       { label: 'Warehouses', href: '/masters/warehouses' },
+      { label: 'Bank Accounts', href: '/masters/bank-accounts' },
     ],
   },
   {
@@ -76,6 +86,13 @@ const navItems: NavItem[] = [
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
       { label: 'Purchase Bills', href: '/purchase/bills' },
       { label: 'Supplier Payments', href: '/purchase/payments' },
+      /* Two entries for three kinds of document, on purpose. Ours and the
+         supplier's debit notes both live under Debit Notes — they are both
+         debit notes, and the row says whose it is and which way the money
+         goes. A menu that split them made you know the answer before you
+         could look it up. */
+      { label: 'Debit Notes', href: '/purchase/debit-notes' },
+      { label: 'Credit Notes', href: '/purchase/credit-notes' },
     ],
   },
   {
@@ -143,6 +160,19 @@ interface SidebarProps {
   mobileOpen: boolean
   onMobileClose: () => void
 }
+
+/**
+ * A menu group's label, as an id.
+ *
+ * Only needs to be stable and unique within the sidebar, which a lowercased
+ * label with its spaces and punctuation knocked out is — "HR & Payroll"
+ * becomes "hr-payroll".
+ */
+const slug = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
 
 export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: SidebarProps) {
   const pathname = usePathname()
@@ -243,8 +273,17 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
 
               return (
                 <div key={item.label}>
+                  {/* `aria-expanded` says whether the group is open, and
+                    `aria-controls` says what it opens. Neither was here, so
+                    the chevron was the only indication and it is drawn, not
+                    announced — a screen reader could not tell an open Purchase
+                    menu from a closed one, and nor could anything else driving
+                    the page. Collapsed to icons the button does not expand
+                    anything, so it claims nothing. */}
                   <button
                     onClick={() => !collapsed && toggleMenu(item.label)}
+                    aria-expanded={collapsed ? undefined : isOpen}
+                    aria-controls={collapsed ? undefined : `nav-group-${slug(item.label)}`}
                     className={cn(
                       'nav-item group w-full',
                       groupActive && 'text-teal-400'
@@ -269,7 +308,10 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
                   </button>
 
                   {!collapsed && isOpen && (
-                    <div className="ml-4 mt-0.5 pl-4 border-l border-border/50 space-y-0.5 animate-fade-in">
+                    <div
+                      id={`nav-group-${slug(item.label)}`}
+                      className="ml-4 mt-0.5 pl-4 border-l border-border/50 space-y-0.5 animate-fade-in"
+                    >
                       {item.children.map((child) =>
                         child.planned ? (
                           <div

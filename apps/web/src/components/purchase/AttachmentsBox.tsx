@@ -221,7 +221,7 @@ export const AttachmentsBox = forwardRef<
           setDragOver(false)
           if (!uploading && fileCount < MAX_FILES) chooseFiles(e.dataTransfer.files)
         }}
-        className={`flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-3 ${
+        className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-dashed px-3 py-3 ${
           uploading || fileCount >= MAX_FILES
             ? 'border-border bg-secondary cursor-not-allowed opacity-70'
             : dragOver
@@ -239,10 +239,12 @@ export const AttachmentsBox = forwardRef<
             <span className="text-foreground block truncate text-sm">
               {uploading ? 'Sending...' : 'Choose files'}
             </span>
-            <span className="text-muted-foreground block text-xs">or drag and drop</span>
+            <span className="text-muted-foreground block whitespace-nowrap text-xs">
+              or drag and drop
+            </span>
           </span>
         </span>
-        <span className="text-muted-foreground shrink-0 text-xs">
+        <span className="text-muted-foreground ml-auto shrink-0 whitespace-nowrap text-xs">
           {fileCount}/{MAX_FILES} · {MAX_FILE_MB}MB each
         </span>
         <input
