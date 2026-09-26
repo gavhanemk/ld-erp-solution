@@ -14,14 +14,15 @@ import {
   Info,
   FileText,
   Package,
-  Percent,
   MessageSquare,
   Calculator,
 } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { settingsApi, type TdsSection } from '@/lib/settingsApi'
 // The same panel the order and receipt forms are built from, so all three
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
+import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
 
 export interface BillLine {
   itemId: string
@@ -34,6 +35,13 @@ export interface BillLine {
   /** Only set when the line came from a receipt — drives the variance notes. */
   acceptedQty?: number
   pendingQty?: number
+  /**
+   * How much of this line's quantity was refused at the gate, carried so the
+   * form can say so while it is being billed — the bill still claims the
+   * whole delivery, tax invoice and all, but the rejected part of it is a
+   * debit note still to be raised, not goods that reached the rack.
+   */
+  rejectedQty?: number
   orderedRate?: number
   /**
    * What to do about a rate that does not match the order. Only ever set on a
@@ -114,7 +122,11 @@ export interface PurchaseBill {
       amount?: string | number
       grnLine?: {
         id: string
+        receivedQty: string
         acceptedQty: string
+        rejectedQty: string
+        /** Already claimed by a note raised straight off the receipt, before this bill existed. */
+        rejectedNotedQty?: number
         unitRate?: string | number
         grn: { id: string; grnNumber: string; attachments?: BillAttachment[] }
       } | null
@@ -149,7 +161,9 @@ export interface PurchaseBill {
   adjustments?: Array<{
     id: string
     noteNumber: string
-    noteType: 'DEBIT' | 'CREDIT'
+    docType: NoteDoc
+    issuedBy: NoteIssuer
+    gstTreatment: NoteGst
     noteDate: string
     reason: string
     reasonNote: string | null
@@ -256,6 +270,7 @@ export function PurchaseBillDialog({
   const [chargeTypes, setChargeTypes] = useState<Option[]>([])
   const [grns, setGrns] = useState<GrnOption[]>([])
   const [companyState, setCompanyState] = useState<string | null>(null)
+  const [tdsSections, setTdsSections] = useState<TdsSection[]>([])
 
   const [supplierId, setSupplierId] = useState('')
   const [poId, setPoId] = useState<string | null>(null)
@@ -267,6 +282,8 @@ export function PurchaseBillDialog({
   const [isReverseCharge, setIsReverseCharge] = useState(false)
   const [tdsSection, setTdsSection] = useState('')
   const [tdsRate, setTdsRate] = useState('')
+  /** Forces the manual section/rate inputs even when they'd otherwise match a master row. */
+  const [tdsCustomMode, setTdsCustomMode] = useState(false)
   const [notes, setNotes] = useState('')
   /** Why a rate above the order was agreed. Asked for once, not per line. */
   const [rateVarianceReason, setRateVarianceReason] = useState('')
@@ -379,7 +396,8 @@ export function PurchaseBillDialog({
         .get<{ success: boolean; data: { stateCode: string | null } }>('/settings/company')
         .catch(() => null),
       api.get<Paginated<GrnOption>>('/purchase/grn?limit=200').catch(() => null),
-    ]).then(([s, i, c, co, g]) => {
+      settingsApi.tdsSections.list().catch(() => null),
+    ]).then(([s, i, c, co, g, t]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -390,6 +408,7 @@ export function PurchaseBillDialog({
       )
       setCompanyState(co?.data?.stateCode ?? null)
       setGrns(g?.data ?? [])
+      setTdsSections(t?.data.filter((x) => x.isActive) ?? [])
     })
 
     return () => {
@@ -580,7 +599,10 @@ export function PurchaseBillDialog({
           lines: Array<{
             grnLineId: string
             item: { id: string; name: string }
+            receivedQty: number
             acceptedQty: number
+            rejectedQty: number
+            rejectedNotedQty: number
             billedQty: number
             pendingQty: number
             orderedRate: number
@@ -639,6 +661,10 @@ export function PurchaseBillDialog({
         discount: '0',
         gstRate: String(l.gstRate),
         acceptedQty: l.acceptedQty,
+        // What is still unclaimed, not the raw reject figure — a rejection
+        // already noted straight off the receipt (before this bill existed)
+        // has nothing left for the hint below to ask for.
+        rejectedQty: Math.max(0, Math.round((l.rejectedQty - l.rejectedNotedQty) * 1000) / 1000),
         pendingQty: l.pendingQty,
         orderedRate: l.orderedRate,
         grnNumber: d.grn.grnNumber,
@@ -730,7 +756,7 @@ export function PurchaseBillDialog({
       onSaved()
       onClose()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
+      setError(apiErrorMessage(err, 'Could not save. Is the API running?'))
     } finally {
       setSaving(false)
     }
@@ -810,18 +836,18 @@ export function PurchaseBillDialog({
       >
         {/* Header — stays put while the body scrolls. */}
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
-          <div className="flex items-center gap-2.5">
+          <div className="flex min-w-0 items-center gap-2.5">
             <div className="bg-primary/10 border-primary/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border">
               <Receipt size={16} className="text-primary" />
             </div>
-            <div>
+            <div className="min-w-0">
               <h2
                 id="bill-dialog-title"
                 className="text-foreground truncate text-xl font-semibold tracking-tight"
               >
                 {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
               </h2>
-              <p className="text-muted-foreground mt-0.5 text-[13px]">
+              <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                 {isEdit
                   ? 'A bill can be changed until a payment is made against it'
                   : 'Our reference number is given when you save. Type the supplier’s own number below.'}
@@ -829,13 +855,19 @@ export function PurchaseBillDialog({
             </div>
           </div>
           {/* The primary action sits in the header as well as the footer, as
-            it does on the order and receipt forms. On a long form the footer
-            is a scroll away from wherever somebody happens to be. */}
+            it does on the goods receipt form — but desk only there too,
+            wrapped in its own `hidden md:block`. Without a `min-w-0` chain
+            above, the title never actually truncated despite carrying the
+            class — a flex child's default min-width is its content's, not
+            zero — and this button ran off the right edge of a phone
+            instead of the header ever giving the title room to give up. */}
           <div className="flex shrink-0 items-center gap-2">
-            <button type="submit" form="bill-form" className="btn-primary" disabled={saving}>
-              {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
-              {isEdit ? 'Save changes' : 'Book bill'}
-            </button>
+            <div className="hidden md:block">
+              <button type="submit" form="bill-form" className="btn-primary" disabled={saving}>
+                {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
+                {isEdit ? 'Save changes' : 'Book bill'}
+              </button>
+            </div>
             <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
               <X size={18} />
             </button>
@@ -961,8 +993,18 @@ export function PurchaseBillDialog({
             )}
 
             <Section icon={FileText} title="Bill Details">
-              <div className="grid grid-cols-1 gap-2.5 md:grid-cols-4">
-                <div className="md:col-span-2">
+              {/* `auto-fit`, not a fixed two columns — their bill's own
+                number pairs with its date, and when we booked it pairs
+                with when it falls due, on any phone wide enough to hold
+                a date field without clipping it to "dd-mm-yyy". Supplier
+                and the reverse charge note take `col-span-full` rather
+                than a fixed span, so they stay full width whether the
+                row beside them has resolved to one column or three —
+                one carries a GSTIN line under it and the other a
+                paragraph, and either beside a lone date field would read
+                as unbalanced. */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 md:grid-cols-4 xl:grid-cols-8">
+                <div className="col-span-full md:col-span-2">
                   <label className="form-label" htmlFor="bill-supplier">
                     Supplier<span className="ml-0.5 text-red-400">*</span>
                   </label>
@@ -1071,7 +1113,7 @@ export function PurchaseBillDialog({
                   )}
                 </div>
 
-                <div className="flex items-end md:col-span-2">
+                <div className="col-span-full flex items-end md:col-span-2">
                   <label className="text-foreground flex cursor-pointer items-start gap-2 text-sm">
                     <input
                       type="checkbox"
@@ -1093,8 +1135,8 @@ export function PurchaseBillDialog({
 
             {(overBilled.length > 0 || rateDrift.length > 0) && (
               <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
-                <TriangleAlert size={16} className="mt-0.5 shrink-0 text-amber-400" />
-                <div className="space-y-1 text-xs text-amber-400">
+                <TriangleAlert size={16} className="warn-text mt-0.5 shrink-0" />
+                <div className="warn-text space-y-1 text-xs">
                   {overBilled.map((l, i) => (
                     <p key={`o${i}`}>
                       {itemById.get(l.itemId)?.name ?? 'A line'}: the bill claims {num(l.qty)} but
@@ -1249,7 +1291,10 @@ export function PurchaseBillDialog({
                     {lines.map((line, i) => {
                       const item = itemById.get(line.itemId)
                       return (
-                        <tr key={i} className="border-border/50 border-b last:border-0">
+                        <tr
+                          key={i}
+                          className="border-border/50 border-b last:border-0 [&>td]:align-top"
+                        >
                           <td className="min-w-[200px] px-3 py-2">
                             <select
                               className="form-input h-9"
@@ -1277,6 +1322,16 @@ export function PurchaseBillDialog({
                                 {line.pendingQty != null && (
                                   <p className="text-muted-foreground mt-0.5 text-[10px]">
                                     {line.pendingQty} left to bill
+                                  </p>
+                                )}
+                                {/* This bill claims the whole delivery, the
+                                  rejected part included — so it is said here,
+                                  where the person booking it can still act on
+                                  it, rather than left for whoever reconciles
+                                  the payment to notice on their own. */}
+                                {Boolean(line.rejectedQty) && (
+                                  <p className="mt-0.5 text-[10px] text-amber-500">
+                                    {line.rejectedQty} rejected — raise a debit note for it
                                   </p>
                                 )}
                               </>
@@ -1428,6 +1483,11 @@ export function PurchaseBillDialog({
                                 {line.pendingQty} left to bill
                               </p>
                             )}
+                            {Boolean(line.rejectedQty) && (
+                              <p className="mt-0.5 text-[10px] text-amber-500">
+                                {line.rejectedQty} rejected — raise a debit note for it
+                              </p>
+                            )}
                           </>
                         ) : (
                           <span className="text-muted-foreground text-xs">Not matched</span>
@@ -1513,140 +1573,90 @@ export function PurchaseBillDialog({
               </div>
             </Section>
 
-            {/* Charges — freight, transport, dyeing. Own GST rate each. */}
-            {chargeTypes.length > 0 && (
-              <Section
-                icon={Percent}
-                title="Other Charges"
-                actions={
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
-                    }
-                    className="btn-secondary text-xs"
-                  >
-                    <Plus size={14} /> Add charge
-                  </button>
-                }
-              >
-                {charges.length > 0 && (
-                  <div className="border-border divide-border/50 divide-y rounded-lg border">
-                    {charges.map((c, i) => (
-                      <div key={i} className="flex flex-wrap items-end gap-3 p-3">
-                        <div className="min-w-[180px] flex-1">
-                          <select
-                            className="form-input h-9"
-                            value={c.chargeTypeId}
-                            onChange={(e) => {
-                              const ct = chargeById.get(e.target.value)
-                              setCharges((p) =>
-                                p.map((x, y) =>
-                                  y === i
-                                    ? {
-                                        ...x,
-                                        chargeTypeId: e.target.value,
-                                        gstRate:
-                                          x.gstRate ||
-                                          (ct?.defaultGstRate != null
-                                            ? String(ct.defaultGstRate)
-                                            : ''),
-                                      }
-                                    : x
-                                )
-                              )
-                            }}
-                            aria-label={`Charge ${i + 1} type`}
-                          >
-                            <option value="">Select...</option>
-                            {chargeTypes.map((ct) => (
-                              <option key={ct.id} value={ct.id}>
-                                {ct.name}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="w-32">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            className="form-input h-9 text-right"
-                            placeholder="Amount"
-                            value={String(c.amount)}
-                            onChange={(e) =>
-                              setCharges((p) =>
-                                p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
-                              )
-                            }
-                            aria-label={`Charge ${i + 1} amount`}
-                          />
-                        </div>
-                        <div className="w-24">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            max={100}
-                            className="form-input h-9 text-right"
-                            placeholder="GST %"
-                            disabled={taxMode === 'NONE'}
-                            value={taxMode === 'NONE' ? '' : String(c.gstRate)}
-                            onChange={(e) =>
-                              setCharges((p) =>
-                                p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
-                              )
-                            }
-                            aria-label={`Charge ${i + 1} GST rate`}
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
-                          className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                          aria-label={`Remove charge ${i + 1}`}
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Section>
-            )}
-
             {/* What is typed on the left, what it comes to on the right. */}
             <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
               <Section icon={MessageSquare} title="TDS &amp; Notes">
-                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                  <div>
-                    <label className="form-label" htmlFor="bill-tds-section">
-                      TDS section
-                    </label>
-                    <input
-                      id="bill-tds-section"
-                      className="form-input"
-                      placeholder="e.g. 194C"
-                      value={tdsSection}
-                      onChange={(e) => setTdsSection(e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="form-label" htmlFor="bill-tds-rate">
-                      TDS rate %
-                    </label>
-                    <input
-                      id="bill-tds-rate"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      max={100}
-                      className="form-input"
-                      value={tdsRate}
-                      onChange={(e) => setTdsRate(e.target.value)}
-                    />
-                  </div>
-                </div>
+                {(() => {
+                  const matched = tdsSections.find(
+                    (t) => t.section === tdsSection && Number(t.rate) === num(tdsRate)
+                  )
+                  const showManual = tdsCustomMode || (!!tdsSection && !matched)
+                  const selectValue = !tdsSection ? '' : matched ? matched.id : 'custom'
+                  return (
+                    <>
+                      <div>
+                        <label className="form-label" htmlFor="bill-tds-select">
+                          TDS section
+                        </label>
+                        <select
+                          id="bill-tds-select"
+                          className="form-input"
+                          value={selectValue}
+                          onChange={(e) => {
+                            const v = e.target.value
+                            if (v === '') {
+                              setTdsSection('')
+                              setTdsRate('')
+                              setTdsCustomMode(false)
+                            } else if (v === 'custom') {
+                              setTdsCustomMode(true)
+                            } else {
+                              const row = tdsSections.find((t) => t.id === v)
+                              if (row) {
+                                setTdsSection(row.section)
+                                setTdsRate(String(row.rate))
+                              }
+                              setTdsCustomMode(false)
+                            }
+                          }}
+                        >
+                          <option value="">No TDS</option>
+                          {tdsSections.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.section} — {t.label} ({t.rate}%)
+                            </option>
+                          ))}
+                          <option value="custom">Other / not listed…</option>
+                        </select>
+                      </div>
+
+                      {showManual && (
+                        <div className="mt-2.5 grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5">
+                          <div>
+                            <label className="form-label" htmlFor="bill-tds-section">
+                              Section
+                            </label>
+                            <input
+                              id="bill-tds-section"
+                              className="form-input"
+                              placeholder="e.g. 194C"
+                              value={tdsSection}
+                              onChange={(e) => setTdsSection(e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label className="form-label" htmlFor="bill-tds-rate">
+                              Rate %
+                            </label>
+                            <input
+                              id="bill-tds-rate"
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              max={100}
+                              className="form-input"
+                              value={tdsRate}
+                              onChange={(e) => setTdsRate(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      )}
+                      <p className="text-muted-foreground mt-1 text-[11px]">
+                        Manage the list in Settings → Company → TDS sections.
+                      </p>
+                    </>
+                  )
+                })()}
                 <div>
                   <label className="form-label" htmlFor="bill-notes">
                     Notes
@@ -1679,7 +1689,91 @@ export function PurchaseBillDialog({
                       onChange={(e) => setDiscountAmount(e.target.value)}
                     />
                   </div>
-                  {totals.chargeTotal > 0 && <Row label="Extras" value={totals.chargeTotal} />}
+                  {chargeTypes.length > 0 && (
+                    <div className="space-y-1.5 py-0.5">
+                      {charges.map((c, i) => (
+                        <div key={i} className="flex items-center gap-1.5">
+                          <select
+                            className="form-input h-8 min-w-0 flex-1 text-xs"
+                            value={c.chargeTypeId}
+                            onChange={(e) => {
+                              const ct = chargeById.get(e.target.value)
+                              setCharges((p) =>
+                                p.map((x, y) =>
+                                  y === i
+                                    ? {
+                                        ...x,
+                                        chargeTypeId: e.target.value,
+                                        gstRate:
+                                          x.gstRate ||
+                                          (ct?.defaultGstRate != null
+                                            ? String(ct.defaultGstRate)
+                                            : ''),
+                                      }
+                                    : x
+                                )
+                              )
+                            }}
+                            aria-label={`Charge ${i + 1} type`}
+                          >
+                            <option value="">Charge type…</option>
+                            {chargeTypes.map((ct) => (
+                              <option key={ct.id} value={ct.id}>
+                                {ct.name}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            className="form-input h-8 w-24 shrink-0 text-right text-xs"
+                            placeholder="Amount"
+                            value={String(c.amount)}
+                            onChange={(e) =>
+                              setCharges((p) =>
+                                p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
+                              )
+                            }
+                            aria-label={`Charge ${i + 1} amount`}
+                          />
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            max={100}
+                            className="form-input h-8 w-16 shrink-0 text-right text-xs"
+                            placeholder="GST%"
+                            disabled={taxMode === 'NONE'}
+                            value={taxMode === 'NONE' ? '' : String(c.gstRate)}
+                            onChange={(e) =>
+                              setCharges((p) =>
+                                p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
+                              )
+                            }
+                            aria-label={`Charge ${i + 1} GST rate`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
+                            className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
+                            aria-label={`Remove charge ${i + 1}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
+                        }
+                        className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
+                      >
+                        <Plus size={12} /> Add charge
+                      </button>
+                    </div>
+                  )}
                   <Row label="Taxable value" value={totals.taxable} />
                   {taxMode === 'CGST_SGST' && (
                     <>

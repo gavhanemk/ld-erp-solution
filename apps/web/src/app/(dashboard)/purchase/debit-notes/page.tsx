@@ -3,11 +3,13 @@
 import { PurchaseNotesScreen } from '@/components/purchase/PurchaseNotesScreen'
 
 /**
- * What the mill claims back from its suppliers.
+ * Every debit note against a supplier bill — ours and theirs.
  *
- * The screen itself is shared with the credit notes page: the two documents
- * adjust the same bills against the same remaining balance and differ in who
- * signed the paper, which is one field rather than a second implementation.
+ * Both on one screen, because both are debit notes. Ours claims money back
+ * and reduces the bill; theirs charges us more and increases it. Which is
+ * which is a column and a badge on the row, not a separate menu entry —
+ * splitting them asked a clerk to know whose paper a thing was before they
+ * could find it, when finding it is how they discover whose it is.
  */
 export default function DebitNotesPage() {
   return <PurchaseNotesScreen moduleType="DEBIT" />

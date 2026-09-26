@@ -232,111 +232,253 @@ export function IndentItemsDialog({
               </p>
             </div>
           ) : (
-            <table className="w-full min-w-[1000px] text-sm">
-              <thead className="bg-secondary sticky top-0 z-10">
-                <tr className="border-border border-b">
-                  <th className={`${TH} w-10`}>
-                    <input
-                      type="checkbox"
-                      checked={allTicked}
-                      onChange={toggleAll}
-                      disabled={selectable.length === 0}
-                      aria-label="Select every line shown"
-                    />
-                  </th>
-                  <th className={TH}>Indent no</th>
-                  <th className={TH}>SO no</th>
-                  <th className={TH}>MO no</th>
-                  <th className={TH}>Remark</th>
-                  <th className={TH}>Item</th>
-                  <th className={`${TH} !text-right`}>Indent qty</th>
-                  <th className={`${TH} !text-right`}>PO created qty</th>
-                  <th className={`${TH} !text-right`}>PO pending qty</th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((r) => {
-                  const taken = alreadyPicked.has(r.mrLineId)
-                  const on = ticked.has(r.mrLineId)
-                  const over = Number(amounts[r.mrLineId]) > r.pendingQty
-                  return (
-                    <tr
-                      key={r.mrLineId}
-                      className={`border-border/40 border-b last:border-0 ${
-                        taken ? 'opacity-50' : on ? 'bg-primary/5' : ''
-                      }`}
-                    >
-                      <td className={TD}>
-                        <input
-                          type="checkbox"
-                          checked={on}
-                          disabled={taken}
-                          onChange={() => toggle(r.mrLineId)}
-                          aria-label={`Order ${r.item.name} from ${r.mrNumber}`}
-                        />
-                      </td>
-                      <td className={`${TD} whitespace-nowrap font-mono`}>
-                        {r.mrNumber}
-                        <div className="text-muted-foreground text-[10px]">
-                          {formatDate(r.requestDate)}
-                        </div>
-                      </td>
-                      <td className={`${TD} text-muted-foreground`}>{r.soNumber ?? '—'}</td>
-                      <td className={TD}>
-                        {r.moNumber ?? <span className="text-muted-foreground">—</span>}
-                      </td>
-                      <td className={TD}>
-                        {r.remark ?? <span className="text-muted-foreground">—</span>}
-                        {r.department && (
-                          <div className="text-muted-foreground text-[10px]">
-                            {r.department.name}
+            <div className="p-4">
+              {/* Cards below the width nine columns can still be read at,
+                the table above it — the same `list-scope` switch every
+                purchase list uses. The table's own `overflow-x-auto`
+                let it render at all on a phone, but reaching the one box
+                that matters here, the quantity to order, meant dragging
+                three columns out of the way first every single line. */}
+              <div className="list-scope">
+                <div className="list-cards space-y-2.5">
+                  {shown.map((r) => {
+                    const taken = alreadyPicked.has(r.mrLineId)
+                    const on = ticked.has(r.mrLineId)
+                    const over = Number(amounts[r.mrLineId]) > r.pendingQty
+                    return (
+                      <div
+                        key={r.mrLineId}
+                        className={`rounded-lg border p-3 ${
+                          taken
+                            ? 'border-border opacity-50'
+                            : on
+                              ? 'border-primary/40 bg-primary/5'
+                              : 'border-border bg-card'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <input
+                            type="checkbox"
+                            className="mt-1 shrink-0"
+                            checked={on}
+                            disabled={taken}
+                            onChange={() => toggle(r.mrLineId)}
+                            aria-label={`Order ${r.item.name} from ${r.mrNumber}`}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-baseline gap-x-2">
+                              <span className="text-foreground font-mono text-xs font-semibold">
+                                {r.mrNumber}
+                              </span>
+                              <span className="text-muted-foreground text-[10px]">
+                                {formatDate(r.requestDate)}
+                              </span>
+                            </div>
+                            <p className="text-foreground mt-1 font-medium leading-snug">
+                              {r.item.name}
+                            </p>
+                            <p className="text-muted-foreground font-mono text-[10px]">
+                              {r.item.code}
+                            </p>
                           </div>
-                        )}
-                      </td>
-                      <td className={TD}>
-                        <div className="text-foreground">{r.item.name}</div>
-                        <div className="text-muted-foreground font-mono text-[10px]">
-                          {r.item.code}
                         </div>
-                      </td>
-                      <td className={`${TD} whitespace-nowrap text-right tabular-nums`}>
-                        {qty(r.indentQty)} {r.item.uom?.symbol ?? ''}
-                      </td>
-                      <td className={`${TD} text-right tabular-nums`}>{qty(r.orderedQty)}</td>
-                      <td className={`${TD} text-right`}>
-                        {taken ? (
-                          <span className="text-muted-foreground text-[11px]">
-                            already on this order
-                          </span>
-                        ) : (
-                          /* The wheel and the arrow keys move this by whole units.
+
+                        {(r.soNumber || r.moNumber || r.remark || r.department) && (
+                          <dl className="border-border/70 mt-2.5 grid grid-cols-[5rem_minmax(0,1fr)] gap-x-3 gap-y-1 border-t pt-2.5 text-xs">
+                            {r.soNumber && (
+                              <>
+                                <dt className="text-muted-foreground">SO no</dt>
+                                <dd className="text-foreground min-w-0">{r.soNumber}</dd>
+                              </>
+                            )}
+                            {r.moNumber && (
+                              <>
+                                <dt className="text-muted-foreground">MO no</dt>
+                                <dd className="text-foreground min-w-0">{r.moNumber}</dd>
+                              </>
+                            )}
+                            {(r.remark || r.department) && (
+                              <>
+                                <dt className="text-muted-foreground">Remark</dt>
+                                <dd className="text-foreground min-w-0">
+                                  {r.remark ?? '—'}
+                                  {r.department && (
+                                    <span className="text-muted-foreground">
+                                      {' '}
+                                      · {r.department.name}
+                                    </span>
+                                  )}
+                                </dd>
+                              </>
+                            )}
+                          </dl>
+                        )}
+
+                        <div className="border-border/70 mt-2.5 grid grid-cols-3 gap-2 border-t pt-2.5">
+                          <div>
+                            <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+                              Indent qty
+                            </p>
+                            <p className="text-foreground text-xs tabular-nums">
+                              {qty(r.indentQty)} {r.item.uom?.symbol ?? ''}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+                              PO created
+                            </p>
+                            <p className="text-foreground text-xs tabular-nums">
+                              {qty(r.orderedQty)}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+                              PO pending
+                            </p>
+                            {taken ? (
+                              <p className="text-muted-foreground text-[11px] leading-snug">
+                                already on this order
+                              </p>
+                            ) : (
+                              <input
+                                type="number"
+                                step="any"
+                                min="0"
+                                className={`form-input h-8 w-full px-1.5 text-right text-xs tabular-nums ${
+                                  over ? 'border-amber-500' : ''
+                                }`}
+                                value={amounts[r.mrLineId] ?? ''}
+                                onChange={(e) =>
+                                  setAmounts((prev) => ({ ...prev, [r.mrLineId]: e.target.value }))
+                                }
+                                aria-label={`Quantity to order of ${r.item.name}`}
+                              />
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="list-rows border-border bg-card overflow-x-auto rounded-xl border">
+                  <table className="w-full min-w-[1000px] text-sm">
+                    <thead className="bg-secondary sticky top-0 z-10">
+                      <tr className="border-border border-b">
+                        <th className={`${TH} w-10`}>
+                          <input
+                            type="checkbox"
+                            checked={allTicked}
+                            onChange={toggleAll}
+                            disabled={selectable.length === 0}
+                            aria-label="Select every line shown"
+                          />
+                        </th>
+                        <th className={TH}>Indent no</th>
+                        <th className={TH}>SO no</th>
+                        <th className={TH}>MO no</th>
+                        <th className={TH}>Remark</th>
+                        <th className={TH}>Item</th>
+                        <th className={`${TH} !text-right`}>Indent qty</th>
+                        <th className={`${TH} !text-right`}>PO created qty</th>
+                        <th className={`${TH} !text-right`}>PO pending qty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shown.map((r, i) => {
+                        const taken = alreadyPicked.has(r.mrLineId)
+                        const on = ticked.has(r.mrLineId)
+                        const over = Number(amounts[r.mrLineId]) > r.pendingQty
+                        return (
+                          <tr
+                            key={r.mrLineId}
+                            className={`border-border/40 border-b last:border-0 ${
+                              taken
+                                ? 'opacity-50'
+                                : on
+                                  ? 'bg-primary/10'
+                                  : i % 2 === 1
+                                    ? 'zebra-row'
+                                    : 'bg-card'
+                            }`}
+                          >
+                            <td className={TD}>
+                              <input
+                                type="checkbox"
+                                checked={on}
+                                disabled={taken}
+                                onChange={() => toggle(r.mrLineId)}
+                                aria-label={`Order ${r.item.name} from ${r.mrNumber}`}
+                              />
+                            </td>
+                            <td className={`${TD} whitespace-nowrap font-mono`}>
+                              {r.mrNumber}
+                              <div className="text-muted-foreground text-[10px]">
+                                {formatDate(r.requestDate)}
+                              </div>
+                            </td>
+                            <td className={`${TD} text-muted-foreground`}>{r.soNumber ?? '—'}</td>
+                            <td className={TD}>
+                              {r.moNumber ?? <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className={TD}>
+                              {r.remark ?? <span className="text-muted-foreground">—</span>}
+                              {r.department && (
+                                <div className="text-muted-foreground text-[10px]">
+                                  {r.department.name}
+                                </div>
+                              )}
+                            </td>
+                            <td className={TD}>
+                              <div className="text-foreground">{r.item.name}</div>
+                              <div className="text-muted-foreground font-mono text-[10px]">
+                                {r.item.code}
+                              </div>
+                            </td>
+                            <td className={`${TD} whitespace-nowrap text-right tabular-nums`}>
+                              {qty(r.indentQty)} {r.item.uom?.symbol ?? ''}
+                            </td>
+                            <td className={`${TD} text-right tabular-nums`}>{qty(r.orderedQty)}</td>
+                            <td className={`${TD} text-right`}>
+                              {taken ? (
+                                <span className="text-muted-foreground text-[11px]">
+                                  already on this order
+                                </span>
+                              ) : (
+                                /* The wheel and the arrow keys move this by whole units.
                            Not 0.001, which moved it by a thousandth of a piece; and not 1,
                            which would refuse 1500.5 metres of fabric outright. "any" steps
                            by one while still accepting a decimal that is typed. */
-                          <input
-                            type="number"
-                            step="any"
-                            min="0"
-                            className={`form-input h-8 w-24 text-right tabular-nums ${
-                              over ? 'border-amber-500' : ''
-                            }`}
-                            value={amounts[r.mrLineId] ?? ''}
-                            onChange={(e) =>
-                              setAmounts((prev) => ({ ...prev, [r.mrLineId]: e.target.value }))
-                            }
-                            aria-label={`Quantity to order of ${r.item.name}`}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+                                <input
+                                  type="number"
+                                  step="any"
+                                  min="0"
+                                  className={`form-input h-8 w-24 text-right tabular-nums ${
+                                    over ? 'border-amber-500' : ''
+                                  }`}
+                                  value={amounts[r.mrLineId] ?? ''}
+                                  onChange={(e) =>
+                                    setAmounts((prev) => ({
+                                      ...prev,
+                                      [r.mrLineId]: e.target.value,
+                                    }))
+                                  }
+                                  aria-label={`Quantity to order of ${r.item.name}`}
+                                />
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           )}
         </div>
 
-        <div className="border-border flex shrink-0 flex-wrap items-center gap-3 border-t px-4 py-3">
+        <div className="border-border flex shrink-0 flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:flex-wrap sm:items-center">
           {/* A warning, not a refusal. Ordering more than was asked for is
             ordinary — the supplier sells thread in full cones — and the extra
             simply is not credited against the request. */}
@@ -347,17 +489,23 @@ export function IndentItemsDialog({
                 } over what was asked for. That is allowed — only the requested quantity counts against the indent.`
               : 'Tick the lines to order, change any quantity, then add them to the order.'}
           </p>
-          <button className="btn-secondary" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={picks.length === 0}
-            onClick={() => onAdd(picks)}
-          >
-            Add {picks.length > 0 ? `${picks.length} ` : ''}
-            {picks.length === 1 ? 'item' : 'items'} to the order
-          </button>
+          {/* Both buttons stay one row even where the sentence above them
+            gives up its own — it used to share that row too, which on a
+            phone left it about four characters wide and reading top to
+            bottom instead of left to right. */}
+          <div className="flex shrink-0 items-center justify-end gap-3">
+            <button className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              className="btn-primary disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={picks.length === 0}
+              onClick={() => onAdd(picks)}
+            >
+              Add {picks.length > 0 ? `${picks.length} ` : ''}
+              {picks.length === 1 ? 'item' : 'items'} to the order
+            </button>
+          </div>
         </div>
       </div>
     </div>,

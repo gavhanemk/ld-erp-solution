@@ -43,6 +43,8 @@ import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, itemsPreview } from '@/lib/utils'
+import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -323,6 +325,52 @@ export default function PurchaseOrdersPage() {
     }
   }
 
+  /*
+   * Closing one line short, from the order it belongs to.
+   *
+   * The same two endpoints the goods-receipt screen has always called, the
+   * same dialog, the same required reason — nothing about what happens is
+   * different here. Only where it can be reached from is: this decision is
+   * about an order, and a buyer chasing a supplier is looking at the order,
+   * not at the receipts screen where it used to live alone.
+   *
+   * `pendingQty` is pinned to zero on the server and `receivedQty` is left
+   * exactly as it was, so this never touches stock, a bill, or anything
+   * already received. Reversible by the same reopen it always was.
+   */
+  const [lineConfirm, setLineConfirm] = useState<{
+    type: 'close' | 'reopen'
+    po: PurchaseOrder
+    lineId: string
+    itemName: string
+    /** Decides whether the word is "Cancel" or "Close short". */
+    receivedQty: string | number | null | undefined
+  } | null>(null)
+
+  const lineAction = async (
+    po: PurchaseOrder,
+    lineId: string,
+    what: 'short-close' | 'reopen',
+    reason?: string
+  ) => {
+    setBusy(true)
+    setMessage(null)
+    setError(null)
+    try {
+      const res = await api.patch<{ message?: string }>(
+        `/purchase/orders/${po.id}/lines/${lineId}/${what}`,
+        what === 'short-close' ? { reason } : {}
+      )
+      setLineConfirm(null)
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const act = async (po: PurchaseOrder, what: 'cancel') => {
     if (!confirm(`Cancel ${po.poNumber}?`)) return
     setBusy(true)
@@ -476,21 +524,30 @@ The supplier already has this order. If it was real and fell through, cancel it 
 
   return (
     <div className="space-y-5">
-      <div className="page-header flex-wrap gap-3">
-        <div>
-          <h1 className="page-title">Purchase Orders</h1>
+      {/* `gap-3` without `flex-wrap` — refresh, Export and the primary
+        button sit beside the title on every width instead of dropping to
+        a row of their own under it. The title takes a size down and the
+        primary button loses its words below `sm`, which between them is
+        what leaves the row enough space to still fit. */}
+      <div className="page-header gap-3">
+        <div className="min-w-0">
+          <h1 className="page-title text-xl sm:text-2xl">Purchase Orders</h1>
           {/* Desk only. On a phone the screen is short and the heading
             already says what this is — the sentence under it cost a line of
             a list somebody is scrolling. */}
           <p className="page-subtitle hidden sm:block">What you have ordered from your suppliers</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
-          <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
-            <Plus size={15} /> New Purchase Order
+          <button
+            className="btn-primary"
+            onClick={() => setDialog({ open: true, record: null })}
+            aria-label="New Purchase Order"
+          >
+            <Plus size={15} /> <span className="hidden sm:inline">New Purchase Order</span>
           </button>
         </div>
       </div>
@@ -520,7 +577,13 @@ The supplier already has this order. If it was real and fell through, cancel it 
           per layout, which is how these bars end up disagreeing with
           themselves. */}
         <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
-          <div className="flex items-center gap-2 sm:contents">
+          {/* Search on its own line at a phone width, the two dates on the
+            one under it — sharing a row with a fixed-width date pair left
+            the search box too narrow to read what was typed into it. See
+            the same fix on Supplier Payments. `sm:contents` still
+            dissolves both back into the one row a tablet or a desk has
+            the width for. */}
+          <div className="flex flex-col gap-2 sm:contents">
             {/* One box for words. It reaches the supplier as well as the order
               number, so typing "ambika" finds every order raised against them
               just as typing "PO-0006" finds the one order. */}
@@ -546,7 +609,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
             <div className="flex shrink-0 items-center gap-1">
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={fromDate}
                 max={toDate || undefined}
                 onChange={(e) => setFromDate(e.target.value)}
@@ -555,7 +618,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
               <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={toDate}
                 min={fromDate || undefined}
                 onChange={(e) => setToDate(e.target.value)}
@@ -1134,7 +1197,26 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                                 className="mt-0.5 whitespace-normal text-[10px] font-normal normal-case text-amber-500"
                                                 title={line.shortCloseReason ?? undefined}
                                               >
-                                                Closed short
+                                                {shortCloseNoun(line.receivedQty)}
+                                                {line.id &&
+                                                  (po.status === 'SENT' ||
+                                                    po.status === 'PARTIALLY_RECEIVED') && (
+                                                    <button
+                                                      type="button"
+                                                      className="text-muted-foreground hover:text-foreground ml-1.5 underline underline-offset-2"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'reopen',
+                                                          po,
+                                                          lineId: line.id!,
+                                                          itemName: line.item?.name ?? 'this line',
+                                                          receivedQty: line.receivedQty,
+                                                        })
+                                                      }
+                                                    >
+                                                      Reopen
+                                                    </button>
+                                                  )}
                                               </div>
                                             ) : (
                                               (po.status === 'SENT' ||
@@ -1142,6 +1224,28 @@ The supplier already has this order. If it was real and fell through, cancel it 
                                               Number(line.pendingQty) > 0 && (
                                                 <div className="text-muted-foreground mt-0.5 whitespace-normal text-[10px] font-normal normal-case">
                                                   {Number(line.pendingQty)} pending
+                                                  {/* Beside the number it acts on, rather
+                                                    than in a menu at the end of the row —
+                                                    the decision is about this line's
+                                                    balance and nothing else on the row. */}
+                                                  {line.id && (
+                                                    <button
+                                                      type="button"
+                                                      className="text-muted-foreground hover:text-foreground ml-1.5 underline underline-offset-2"
+                                                      onClick={() =>
+                                                        setLineConfirm({
+                                                          type: 'close',
+                                                          po,
+                                                          lineId: line.id!,
+                                                          itemName: line.item?.name ?? 'this line',
+                                                          receivedQty: line.receivedQty,
+                                                        })
+                                                      }
+                                                      title={`Say the rest of ${line.item?.name ?? 'this line'} is not coming`}
+                                                    >
+                                                      {shortCloseVerb(line.receivedQty)}
+                                                    </button>
+                                                  )}
                                                 </div>
                                               )
                                             )}
@@ -1236,6 +1340,41 @@ The supplier already has this order. If it was real and fell through, cancel it 
           docId={filesFor.id}
           docNumber={filesFor.poNumber}
           onClose={() => setFilesFor(null)}
+        />
+      )}
+
+      {/* The same dialog and the same words as the receipts screen, because it
+        is the same decision being taken from a different desk. */}
+      {lineConfirm && (
+        <ReasonDialog
+          title={
+            lineConfirm.type === 'close'
+              ? `${shortCloseVerb(lineConfirm.receivedQty)} ${lineConfirm.itemName}?`
+              : `Reopen ${lineConfirm.itemName}?`
+          }
+          description={
+            lineConfirm.type === 'close'
+              ? wasNeverReceived(lineConfirm.receivedQty)
+                ? `Nothing has ever been received against this line on ${lineConfirm.po.poNumber} — it will be marked as never coming.`
+                : `This says the rest of it is not coming — it does not touch what has already ` +
+                  `been received against ${lineConfirm.po.poNumber}.`
+              : `It will count as pending again on ${lineConfirm.po.poNumber}.`
+          }
+          confirmLabel={
+            lineConfirm.type === 'close' ? shortCloseVerb(lineConfirm.receivedQty) : 'Reopen'
+          }
+          danger={lineConfirm.type === 'close'}
+          requireReason={lineConfirm.type === 'close'}
+          busy={busy}
+          onCancel={() => setLineConfirm(null)}
+          onConfirm={(reason) =>
+            void lineAction(
+              lineConfirm.po,
+              lineConfirm.lineId,
+              lineConfirm.type === 'close' ? 'short-close' : 'reopen',
+              reason
+            )
+          }
         />
       )}
     </div>

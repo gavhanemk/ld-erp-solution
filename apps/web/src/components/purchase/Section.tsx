@@ -108,7 +108,13 @@ export function Section({
           <span className="text-muted-foreground min-w-0 truncate text-xs">{summary}</span>
         )}
         {actions && !shut && (
-          <div className="ml-auto flex shrink-0 items-center gap-2 [&>*]:ml-0">{actions}</div>
+          // `flex-wrap`, not a rigid single line — a section whose actions
+          // are a button and a labelled dropdown (Items, with "Select from
+          // indent" beside "Order type") is wider than the actions ever
+          // fit on a phone otherwise, and without somewhere to wrap to
+          // they ran the dropdown's own text off the right edge of the
+          // card instead of onto a second line under the button.
+          <div className="ml-auto flex flex-wrap items-center gap-2 [&>*]:ml-0">{actions}</div>
         )}
       </div>
       {!shut && <div className="p-4">{children}</div>}

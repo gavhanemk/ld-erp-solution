@@ -117,7 +117,11 @@ export default function PurchaseNotePrintPage() {
 
   const { company, template, note, reasonLabel, taxMode } = data
   const companyName = company.legalName || company.name || ''
-  const ours = note.noteType === 'DEBIT'
+  /* Who issued it, read off the column that records exactly that. It used
+     to be inferred from the document being a debit note, which put the
+     mill in the From box on a supplier's debit note — their document,
+     printed as though we had written it. */
+  const ours = note.issuedBy === 'OUR_COMPANY'
 
   /* Who issued it decides which way round the two boxes read. */
   const parties = ours
@@ -258,7 +262,11 @@ export default function PurchaseNotePrintPage() {
     <>
       <style>{SHEET_CSS}</style>
       <PrintToolbar
-        backHref={ours ? '/purchase/debit-notes' : '/purchase/credit-notes'}
+        backHref={
+          note.docType === 'SUPPLIER_CREDIT_NOTE'
+            ? '/purchase/credit-notes'
+            : '/purchase/debit-notes'
+        }
         backLabel={ours ? 'Back to debit notes' : 'Back to credit notes'}
         copies={1}
       />

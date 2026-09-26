@@ -15,6 +15,16 @@ export interface RowAction {
   newTab?: boolean
   onClick?: () => void
   danger?: boolean
+  /**
+   * Present, but not available yet.
+   *
+   * For a step that is genuinely next in the workflow and genuinely blocked —
+   * not for one the user has no right to, which should not be in the list at
+   * all. `hint` says what is in the way, because a greyed line with no reason
+   * beside it is worse than no line.
+   */
+  disabled?: boolean
+  hint?: string
 }
 
 /**
@@ -139,14 +149,28 @@ export function ActionMenu({ label, items }: { label: string; items: RowAction[]
                     key={it.key}
                     type="button"
                     role="menuitem"
-                    className={`${ITEM} ${it.danger ? 'text-red-400' : 'text-foreground'}`}
+                    disabled={it.disabled}
+                    title={it.hint}
+                    className={`${ITEM} ${
+                      it.disabled
+                        ? 'text-muted-foreground cursor-not-allowed opacity-60'
+                        : it.danger
+                          ? 'text-red-400'
+                          : 'text-foreground'
+                    }`}
                     onClick={() => {
+                      if (it.disabled) return
                       setOpen(false)
                       it.onClick?.()
                     }}
                   >
                     {it.icon}
-                    {it.label}
+                    <span className="flex flex-col items-start">
+                      {it.label}
+                      {it.disabled && it.hint && (
+                        <span className="text-[10px] leading-tight opacity-80">{it.hint}</span>
+                      )}
+                    </span>
                   </button>
                 )
               )}

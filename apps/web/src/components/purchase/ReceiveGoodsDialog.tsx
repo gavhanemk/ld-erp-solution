@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   X,
   Loader2,
@@ -16,7 +16,14 @@ import {
   Pencil,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import { api, ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
+import {
+  api,
+  apiErrorMessage,
+  ApiError,
+  masterResource,
+  type Paginated,
+  type Single,
+} from '@/lib/api'
 import {
   Section,
   addressLine,
@@ -24,6 +31,7 @@ import {
 } from '@/components/purchase/PurchaseOrderDialog'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IconField, Readout } from '@/components/purchase/FormBits'
+import { shortCloseNoun } from '@/components/purchase/shortClose'
 
 /**
  * Booking in what arrived against an order.
@@ -90,7 +98,6 @@ interface Alloc {
   key: string
   warehouseId: string
   received: string
-  rejected: string
 }
 
 /** The delivery's own paperwork, all of it optional. */
@@ -180,9 +187,351 @@ interface EditingGrn {
     supplierAddress?: string | null
     lines: Array<Omit<OrderLine, 'receivedQty' | 'pendingQty'>>
   } | null
-  /** Accepted-elsewhere per order line — this receipt's own lines already left out. */
-  otherAccepted: Record<string, number>
+  /** Received-elsewhere per order line — this receipt's own lines already left out. */
+  otherReceived: Record<string, number>
 }
+
+/** A stable empty list, so a line with no rows yet does not defeat the memo below. */
+const NO_ALLOCS: Alloc[] = []
+
+/**
+ * One order line's rows in the What Arrived table.
+ *
+ * Its own component so it can be memoised: `setAlloc` replaces only the array
+ * of the line that changed, so every other line's `allocs` keeps its identity
+ * and skips re-rendering. That stops working the moment something rebuilds
+ * `entries` wholesale.
+ *
+ * ── What the measurement actually showed ───────────────────────────────────
+ *
+ * Read this before assuming the memo is load-bearing. On a production build,
+ * measured inside the page with the test runner's round trip removed, one
+ * keystroke in a quantity box costs 67ms against 34ms for the note box outside
+ * the table. Extracting and memoising this component, and the card below it,
+ * took the DOM changes per keystroke from about 40 to 27 — and moved the
+ * wall-clock not at all. 67ms before, 67ms after.
+ *
+ * So React's render work is NOT what those 33ms are. The figure is quantised
+ * to frames (34ms is two, 67ms is four), which points at a second render-and-
+ * paint cycle on the quantity path that nothing here has yet identified.
+ * Whatever it is, it is not the number of lines being reconciled.
+ *
+ * These two components are kept anyway, on the ordinary grounds that 300 lines
+ * of JSX inline in a map is worse than two named components, and that the work
+ * they skip will matter on a twenty-line order in a way it does not on a
+ * four-line one. They are not kept because they made typing faster, because
+ * they did not.
+ *
+ * Also worth recording: measured on the dev server the two boxes came out at
+ * 127ms and 128ms — indistinguishable — because dev-mode React renders
+ * everything twice and buries the very difference being looked for. The
+ * production build is the only one worth measuring.
+ */
+const ReceiptLineRows = memo(function ReceiptLineRows({
+  line,
+  allocs,
+  storeOptions,
+  setAlloc,
+  addAlloc,
+  removeAlloc,
+}: {
+  line: OrderLine
+  allocs: Alloc[]
+  storeOptions: React.ReactNode
+  setAlloc: (lineId: string, key: string, patch: Partial<Alloc>) => void
+  addAlloc: (lineId: string) => void
+  removeAlloc: (lineId: string, key: string) => void
+}) {
+  const ordered = num(line.qty)
+  const already = num(line.receivedQty)
+  const pending = ordered - already
+  const unit = line.item.uom?.symbol ?? ''
+  const done = pending <= 0 || Boolean(line.shortClosed)
+  const category = line.item.category
+  const categoryLabel = category
+    ? category.parent
+      ? `${category.parent.name} / ${category.name}`
+      : category.name
+    : null
+
+  /* The whole line's share of this delivery, added across its stores — the
+     figure that has to fit inside what is still due, and the one the server
+     checks. */
+  const lineAccepted = allocs.reduce((sum, a) => sum + num(a.received), 0)
+  const over = lineAccepted > pending + 0.0001
+
+  return (
+    <>
+      {allocs.map((alloc, i) => {
+        const first = i === 0
+
+        return (
+          <tr key={alloc.key} className="divide-border/60 divide-x [&>td]:align-top">
+            {first && (
+              <>
+                <td rowSpan={allocs.length} className="align-top">
+                  <div className="text-foreground text-sm font-medium">{line.item.name}</div>
+                  <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
+                    <span className="font-mono">{line.item.code}</span>
+                    {categoryLabel && (
+                      <>
+                        <span>·</span>
+                        <span>{categoryLabel}</span>
+                      </>
+                    )}
+                    {line.item.hsnCode && (
+                      <>
+                        <span>·</span>
+                        <span>HSN {line.item.hsnCode}</span>
+                      </>
+                    )}
+                  </div>
+                  {over && (
+                    <div className="text-muted-foreground mt-1 text-[11px]">
+                      {Number((lineAccepted - pending).toFixed(3))} {unit} more than is still due.
+                    </div>
+                  )}
+                  {line.shortClosed && (
+                    <div
+                      className="mt-1 text-[11px] text-amber-400"
+                      title={line.shortCloseReason ?? undefined}
+                    >
+                      {shortCloseNoun(line.receivedQty)}
+                      {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} — no more
+                      expected
+                    </div>
+                  )}
+                </td>
+                <td rowSpan={allocs.length} className="text-right align-top text-sm tabular-nums">
+                  {ordered} {unit}
+                </td>
+                <td
+                  rowSpan={allocs.length}
+                  className="text-muted-foreground text-right align-top text-sm tabular-nums"
+                >
+                  {already > 0 ? `${already} ${unit}` : '—'}
+                </td>
+                <td rowSpan={allocs.length} className="text-right align-top text-sm tabular-nums">
+                  {pending > 0 ? (
+                    <span>
+                      {Number(pending.toFixed(3))} {unit}
+                    </span>
+                  ) : (
+                    <span className="badge-success">complete</span>
+                  )}
+                </td>
+              </>
+            )}
+
+            <td>
+              <input
+                className="form-input h-9 text-right"
+                inputMode="decimal"
+                value={alloc.received}
+                onChange={(e) => setAlloc(line.id, alloc.key, { received: e.target.value })}
+                disabled={done}
+                placeholder="Qty"
+                aria-label={`Quantity of ${line.item.name} received on this receipt${
+                  first ? '' : `, row ${i + 1}`
+                }`}
+              />
+            </td>
+            <td>
+              <select
+                className="form-input h-9"
+                value={alloc.warehouseId}
+                onChange={(e) => setAlloc(line.id, alloc.key, { warehouseId: e.target.value })}
+                disabled={done}
+                aria-label={`Store for ${line.item.name}${first ? '' : `, row ${i + 1}`}`}
+              >
+                <option value="">Choose…</option>
+                {storeOptions}
+              </select>
+            </td>
+            <td>
+              {/* One delivery can go to more than one store. The first row
+                keeps the add button; the rest can be taken away again. */}
+              <div className="flex gap-1">
+                {first ? (
+                  <button
+                    type="button"
+                    className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                    onClick={() => addAlloc(line.id)}
+                    disabled={done}
+                    title={`Send some of ${line.item.name} to another store`}
+                    aria-label={`Add another store for ${line.item.name}`}
+                  >
+                    <Plus size={14} />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="border-border text-muted-foreground inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
+                    onClick={() => removeAlloc(line.id, alloc.key)}
+                    title="Remove this store"
+                    aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
+                  >
+                    <Minus size={14} />
+                  </button>
+                )}
+              </div>
+            </td>
+          </tr>
+        )
+      })}
+    </>
+  )
+})
+
+/**
+ * The same line as a card, for a screen too narrow for the table.
+ *
+ * `sm:hidden` hides it in CSS; React still renders every one of these on every
+ * keystroke, on a desktop where not one of them is visible. That is why it is
+ * memoised alongside the table rows — half the reconciliation was over here,
+ * and memoising only the table would have left it doing the same work.
+ *
+ * See the note on `ReceiptLineRows` for what this did and did not buy.
+ */
+const ReceiptLineCard = memo(function ReceiptLineCard({
+  line,
+  allocs,
+  storeOptions,
+  setAlloc,
+  addAlloc,
+  removeAlloc,
+}: {
+  line: OrderLine
+  allocs: Alloc[]
+  storeOptions: React.ReactNode
+  setAlloc: (lineId: string, key: string, patch: Partial<Alloc>) => void
+  addAlloc: (lineId: string) => void
+  removeAlloc: (lineId: string, key: string) => void
+}) {
+  const ordered = num(line.qty)
+  const already = num(line.receivedQty)
+  const pending = ordered - already
+  const unit = line.item.uom?.symbol ?? ''
+  const done = pending <= 0 || Boolean(line.shortClosed)
+  const category = line.item.category
+  const categoryLabel = category
+    ? category.parent
+      ? `${category.parent.name} / ${category.name}`
+      : category.name
+    : null
+  const lineAccepted = allocs.reduce((sum, a) => sum + num(a.received), 0)
+  const over = lineAccepted > pending + 0.0001
+  const fieldLabel = 'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+
+  return (
+    <div key={line.id} className="border-border bg-card rounded-lg border p-3">
+      <div className="text-foreground text-sm font-medium">{line.item.name}</div>
+      <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
+        <span className="font-mono">{line.item.code}</span>
+        {categoryLabel && (
+          <>
+            <span>·</span>
+            <span>{categoryLabel}</span>
+          </>
+        )}
+        {line.item.hsnCode && (
+          <>
+            <span>·</span>
+            <span>HSN {line.item.hsnCode}</span>
+          </>
+        )}
+      </div>
+      {over && (
+        <div className="text-muted-foreground mt-1 text-[11px]">
+          {Number((lineAccepted - pending).toFixed(3))} {unit} more than is still due.
+        </div>
+      )}
+      {line.shortClosed && (
+        <div className="mt-1 text-[11px] text-amber-400" title={line.shortCloseReason ?? undefined}>
+          {shortCloseNoun(line.receivedQty)}
+          {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} — no more expected
+        </div>
+      )}
+
+      <div className="border-border/70 mt-2 grid grid-cols-3 gap-2 border-t pt-2">
+        <div>
+          <p className={fieldLabel}>Ordered</p>
+          <p className="text-sm tabular-nums">
+            {ordered} {unit}
+          </p>
+        </div>
+        <div>
+          <p className={fieldLabel}>Received</p>
+          <p className="text-muted-foreground text-sm tabular-nums">
+            {already > 0 ? `${already} ${unit}` : '—'}
+          </p>
+        </div>
+        <div>
+          <p className={fieldLabel}>Still due</p>
+          {pending > 0 ? (
+            <p className="text-sm tabular-nums">
+              {Number(pending.toFixed(3))} {unit}
+            </p>
+          ) : (
+            <span className="badge-success">complete</span>
+          )}
+        </div>
+      </div>
+
+      {allocs.map((alloc, i) => {
+        const accepted = num(alloc.received)
+        const first = i === 0
+
+        return (
+          <div key={alloc.key} className="border-border/70 mt-2 space-y-2 rounded-md border p-2">
+            <div className="flex items-center justify-between">
+              <span className={fieldLabel}>{allocs.length > 1 ? `Store ${i + 1}` : 'Store'}</span>
+              {first ? (
+                <button
+                  type="button"
+                  className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={() => addAlloc(line.id)}
+                  disabled={done}
+                  title={`Send some of ${line.item.name} to another store`}
+                  aria-label={`Add another store for ${line.item.name}`}
+                >
+                  <Plus size={13} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="border-border text-muted-foreground inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
+                  onClick={() => removeAlloc(line.id, alloc.key)}
+                  title="Remove this store"
+                  aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
+                >
+                  <Minus size={13} />
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className={fieldLabel}>Received qty</label>
+                <input
+                  className="form-input h-9 w-full text-right"
+                  inputMode="decimal"
+                  value={alloc.received}
+                  onChange={(e) => setAlloc(line.id, alloc.key, { received: e.target.value })}
+                  disabled={done}
+                  placeholder="Qty"
+                  aria-label={`Quantity of ${line.item.name} received on this receipt${
+                    first ? '' : `, row ${i + 1}`
+                  }`}
+                />
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+})
 
 export function ReceiveGoodsDialog({
   onClose,
@@ -269,6 +618,24 @@ export function ReceiveGoodsDialog({
   const nextKey = useRef(0)
   const makeKey = () => `a${nextKey.current++}`
 
+  /*
+   * The store list, built once per set of warehouses.
+   *
+   * There is one of these dropdowns on every allocation row, and every
+   * keystroke in a quantity box re-renders the whole table — so the full
+   * option list was being rebuilt for each dropdown on each character typed.
+   * Elements are immutable, so the one array is safe to hand to all of them.
+   */
+  const storeOptions = useMemo(
+    () =>
+      warehouses.map((w) => (
+        <option key={w.id} value={w.id}>
+          {w.name}
+        </option>
+      )),
+    [warehouses]
+  )
+
   // Only orders that have actually been sent can be received against, so those
   // are the only ones offered. A draft in this list would be a door the server
   // is certain to shut.
@@ -276,17 +643,34 @@ export function ReceiveGoodsDialog({
     let cancelled = false
     void (async () => {
       try {
-        const [sent, partly, w] = await Promise.all([
-          api.get<Paginated<OrderOption>>('/purchase/orders?status=SENT&limit=100&view=picker'),
-          api.get<Paginated<OrderOption>>(
-            '/purchase/orders?status=PARTIALLY_RECEIVED&limit=100&view=picker'
-          ),
+        /*
+         * Correcting a receipt does not need the picker.
+         *
+         * The order is already decided — the dropdown is replaced by a
+         * disabled box showing its number — so the two hundred-row order
+         * queries behind it were fetched, waited for, and thrown away every
+         * time somebody opened a correction. They were also the slowest part
+         * of opening it: the receipt's own lines cannot be drawn until this
+         * resolves, because the Store dropdowns need the warehouses.
+         *
+         * The stores are still wanted either way. Asking for one list instead
+         * of three is most of the wait gone.
+         */
+        const [w, sent, partly] = await Promise.all([
           masterResource<{ id: string; name: string; address?: string | null }>('warehouses').list({
             limit: 100,
           }),
+          editing
+            ? null
+            : api.get<Paginated<OrderOption>>('/purchase/orders?status=SENT&limit=100&view=picker'),
+          editing
+            ? null
+            : api.get<Paginated<OrderOption>>(
+                '/purchase/orders?status=PARTIALLY_RECEIVED&limit=100&view=picker'
+              ),
         ])
         if (cancelled) return
-        setOrders([...sent.data, ...partly.data])
+        setOrders([...(sent?.data ?? []), ...(partly?.data ?? [])])
         setWarehouses(w.data)
       } catch {
         if (!cancelled) setError('Could not load the open purchase orders.')
@@ -297,7 +681,7 @@ export function ReceiveGoodsDialog({
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [editing])
 
   useEffect(() => {
     // A fresh order starts with a blank note — carrying one over from
@@ -346,7 +730,6 @@ export function ReceiveGoodsDialog({
                     // has arrived — the one thing a store keeper is here to
                     // check, not assume.
                     received: '',
-                    rejected: '',
                   },
                 ],
               ]
@@ -402,7 +785,7 @@ export function ReceiveGoodsDialog({
             // What every other receipt against this line already accounts
             // for — this receipt's own lines are left out on purpose, the
             // same way saving the correction leaves them out.
-            receivedQty: g.otherAccepted[l.id] ?? 0,
+            receivedQty: g.otherReceived[l.id] ?? 0,
             pendingQty: 0,
           })),
         }
@@ -416,7 +799,6 @@ export function ReceiveGoodsDialog({
             key: makeKey(),
             warehouseId: l.warehouseId,
             received: String(l.receivedQty),
-            rejected: String(l.rejectedQty),
           })
         }
         // A line this receipt never touched still gets a row — empty, same
@@ -424,7 +806,7 @@ export function ReceiveGoodsDialog({
         const fallback = po.deliveryWarehouse?.id ?? warehouses[0]?.id ?? ''
         for (const l of po.lines) {
           if (!byPoLine[l.id]) {
-            byPoLine[l.id] = [{ key: makeKey(), warehouseId: fallback, received: '', rejected: '' }]
+            byPoLine[l.id] = [{ key: makeKey(), warehouseId: fallback, received: '' }]
           }
         }
         setEntries(byPoLine)
@@ -508,11 +890,17 @@ export function ReceiveGoodsDialog({
     }
   }, [order?.supplier?.id, order?.supplierAddress])
 
-  const setAlloc = (lineId: string, key: string, patch: Partial<Alloc>) =>
-    setEntries((prev) => ({
-      ...prev,
-      [lineId]: (prev[lineId] ?? []).map((a) => (a.key === key ? { ...a, ...patch } : a)),
-    }))
+  /* These three keep one identity for the life of the dialog, which is what
+     lets the memo on `ReceiptLineRows` above actually hold. A fresh function
+     every render would be a changed prop on every line, every keystroke. */
+  const setAlloc = useCallback(
+    (lineId: string, key: string, patch: Partial<Alloc>) =>
+      setEntries((prev) => ({
+        ...prev,
+        [lineId]: (prev[lineId] ?? []).map((a) => (a.key === key ? { ...a, ...patch } : a)),
+      })),
+    []
+  )
 
   /*
    * A second store for a line starts empty, not with the quantity still due.
@@ -520,20 +908,26 @@ export function ReceiveGoodsDialog({
    * some of it — an offer here would have to be deleted before it could be
    * corrected.
    */
-  const addAlloc = (lineId: string) =>
-    setEntries((prev) => ({
-      ...prev,
-      [lineId]: [
-        ...(prev[lineId] ?? []),
-        { key: makeKey(), warehouseId: '', received: '', rejected: '' },
-      ],
-    }))
+  const addAlloc = useCallback(
+    (lineId: string) =>
+      setEntries((prev) => ({
+        ...prev,
+        [lineId]: [
+          ...(prev[lineId] ?? []),
+          { key: `a${nextKey.current++}`, warehouseId: '', received: '' },
+        ],
+      })),
+    []
+  )
 
-  const removeAlloc = (lineId: string, key: string) =>
-    setEntries((prev) => ({
-      ...prev,
-      [lineId]: (prev[lineId] ?? []).filter((a) => a.key !== key),
-    }))
+  const removeAlloc = useCallback(
+    (lineId: string, key: string) =>
+      setEntries((prev) => ({
+        ...prev,
+        [lineId]: (prev[lineId] ?? []).filter((a) => a.key !== key),
+      })),
+    []
+  )
 
   const setField = (patch: Partial<Delivery>) => setDelivery((prev) => ({ ...prev, ...patch }))
 
@@ -604,7 +998,6 @@ export function ReceiveGoodsDialog({
         poLineId: line.id,
         warehouseId: alloc.warehouseId,
         receivedQty: num(alloc.received),
-        rejectedQty: num(alloc.rejected),
       })),
     }
 
@@ -640,17 +1033,17 @@ export function ReceiveGoodsDialog({
           : base
       )
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
+      setError(apiErrorMessage(err))
     } finally {
       setSaving(false)
     }
   }
 
-  /** The paperwork boxes, so thirteen near-identical labels are written once. */
+  /** The paperwork boxes, so eleven near-identical labels are written once. */
   const paper = (
     label: string,
     field: keyof Delivery,
-    opts: { type?: string; placeholder?: string; help?: string } = {}
+    opts: { type?: string; placeholder?: string; help?: string; min?: number } = {}
   ) => (
     <label className="block">
       <span className="form-label">{label}</span>
@@ -658,7 +1051,16 @@ export function ReceiveGoodsDialog({
         type={opts.type ?? 'text'}
         className="form-input h-9"
         value={delivery[field]}
-        onChange={(e) => setField({ [field]: e.target.value } as Partial<Delivery>)}
+        min={opts.min}
+        onChange={(e) => {
+          const raw = e.target.value
+          // A package count under zero is not a smaller delivery, it is a
+          // typo — the box simply will not hold one, the same way it will
+          // not hold a letter. "-" alone is let through rather than bounced
+          // on the first keystroke of a number that has not been typed yet.
+          if (opts.min != null && raw !== '-' && Number(raw) < opts.min) return
+          setField({ [field]: raw } as Partial<Delivery>)
+        }}
         placeholder={opts.placeholder}
       />
       {opts.help && <span className="form-help">{opts.help}</span>}
@@ -673,10 +1075,7 @@ export function ReceiveGoodsDialog({
    */
   const booksOverOrder = (order?.lines ?? []).some((line) => {
     const pending = num(line.qty) - num(line.receivedQty)
-    const taking = (entries[line.id] ?? []).reduce(
-      (sum, a) => sum + (num(a.received) - num(a.rejected)),
-      0
-    )
+    const taking = (entries[line.id] ?? []).reduce((sum, a) => sum + num(a.received), 0)
     return taking > pending
   })
 
@@ -776,67 +1175,83 @@ export function ReceiveGoodsDialog({
           )}
 
           <Section icon={FileText} title="Purchase &amp; Supplier Details">
+            {/* Two groups rather than one flat row of five, and each sized
+              by `auto-fit` rather than a fixed column count. A fixed
+              `grid-cols-3` for order/supplier/vehicle looked right on the
+              one phone it was built against and then clipped its own date
+              and time boxes to "dd-m" and "--:-" on a narrower one — a
+              track that has nowhere left to shrink just cuts the text
+              inside it instead of admitting defeat. `minmax` gives every
+              column a floor it will not shrink past, so a row that cannot
+              fit at that floor drops a column instead of clipping one.
+              `sm:contents` dissolves both groups at the tablet width up —
+              the five fields fall back into the plain `sm:grid-cols-2
+              lg:grid-cols-5` row this section already had, unchanged. */}
             <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
-              <label className="block">
-                <span className="form-label">Purchase order</span>
-                {editing ? (
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 sm:contents">
+                <label className="block">
+                  <span className="form-label">Purchase order</span>
+                  {editing ? (
+                    <input
+                      className="form-input text-muted-foreground h-9"
+                      value={order?.poNumber ?? ''}
+                      disabled
+                    />
+                  ) : (
+                    <select
+                      className="form-input h-9"
+                      value={poId}
+                      onChange={(e) => setPoId(e.target.value)}
+                      disabled={loadingLists}
+                    >
+                      <option value="">Choose…</option>
+                      {orders.map((o) => (
+                        <option key={o.id} value={o.id}>
+                          {o.poNumber}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </label>
+                <label className="block">
+                  <span className="form-label">Supplier</span>
                   <input
                     className="form-input text-muted-foreground h-9"
-                    value={order?.poNumber ?? ''}
+                    value={order?.supplier?.name ?? ''}
                     disabled
+                    placeholder="—"
                   />
-                ) : (
-                  <select
+                </label>
+              </div>
+              <div className="mt-2.5 grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 sm:mt-0 sm:contents">
+                <label className="block">
+                  <span className="form-label">Vehicle number</span>
+                  <input
                     className="form-input h-9"
-                    value={poId}
-                    onChange={(e) => setPoId(e.target.value)}
-                    disabled={loadingLists}
-                  >
-                    <option value="">Choose…</option>
-                    {orders.map((o) => (
-                      <option key={o.id} value={o.id}>
-                        {o.poNumber}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </label>
-              <label className="block">
-                <span className="form-label">Supplier</span>
-                <input
-                  className="form-input text-muted-foreground h-9"
-                  value={order?.supplier?.name ?? ''}
-                  disabled
-                  placeholder="—"
-                />
-              </label>
-              <label className="block">
-                <span className="form-label">Vehicle number</span>
-                <input
-                  className="form-input h-9"
-                  value={vehicleNo}
-                  onChange={(e) => setVehicleNo(e.target.value)}
-                />
-              </label>
-              <label className="block">
-                <span className="form-label">Received on</span>
-                <input
-                  type="date"
-                  className="form-input h-9"
-                  value={grnDate}
-                  onChange={(e) => setGrnDate(e.target.value)}
-                />
-              </label>
-              <label className="block">
-                <span className="form-label">At</span>
-                <input
-                  type="time"
-                  className="form-input h-9"
-                  value={grnTime}
-                  onChange={(e) => setGrnTime(e.target.value)}
-                  aria-label="Time the goods were received"
-                />
-              </label>
+                    value={vehicleNo}
+                    onChange={(e) => setVehicleNo(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <span className="form-label">Received on</span>
+                  <input
+                    type="date"
+                    className="form-input h-9"
+                    value={grnDate}
+                    onChange={(e) => setGrnDate(e.target.value)}
+                  />
+                </label>
+                <label className="block">
+                  <span className="form-label">At</span>
+                  <input
+                    type="time"
+                    className="form-input h-9"
+                    value={grnTime}
+                    onChange={(e) => setGrnTime(e.target.value)}
+                    aria-label="Time the goods were received"
+                  />
+                </label>
+              </div>
             </div>
 
             {/* The supplier's own address, and which of the mill's stores the
@@ -906,7 +1321,7 @@ export function ReceiveGoodsDialog({
 
           {/* —— The delivery's own paperwork ——
 
-            Thirteen boxes, none of them required. They are here because the
+            Eleven boxes, none of them required. They are here because the
             mill's old ERP had every one of them, and because they are what
             settles a query about the supplier's bill months later: the gate
             entry is our own independent trace that a lorry came, and the
@@ -914,15 +1329,28 @@ export function ReceiveGoodsDialog({
 
             Collapsible, and open to start. Somebody standing at the gate with
             the paperwork in hand wants it in front of them; somebody booking
-            in a walk-in delivery with no paperwork at all can fold it away. */}
+            in a walk-in delivery with no paperwork at all can fold it away.
+
+            Folded to start when correcting, though. The paperwork was filled
+            in when the lorry arrived and is almost never what is wrong — a
+            correction is nearly always a quantity. Eleven boxes already
+            answered stood between the person and the one row they came to
+            change, and pushed the lines off the bottom of the screen on a
+            laptop. Folded, the whole receipt fits without scrolling, and the
+            paperwork is one press away on the days it is the thing that was
+            mis-typed. */}
           <Section
             icon={ClipboardList}
             title="Delivery Paperwork"
             foldable
-            openByDefault
-            summary="Gate entry, challan, the supplier's invoice — all optional"
+            openByDefault={!editing}
+            summary="Gate entry, challan, the supplier's bill — all optional"
           >
-            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+            {/* `auto-fit`, not a fixed two columns — the gate entry pairs
+              with its own date and the challan with its on any phone wide
+              enough to hold both without clipping either, and drops to one
+              column instead of clipping on a phone that is not. */}
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 lg:grid-cols-4">
               {paper('Gate entry number', 'gateEntryNo')}
               {paper('Gate entry date', 'gateEntryDate', { type: 'date' })}
               {paper('Challan number', 'challanNo', {
@@ -930,30 +1358,41 @@ export function ReceiveGoodsDialog({
               })}
               {paper('Challan date', 'challanDate', { type: 'date' })}
 
-              {paper('Supplier bill number', 'supplierBillNo')}
-              {paper('Supplier invoice number', 'supplierInvoiceNo', {
+              {paper('Supplier bill number', 'supplierInvoiceNo', {
                 help: 'What accounts will book the bill against',
               })}
-              {paper('Supplier invoice date', 'supplierInvoiceDate', { type: 'date' })}
+              {paper('Supplier bill date', 'supplierInvoiceDate', { type: 'date' })}
               {paper('Packages', 'packageCount', {
                 type: 'number',
                 placeholder: '0',
                 help: 'Bales, cartons or rolls off the vehicle',
+                min: 0,
               })}
 
               {paper('Driver name', 'driverName')}
-              {paper('Form number', 'formNo')}
               {paper('Client name', 'clientName')}
               {paper('Ordered by', 'orderedBy')}
               {paper('Reference', 'referenceNo')}
             </div>
           </Section>
 
-          {!loadingLists && orders.length === 0 && (
-            <p className="text-muted-foreground py-6 text-center text-sm">
-              No orders are waiting for goods. An order has to be sent to the supplier before
-              anything can be received against it.
-            </p>
+          {/* Only while picking an order, and only as a banner.
+
+              Correcting a receipt has its order already — and a completed
+              order is not in the picker's list, which is how "No orders are
+              waiting for goods" came to sit in the middle of a form that was
+              plainly showing PO-0001's four lines underneath it. Floating
+              grey text between two boxed sections read as a stray line
+              anyway; a banner says it is a notice about the empty picker
+              above, which is the only thing it was ever about. */}
+          {!loadingLists && !editing && orders.length === 0 && (
+            <div className="border-border bg-secondary/40 text-muted-foreground flex items-start gap-2.5 rounded-lg border px-3.5 py-3 text-sm">
+              <ClipboardList size={16} className="mt-px shrink-0" />
+              <span>
+                No orders are waiting for goods. An order has to be sent to the supplier before
+                anything can be received against it.
+              </span>
+            </div>
           )}
 
           {/* Otherwise the form ends after two short boxes and leaves the rest
@@ -965,7 +1404,42 @@ export function ReceiveGoodsDialog({
             </p>
           )}
 
-          {loadingOrder && <p className="text-muted-foreground py-6 text-sm">Opening the order…</p>}
+          {/* The shape of what is coming, rather than a line of text.
+
+              The dialog itself has always opened at once — it is this part,
+              the lines, that waits on the order. A single grey sentence where
+              the table belongs makes that wait read as a stall; a table-shaped
+              placeholder makes it read as loading, and the panel does not jump
+              when the real rows land on top of it. */}
+          {loadingOrder && (
+            <Section icon={PackageCheck} title="What Arrived">
+              <div
+                className="border-border overflow-hidden rounded-lg border"
+                role="status"
+                aria-label="Opening the order"
+              >
+                <div className="border-border bg-secondary/40 border-b px-3 py-2.5">
+                  <div className="bg-muted-foreground/20 h-3 w-28 animate-pulse rounded" />
+                </div>
+                {[0, 1, 2, 3].map((i) => (
+                  <div
+                    key={i}
+                    className="border-border/50 flex items-center gap-3 border-b px-3 py-3 last:border-b-0"
+                  >
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <div className="bg-muted-foreground/20 h-3.5 w-2/5 animate-pulse rounded" />
+                      <div className="bg-muted-foreground/10 h-2.5 w-3/5 animate-pulse rounded" />
+                    </div>
+                    <div className="bg-muted-foreground/10 h-3 w-12 animate-pulse rounded" />
+                    <div className="bg-muted-foreground/10 h-3 w-12 animate-pulse rounded" />
+                    <div className="bg-muted-foreground/20 h-9 w-24 animate-pulse rounded-lg" />
+                    <div className="bg-muted-foreground/20 h-9 w-32 animate-pulse rounded-lg" />
+                  </div>
+                ))}
+              </div>
+              <span className="sr-only">Opening the order…</span>
+            </Section>
+          )}
 
           {order && !loadingOrder && (
             <Section icon={PackageCheck} title="What Arrived">
@@ -985,17 +1459,25 @@ export function ReceiveGoodsDialog({
                 overrides it. The one column without a percentage — the
                 add-store button — gets a pixel width instead, because fixed
                 layout has no equivalent of auto's "shrink to content" trick. */}
+                {/* Nine columns were declared here for a seven-column table.
+                    Under `table-fixed` the colgroup is the only vote, so the
+                    two spare entries became two empty columns down the right
+                    of every row — the whitespace — and every real column was
+                    reading a width meant for the one before it. Store was the
+                    sixth header taking the sixth col's 8%, which is why a
+                    name as ordinary as "Fabric Godown" came out as "Fabric
+                    G…" in a box the comment above says was widened to stop
+                    exactly that. Seven cols now, one per header, and they add
+                    up to 100. */}
                 <table className="data-table table-compact w-full min-w-[980px] table-fixed">
                   <colgroup>
-                    <col style={{ width: '20%' }} />
-                    <col style={{ width: '7%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '31%' }} />
                     <col style={{ width: '10%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '8%' }} />
-                    <col style={{ width: '23%' }} />
-                    <col style={{ width: '64px' }} />
+                    <col style={{ width: '10%' }} />
+                    <col style={{ width: '10%' }} />
+                    <col style={{ width: '15%' }} />
+                    <col style={{ width: '20%' }} />
+                    <col style={{ width: '4%' }} />
                   </colgroup>
                   <thead>
                     <tr className="divide-border/60 divide-x">
@@ -1004,8 +1486,6 @@ export function ReceiveGoodsDialog({
                       <th className="text-right">Received till now</th>
                       <th className="text-right">Still due</th>
                       <th className="text-right">Received qty</th>
-                      <th className="text-right">Rejected</th>
-                      <th className="text-right">Into stock</th>
                       <th>Store</th>
                       <th>
                         <span className="sr-only">Split across stores</span>
@@ -1013,192 +1493,17 @@ export function ReceiveGoodsDialog({
                     </tr>
                   </thead>
                   <tbody>
-                    {order.lines.map((line) => {
-                      const allocs = entries[line.id] ?? []
-                      const ordered = num(line.qty)
-                      const already = num(line.receivedQty)
-                      const pending = ordered - already
-                      const unit = line.item.uom?.symbol ?? ''
-                      const done = pending <= 0 || Boolean(line.shortClosed)
-                      const category = line.item.category
-                      const categoryLabel = category
-                        ? category.parent
-                          ? `${category.parent.name} / ${category.name}`
-                          : category.name
-                        : null
-
-                      /* The whole line's share of this delivery, added across
-                      its stores — the figure that has to fit inside what is
-                      still due, and the one the server checks. */
-                      const lineAccepted = allocs.reduce(
-                        (sum, a) => sum + (num(a.received) - num(a.rejected)),
-                        0
-                      )
-                      const over = lineAccepted > pending + 0.0001
-
-                      return allocs.map((alloc, i) => {
-                        const accepted = num(alloc.received) - num(alloc.rejected)
-                        const first = i === 0
-
-                        return (
-                          <tr key={alloc.key} className="divide-border/60 divide-x">
-                            {first && (
-                              <>
-                                <td rowSpan={allocs.length} className="align-top">
-                                  <div className="text-foreground text-sm font-medium">
-                                    {line.item.name}
-                                  </div>
-                                  <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
-                                    <span className="font-mono">{line.item.code}</span>
-                                    {categoryLabel && (
-                                      <>
-                                        <span>·</span>
-                                        <span>{categoryLabel}</span>
-                                      </>
-                                    )}
-                                    {line.item.hsnCode && (
-                                      <>
-                                        <span>·</span>
-                                        <span>HSN {line.item.hsnCode}</span>
-                                      </>
-                                    )}
-                                  </div>
-                                  {over && (
-                                    <div className="text-muted-foreground mt-1 text-[11px]">
-                                      {Number((lineAccepted - pending).toFixed(3))} {unit} more than
-                                      is still due.
-                                    </div>
-                                  )}
-                                  {line.shortClosed && (
-                                    <div
-                                      className="mt-1 text-[11px] text-amber-400"
-                                      title={line.shortCloseReason ?? undefined}
-                                    >
-                                      Closed short
-                                      {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} —
-                                      no more expected
-                                    </div>
-                                  )}
-                                </td>
-                                <td
-                                  rowSpan={allocs.length}
-                                  className="text-right align-top text-sm tabular-nums"
-                                >
-                                  {ordered} {unit}
-                                </td>
-                                <td
-                                  rowSpan={allocs.length}
-                                  className="text-muted-foreground text-right align-top text-sm tabular-nums"
-                                >
-                                  {already > 0 ? `${already} ${unit}` : '—'}
-                                </td>
-                                <td
-                                  rowSpan={allocs.length}
-                                  className="text-right align-top text-sm tabular-nums"
-                                >
-                                  {pending > 0 ? (
-                                    <span>
-                                      {Number(pending.toFixed(3))} {unit}
-                                    </span>
-                                  ) : (
-                                    <span className="badge-success">complete</span>
-                                  )}
-                                </td>
-                              </>
-                            )}
-
-                            <td>
-                              <input
-                                className="form-input h-9 text-right"
-                                inputMode="decimal"
-                                value={alloc.received}
-                                onChange={(e) =>
-                                  setAlloc(line.id, alloc.key, { received: e.target.value })
-                                }
-                                disabled={done}
-                                placeholder="Qty"
-                                aria-label={`Quantity of ${line.item.name} received on this receipt${
-                                  first ? '' : `, row ${i + 1}`
-                                }`}
-                              />
-                            </td>
-                            <td>
-                              <input
-                                className="form-input h-9 text-right"
-                                inputMode="decimal"
-                                value={alloc.rejected}
-                                onChange={(e) =>
-                                  setAlloc(line.id, alloc.key, { rejected: e.target.value })
-                                }
-                                disabled={done}
-                                placeholder="0"
-                                aria-label={`Quantity of ${line.item.name} rejected${
-                                  first ? '' : `, row ${i + 1}`
-                                }`}
-                              />
-                            </td>
-                            <td className="text-right text-sm tabular-nums">
-                              {accepted > 0 ? (
-                                <span className="text-foreground">
-                                  {Number(accepted.toFixed(3))} {unit}
-                                </span>
-                              ) : (
-                                <span className="text-muted-foreground">—</span>
-                              )}
-                            </td>
-                            <td>
-                              <select
-                                className="form-input h-9"
-                                value={alloc.warehouseId}
-                                onChange={(e) =>
-                                  setAlloc(line.id, alloc.key, { warehouseId: e.target.value })
-                                }
-                                disabled={done}
-                                aria-label={`Store for ${line.item.name}${
-                                  first ? '' : `, row ${i + 1}`
-                                }`}
-                              >
-                                <option value="">Choose…</option>
-                                {warehouses.map((w) => (
-                                  <option key={w.id} value={w.id}>
-                                    {w.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                            <td>
-                              {/* One delivery can go to more than one store.
-                              The first row keeps the add button; the rest can
-                              be taken away again. */}
-                              <div className="flex gap-1">
-                                {first ? (
-                                  <button
-                                    type="button"
-                                    className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
-                                    onClick={() => addAlloc(line.id)}
-                                    disabled={done}
-                                    title={`Send some of ${line.item.name} to another store`}
-                                    aria-label={`Add another store for ${line.item.name}`}
-                                  >
-                                    <Plus size={14} />
-                                  </button>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="border-border text-muted-foreground inline-flex h-9 w-9 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
-                                    onClick={() => removeAlloc(line.id, alloc.key)}
-                                    title="Remove this store"
-                                    aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
-                                  >
-                                    <Minus size={14} />
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        )
-                      })
-                    })}
+                    {order.lines.map((line) => (
+                      <ReceiptLineRows
+                        key={line.id}
+                        line={line}
+                        allocs={entries[line.id] ?? NO_ALLOCS}
+                        storeOptions={storeOptions}
+                        setAlloc={setAlloc}
+                        addAlloc={addAlloc}
+                        removeAlloc={removeAlloc}
+                      />
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -1208,200 +1513,17 @@ export function ReceiveGoodsDialog({
                 boxed block underneath, so nothing is typed off the right
                 edge of a table nobody can widen. */}
               <div className="space-y-3 sm:hidden">
-                {order.lines.map((line) => {
-                  const allocs = entries[line.id] ?? []
-                  const ordered = num(line.qty)
-                  const already = num(line.receivedQty)
-                  const pending = ordered - already
-                  const unit = line.item.uom?.symbol ?? ''
-                  const done = pending <= 0 || Boolean(line.shortClosed)
-                  const category = line.item.category
-                  const categoryLabel = category
-                    ? category.parent
-                      ? `${category.parent.name} / ${category.name}`
-                      : category.name
-                    : null
-                  const lineAccepted = allocs.reduce(
-                    (sum, a) => sum + (num(a.received) - num(a.rejected)),
-                    0
-                  )
-                  const over = lineAccepted > pending + 0.0001
-                  const fieldLabel =
-                    'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
-
-                  return (
-                    <div key={line.id} className="border-border bg-card rounded-lg border p-3">
-                      <div className="text-foreground text-sm font-medium">{line.item.name}</div>
-                      <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[11px]">
-                        <span className="font-mono">{line.item.code}</span>
-                        {categoryLabel && (
-                          <>
-                            <span>·</span>
-                            <span>{categoryLabel}</span>
-                          </>
-                        )}
-                        {line.item.hsnCode && (
-                          <>
-                            <span>·</span>
-                            <span>HSN {line.item.hsnCode}</span>
-                          </>
-                        )}
-                      </div>
-                      {over && (
-                        <div className="text-muted-foreground mt-1 text-[11px]">
-                          {Number((lineAccepted - pending).toFixed(3))} {unit} more than is still
-                          due.
-                        </div>
-                      )}
-                      {line.shortClosed && (
-                        <div
-                          className="mt-1 text-[11px] text-amber-400"
-                          title={line.shortCloseReason ?? undefined}
-                        >
-                          Closed short
-                          {line.shortClosedBy ? ` by ${line.shortClosedBy.name}` : ''} — no more
-                          expected
-                        </div>
-                      )}
-
-                      <div className="border-border/70 mt-2 grid grid-cols-3 gap-2 border-t pt-2">
-                        <div>
-                          <p className={fieldLabel}>Ordered</p>
-                          <p className="text-sm tabular-nums">
-                            {ordered} {unit}
-                          </p>
-                        </div>
-                        <div>
-                          <p className={fieldLabel}>Received</p>
-                          <p className="text-muted-foreground text-sm tabular-nums">
-                            {already > 0 ? `${already} ${unit}` : '—'}
-                          </p>
-                        </div>
-                        <div>
-                          <p className={fieldLabel}>Still due</p>
-                          {pending > 0 ? (
-                            <p className="text-sm tabular-nums">
-                              {Number(pending.toFixed(3))} {unit}
-                            </p>
-                          ) : (
-                            <span className="badge-success">complete</span>
-                          )}
-                        </div>
-                      </div>
-
-                      {allocs.map((alloc, i) => {
-                        const accepted = num(alloc.received) - num(alloc.rejected)
-                        const first = i === 0
-
-                        return (
-                          <div
-                            key={alloc.key}
-                            className="border-border/70 mt-2 space-y-2 rounded-md border p-2"
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className={fieldLabel}>
-                                {allocs.length > 1 ? `Store ${i + 1}` : 'Store'}
-                              </span>
-                              {first ? (
-                                <button
-                                  type="button"
-                                  className="border-border text-muted-foreground hover:text-foreground hover:bg-secondary inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors disabled:cursor-not-allowed disabled:opacity-40"
-                                  onClick={() => addAlloc(line.id)}
-                                  disabled={done}
-                                  title={`Send some of ${line.item.name} to another store`}
-                                  aria-label={`Add another store for ${line.item.name}`}
-                                >
-                                  <Plus size={13} />
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  className="border-border text-muted-foreground inline-flex h-7 w-7 items-center justify-center rounded-lg border transition-colors hover:text-red-400"
-                                  onClick={() => removeAlloc(line.id, alloc.key)}
-                                  title="Remove this store"
-                                  aria-label={`Remove store row ${i + 1} for ${line.item.name}`}
-                                >
-                                  <Minus size={13} />
-                                </button>
-                              )}
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2">
-                              <div className="space-y-1">
-                                <label className={fieldLabel}>Received qty</label>
-                                <input
-                                  className="form-input h-9 w-full text-right"
-                                  inputMode="decimal"
-                                  value={alloc.received}
-                                  onChange={(e) =>
-                                    setAlloc(line.id, alloc.key, { received: e.target.value })
-                                  }
-                                  disabled={done}
-                                  placeholder="Qty"
-                                  aria-label={`Quantity of ${line.item.name} received on this receipt${
-                                    first ? '' : `, row ${i + 1}`
-                                  }`}
-                                />
-                              </div>
-                              <div className="space-y-1">
-                                <label className={fieldLabel}>Rejected</label>
-                                <input
-                                  className="form-input h-9 w-full text-right"
-                                  inputMode="decimal"
-                                  value={alloc.rejected}
-                                  onChange={(e) =>
-                                    setAlloc(line.id, alloc.key, { rejected: e.target.value })
-                                  }
-                                  disabled={done}
-                                  placeholder="0"
-                                  aria-label={`Quantity of ${line.item.name} rejected${
-                                    first ? '' : `, row ${i + 1}`
-                                  }`}
-                                />
-                              </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2">
-                              <div>
-                                <p className={fieldLabel}>Into stock</p>
-                                <p className="text-sm tabular-nums">
-                                  {accepted > 0 ? (
-                                    <span className="text-foreground">
-                                      {Number(accepted.toFixed(3))} {unit}
-                                    </span>
-                                  ) : (
-                                    <span className="text-muted-foreground">—</span>
-                                  )}
-                                </p>
-                              </div>
-                              <div className="space-y-1">
-                                <label className={fieldLabel}>Store</label>
-                                <select
-                                  className="form-input h-9 w-full"
-                                  value={alloc.warehouseId}
-                                  onChange={(e) =>
-                                    setAlloc(line.id, alloc.key, { warehouseId: e.target.value })
-                                  }
-                                  disabled={done}
-                                  aria-label={`Store for ${line.item.name}${
-                                    first ? '' : `, row ${i + 1}`
-                                  }`}
-                                >
-                                  <option value="">Choose…</option>
-                                  {warehouses.map((w) => (
-                                    <option key={w.id} value={w.id}>
-                                      {w.name}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )
-                })}
+                {order.lines.map((line) => (
+                  <ReceiptLineCard
+                    key={line.id}
+                    line={line}
+                    allocs={entries[line.id] ?? NO_ALLOCS}
+                    storeOptions={storeOptions}
+                    setAlloc={setAlloc}
+                    addAlloc={addAlloc}
+                    removeAlloc={removeAlloc}
+                  />
+                ))}
               </div>
 
               {/* Note and attachments, side by side — neither is more than a

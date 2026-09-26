@@ -542,9 +542,14 @@ export default function SupplierPaymentsPage() {
 
   return (
     <div className="space-y-5">
-      <div className="page-header flex-wrap gap-3">
-        <div>
-          <h1 className="page-title">Supplier Payments</h1>
+      {/* `gap-3` without `flex-wrap` — refresh and Export sit beside the
+        title on every width instead of dropping to a row of their own
+        under it, which on a phone was most of a screen's height spent on
+        a heading before a single bill was in view. The title takes a
+        size down below `sm` to leave the two buttons room. */}
+      <div className="page-header gap-3">
+        <div className="min-w-0">
+          <h1 className="page-title text-xl sm:text-2xl">Supplier Payments</h1>
           {/* Desk only — on a phone the heading already says what this is,
             and the sentence under it cost a line of a list somebody is
             scrolling. */}
@@ -640,8 +645,13 @@ export default function SupplierPaymentsPage() {
 
           <span className="bg-border hidden h-6 w-px shrink-0 lg:block" />
 
-          {/* Row: what you type, and when. */}
-          <div className="flex items-center gap-2 sm:contents">
+          {/* Search on its own line at a phone width, the two dates on the
+            one under it — the row they used to share left the search box
+            about 70px wide once the date pair took its fixed share, which
+            is not room enough to read what was typed into it, only to
+            guess. `sm:contents` still dissolves both back into the one
+            flowing row a tablet or a desk has the width for. */}
+          <div className="flex flex-col gap-2 sm:contents">
             <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[260px] sm:basis-0 sm:px-2.5">
               <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
               <input
@@ -666,7 +676,7 @@ export default function SupplierPaymentsPage() {
               </span>
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[8.5rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[8.5rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={from}
                 max={to || undefined}
                 onChange={(e) => setFrom(e.target.value)}
@@ -675,7 +685,7 @@ export default function SupplierPaymentsPage() {
               <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[8.5rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[8.5rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={to}
                 min={from || undefined}
                 onChange={(e) => setTo(e.target.value)}

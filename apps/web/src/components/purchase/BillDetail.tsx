@@ -21,7 +21,7 @@ import { Section } from './PurchaseOrderDialog'
 import type { BillAttachment, PurchaseBill } from './PurchaseBillDialog'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
-import { NOTE_STATUS, REASON_WORDS, type NoteStatus } from './noteTypes'
+import { DOC_WORDS, NOTE_STATUS, REASON_WORDS, type NoteStatus } from './noteTypes'
 
 const inr = (v: string | number | null | undefined) =>
   Number(v ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -104,6 +104,23 @@ export function BillItems({ bill }: { bill: PurchaseBill }) {
               </td>
               <td className="text-muted-foreground col-wide font-mono">
                 {l.grnLine?.grn?.grnNumber ?? 'Direct'}
+                {/* The bill claims the whole delivery, rejected part
+                  included — said here so it stays visible after the bill is
+                  saved, not only while it is being pulled in. Amber only for
+                  what is still unclaimed: a rejection already noted straight
+                  off the receipt, before this bill existed, is not still
+                  waiting on one. */}
+                {(() => {
+                  const rejected = Number(l.grnLine?.rejectedQty ?? 0)
+                  if (!rejected) return null
+                  const noted = Number(l.grnLine?.rejectedNotedQty ?? 0)
+                  const remaining = Math.max(0, rejected - noted)
+                  return remaining > 0 ? (
+                    <div className="text-amber-500">{qtyFmt(remaining)} rejected</div>
+                  ) : (
+                    <div className="text-muted-foreground">{qtyFmt(rejected)} rejected · noted</div>
+                  )
+                })()}
               </td>
               <td className="text-foreground text-right tabular-nums">
                 {qtyFmt(l.qty)}
@@ -711,9 +728,8 @@ export function BillDetailDialog({ bill, onClose }: { bill: PurchaseBill; onClos
                           <td className="py-2 pr-3">
                             <span className="font-mono text-amber-400">{n.noteNumber}</span>
                             <div className="text-muted-foreground text-[10px]">
-                              {n.noteType === 'DEBIT'
-                                ? 'our debit note'
-                                : `their credit note${n.supplierDocNo ? ` ${n.supplierDocNo}` : ''}`}
+                              {DOC_WORDS[n.docType]?.short.toLowerCase() ?? n.docType}
+                              {n.supplierDocNo ? ` ${n.supplierDocNo}` : ''}
                             </div>
                           </td>
                           <td className="text-muted-foreground py-2 pr-3">

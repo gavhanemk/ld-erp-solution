@@ -5,6 +5,10 @@ import { Download, FileText, Loader2, Paperclip } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import {
+  DOC_WORDS,
+  EFFECT_WORDS,
+  GST_WORDS,
+  ISSUER_WORDS,
   NOTE_STATUS,
   REASON_WORDS,
   money,
@@ -122,15 +126,27 @@ export function NoteDetail({ note }: { note: PurchaseNote }) {
         <div className="border-border bg-card space-y-1.5 rounded-lg border p-3 lg:col-span-2">
           <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
             <Fact label="What happened" value={REASON_WORDS[note.reason] ?? note.reason} />
+            {/* Four separate facts, shown separately on purpose. Collapsed
+              into "Debit note" they read as one thing, and the one they read
+              as is whichever the reader already expected. */}
             <Fact
               label="Document"
-              value={note.noteType === 'DEBIT' ? 'Our debit note' : "Supplier's credit note"}
+              value={DOC_WORDS[note.docType]?.label ?? note.docType}
               sub={note.supplierDocNo ? `No. ${note.supplierDocNo}` : undefined}
             />
+            <Fact label="Issued by" value={ISSUER_WORDS[note.issuedBy] ?? note.issuedBy} />
             <Fact
               label="Effect"
-              value={
-                note.effect === 'REDUCES_PAYABLE' ? 'Reduces what we owe' : 'Increases what we owe'
+              value={EFFECT_WORDS[note.effect]?.label ?? note.effect}
+              sub={EFFECT_WORDS[note.effect]?.hint}
+            />
+            <Fact
+              label="GST treatment"
+              value={GST_WORDS[note.gstTreatment]?.label ?? note.gstTreatment}
+              sub={
+                note.gstTreatedBy
+                  ? `By ${note.gstTreatedBy.name}`
+                  : GST_WORDS[note.gstTreatment]?.hint
               }
             />
             {note.bill ? (

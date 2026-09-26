@@ -400,15 +400,17 @@ function PurchaseBillsTable() {
 
   return (
     <div className="space-y-5">
-      {/* One row at every width. It used to carry `flex-wrap`, which on a
-        phone put refresh and Book Bill on a line of their own underneath —
-        a whole row spent on two buttons, on the screen with the least room
-        to spend. Without it the heading gives way instead: it wraps to two
-        short lines on the narrowest phones and the buttons stay where they
-        belong, hard right of the title. */}
+      {/* One row at every width, title included. It used to carry
+        `flex-wrap`, which on a phone put refresh and Book Bill on a line
+        of their own underneath the title. Letting the heading itself wrap
+        to two short lines instead was tried next and read just as
+        oddly — "Purchase" over "Bills" is not how the title is read
+        anywhere else in the module. What actually buys the row enough
+        width is the title taking a size down and Book Bill losing its
+        words below `sm`, matching Purchase Orders and Goods Receipt. */}
       <div className="page-header gap-3">
         <div className="min-w-0">
-          <h1 className="page-title">Purchase Bills</h1>
+          <h1 className="page-title text-xl sm:text-2xl">Purchase Bills</h1>
           {/* Desk only. On a phone the heading already says what this is —
             the sentence under it cost a line of a list somebody is
             scrolling. */}
@@ -421,8 +423,12 @@ function PurchaseBillsTable() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
-          <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
-            <Plus size={15} /> Book Bill
+          <button
+            className="btn-primary"
+            onClick={() => setDialog({ open: true, record: null })}
+            aria-label="Book Bill"
+          >
+            <Plus size={15} /> <span className="hidden sm:inline">Book Bill</span>
           </button>
         </div>
       </div>
@@ -445,7 +451,13 @@ function PurchaseBillsTable() {
           phone, so their children rejoin the one wrapping row they were
           always in rather than keeping a second, disagreeing layout. */}
         <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
-          <div className="flex items-center gap-2 sm:contents">
+          {/* Search on its own line at a phone width, the two dates on the
+            one under it — sharing a row with a fixed-width date pair left
+            the search box too narrow to read what was typed into it. See
+            the same fix on Supplier Payments. `sm:contents` still
+            dissolves both back into the one row a tablet or a desk has
+            the width for. */}
+          <div className="flex flex-col gap-2 sm:contents">
             <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
               <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
               <input
@@ -464,7 +476,7 @@ function PurchaseBillsTable() {
             <div className="flex shrink-0 items-center gap-1">
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={fromDate}
                 max={toDate || undefined}
                 onChange={(e) => setFromDate(e.target.value)}
@@ -473,7 +485,7 @@ function PurchaseBillsTable() {
               <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
               <input
                 type="date"
-                className="form-input h-8 w-[6.9rem] px-1 py-0 text-[10px] sm:w-[7.75rem] sm:px-3 sm:text-xs"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
                 value={toDate}
                 min={fromDate || undefined}
                 onChange={(e) => setToDate(e.target.value)}
@@ -944,9 +956,11 @@ function PurchaseBillsTable() {
         initialGrnIds={fromGrnIds}
         onClose={() => {
           setDialog({ open: false, record: null })
-          // The receipt has been dealt with one way or another; leaving it in
-          // the address would reopen the form on the next visit to this page.
-          if (fromGrn) router.replace('/purchase/bills')
+          // Arriving here was "Add bill" on a receipt, not a visit to this
+          // list in its own right — so closing the form, saved or not,
+          // goes back to the Goods Receipt screen it was raised from rather
+          // than stranding the user on the bill list they never asked for.
+          if (fromGrn) router.replace('/purchase/grn')
         }}
         onSaved={() => void load()}
       />
@@ -965,7 +979,7 @@ function PurchaseBillsTable() {
         what is left of each are already on the screen. */}
       <PurchaseNoteDialog
         open={Boolean(adjusting)}
-        moduleType="DEBIT"
+        moduleType="OUR_DEBIT_NOTE"
         initialBillId={adjusting?.id ?? null}
         onClose={() => setAdjusting(null)}
         onSaved={() => void load()}

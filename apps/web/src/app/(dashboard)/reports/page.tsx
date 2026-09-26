@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { AlertCircle, BarChart3, FileSpreadsheet, RefreshCw } from 'lucide-react'
+import {
+  AlertCircle,
+  BarChart3,
+  ChevronDown,
+  ChevronRight,
+  FileSpreadsheet,
+  RefreshCw,
+} from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 
 /**
@@ -35,6 +42,8 @@ export default function ReportsPage() {
   const [reports, setReports] = useState<ReportSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  /** Which module's reports are showing. One at a time; null is all closed. */
+  const [openModule, setOpenModule] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -93,40 +102,81 @@ export default function ReportsPage() {
           </p>
         </div>
       ) : (
-        Object.entries(byModule).map(([module, list]) => (
-          <div key={module} className="space-y-3">
-            <h2 className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">
-              {MODULE_WORDS[module] ?? module}
-            </h2>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {list.map((r) => (
-                <Link
-                  key={r.id}
-                  href={`/reports/${r.id}`}
-                  className="glass-card hover:border-primary/40 group p-4 transition-colors"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="bg-primary/10 border-primary/20 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
-                      <FileSpreadsheet size={17} className="text-primary" />
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="text-foreground group-hover:text-primary text-sm font-semibold transition-colors">
-                        {r.title}
-                      </h3>
-                      <p className="text-muted-foreground mt-1 text-xs leading-snug">
-                        {r.description}
-                      </p>
-                      <p className="text-muted-foreground mt-2 text-[11px]">
-                        {r.columns.length} columns
-                        {r.filters.length > 0 && ` · ${r.filters.length} filters`}
-                      </p>
-                    </div>
-                  </div>
-                </Link>
-              ))}
+        /*
+         * One tile per module, and its reports underneath once it is opened.
+         *
+         * The heading-plus-cards layout this replaces put every report of every
+         * module on the page at once. That is readable with five and a wall
+         * with forty, and the modules still to come — sales, inventory,
+         * production, accounts, payroll — all bring their own. A person opening
+         * this page is looking for one report, and they already know which part
+         * of the business it belongs to.
+         *
+         * Closed to start, so the page opens as a short list of places to look
+         * rather than as everything at once.
+         */
+        Object.entries(byModule).map(([module, list]) => {
+          const open = openModule === module
+          return (
+            <div key={module} className="space-y-3">
+              <button
+                type="button"
+                onClick={() => setOpenModule(open ? null : module)}
+                aria-expanded={open}
+                className={`glass-card hover:border-primary/40 group flex w-full items-center gap-3 p-4 text-left transition-colors ${
+                  open ? 'border-primary/40' : ''
+                }`}
+              >
+                <div className="bg-primary/10 border-primary/20 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                  <BarChart3 size={17} className="text-primary" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-foreground group-hover:text-primary text-sm font-semibold transition-colors">
+                    {MODULE_WORDS[module] ?? module}
+                  </h2>
+                  <p className="text-muted-foreground mt-0.5 text-xs">
+                    {list.length} {list.length === 1 ? 'report' : 'reports'}
+                  </p>
+                </div>
+                {open ? (
+                  <ChevronDown size={16} className="text-muted-foreground ml-auto shrink-0" />
+                ) : (
+                  <ChevronRight size={16} className="text-muted-foreground ml-auto shrink-0" />
+                )}
+              </button>
+
+              {open && (
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  {list.map((r) => (
+                    <Link
+                      key={r.id}
+                      href={`/reports/${r.id}`}
+                      className="glass-card hover:border-primary/40 group p-4 transition-colors"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="bg-primary/10 border-primary/20 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                          <FileSpreadsheet size={17} className="text-primary" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-foreground group-hover:text-primary text-sm font-semibold transition-colors">
+                            {r.title}
+                          </h3>
+                          <p className="text-muted-foreground mt-1 text-xs leading-snug">
+                            {r.description}
+                          </p>
+                          <p className="text-muted-foreground mt-2 text-[11px]">
+                            {r.columns.length} columns
+                            {r.filters.length > 0 && ` · ${r.filters.length} filters`}
+                          </p>
+                        </div>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
-        ))
+          )
+        })
       )}
     </div>
   )

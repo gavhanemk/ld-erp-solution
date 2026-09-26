@@ -3,11 +3,12 @@
 import { PurchaseNotesScreen } from '@/components/purchase/PurchaseNotesScreen'
 
 /**
- * The credit notes suppliers have sent us.
+ * Reductions the mill's suppliers have granted it.
  *
- * Ours to record, not to raise — the document is theirs, so the form asks for
- * their number and their date and files it under a reference of our own.
+ * Their document, not ours: they reduced their own invoice and sent the note,
+ * and this screen records it under our reference so it can be found when the
+ * department matches their document against ours.
  */
-export default function SupplierCreditNotesPage() {
+export default function CreditNotesPage() {
   return <PurchaseNotesScreen moduleType="CREDIT" />
 }

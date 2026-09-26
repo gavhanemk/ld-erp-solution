@@ -113,10 +113,15 @@ export function ExportButton({
         className="btn-ghost"
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={busy ? 'Preparing...' : label}
       >
         {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-        {busy ? 'Preparing...' : label}
-        {!busy && <ChevronDown size={13} />}
+        {/* The word, not just the icon, from `sm` up — a header this sits
+          in is rarely fighting a phone for width there. Below it, the
+          icon alone is what keeps a title and this button on one row
+          instead of the button wrapping under it. */}
+        <span className="hidden sm:inline">{busy ? 'Preparing...' : label}</span>
+        {!busy && <ChevronDown size={13} className="hidden sm:block" />}
       </button>
 
       {open &&

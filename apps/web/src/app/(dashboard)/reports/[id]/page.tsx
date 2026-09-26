@@ -6,6 +6,7 @@ import { AlertCircle, ArrowLeft, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ReportDashboard, TONE, type Analysis, type Tone } from '@/components/reports/Dashboard'
+import { PivotTable } from '@/components/reports/PivotTable'
 import { FilterBar, type Filter } from '@/components/reports/FilterBar'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { formatDate } from '@/lib/utils'
@@ -29,6 +30,8 @@ interface RunResult {
   truncated: boolean
   columns: Column[]
   preview: Array<Record<string, unknown>>
+  /** Every row the query returned, for the pivot table to regroup over. */
+  rows: Array<Record<string, unknown>>
 }
 
 const money = (v: number) =>
@@ -85,15 +88,28 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** What the report's own Pivot sheet defaults to, so the on-screen one opens the same way. */
+  const [pivotDefaults, setPivotDefaults] = useState<{ rows?: string; values?: string }>({})
 
   // The definition, for the filter bar. Fetched from the same registry the
   // server runs from, so a filter added there appears here with no change.
   useEffect(() => {
     void (async () => {
       try {
-        const res = await api.get<{ data: Array<{ id: string; filters: Filter[] }> }>('/reports')
+        const res = await api.get<{
+          data: Array<{
+            id: string
+            filters: Filter[]
+            pivot?: { rows: string | string[]; values: string[] }
+          }>
+        }>('/reports')
         const mine = res.data.find((r) => r.id === id)
         setFilters(mine?.filters ?? [])
+        const rowsSpec = mine?.pivot?.rows
+        setPivotDefaults({
+          rows: Array.isArray(rowsSpec) ? rowsSpec[0] : rowsSpec,
+          values: mine?.pivot?.values?.[0],
+        })
 
         const needed = [...new Set((mine?.filters ?? []).map((f) => f.optionsFrom).filter(Boolean))]
         const loaded: Record<string, Array<{ id: string; name: string }>> = {}
@@ -222,6 +238,15 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
           </p>
 
           <ReportDashboard analysis={result.analysis} rowCount={result.rowCount} />
+
+          {result.rows.length > 0 && (
+            <PivotTable
+              columns={result.columns}
+              rows={result.rows}
+              defaultRowKey={pivotDefaults.rows}
+              defaultValueKey={pivotDefaults.values}
+            />
+          )}
 
           {result.preview.length > 0 && (
             <div className="glass-card overflow-hidden p-0">

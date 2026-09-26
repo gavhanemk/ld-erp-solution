@@ -33,7 +33,7 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 
 /**
@@ -1725,7 +1725,7 @@ export function PurchaseOrderDialog({
       onSaved()
       onClose()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
+      setError(apiErrorMessage(err, 'Could not save. Is the API running?'))
     } finally {
       setSaving(null)
     }
@@ -1889,8 +1889,17 @@ export function PurchaseOrderDialog({
               a box of its own — it is one dropdown, and a box to itself left a
               column of empty space beside it. */}
             <Section icon={FileText} title="Basic Details">
-              <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-3">
-                <div>
+              {/* `auto-fit`, not a fixed two columns, so each pairs with
+                the field beside it instead of stacking six deep on a
+                phone — where it's going with who it's from, which order
+                this is with when — but a track that cannot hold a date
+                input drops to one column instead of clipping it to
+                "dd-m". `order` moves them back into the desktop's three
+                grouped rows (location/number/date, then supplier/
+                reference/remark) without changing the DOM, so tab order
+                still matches what is on screen at every width. */}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
+                <div className="order-1 md:order-1">
                   <label className="form-label" htmlFor="po-location">
                     Location
                   </label>
@@ -1920,7 +1929,7 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
 
-                <div>
+                <div className="order-3 md:order-2">
                   <label className="form-label" htmlFor="po-number">
                     Purchase order<span className="ml-0.5 text-red-500">*</span>
                   </label>
@@ -1944,7 +1953,7 @@ export function PurchaseOrderDialog({
                   )}
                 </div>
 
-                <div>
+                <div className="order-4 md:order-3">
                   <label className="form-label" htmlFor="po-date">
                     Date
                   </label>
@@ -1962,23 +1971,20 @@ export function PurchaseOrderDialog({
                   />
                 </div>
 
-                <div>
+                <div className="order-2 md:order-4">
                   <label className="form-label" htmlFor="po-supplier">
                     Supplier<span className="ml-0.5 text-red-500">*</span>
                   </label>
                   <div className="relative">
                     <User
                       size={14}
-                      className={`pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 ${
-                        supplierMissing ? 'text-red-500' : 'text-muted-foreground'
-                      }`}
+                      className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                     />
                     <select
                       id="po-supplier"
-                      className={`form-input pl-9 ${supplierMissing ? 'border-red-500' : ''}`}
+                      className="form-input pl-9"
                       value={supplierId}
                       onChange={(e) => setSupplierId(e.target.value)}
-                      aria-invalid={supplierMissing}
                       aria-describedby={supplierMissing ? 'po-supplier-error' : undefined}
                     >
                       <option value="">Choose supplier</option>
@@ -1989,23 +1995,21 @@ export function PurchaseOrderDialog({
                       ))}
                     </select>
                   </div>
-                  {/* Marked at the field from the start, not held back until a
-                    save is attempted. Every Save on this form is disabled while
-                    the supplier is empty, so waiting for a click that cannot
-                    happen would leave the buttons greyed out with nothing on
-                    screen saying which field is holding them. */}
+                  {/* A prompt, not an alarm. Every Save on this form is
+                    disabled while the supplier is empty, so this still says
+                    which field is holding them back — but in the same grey a
+                    blank box on a form nobody has filled in yet gets
+                    everywhere else on this screen. Red is for a mistake
+                    already made, and choosing nothing on a form just opened
+                    is not one. */}
                   {supplierMissing ? (
-                    <p
-                      id="po-supplier-error"
-                      className="mt-1 flex items-center gap-1.5 text-xs text-red-500"
-                    >
-                      <AlertCircle size={13} className="shrink-0" />
-                      Supplier is required
+                    <p id="po-supplier-error" className="text-muted-foreground mt-1 text-xs">
+                      Choose the supplier to save this order
                     </p>
                   ) : null}
                 </div>
 
-                <div>
+                <div className="order-5 md:order-5">
                   <label className="form-label" htmlFor="po-reference">
                     Reference
                   </label>
@@ -2024,7 +2028,7 @@ export function PurchaseOrderDialog({
                   </div>
                 </div>
 
-                <div>
+                <div className="order-6 md:order-6">
                   <label className="form-label" htmlFor="po-remark">
                     Remark
                   </label>
@@ -2650,34 +2654,44 @@ export function PurchaseOrderDialog({
 
                       <div className="space-y-1">
                         <label className={fieldLabel}>Item</label>
-                        <input
-                          className={`${cell} font-mono`}
-                          list={`po-codes-m-${i}`}
-                          placeholder="Item code"
-                          value={line.codeText ?? ''}
-                          onChange={(e) => typeCodeFor(i, e.target.value)}
-                          aria-label={`Row ${i + 1} item code`}
-                        />
-                        <datalist id={`po-codes-m-${i}`}>
-                          {choices.map((it) => (
-                            <option key={it.id} value={it.code ?? ''} label={it.name} />
-                          ))}
-                        </datalist>
-                        <select
-                          className={cell}
-                          value={line.itemId}
-                          onChange={(e) => pickItemFor(i, e.target.value)}
-                          aria-label={`Row ${i + 1} item`}
-                        >
-                          <option value="">
-                            {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
-                          </option>
-                          {choices.map((it) => (
-                            <option key={it.id} value={it.id}>
-                              {it.name}
+                        {/* Code and name side by side rather than stacked — the
+                          code is short enough that giving it a full row of its
+                          own on a phone was one more screen of scrolling per
+                          line for nothing the width needed. */}
+                        <div className="flex gap-1.5">
+                          {/* `cell` carries `w-full`, which would fight a
+                            flex-basis override here — spelled out without it
+                            so the fixed code column and the flexible name
+                            column actually hold the widths they are given. */}
+                          <input
+                            className="form-input h-9 w-24 shrink-0 px-2 font-mono text-xs"
+                            list={`po-codes-m-${i}`}
+                            placeholder="Code"
+                            value={line.codeText ?? ''}
+                            onChange={(e) => typeCodeFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item code`}
+                          />
+                          <datalist id={`po-codes-m-${i}`}>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.code ?? ''} label={it.name} />
+                            ))}
+                          </datalist>
+                          <select
+                            className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
+                            value={line.itemId}
+                            onChange={(e) => pickItemFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item`}
+                          >
+                            <option value="">
+                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                             </option>
-                          ))}
-                        </select>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.id}>
+                                {it.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
                         {(item?.hsnCode || line.mrNumber) && (
                           <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
                             {item?.hsnCode && (
@@ -2808,13 +2822,19 @@ export function PurchaseOrderDialog({
                       <div className="mt-2 grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                           <label className={fieldLabel}>Discount</label>
+                          {/* `cell` carries `w-full`, which fights a
+                            fixed-width override the same way it did on the
+                            item code cell — spelled out without it so the
+                            unit select actually holds `w-14` instead of
+                            stretching to match the number box and pushing
+                            the row past the card's right edge. */}
                           <div className="flex items-stretch gap-1">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
                               max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
-                              className={`${cell} min-w-0 flex-1`}
+                              className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
                               placeholder="0"
                               disabled={poType !== 'ITEM_LEVEL'}
                               value={poType === 'ITEM_LEVEL' ? String(line.discount) : ''}
@@ -2822,7 +2842,7 @@ export function PurchaseOrderDialog({
                               aria-label={`Row ${i + 1} discount`}
                             />
                             <select
-                              className={`${cell} w-14 shrink-0 px-1`}
+                              className="form-input h-9 w-14 shrink-0 px-1 text-xs"
                               disabled={poType !== 'ITEM_LEVEL'}
                               value={line.discountUnit ?? '%'}
                               onChange={(e) =>
@@ -3367,15 +3387,25 @@ export function PurchaseOrderDialog({
                         const helperOpen = pctOpen === c.chargeTypeId
                         return (
                           <div key={c.chargeTypeId}>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-muted-foreground min-w-0">
-                                {c.name} @{c.gstRate}%
+                            {/* `flex-wrap`, with the name given a floor it
+                              will not shrink under — a name like "Dyeing
+                              Charges (Processing)" broke mid-word onto a
+                              second line while the button and the box sat
+                              centred beside whichever half of it fit, which
+                              read as broken rather than as a long name. Past
+                              that floor the whole button-and-box group wraps
+                              to its own line under the name instead, which
+                              is the same shape every field on this form
+                              already takes on a phone. */}
+                            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                              <span className="text-muted-foreground min-w-[9rem] flex-1">
+                                {c.name}
                               </span>
                               {/* The amount box stays where the other boxes are
                                 and the helper button goes to its left, so the
                                 right edge of every figure on this panel still
                                 lines up down one column. */}
-                              <div className="flex shrink-0 items-center gap-1.5">
+                              <div className="ml-auto flex shrink-0 items-center gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => setPctOpen(helperOpen ? null : c.chargeTypeId)}
@@ -3459,11 +3489,14 @@ export function PurchaseOrderDialog({
                   {/* Carries no GST of its own and is added after tax, which is
                     how the mill's old system had it. */}
                   <div>
-                    <div className="flex items-center justify-between gap-2">
-                      <label htmlFor="po-other-charges" className="text-muted-foreground min-w-0">
+                    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                      <label
+                        htmlFor="po-other-charges"
+                        className="text-muted-foreground min-w-[9rem] flex-1"
+                      >
                         Other charges
                       </label>
-                      <div className="flex shrink-0 items-center gap-1.5">
+                      <div className="ml-auto flex shrink-0 items-center gap-1.5">
                         {/* No rate of its own, so this helper opens empty. It
                           is here because the sum is the same one — a
                           percentage of the goods — and a helper on every box
