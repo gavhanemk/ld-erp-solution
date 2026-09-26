@@ -15,6 +15,7 @@ import {
   ThumbsDown,
   Trash2,
   Scale,
+  Truck,
   Undo2,
   X,
 } from 'lucide-react'
@@ -22,6 +23,7 @@ import { api, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { RecordQuoteDialog } from '@/components/purchase/RecordQuoteDialog'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { Section } from '@/components/purchase/Section'
 import {
   money,
   overBest,
@@ -223,15 +225,11 @@ export function EnquiryCompareDialog({
   return shell(
     <div className="space-y-4 px-5 py-4">
       {/* ── Who was asked ─────────────────────────────────────────────────── */}
-      <section>
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h4 className="text-foreground text-sm font-semibold">
-            Suppliers asked
-            <span className="text-muted-foreground ml-2 text-xs font-normal">
-              {enquiry.answeredCount} of {enquiry.supplierCount} have answered
-            </span>
-          </h4>
-          {editable && can(MODULE, 'edit') && addable.length > 0 && (
+      <Section
+        icon={Truck}
+        title="Suppliers asked"
+        actions={
+          editable && can(MODULE, 'edit') && addable.length > 0 ? (
             <div className="flex items-center gap-2">
               <select
                 value={adding}
@@ -260,9 +258,10 @@ export function EnquiryCompareDialog({
                 Add
               </button>
             </div>
-          )}
-        </div>
-
+          ) : undefined
+        }
+        summary={enquiry.answeredCount + ' of ' + enquiry.supplierCount + ' have answered'}
+      >
         {enquiry.supplierCount === 0 ? (
           <div className="border-border/70 rounded-lg border border-dashed p-5 text-center">
             <p className="text-muted-foreground text-sm">Nobody has been asked yet.</p>
@@ -271,183 +270,182 @@ export function EnquiryCompareDialog({
               comparison below worth reading.
             </p>
           </div>
-        ) : null}
-      </section>
-
-      {enquiry.supplierCount > 0 && (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {enquiry.quotes.map((q) => {
-            const isBest = enquiry.best?.quoteId === q.id
-            const over = overBest(q, best)
-            const working = busy === q.id
-            return (
-              <div
-                key={q.id}
-                /* The cheapest is ringed, not filled and not pre-selected.
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {enquiry.quotes.map((q) => {
+              const isBest = enquiry.best?.quoteId === q.id
+              const over = overBest(q, best)
+              const working = busy === q.id
+              return (
+                <div
+                  key={q.id}
+                  /* The cheapest is ringed, not filled and not pre-selected.
                    Marking it answers the question; choosing for the buyer
                    would pretend the screen knows about lead time and quality,
                    which it does not. */
-                className={`rounded-lg border p-3 ${
-                  q.declinedAt
-                    ? 'border-border/60 bg-secondary/20 opacity-70'
-                    : isBest
-                      ? 'border-emerald-500/40 bg-emerald-500/5'
-                      : 'border-border/70 bg-card'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="text-foreground truncate text-sm font-medium">
-                      {q.supplier.name}
-                    </p>
-                    <p className="text-muted-foreground font-mono text-[11px]">{q.supplier.code}</p>
-                  </div>
-                  {isBest && !q.declinedAt && (
-                    <span className="badge-success shrink-0">Cheapest</span>
-                  )}
-                  {q.declinedAt && <span className="badge-neutral shrink-0">Passed over</span>}
-                  {q.ordered && <span className="badge-info shrink-0">Ordered</span>}
-                </div>
-
-                <div className="mt-2 space-y-1 text-xs">
-                  {q.answered ? (
-                    <>
-                      <p className="font-mono">{q.piNumber}</p>
-                      <p className="text-muted-foreground">
-                        {q.piDate && formatDate(q.piDate)}
-                        {q.piValidUntil &&
-                          (q.expired ? (
-                            <span className="ml-1 font-medium text-red-400">
-                              · price lapsed {formatDate(q.piValidUntil)}
-                            </span>
-                          ) : (
-                            <span className="ml-1">· holds to {formatDate(q.piValidUntil)}</span>
-                          ))}
+                  className={`rounded-lg border p-3 ${
+                    q.declinedAt
+                      ? 'border-border/60 bg-secondary/20 opacity-70'
+                      : isBest
+                        ? 'border-emerald-500/40 bg-emerald-500/5'
+                        : 'border-border/70 bg-card'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-foreground truncate text-sm font-medium">
+                        {q.supplier.name}
                       </p>
-                      <p className="text-foreground text-base font-semibold tabular-nums">
-                        ₹{money(quoteTotal(q))}
-                        {/* How far off the cheapest, in the terms a buyer
+                      <p className="text-muted-foreground font-mono text-[11px]">
+                        {q.supplier.code}
+                      </p>
+                    </div>
+                    {isBest && !q.declinedAt && (
+                      <span className="badge-success shrink-0">Cheapest</span>
+                    )}
+                    {q.declinedAt && <span className="badge-neutral shrink-0">Passed over</span>}
+                    {q.ordered && <span className="badge-info shrink-0">Ordered</span>}
+                  </div>
+
+                  <div className="mt-2 space-y-1 text-xs">
+                    {q.answered ? (
+                      <>
+                        <p className="font-mono">{q.piNumber}</p>
+                        <p className="text-muted-foreground">
+                          {q.piDate && formatDate(q.piDate)}
+                          {q.piValidUntil &&
+                            (q.expired ? (
+                              <span className="ml-1 font-medium text-red-400">
+                                · price lapsed {formatDate(q.piValidUntil)}
+                              </span>
+                            ) : (
+                              <span className="ml-1">· holds to {formatDate(q.piValidUntil)}</span>
+                            ))}
+                        </p>
+                        <p className="text-foreground text-base font-semibold tabular-nums">
+                          ₹{money(quoteTotal(q))}
+                          {/* How far off the cheapest, in the terms a buyer
                           argues in. "8% higher" is a negotiating position;
                           "₹680 more" is arithmetic they would have to do. */}
-                        {over != null && (
-                          <span className="ml-1.5 text-[11px] font-normal text-amber-400">
-                            {(over * 100).toFixed(1)}% higher
-                          </span>
-                        )}
-                      </p>
-                      <p className="text-muted-foreground text-[11px]">
-                        {q.piAmount != null ? 'his stated total' : 'from his rates, before tax'}
-                        {' · '}
-                        {q.pricedLines} of {lines.length} priced
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-muted-foreground">
-                      {q.sentAt
-                        ? 'No rates back yet · waiting ' + waitingFor(q.sentAt)
-                        : 'Not yet sent to him'}
-                    </p>
-                  )}
-                  {q.declinedReason && (
-                    <p className="text-muted-foreground text-[11px] italic">{q.declinedReason}</p>
-                  )}
-                </div>
-
-                {editable && can(MODULE, 'edit') && (
-                  <div className="border-border/60 mt-3 flex flex-wrap items-center gap-1 border-t pt-2">
-                    {working && <Loader2 size={13} className="animate-spin" />}
-                    {!q.sentAt && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void act(q.id, () =>
-                            api.patch<{ message: string }>(
-                              '/purchase/enquiries/quotes/' + q.id + '/send',
-                              {}
-                            )
-                          )
-                        }
-                        disabled={working}
-                        className="btn-ghost text-xs"
-                      >
-                        <Send size={13} /> Sent
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setQuoting(q)}
-                      disabled={working}
-                      className="btn-ghost text-xs"
-                    >
-                      <Check size={13} /> {q.answered ? 'Revise PI' : 'Record PI'}
-                    </button>
-                    <a
-                      href={'/print/purchase-enquiry/' + enquiry.id + '?quote=' + q.id}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn-ghost text-xs"
-                      title={'His copy of ' + enquiry.enquiryNumber}
-                    >
-                      <Printer size={13} />
-                    </a>
-                    {q.answered && !q.declinedAt && can(MODULE, 'create') && (
-                      <Link
-                        href={'/purchase/orders?fromEnquiry=' + enquiry.id + '&fromQuote=' + q.id}
-                        className="btn-primary text-xs"
-                        title={'Raise a purchase order against ' + q.piNumber}
-                      >
-                        <ShoppingCart size={13} /> Order
-                      </Link>
-                    )}
-                    {q.declinedAt ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void act(q.id, () =>
-                            api.patch<{ message: string }>(
-                              '/purchase/enquiries/quotes/' + q.id + '/reconsider',
-                              {}
-                            )
-                          )
-                        }
-                        disabled={working}
-                        className="btn-ghost text-xs"
-                      >
-                        <Undo2 size={13} /> Reconsider
-                      </button>
+                          {over != null && (
+                            <span className="ml-1.5 text-[11px] font-normal text-amber-400">
+                              {(over * 100).toFixed(1)}% higher
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-muted-foreground text-[11px]">
+                          {q.piAmount != null ? 'his stated total' : 'from his rates, before tax'}
+                          {' · '}
+                          {q.pricedLines} of {lines.length} priced
+                        </p>
+                      </>
                     ) : (
-                      q.answered &&
-                      !q.ordered && (
-                        <button
-                          type="button"
-                          onClick={() => setDeclining(q)}
-                          disabled={working}
-                          className="btn-ghost text-xs"
-                          title="Keep his quote on the record, but pass him over"
-                        >
-                          <ThumbsDown size={13} />
-                        </button>
-                      )
+                      <p className="text-muted-foreground">
+                        {q.sentAt
+                          ? 'No rates back yet · waiting ' + waitingFor(q.sentAt)
+                          : 'Not yet sent to him'}
+                      </p>
                     )}
-                    {!q.ordered && can(MODULE, 'delete') && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void act(q.id, () =>
-                            api.delete<{ message: string }>('/purchase/enquiries/quotes/' + q.id)
-                          )
-                        }
-                        disabled={working}
-                        className="btn-ghost text-xs text-red-400"
-                        title="Take him off the enquiry altogether"
-                      >
-                        <Trash2 size={13} />
-                      </button>
+                    {q.declinedReason && (
+                      <p className="text-muted-foreground text-[11px] italic">{q.declinedReason}</p>
                     )}
                   </div>
-                )}
 
-                {/* His paperwork, filed against him rather than against the
+                  {editable && can(MODULE, 'edit') && (
+                    <div className="border-border/60 mt-3 flex flex-wrap items-center gap-1 border-t pt-2">
+                      {working && <Loader2 size={13} className="animate-spin" />}
+                      {!q.sentAt && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void act(q.id, () =>
+                              api.patch<{ message: string }>(
+                                '/purchase/enquiries/quotes/' + q.id + '/send',
+                                {}
+                              )
+                            )
+                          }
+                          disabled={working}
+                          className="btn-ghost text-xs"
+                        >
+                          <Send size={13} /> Sent
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setQuoting(q)}
+                        disabled={working}
+                        className="btn-ghost text-xs"
+                      >
+                        <Check size={13} /> {q.answered ? 'Revise PI' : 'Record PI'}
+                      </button>
+                      <a
+                        href={'/print/purchase-enquiry/' + enquiry.id + '?quote=' + q.id}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn-ghost text-xs"
+                        title={'His copy of ' + enquiry.enquiryNumber}
+                      >
+                        <Printer size={13} />
+                      </a>
+                      {q.answered && !q.declinedAt && can(MODULE, 'create') && (
+                        <Link
+                          href={'/purchase/orders?fromEnquiry=' + enquiry.id + '&fromQuote=' + q.id}
+                          className="btn-primary text-xs"
+                          title={'Raise a purchase order against ' + q.piNumber}
+                        >
+                          <ShoppingCart size={13} /> Order
+                        </Link>
+                      )}
+                      {q.declinedAt ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void act(q.id, () =>
+                              api.patch<{ message: string }>(
+                                '/purchase/enquiries/quotes/' + q.id + '/reconsider',
+                                {}
+                              )
+                            )
+                          }
+                          disabled={working}
+                          className="btn-ghost text-xs"
+                        >
+                          <Undo2 size={13} /> Reconsider
+                        </button>
+                      ) : (
+                        q.answered &&
+                        !q.ordered && (
+                          <button
+                            type="button"
+                            onClick={() => setDeclining(q)}
+                            disabled={working}
+                            className="btn-ghost text-xs"
+                            title="Keep his quote on the record, but pass him over"
+                          >
+                            <ThumbsDown size={13} />
+                          </button>
+                        )
+                      )}
+                      {!q.ordered && can(MODULE, 'delete') && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void act(q.id, () =>
+                              api.delete<{ message: string }>('/purchase/enquiries/quotes/' + q.id)
+                            )
+                          }
+                          disabled={working}
+                          className="btn-ghost text-xs text-red-400"
+                          title="Take him off the enquiry altogether"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* His paperwork, filed against him rather than against the
                   enquiry — three scanned PIs in one list with nothing saying
                   whose each was is not a filing system.
 
@@ -455,26 +453,27 @@ export function EnquiryCompareDialog({
                   holding the PDF at the moment they type its number, and a
                   drop zone in every supplier card would put three of them on a
                   panel that is meant to be read at a glance. */}
-                {q.attachments.length > 0 && (
-                  <div className="border-border/60 mt-2 border-t pt-2">
-                    {q.attachments.map((a) => (
-                      <button
-                        key={a.id}
-                        type="button"
-                        onClick={() => void openFile(a.id)}
-                        className="text-primary flex w-full items-center gap-1.5 truncate text-left text-[11px] hover:underline"
-                      >
-                        <Paperclip size={11} className="shrink-0" />
-                        <span className="truncate">{a.fileName}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-      )}
+                  {q.attachments.length > 0 && (
+                    <div className="border-border/60 mt-2 border-t pt-2">
+                      {q.attachments.map((a) => (
+                        <button
+                          key={a.id}
+                          type="button"
+                          onClick={() => void openFile(a.id)}
+                          className="text-primary flex w-full items-center gap-1.5 truncate text-left text-[11px] hover:underline"
+                        >
+                          <Paperclip size={11} className="shrink-0" />
+                          <span className="truncate">{a.fileName}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </Section>
 
       {/* ── The grid ──────────────────────────────────────────────────────────
 
@@ -486,15 +485,20 @@ export function EnquiryCompareDialog({
         Shown once two suppliers have answered. With one there is nothing to
         compare and the card above already says what he quoted. */}
       {enquiry.answeredCount > 1 && (
-        <section>
-          <h4 className="text-foreground mb-2 text-sm font-semibold">
-            Rates compared
-            {!enquiry.comparable && (
-              <span className="ml-2 text-xs font-normal text-amber-400">
-                — not every supplier priced every line, so the totals are not like for like
-              </span>
-            )}
-          </h4>
+        <Section
+          icon={Scale}
+          title="Rates compared"
+          summary={
+            enquiry.comparable
+              ? undefined
+              : 'not every supplier priced every line, so the totals are not like for like'
+          }
+        >
+          {!enquiry.comparable && (
+            <p className="mb-2 text-xs text-amber-400">
+              Not every supplier priced every line, so the totals below are not like for like.
+            </p>
+          )}
           <div className="border-border/70 overflow-x-auto rounded-lg border">
             <table className="subtable w-full">
               <thead>
@@ -622,7 +626,7 @@ export function EnquiryCompareDialog({
             Cheapest is marked, not chosen. Lead time, quality and how reliably somebody delivers
             are not on this screen — the figures are one part of the decision.
           </p>
-        </section>
+        </Section>
       )}
 
       {quoting && (

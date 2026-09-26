@@ -408,7 +408,12 @@ export default function PrintGoodsReceipt() {
         padding is inline — and those few millimetres are enough to push the
         bottom of the sheet onto a second piece of paper. Measured: it did
         exactly that, 2 pages for a two-line receipt. */}
-      <PrintToolbar backHref="/purchase/grn" backLabel="Goods receipts" copies={1} />
+      <PrintToolbar
+        backHref="/purchase/grn"
+        backLabel="Goods receipts"
+        copies={1}
+        fileName={grn.grnNumber}
+      />
 
       <div
         className="grn-sheet"

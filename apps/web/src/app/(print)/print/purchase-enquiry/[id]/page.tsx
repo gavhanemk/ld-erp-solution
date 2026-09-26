@@ -83,7 +83,12 @@ export default function PurchaseEnquiryPrintPage() {
 
   return (
     <>
-      <PrintToolbar backHref="/purchase/enquiries" backLabel="Enquiries" copies={1} />
+      <PrintToolbar
+        backHref="/purchase/enquiries"
+        backLabel="Enquiries"
+        copies={1}
+        fileName={forQuote ? e.enquiryNumber + ' ' + forQuote.supplier.name : e.enquiryNumber}
+      />
       <div
         style={{
           fontFamily: SANS,
@@ -262,9 +267,29 @@ export default function PurchaseEnquiryPrintPage() {
                 </tr>
               )
             })}
+            {/* Ruled blank rows to a minimum depth.
+              A two-line enquiry printed as a two-line table over half a page of
+              nothing reads as a torn-off stub, and a supplier who is being
+              asked to write rates into it needs somewhere to write. The shared
+              `DocumentTable` pads for the same reason; this sheet draws its own
+              grid and has to do it itself. */}
+            {Array.from({ length: Math.max(0, 8 - e.lines.length) }).map((_, i) => (
+              <tr
+                key={'pad' + i}
+                style={{
+                  background: (e.lines.length + i) % 2 ? TINT_SOFT : '#fff',
+                  borderBottom: '1px solid ' + RULE,
+                }}
+              >
+                <td style={{ padding: '5px 6px', color: GREY }}>{e.lines.length + i + 1}</td>
+                <td colSpan={5} style={{ padding: '5px 6px' }}>
+                  &nbsp;
+                </td>
+              </tr>
+            ))}
           </tbody>
-          {forQuote?.answered && (
-            <tfoot>
+          <tfoot>
+            {forQuote?.answered ? (
               <tr style={{ background: TINT, fontWeight: 700 }}>
                 <td colSpan={4} style={{ padding: '5px 6px', textAlign: 'right' }}>
                   Total on PI {forQuote.piNumber}
@@ -273,8 +298,21 @@ export default function PurchaseEnquiryPrintPage() {
                   {money(forQuote.piAmount ?? forQuote.value)}
                 </td>
               </tr>
-            </tfoot>
-          )}
+            ) : (
+              /* An empty total line on the copy he has not answered yet. He is
+                 being asked for a figure, and a form that asks for one without
+                 leaving a ruled space for it gets the figure written in the
+                 margin. */
+              <tr style={{ background: TINT, fontWeight: 700 }}>
+                <td colSpan={4} style={{ padding: '7px 6px', textAlign: 'right' }}>
+                  Your total
+                </td>
+                <td colSpan={2} style={{ padding: '7px 6px' }}>
+                  &nbsp;
+                </td>
+              </tr>
+            )}
+          </tfoot>
         </table>
 
         {/* Said on the paper, not only on the screen. A supplier holding a
@@ -294,12 +332,47 @@ export default function PurchaseEnquiryPrintPage() {
             : 'Office copy. Not to be sent to any supplier.'}
         </p>
 
+        {/* ── What we are asking him to send back ──────────────────────────
+
+          The reply block is the point of the supplier's copy, and it was the
+          thing the sheet did not have: a form that asks a man for four facts
+          and leaves him nowhere to write them gets them back on a letterhead
+          in his own order, which is how a comparison stops being comparable.
+
+          Never on the office copy — the mill is not quoting itself. */}
+        {forQuote && (
+          <div style={{ marginTop: 12, border: '1px solid ' + RULE, borderRadius: 4 }}>
+            <div
+              style={{
+                background: TINT,
+                padding: '4px 10px',
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: 0.5,
+                textTransform: 'uppercase',
+                color: NAVY,
+              }}
+            >
+              Your quotation
+            </div>
+            <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+              <tbody>
+                <ReplyRow label="Your PI / quotation no." />
+                <ReplyRow label="Price held until" />
+                <ReplyRow label="Delivery in (days)" />
+                <ReplyRow label="Payment terms" />
+                <ReplyRow label="Freight / packing" />
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {(e.notes || e.terms) && (
-          <div style={{ marginTop: 12, display: 'flex', gap: 12 }}>
+          <div style={{ marginTop: 12, display: 'flex', gap: 16 }}>
             {e.notes && (
               <div style={{ flex: 1 }}>
                 <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: NAVY }}>NOTES</p>
-                <p style={{ margin: '2px 0 0', fontSize: 11, color: GREY, whiteSpace: 'pre-line' }}>
+                <p style={{ margin: '3px 0 0', fontSize: 11, color: GREY, whiteSpace: 'pre-line' }}>
                   {e.notes}
                 </p>
               </div>
@@ -307,7 +380,7 @@ export default function PurchaseEnquiryPrintPage() {
             {e.terms && (
               <div style={{ flex: 1 }}>
                 <p style={{ margin: 0, fontSize: 10, fontWeight: 700, color: NAVY }}>TERMS</p>
-                <p style={{ margin: '2px 0 0', fontSize: 11, color: GREY, whiteSpace: 'pre-line' }}>
+                <p style={{ margin: '3px 0 0', fontSize: 11, color: GREY, whiteSpace: 'pre-line' }}>
                   {e.terms}
                 </p>
               </div>
@@ -315,12 +388,59 @@ export default function PurchaseEnquiryPrintPage() {
           </div>
         )}
 
+        {/* Both sides sign an enquiry that is going out, because the thing
+          coming back is his quotation and it needs his name on it. The office
+          copy signs once — there is nobody else in the room. */}
         {data.template?.showSignature !== false && (
-          <div style={{ marginTop: 34, textAlign: 'right', fontSize: 11, color: GREY }}>
-            <p style={{ margin: 0 }}>For {co.name}</p>
-            <p style={{ margin: '28px 0 0' }}>Authorised signatory</p>
+          <div
+            style={{
+              marginTop: 30,
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 24,
+              fontSize: 11,
+              color: GREY,
+            }}
+          >
+            {forQuote && (
+              <div style={{ flex: 1 }}>
+                <p style={{ margin: 0 }}>For {forQuote.supplier.name}</p>
+                <div style={{ height: 34 }} />
+                <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 3 }}>
+                  Signature &amp; seal · Date
+                </p>
+              </div>
+            )}
+            <div style={{ flex: 1, textAlign: 'right' }}>
+              <p style={{ margin: 0 }}>For {co.name}</p>
+              <div style={{ height: 34 }} />
+              <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 3 }}>
+                Authorised signatory
+              </p>
+            </div>
           </div>
         )}
+
+        {/* The number on the foot as well as the head. A sheet that comes back
+          by fax or as a photograph of the second page has to still say which
+          enquiry it answers. */}
+        <div
+          style={{
+            marginTop: 18,
+            borderTop: '1px solid ' + RULE,
+            paddingTop: 6,
+            display: 'flex',
+            justifyContent: 'space-between',
+            fontSize: 9.5,
+            color: GREY,
+          }}
+        >
+          <span>
+            {e.enquiryNumber}
+            {forQuote ? ' · ' + forQuote.supplier.name : ' · office copy'}
+          </span>
+          <span>{co.name}</span>
+        </div>
 
         {data.template?.footerNote && (
           <p style={{ marginTop: 14, fontSize: 10, color: GREY, textAlign: 'center' }}>
@@ -329,6 +449,18 @@ export default function PurchaseEnquiryPrintPage() {
         )}
       </div>
     </>
+  )
+}
+
+/** A ruled line for the supplier to write on. */
+function ReplyRow({ label }: { label: string }) {
+  return (
+    <tr style={{ borderTop: '1px solid ' + RULE }}>
+      <td style={{ padding: '7px 10px', color: GREY, whiteSpace: 'nowrap', width: '38%' }}>
+        {label}
+      </td>
+      <td style={{ padding: '7px 10px' }}>&nbsp;</td>
+    </tr>
   )
 }
 

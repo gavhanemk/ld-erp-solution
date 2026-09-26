@@ -268,6 +268,7 @@ export default function PurchaseNotePrintPage() {
             : '/purchase/debit-notes'
         }
         backLabel={ours ? 'Back to debit notes' : 'Back to credit notes'}
+        fileName={note.noteNumber}
         copies={1}
       />
 
