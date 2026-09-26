@@ -525,29 +525,43 @@ export function PurchaseEnquiryDialog({
         aria-modal="true"
         aria-labelledby="enquiry-dialog-title"
       >
-        <div className="border-border flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
-          <div className="min-w-0">
-            <h2 id="enquiry-dialog-title" className="text-foreground text-base font-semibold">
-              {editing ? 'Correct ' + record!.enquiryNumber : 'New purchase enquiry'}
-            </h2>
-            <p className="text-muted-foreground mt-0.5 text-xs">
-              {editing
-                ? 'Quantities the suppliers have already been asked about. Rates they quoted are kept.'
-                : 'Quantities now, prices when they answer. The number is allotted on save.'}
-            </p>
+        {/* The same chrome the order, receipt, bill and payment forms wear. */}
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+              <FileText size={19} className="text-primary" />
+            </div>
+            <div className="min-w-0">
+              <h2
+                id="enquiry-dialog-title"
+                className="text-foreground truncate text-xl font-semibold tracking-tight"
+              >
+                {editing ? 'Correct ' + record!.enquiryNumber : 'New Purchase Enquiry'}
+              </h2>
+              <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
+                {editing
+                  ? 'Quantities the suppliers have already been asked about. Rates they quoted are kept.'
+                  : 'Quantities now, prices when they answer. The number is allotted on save.'}
+              </p>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={saving}
-            className="btn-ghost"
-            aria-label="Close"
-          >
-            <X size={16} />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={save}
+              disabled={saving || problems.length > 0}
+            >
+              {saving && <Loader2 size={15} className="animate-spin" />}
+              {editing ? 'Save changes' : 'Raise enquiry'}
+            </button>
+            <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {error && (
             <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
               <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
@@ -967,7 +981,7 @@ export function PurchaseEnquiryDialog({
           </div>
         </div>
 
-        <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-4 py-3">
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-5 py-3.5">
           <div className="min-w-0">
             {/* Labelled an estimate every time it is shown. It is built from
               rates nobody has agreed to, and a bare total here would read as a
@@ -990,7 +1004,7 @@ export function PurchaseEnquiryDialog({
                 {problems[0]}
               </p>
             )}
-            <button type="button" onClick={onClose} disabled={saving} className="btn-ghost">
+            <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
               Cancel
             </button>
             <button

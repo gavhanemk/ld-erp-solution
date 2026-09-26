@@ -184,39 +184,49 @@ export function RecordQuoteDialog({
   }, [onClose, saving])
 
   return createPortal(
-    /* Centred and sized to its content, not stretched to the window.
-      The order and enquiry forms are full height because they are long; this
-      one is four fields and a short table, and at full height two thirds of it
-      was empty grey with the buttons stranded at the bottom of the screen. */
-    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
       <div
-        className="glass-card po-form flex max-h-full w-full max-w-5xl flex-col overflow-hidden"
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="quote-dialog-title"
       >
-        <div className="border-border flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
-          <div className="min-w-0">
-            <h2 id="quote-dialog-title" className="text-foreground text-base font-semibold">
-              {revising ? 'Revised PI' : 'Record proforma invoice'}
-            </h2>
-            <p className="text-muted-foreground mt-0.5 text-xs">
-              {enquiry.enquiryNumber} · {quote.supplier.name}
-              {revising && ' · replaces ' + quote.piNumber}
-            </p>
+        {/* The same chrome the order, receipt, bill and payment forms wear. */}
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+              <Receipt size={19} className="text-primary" />
+            </div>
+            <div className="min-w-0">
+              <h2
+                id="quote-dialog-title"
+                className="text-foreground truncate text-xl font-semibold tracking-tight"
+              >
+                {revising ? 'Revised Proforma Invoice' : 'Record Proforma Invoice'}
+              </h2>
+              <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
+                {enquiry.enquiryNumber} · {quote.supplier.name}
+                {revising && ' · replaces ' + quote.piNumber}
+              </p>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={saving}
-            className="btn-ghost"
-            aria-label="Close"
-          >
-            <X size={16} />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={save}
+              disabled={saving || problems.length > 0}
+            >
+              {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
+              {revising ? 'Replace PI' : 'Record PI'}
+            </button>
+            <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
-        <div className="min-h-0 space-y-4 overflow-y-auto p-4">
+        <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {error && (
             <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
               <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
@@ -461,7 +471,7 @@ export function RecordQuoteDialog({
           )}
         </div>
 
-        <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-4 py-3">
+        <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-5 py-3.5">
           <div className="min-w-0">
             <p className="text-muted-foreground text-[11px]">
               {priced} of {enquiry.lines.length} lines priced
@@ -473,20 +483,20 @@ export function RecordQuoteDialog({
               </span>
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             {problems.length > 0 && (
               <p className="text-muted-foreground max-w-[240px] text-right text-[11px]">
                 {problems[0]}
               </p>
             )}
-            <button type="button" onClick={onClose} disabled={saving} className="btn-ghost">
+            <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
               Cancel
             </button>
             <button
               type="button"
+              className="btn-primary"
               onClick={save}
               disabled={saving || problems.length > 0}
-              className="btn-primary"
             >
               {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
               {revising ? 'Replace PI' : 'Record PI'}

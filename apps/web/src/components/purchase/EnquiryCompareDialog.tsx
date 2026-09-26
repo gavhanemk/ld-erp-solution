@@ -14,6 +14,7 @@ import {
   ShoppingCart,
   ThumbsDown,
   Trash2,
+  Scale,
   Undo2,
   X,
 } from 'lucide-react'
@@ -164,34 +165,43 @@ export function EnquiryCompareDialog({
         lines is a short document; at full height it was half a screen of empty
         grey under it. It still grows — `max-h-full` with the body scrolling —
         so eight suppliers fill the screen and no more. */
-      <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
+      <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
         <div
-          className="glass-card po-form flex max-h-full w-full max-w-6xl flex-col overflow-hidden"
+          className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
           role="dialog"
           aria-modal="true"
           aria-labelledby="compare-title"
         >
-          <div className="border-border flex shrink-0 items-center justify-between gap-3 border-b px-4 py-3">
-            <div className="min-w-0">
-              <h2 id="compare-title" className="text-foreground text-base font-semibold">
-                What came back
-              </h2>
-              <p className="text-muted-foreground mt-0.5 text-xs">
-                {enquiryNumber}
-                {enquiry
-                  ? ' · ' +
-                    enquiry.answeredCount +
-                    ' of ' +
-                    enquiry.supplierCount +
-                    ' have answered'
-                  : ''}
-              </p>
+          {/* The same chrome the order, receipt, bill and payment forms wear. */}
+          <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+                <Scale size={19} className="text-primary" />
+              </div>
+              <div className="min-w-0">
+                <h2
+                  id="compare-title"
+                  className="text-foreground truncate text-xl font-semibold tracking-tight"
+                >
+                  What Came Back
+                </h2>
+                <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
+                  {enquiryNumber}
+                  {enquiry
+                    ? ' · ' +
+                      enquiry.answeredCount +
+                      ' of ' +
+                      enquiry.supplierCount +
+                      ' have answered'
+                    : ''}
+                </p>
+              </div>
             </div>
-            <button type="button" onClick={onClose} className="btn-ghost" aria-label="Close">
-              <X size={16} />
+            <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
+              <X size={18} />
             </button>
           </div>
-          <div className="min-h-0 overflow-y-auto">{body}</div>
+          <div className="flex-1 overflow-y-auto">{body}</div>
         </div>
       </div>,
       document.body
@@ -211,7 +221,7 @@ export function EnquiryCompareDialog({
   const lines = enquiry.lines
 
   return shell(
-    <div className="space-y-4 p-4">
+    <div className="space-y-4 px-5 py-4">
       {/* ── Who was asked ─────────────────────────────────────────────────── */}
       <section>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
