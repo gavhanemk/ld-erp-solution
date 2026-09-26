@@ -17,6 +17,7 @@ import masterRoutes from './routes/master.routes'
 import salesRoutes from './routes/sales.routes'
 import purchaseRoutes from './routes/purchase.routes'
 import purchaseNoteRoutes from './routes/purchase-notes.routes'
+import purchaseEnquiryRoutes from './routes/purchase-enquiries.routes'
 import reportsRoutes from './routes/reports.routes'
 import inventoryRoutes from './routes/inventory.routes'
 import productionRoutes from './routes/production.routes'
@@ -230,6 +231,7 @@ app.use('/api/webhooks', webhookRoutes)
 app.use('/api/dashboard', authMiddleware, dashboardRoutes)
 app.use('/api/masters', authMiddleware, masterRoutes)
 app.use('/api/sales', authMiddleware, salesRoutes)
+app.use('/api/purchase/enquiries', authMiddleware, purchaseEnquiryRoutes)
 app.use('/api/purchase/notes', authMiddleware, purchaseNoteRoutes)
 app.use('/api/purchase', authMiddleware, purchaseRoutes)
 app.use('/api/reports', authMiddleware, reportsRoutes)

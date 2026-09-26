@@ -261,6 +261,7 @@ model User {
   aiConversations      AIConversation[]
   createdSOs           SalesOrder[]                @relation("SOCreatedBy")
   approvedSOs          SalesOrder[]                @relation("SOApprovedBy")
+  createdEnquiries     PurchaseEnquiry[]           @relation("EnquiryCreatedBy")
   createdPOs           PurchaseOrder[]             @relation("POCreatedBy")
   approvedPOs          PurchaseOrder[]             @relation("POApprovedBy")
   createdMOs           ManufacturingOrder[]        @relation("MOCreatedBy")
@@ -271,6 +272,7 @@ model User {
   createdPayments      SupplierPayment[]           @relation("PaymentCreatedBy")
   reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
   uploadedFiles        PurchaseOrderAttachment[]   @relation("AttachmentUploadedBy")
+  uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
   countedStock         StockAdjustment[]           @relation("AdjustmentMadeBy")
@@ -536,6 +538,7 @@ model Item {
 
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
+  enquiryLines  PurchaseEnquiryLine[]
   poLines       PurchaseOrderLine[]
   soLines       SalesOrderLine[]
   mrLines       MaterialRequisitionLine[]
@@ -744,13 +747,14 @@ model Supplier {
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
-  addresses      SupplierAddress[]
-  purchaseOrders PurchaseOrder[]
-  invoices       PurchaseInvoice[]
-  payments       SupplierPayment[]
-  purchaseNotes  PurchaseNote[]
-  debitNotes     DebitNote[]
-  workstations   Workstation[]
+  addresses         SupplierAddress[]
+  purchaseEnquiries PurchaseEnquiry[]
+  purchaseOrders    PurchaseOrder[]
+  invoices          PurchaseInvoice[]
+  payments          SupplierPayment[]
+  purchaseNotes     PurchaseNote[]
+  debitNotes        DebitNote[]
+  workstations      Workstation[]
 
   @@index([code])
   @@map("suppliers")
@@ -1029,6 +1033,179 @@ model PaymentReceipt {
 // PURCHASE
 // ═══════════════════════════════════════════
 
+/// How far an enquiry has got.
+///
+/// `ORDERED` is set by the order, never by hand, and means at least one live
+/// purchase order stands on this enquiry. Part-ordering is ordinary — the mill
+/// orders 600 of the 1,240 quoted because that is what the supplier will hold
+/// the price on — so the enquiry has to go on showing the other 640 as quoted
+/// but unplaced.
+enum PurchaseEnquiryStatus {
+  /// Being prepared. Nothing has left the building.
+  DRAFT
+  /// With the supplier, waiting on his rates.
+  SENT
+  /// His proforma invoice is recorded against it.
+  QUOTED
+  /// At least one purchase order has been raised from it.
+  ORDERED
+  /// Dropped, with a reason — the rate was too high, the job was cancelled.
+  CLOSED
+}
+
+/// What the mill asks a supplier before it commits to anything.
+///
+/// The old ERP calls this a *provisional PO*, and the chain it sits in is:
+/// indent → provisional PO → supplier's rates → purchase order. The step exists
+/// because the buyer frequently does not know the rate. An enquiry goes out
+/// carrying quantities and no prices; the supplier answers with a proforma
+/// invoice — his own numbered document, quoting a rate and saying how long he
+/// will hold it; and the purchase order is then raised against that PI's
+/// number.
+///
+/// **Its own document rather than a sixth `PurchaseOrderStatus`.** A
+/// provisional order sitting in `purchase_orders` is read as a real one by
+/// everything that does not explicitly exclude it, and there are far more
+/// places that query purchase orders than places that look at their status. An
+/// enquiry leaking into ordered quantities would tell a buyer goods were coming
+/// that nobody had agreed to supply, put them on the indent as already bought,
+/// and offer a goods receipt against an order the supplier has never seen.
+///
+/// Nothing on this document is a commitment. That is the point of it, and it is
+/// why an open enquiry does not reduce what an indent still needs ordered.
+model PurchaseEnquiry {
+  id            String                @id @default(cuid())
+  enquiryNumber String                @unique
+  supplierId    String
+  supplier      Supplier              @relation(fields: [supplierId], references: [id])
+  enquiryDate   DateTime              @default(now())
+  /// When the mill needs the goods. Printed, so the supplier quotes against a
+  /// date instead of quoting a rate he cannot hold long enough to be useful.
+  requiredDate  DateTime?
+  status        PurchaseEnquiryStatus @default(DRAFT)
+
+  /// When it actually went out, which is not the date written on it. An enquiry
+  /// is drafted on Monday and sent on Wednesday, and the supplier's clock — and
+  /// any later argument about how long he took — starts on Wednesday.
+  sentAt DateTime?
+
+  /// The supplier's proforma invoice, as he wrote it.
+  ///
+  /// `piNumber` is his reference, and it is what goes onto the purchase order,
+  /// so the document he receives quotes the document he sent. `piAmount` is the
+  /// total *his* PI states and is deliberately not recomputed from the lines
+  /// below: when his arithmetic and ours disagree, the buyer has to see that
+  /// before ordering rather than have it silently corrected into agreement.
+  piNumber     String?
+  piDate       DateTime?
+  piAmount     Decimal?  @db.Decimal(12, 2)
+  /// How long he will hold the price. A rate that expired in August is not a
+  /// rate, and an order raised against one is an argument waiting to happen.
+  piValidUntil DateTime?
+  piReceivedAt DateTime?
+
+  /// Where the goods would be delivered, as a two-digit GST state code. Carried
+  /// so a quoted rate can be read as CGST+SGST or IGST before the order, not
+  /// after the bill.
+  placeOfSupplyCode String?
+
+  /// Printed on the supplier's copy.
+  notes  String?
+  terms  String?
+  /// Internal. A remark about a supplier is not always something to send him.
+  remark String?
+
+  /// Why it was dropped. A decision with no reason recorded gets taken again.
+  closeReason String?
+  closedAt    DateTime?
+
+  createdById String
+  createdBy   User     @relation("EnquiryCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// Recycle bin, as a purchase order has: the row stays, marked, and every
+  /// list, count and lookup outside the bin itself passes over it.
+  deletedAt   DateTime?
+  deletedById String?
+
+  lines          PurchaseEnquiryLine[]
+  attachments    PurchaseEnquiryAttachment[]
+  purchaseOrders PurchaseOrder[]
+
+  @@index([supplierId])
+  @@index([status])
+  @@index([deletedAt])
+  @@map("purchase_enquiries")
+}
+
+model PurchaseEnquiryLine {
+  id          String          @id @default(cuid())
+  enquiryId   String
+  enquiry     PurchaseEnquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item            @relation(fields: [itemId], references: [id])
+  /// What we asked for in our own words, when it differs from the item name.
+  description String?
+  /// Copied from the item when the enquiry is raised, so correcting the master
+  /// later does not change what the supplier was asked about.
+  hsnCode     String?
+  qty         Decimal         @db.Decimal(10, 3)
+
+  /// What the mill expects to pay, where the buyer has a view. Usually empty —
+  /// an enquiry goes out precisely because nobody knows the rate yet. Where it
+  /// is set it is worth keeping, because the gap between it and `quotedRate` is
+  /// the whole reason the buyer reads the PI twice.
+  expectedRate Decimal? @db.Decimal(10, 2)
+  /// What the supplier came back with. Set when the PI is recorded, and what
+  /// the purchase order's rate defaults to.
+  quotedRate   Decimal? @db.Decimal(10, 2)
+  /// His GST rate for the line, which is not always the one on our master and
+  /// is his to state.
+  gstRate      Decimal? @db.Decimal(5, 2)
+
+  sortOrder Int @default(0)
+
+  /// The indent line this was raised to answer, where it came off the indent
+  /// list rather than being typed. Null for an enquiry about something nobody
+  /// requisitioned, which is ordinary.
+  mrLineId String?
+  mrLine   MaterialRequisitionLine? @relation(fields: [mrLineId], references: [id])
+
+  /// The order lines raised from this one.
+  ///
+  /// How much of the enquiry has been ordered is read off these rather than
+  /// kept as a running total here, for the same reason the indent does it: a
+  /// counter and the orders it counts drift apart the first time an order is
+  /// cancelled, and then the buyer is told to order what they already ordered.
+  poLines PurchaseOrderLine[]
+
+  @@index([enquiryId])
+  @@index([mrLineId])
+  @@map("purchase_enquiry_lines")
+}
+
+/// The supplier's proforma invoice as a file, and whatever else the enquiry
+/// gathered. The PI is the document a price is defended with months later, so
+/// the scan matters as much as the number typed off it.
+model PurchaseEnquiryAttachment {
+  id           String          @id @default(cuid())
+  enquiryId    String
+  enquiry      PurchaseEnquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  /// What the person called it on their own machine. Shown in the list; never
+  /// used to build the storage path, because two people upload "scan.pdf".
+  fileName     String
+  storagePath  String          @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User            @relation("EnquiryAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime        @default(now())
+
+  @@index([enquiryId])
+  @@map("purchase_enquiry_attachments")
+}
+
 model PurchaseOrder {
   id                  String              @id @default(cuid())
   poNumber            String              @unique
@@ -1038,10 +1215,23 @@ model PurchaseOrder {
   deliveryDate        DateTime?
   status              PurchaseOrderStatus @default(DRAFT)
   poType              String              @default("STANDARD")
+  /// The enquiry this order came out of, where it came out of one.
+  ///
+  /// Null for an order typed straight in, which is most of them: a buyer who
+  /// already knows the rate does not send an enquiry first. Where it is set,
+  /// `enquiryNo` below is filled from that enquiry's PI number, so the order
+  /// the supplier receives quotes the document the supplier sent.
+  enquiryId           String?
+  enquiry             PurchaseEnquiry?    @relation(fields: [enquiryId], references: [id])
   /// The supplier's quotation or our enquiry that this order answers. Carried
   /// on the order because the first thing asked when a price is questioned
   /// months later is which quote it came from, and that answer lived only in
   /// somebody's email before now.
+  ///
+  /// Set from the enquiry's PI number when the order is raised from one, and
+  /// free text otherwise — an order can answer a quote that never became an
+  /// enquiry on this system, and refusing to record that would lose the
+  /// reference entirely.
   enquiryNo           String?
   enquiryDate         DateTime?
   /// Whatever the mill needs to quote back — a job number, an indent slip, the
@@ -1120,6 +1310,7 @@ model PurchaseOrder {
   @@index([poNumber])
   @@index([supplierId])
   @@index([status])
+  @@index([enquiryId])
   /// Every list of orders filters on this, so it earns an index of its own.
   @@index([deletedAt])
   @@map("purchase_orders")
@@ -1191,6 +1382,14 @@ model PurchaseOrderLine {
   pendingQty  Decimal       @default(0) @db.Decimal(10, 3)
   sortOrder   Int           @default(0)
 
+  /// The enquiry line this was raised from, where the order came off an
+  /// enquiry. It is what lets the enquiry say how much of what it quoted has
+  /// actually been placed, and it survives the order being cancelled — which is
+  /// the point, because a cancelled order has to put its quantity back on the
+  /// enquiry as unplaced rather than leave it looking bought.
+  enquiryLineId String?
+  enquiryLine   PurchaseEnquiryLine? @relation(fields: [enquiryLineId], references: [id])
+
   /// The requisition line this was raised to answer, where it was raised from
   /// one.
   ///
@@ -1219,6 +1418,7 @@ model PurchaseOrderLine {
   grnLines GRNLine[]
 
   @@index([mrLineId])
+  @@index([enquiryLineId])
   @@map("purchase_order_lines")
 }
 
@@ -1643,6 +1843,14 @@ model MaterialRequisitionLine {
   /// Issue it off the rack, or buy it. Defaults to the rack, which is what
   /// every line written before this existed meant.
   fulfilment RequisitionFulfilment @default(FROM_STOCK)
+
+  /// The enquiry lines raised against this one.
+  ///
+  /// Shown to the buyer, but never subtracted from what the request still
+  /// needs: an enquiry is a question, not a purchase. Without it a buyer cannot
+  /// tell a request nobody has looked at from one already out with a supplier,
+  /// and enquires about it a second time.
+  enquiryLines PurchaseEnquiryLine[]
 
   /// The order lines raised against this one.
   ///

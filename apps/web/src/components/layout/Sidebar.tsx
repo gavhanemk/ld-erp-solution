@@ -82,6 +82,11 @@ const navItems: NavItem[] = [
   {
     label: 'Purchase', icon: Package,
     children: [
+      /* First, because it comes first: the buyer sends an enquiry, the
+         supplier answers with a proforma invoice, and the order is raised
+         against its number. Optional — plenty of orders are placed at a rate
+         already known — which is why it reads as a step and not a gate. */
+      { label: 'Purchase Enquiries', href: '/purchase/enquiries' },
       { label: 'Purchase Orders', href: '/purchase/orders' },
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
       { label: 'Purchase Bills', href: '/purchase/bills' },

@@ -11,6 +11,7 @@ import {
   notedQtyByGrnLine,
   syncBillAdjustments,
 } from '../services/purchaseNote.service'
+import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import {
   MAX_FILES_PER_DOCUMENT,
@@ -68,6 +69,12 @@ const lineSchema = z.object({
    * the line by hand, which loses the link entirely.
    */
   mrLineId: z.string().optional().nullable(),
+  /*
+   * The enquiry line this rate came off, when the order was raised from an
+   * enquiry. Checked against the order's own `enquiryId` on the way in, so a
+   * line cannot quietly claim quantity off somebody else's enquiry.
+   */
+  enquiryLineId: z.string().optional().nullable(),
 })
 
 /**
@@ -103,6 +110,15 @@ const createSchema = z.object({
   poType: z.enum(['ITEM_LEVEL', 'ORDER_LEVEL', 'NONE']).optional(),
   // Ship straight to a customer instead of to one of our warehouses.
   deliveryCustomerId: z.string().optional().nullable(),
+  /*
+   * The enquiry this order is being raised from.
+   *
+   * Where it is given, `enquiryNo` and `enquiryDate` are filled from that
+   * enquiry's proforma invoice rather than from the browser — the reference a
+   * price is defended with has to come off the recorded document, not off a
+   * form somebody could type anything into.
+   */
+  enquiryId: z.string().optional().nullable(),
   // Which quotation this order answers, and whatever the mill quotes back.
   // Free text on purpose: every mill numbers these its own way.
   enquiryNo: z.string().max(50).optional().nullable(),
@@ -697,6 +713,23 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         where: { po: { status: { not: 'CANCELLED' } } },
         select: { qty: true },
       },
+      /*
+       * What is already out with a supplier as a question.
+       *
+       * Counted so the buyer can see it, and subtracted from nothing. An
+       * enquiry is not a purchase: if it reduced what the request still needs,
+       * a request that had only been asked about would read as bought, and the
+       * line would drop off this very list before anybody had agreed to supply
+       * it. What it prevents is the opposite mistake — enquiring twice about
+       * the same request because the first enquiry left no mark here.
+       *
+       * Closed enquiries are left out. A dropped enquiry is not out with
+       * anybody, and showing it would stop the buyer raising a new one.
+       */
+      enquiryLines: {
+        where: { enquiry: { status: { notIn: ['CLOSED'] }, deletedAt: null } },
+        select: { qty: true },
+      },
     },
     orderBy: [{ mr: { requestDate: 'asc' } }, { id: 'asc' }],
   })
@@ -705,6 +738,7 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
     .map((l) => {
       const requested = Number(l.requestedQty)
       const ordered = round3(l.poLines.reduce((t, p) => t + Number(p.qty), 0))
+      const enquired = round3(l.enquiryLines.reduce((t, e) => t + Number(e.qty), 0))
       return {
         mrLineId: l.id,
         mrId: l.mr.id,
@@ -723,6 +757,12 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         warehouse: l.warehouse,
         indentQty: requested,
         orderedQty: ordered,
+        /*
+         * Out for enquiry. Shown beside the pending figure, never inside it —
+         * `pendingQty` is what is still to be ORDERED, and it is what decides
+         * whether this row stays on the list.
+         */
+        enquiredQty: enquired,
         pendingQty: round3(Math.max(0, requested - ordered)),
       }
     })
@@ -851,6 +891,78 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
 
+  /*
+   * The enquiry this order is being raised from, if any.
+   *
+   * Three things are checked, and each of them is a way the link could be a
+   * lie rather than a reference:
+   *
+   *   - it exists and is not in the bin, or the order points at nothing;
+   *   - it belongs to this supplier, or one supplier's order would be quoting
+   *     a price another supplier gave;
+   *   - it is not closed, because a closed enquiry is a decision not to buy
+   *     and an order against one is somebody working from a stale screen.
+   *
+   * An expired PI is deliberately NOT refused. The validity is the supplier's
+   * own statement about how long he will hold the rate, not a rule of ours, and
+   * he frequently honours it anyway — so the order carries a warning on screen
+   * and goes through. Refusing it would leave the buyer retyping the whole
+   * order by hand to place something the supplier has already agreed to.
+   */
+  const enquiry = data.enquiryId
+    ? await prisma.purchaseEnquiry.findUnique({
+        where: { id: data.enquiryId },
+        select: {
+          id: true,
+          enquiryNumber: true,
+          supplierId: true,
+          status: true,
+          deletedAt: true,
+          piNumber: true,
+          piDate: true,
+          lines: { select: { id: true } },
+        },
+      })
+    : null
+
+  if (data.enquiryId) {
+    if (!enquiry || enquiry.deletedAt) {
+      throw new AppError('That enquiry no longer exists', 400, 'BAD_ENQUIRY')
+    }
+    if (enquiry.supplierId !== data.supplierId) {
+      throw new AppError(
+        `${enquiry.enquiryNumber} was sent to a different supplier. An order can only be raised ` +
+          `from an enquiry to the supplier it is being placed with.`,
+        400,
+        'ENQUIRY_WRONG_SUPPLIER'
+      )
+    }
+    if (enquiry.status === 'CLOSED') {
+      throw new AppError(
+        `${enquiry.enquiryNumber} is closed. Reopen it before ordering against it.`,
+        409,
+        'ENQUIRY_CLOSED'
+      )
+    }
+
+    const mine = new Set(enquiry.lines.map((l) => l.id))
+    for (const l of data.lines) {
+      if (l.enquiryLineId && !mine.has(l.enquiryLineId)) {
+        throw new AppError(
+          `One of those lines points at an enquiry line that is not on ${enquiry.enquiryNumber}`,
+          400,
+          'ENQUIRY_WRONG_LINE'
+        )
+      }
+    }
+  } else if (data.lines.some((l) => l.enquiryLineId)) {
+    throw new AppError(
+      'A line cannot come off an enquiry unless the order says which enquiry',
+      400,
+      'ENQUIRY_LINE_WITHOUT_ENQUIRY'
+    )
+  }
+
   const po = await prisma.$transaction(async (tx) => {
     // A back-dated order belongs to its own financial year's series.
     const poNumber = await nextDocumentNumber(tx, 'PO', data.poDate ?? new Date())
@@ -896,8 +1008,17 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         deliveryCustomerId: data.deliveryCustomerId || null,
         deliveryAddress: destination?.address ?? null,
         supplierAddress: await supplierBillingAddress(tx, data.supplierId, data.supplierAddressId),
-        enquiryNo: data.enquiryNo ?? null,
-        enquiryDate: data.enquiryDate ?? null,
+        enquiryId: enquiry?.id ?? null,
+        /*
+         * The supplier's own PI number wins over anything typed.
+         *
+         * This is the field printed on the order he receives, and quoting his
+         * reference back to him is the whole point of the enquiry step. What
+         * was typed is only used when there is no enquiry behind the order —
+         * answering a quote that never became one on this system.
+         */
+        enquiryNo: enquiry?.piNumber ?? data.enquiryNo ?? null,
+        enquiryDate: enquiry?.piDate ?? data.enquiryDate ?? null,
         reference: data.reference ?? null,
         remark: data.remark ?? null,
         placeOfSupplyCode: tax.placeOfSupply,
@@ -921,6 +1042,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
             styleNo: l.styleNo?.trim() || null,
             styleId: l.styleId || null,
             mrLineId: l.mrLineId || null,
+            enquiryLineId: l.enquiryLineId || null,
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
             unitRate: l.unitRate,
@@ -935,6 +1057,12 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
       include: poInclude,
     })
   })
+
+  // The enquiry's status is derived, so it has to be recomputed now that an
+  // order stands on it. Outside the transaction above deliberately: the order
+  // is the document that matters, and a failure to relabel the enquiry must not
+  // roll back an order that saved correctly.
+  if (enquiry) await syncEnquiryStatus(prisma, enquiry.id)
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -1173,6 +1301,16 @@ router.patch(
       },
       include: poInclude,
     })
+
+    /*
+     * A cancelled order releases its enquiry.
+     *
+     * This is the case the derived status exists for: the quantity this order
+     * claimed goes straight back to being quoted but unplaced, and an enquiry
+     * with nothing else on it drops from ORDERED back to QUOTED — so the buyer
+     * can raise a corrected order from the same PI instead of starting again.
+     */
+    if (before.enquiryId) await syncEnquiryStatus(prisma, before.enquiryId)
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -1476,6 +1614,9 @@ router.delete('/orders/:id', requirePermission(MODULE, 'delete'), async (req: Au
     data: { deletedAt: new Date(), deletedById: req.user?.id ?? null },
   })
 
+  // A binned order stops standing on its enquiry, the same as a cancelled one.
+  if (order.enquiryId) await syncEnquiryStatus(prisma, order.enquiryId)
+
   await writeAuditLog(req, {
     module: MODULE,
     action: 'DELETE',
@@ -1545,6 +1686,9 @@ router.post(
       where: { id: order.id },
       data: { deletedAt: null, deletedById: null },
     })
+
+    // And an order put back stands on it again.
+    if (order.enquiryId) await syncEnquiryStatus(prisma, order.enquiryId)
 
     await writeAuditLog(req, {
       module: MODULE,

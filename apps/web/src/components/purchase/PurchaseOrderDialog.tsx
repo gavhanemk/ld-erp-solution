@@ -33,6 +33,7 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
+import type { EnquiryRecord } from '@/components/purchase/PurchaseEnquiryDialog'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 
@@ -84,6 +85,15 @@ export interface PoLine {
   mrLineId?: string | null
   /** The indent's number, for the note under the row. Browser only. */
   mrNumber?: string | null
+  /**
+   * The enquiry line this rate came off, when the order was raised from an
+   * enquiry rather than typed.
+   *
+   * Carried so the enquiry knows how much of what it quoted has actually been
+   * placed — which is what lets a cancelled order hand its quantity straight
+   * back, and what stops the same quote being ordered twice.
+   */
+  enquiryLineId?: string | null
   /**
    * Whether `discount` is a percentage or a number of rupees.
    *
@@ -497,13 +507,29 @@ export function PurchaseOrderDialog({
   onClose,
   onSaved,
   record,
+  fromEnquiry,
 }: {
   open: boolean
   onClose: () => void
   onSaved: () => void
   record?: PurchaseOrder | null
+  /**
+   * The enquiry this order is being raised from.
+   *
+   * Prefills the supplier, the lines and the rates the supplier quoted, and
+   * carries the link through to the server so the enquiry can say what has been
+   * placed against it. Ignored when `record` is set: an order already saved has
+   * its own enquiry and must not be re-pointed at another one from a stale link.
+   *
+   * The PI number is deliberately NOT sent from here. The server reads it off
+   * the enquiry row, because the reference a price is defended with must come
+   * from the recorded document rather than from a form.
+   */
+  fromEnquiry?: EnquiryRecord | null
 }) {
   const isEdit = Boolean(record)
+  /** Only for a new order — see the prop's note. */
+  const enquiry = isEdit ? null : (fromEnquiry ?? null)
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<Option[]>([])
@@ -624,7 +650,7 @@ export function PurchaseOrderDialog({
 
   useEffect(() => {
     if (!open) return
-    setSupplierId(record?.supplierId ?? '')
+    setSupplierId(record?.supplierId ?? enquiry?.supplier?.id ?? '')
     // A new order starts without a discount: most of this mill's carry none,
     // and a discount column that is live by default invites a figure nobody
     // agreed to.
@@ -650,8 +676,13 @@ export function PurchaseOrderDialog({
     // An order saved with no discount reopens with the box empty, not with a
     // zero in it — a zero sitting there is not a figure anyone typed.
     setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
-    setNotes(record?.notes ?? '')
-    setTerms(record?.terms ?? '')
+    /*
+     * Carried across from the enquiry, where there is one. The terms the mill
+     * quoted with are the terms it is ordering on, and retyping them is how the
+     * two documents come to disagree about what was agreed.
+     */
+    setNotes(record?.notes ?? enquiry?.notes ?? '')
+    setTerms(record?.terms ?? enquiry?.terms ?? '')
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => {
@@ -680,10 +711,48 @@ export function PurchaseOrderDialog({
               // request would come back as unordered.
               mrLineId: l.mrLine?.id ?? null,
               mrNumber: l.mrLine?.mr?.mrNumber ?? null,
+              // The scalar, not a relation: Prisma returns it on the row and
+              // the edit path must keep it, or correcting an order would cut
+              // every line loose from the enquiry it was quoted on.
+              enquiryLineId: l.enquiryLineId ?? null,
             }
           })
-        : // Always one row to type into. An empty table has nowhere to start.
-          [blankLine()]
+        : enquiry?.lines?.length
+          ? /*
+             * Raised from an enquiry: the items, the quantities and the rates
+             * the supplier quoted, already on the form.
+             *
+             * The rate falls back to zero rather than to our own expected rate
+             * when he did not price the line. An estimate promoted into an
+             * order's unit rate is a figure nobody agreed to arriving on a
+             * document the supplier will be paid against — and a zero is
+             * visibly unfinished, which is the honest state.
+             *
+             * `mrLineId` travels too, so a purchase that began as a production
+             * request still traces back to the job through the enquiry.
+             */
+            enquiry.lines.map((l) => {
+              const cat = categories.find((c) => c.id === (l.item as { category?: { id: string } })?.category?.id)
+              return {
+                itemId: l.itemId,
+                codeText: l.item.code ?? '',
+                categoryId: cat?.parentId ?? cat?.id ?? '',
+                subcategoryId: cat?.parentId ? cat.id : '',
+                description: l.description ?? '',
+                styleNo: '',
+                styleId: '',
+                qty: String(Number(l.qty)),
+                unitRate: l.quotedRate == null ? '' : String(Number(l.quotedRate)),
+                discount: '0',
+                discountUnit: '%' as const,
+                gstRate: l.gstRate == null ? '' : String(Number(l.gstRate)),
+                mrLineId: l.mrLineId ?? null,
+                mrNumber: l.mrLine?.mr?.mrNumber ?? null,
+                enquiryLineId: l.id,
+              }
+            })
+          : // Always one row to type into. An empty table has nowhere to start.
+            [blankLine()]
     )
     setCharges(
       Object.fromEntries((record?.charges ?? []).map((c) => [c.chargeTypeId, String(c.amount)]))
@@ -704,7 +773,10 @@ export function PurchaseOrderDialog({
     askedFor.current = new Set()
     setError(null)
     setSaving(null)
-  }, [open, record])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- categories is
+    // read for the category dropdowns and would re-run this reset every time
+    // the master list loads, wiping what the buyer had typed.
+  }, [open, record, enquiry])
 
   /*
    * The chosen supplier's addresses.
@@ -973,6 +1045,7 @@ export function PurchaseOrderDialog({
     gstRate: '',
     mrLineId: null,
     mrNumber: null,
+    enquiryLineId: null,
   })
 
   /** Rows that have an item on them. A blank row is not part of the order. */
@@ -1583,6 +1656,9 @@ export function PurchaseOrderDialog({
   const payload = () => ({
     supplierId,
     poType,
+    // The link, not the reference. The server fills `enquiryNo` and
+    // `enquiryDate` from the enquiry's own PI row.
+    enquiryId: enquiry?.id ?? null,
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     poDate: poDate || undefined,
@@ -1614,6 +1690,7 @@ export function PurchaseOrderDialog({
       styleNo: (l.styleNo as string)?.trim() || null,
       styleId: (l.styleId as string) || null,
       mrLineId: l.mrLineId || null,
+      enquiryLineId: l.enquiryLineId || null,
       qty: num(l.qty),
       unitRate: num(l.unitRate),
       // A percentage whichever unit it was typed in — see `lineDiscountOf`.
@@ -1888,6 +1965,45 @@ export function PurchaseOrderDialog({
               and what to quote back. The supplier sits in here rather than in
               a box of its own — it is one dropdown, and a box to itself left a
               column of empty space beside it. */}
+            {/* Where this order came from, when it came from an enquiry.
+
+              Read-only on purpose. The PI number is what the printed order
+              quotes back to the supplier, and it is taken off the recorded
+              enquiry by the server rather than from anything typed here —
+              so a price on an order always has a document behind it.
+
+              The lapsed warning is a warning and not a block. The validity
+              is the supplier's own statement about how long he will hold
+              the rate, not a rule of ours, and he usually honours it anyway;
+              refusing the order would mean retyping the whole thing by hand
+              to place something he has already agreed to. */}
+            {enquiry && (
+              <div className="border-border/70 bg-secondary/30 flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-lg border px-3 py-2">
+                <span className="text-muted-foreground text-[11px]">
+                  Raised from{' '}
+                  <span className="text-foreground font-mono">{enquiry.enquiryNumber}</span>
+                </span>
+                {enquiry.piNumber && (
+                  <span className="text-muted-foreground text-[11px]">
+                    against PI{' '}
+                    <span className="text-foreground font-mono">{enquiry.piNumber}</span>
+                    {enquiry.piDate && ' dated ' + new Date(enquiry.piDate).toLocaleDateString("en-IN")}
+                  </span>
+                )}
+                {enquiry.piValidUntil &&
+                  (new Date(enquiry.piValidUntil).getTime() < Date.now() ? (
+                    <span className="text-[11px] font-medium text-amber-400">
+                      his price lapsed on{' '}
+                      {new Date(enquiry.piValidUntil).toLocaleDateString("en-IN")} — worth
+                      confirming before you send this
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground text-[11px]">
+                      price held to {new Date(enquiry.piValidUntil).toLocaleDateString("en-IN")}
+                    </span>
+                  ))}
+              </div>
+            )}
             <Section icon={FileText} title="Basic Details">
               {/* `auto-fit`, not a fixed two columns, so each pairs with
                 the field beside it instead of stacking six deep on a

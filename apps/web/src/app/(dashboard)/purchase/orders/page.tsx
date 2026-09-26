@@ -25,6 +25,7 @@ import {
   type PurchaseOrder,
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
+import type { EnquiryRecord } from '@/components/purchase/PurchaseEnquiryDialog'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
@@ -128,9 +129,55 @@ export default function PurchaseOrdersPage() {
     open: false,
     record: null,
   })
+  /*
+   * The enquiry an order is being raised from, arrived at by ?fromEnquiry=.
+   *
+   * A link rather than a dialog handing over an object, because the Order
+   * button lives on a different screen. The id is all that crosses; the enquiry
+   * itself is fetched here, so what the form prefills from is what the server
+   * currently holds and not a copy of a row that may be minutes stale.
+   */
+  const [fromEnquiry, setFromEnquiry] = useState<EnquiryRecord | null>(null)
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
   const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
+
+  /*
+   * Arriving from an enquiry's Order button.
+   *
+   * Read straight off `window.location` rather than through `useSearchParams`,
+   * which would opt this whole page into a Suspense boundary for one optional
+   * parameter. Runs once: the dialog's own close handler clears both the state
+   * and the query string.
+   *
+   * A failure opens the blank order form and says why, rather than leaving the
+   * buyer on a list with nothing having happened — they can still raise the
+   * order by hand, which is what they would have done before any of this.
+   */
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get('fromEnquiry')
+    if (!id) return
+    let alive = true
+    void api
+      .get<{ data: EnquiryRecord }>(`/purchase/enquiries/${id}`)
+      .then((res) => {
+        if (!alive) return
+        setFromEnquiry(res.data)
+        setDialog({ open: true, record: null })
+      })
+      .catch((err) => {
+        if (!alive) return
+        setError(
+          err instanceof ApiError
+            ? `That enquiry could not be opened: ${err.message}`
+            : 'That enquiry could not be opened.'
+        )
+        setDialog({ open: true, record: null })
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   /*
    * Every supplier and every item, for the two filter dropdowns.
@@ -1313,7 +1360,14 @@ The supplier already has this order. If it was real and fell through, cancel it 
       <PurchaseOrderDialog
         open={dialog.open}
         record={dialog.record}
-        onClose={() => setDialog({ open: false, record: null })}
+        fromEnquiry={fromEnquiry}
+        onClose={() => {
+          setDialog({ open: false, record: null })
+          // Dropped on close, and the query string with it, or coming back to
+          // this screen later would silently reopen against the same enquiry.
+          setFromEnquiry(null)
+          window.history.replaceState(null, '', '/purchase/orders')
+        }}
         onSaved={() => {
           // Correcting an order the supplier already holds makes their copy
           // wrong, and nothing else in the system will tell them. This does.
