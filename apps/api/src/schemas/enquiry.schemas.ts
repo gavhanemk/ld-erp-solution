@@ -17,6 +17,16 @@ export const ENQUIRY_STATUSES = ['DRAFT', 'SENT', 'QUOTED', 'ORDERED', 'CLOSED']
 export type EnquiryStatus = (typeof ENQUIRY_STATUSES)[number]
 
 const lineSchema = z.object({
+  /*
+   * The existing line this row IS, on an edit.
+   *
+   * Without it every save reads as "delete all seven lines, add seven new
+   * ones" — which defeats the guard on what has already been ordered, throws
+   * away the rates the supplier quoted, and cuts any purchase order raised
+   * from this enquiry loose from the line it was quoted on. Absent on a line
+   * being added, which is how the two are told apart.
+   */
+  id: z.string().optional(),
   itemId: z.string().min(1, 'Pick an item'),
   description: z.string().max(300).optional().nullable(),
   qty: z.number().positive('Quantity must be more than zero'),

@@ -441,34 +441,53 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       await assertEditKeepsOrdersTrue(
         tx,
         before,
-        data.lines.map((l) => ({ id: (l as { id?: string }).id ?? null, qty: l.qty }))
+        data.lines.map((l) => ({ id: l.id ?? null, qty: l.qty }))
       )
+
+      const rows = await buildLines(tx, data.lines)
+      const kept = data.lines.map((l) => l.id).filter((id): id is string => Boolean(id))
 
       /*
-       * Rates the supplier already quoted are carried across a correction.
+       * Updated in place, never deleted and rewritten.
        *
-       * They belong to his PI, not to this form, so an edit that changes a
-       * quantity must not silently drop the price he gave for it. Matched by
-       * line id — a line added during the edit has no quoted rate, which is
-       * right: he has not quoted it.
+       * Rewriting was the obvious way to do this and is wrong three times
+       * over. It throws away the rates the supplier quoted, because they live
+       * on the row and not on the form. It defeats the guard above, since
+       * every line then looks new. And `PurchaseOrderLine.enquiryLineId` is
+       * `onDelete: SetNull`, so deleting the row a purchase order was quoted
+       * on does not fail — it quietly cuts the order loose, and the enquiry
+       * goes back to reading as though nothing had been ordered against it.
+       *
+       * So: remove only the lines actually taken off, update the ones that
+       * stayed, and create only the ones that are genuinely new.
        */
-      const quoted = new Map(
-        before.lines.map((l) => [l.id, { quotedRate: l.quotedRate, gstRate: l.gstRate }])
-      )
-      const rows = await buildLines(tx, data.lines)
-
-      await tx.purchaseEnquiryLine.deleteMany({ where: { enquiryId } })
-      await tx.purchaseEnquiryLine.createMany({
-        data: rows.map((r, i) => {
-          const keep = quoted.get((data.lines![i] as { id?: string }).id ?? '')
-          return {
-            ...r,
-            enquiryId,
-            quotedRate: keep?.quotedRate ?? null,
-            gstRate: r.gstRate ?? keep?.gstRate ?? null,
-          }
-        }),
+      await tx.purchaseEnquiryLine.deleteMany({
+        where: { enquiryId, ...(kept.length ? { id: { notIn: kept } } : {}) },
       })
+
+      for (let i = 0; i < rows.length; i++) {
+        const id = data.lines[i].id
+        const row = rows[i]
+        if (id) {
+          await tx.purchaseEnquiryLine.update({
+            where: { id },
+            data: {
+              itemId: row.itemId,
+              description: row.description,
+              hsnCode: row.hsnCode,
+              qty: row.qty,
+              expectedRate: row.expectedRate,
+              mrLineId: row.mrLineId,
+              sortOrder: row.sortOrder,
+              // Only when the form actually sent one, or a correction that
+              // did not mention GST would wipe the rate off his PI.
+              ...(row.gstRate != null ? { gstRate: row.gstRate } : {}),
+            },
+          })
+        } else {
+          await tx.purchaseEnquiryLine.create({ data: { ...row, enquiryId } })
+        }
+      }
     }
 
     await tx.purchaseEnquiry.update({
