@@ -161,7 +161,7 @@ export const purchaseOrderStatus: ReportDefinition = {
           select: {
             qty: true,
             shortClosed: true,
-            grnLines: { select: { acceptedQty: true, grn: { select: { status: true } } } },
+            grnLines: { select: { receivedQty: true, grn: { select: { status: true } } } },
           },
         },
         invoices: { select: { totalAmount: true, status: true } },
@@ -174,12 +174,15 @@ export const purchaseOrderStatus: ReportDefinition = {
     const rows = orders.map((o) => {
       const orderedQty = o.lines.reduce((s, l) => s + Number(l.qty), 0)
       // Cancelled receipts booked nothing in, so they count toward nothing.
+      // Counted from the whole delivery, rejects included — a reject is a
+      // quality dispute settled with a debit note, not a shortfall the order
+      // is still owed.
       const receivedQty = o.lines.reduce(
         (s, l) =>
           s +
           l.grnLines
             .filter((g) => g.grn.status !== 'CANCELLED')
-            .reduce((n, g) => n + Number(g.acceptedQty), 0),
+            .reduce((n, g) => n + Number(g.receivedQty), 0),
         0
       )
       // A short-closed line is settled, not pending. Counting its balance as
@@ -188,7 +191,7 @@ export const purchaseOrderStatus: ReportDefinition = {
         if (l.shortClosed) return s
         const got = l.grnLines
           .filter((g) => g.grn.status !== 'CANCELLED')
-          .reduce((n, g) => n + Number(g.acceptedQty), 0)
+          .reduce((n, g) => n + Number(g.receivedQty), 0)
         return s + Math.max(0, Number(l.qty) - got)
       }, 0)
 

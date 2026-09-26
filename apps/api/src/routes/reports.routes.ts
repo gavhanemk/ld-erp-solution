@@ -30,6 +30,8 @@ router.get('/', async (req: AuthRequest, res) => {
       description: r.description,
       filters: r.filters,
       columns: r.columns.map((c) => ({ key: c.key, label: c.label, type: c.type, unit: c.unit })),
+      /** Read by the on-screen pivot table for which fields to default to. */
+      pivot: r.pivot ? { rows: r.pivot.rows, values: r.pivot.values } : undefined,
     })),
   })
 })
@@ -91,9 +93,18 @@ router.get('/:id/run', async (req: AuthRequest, res) => {
       rowCount: result.rows.length,
       totalRows: result.totalRows ?? result.rows.length,
       truncated: Boolean(result.totalRows && result.totalRows > result.rows.length),
-      /** A window onto the rows, so the screen can show a table without carrying all of them. */
       columns: def.columns,
+      /** The first 100, for the plain table underneath. */
       preview: result.rows.slice(0, 100),
+      /**
+       * Every row the query returned, capped the same way the export is.
+       *
+       * The on-screen pivot table regroups over this rather than the preview
+       * — a cross-tab built from the first 100 rows of a register sorted by
+       * date would silently answer for a fortnight while claiming to answer
+       * for the quarter that was actually asked for.
+       */
+      rows: result.rows,
     },
   })
 })

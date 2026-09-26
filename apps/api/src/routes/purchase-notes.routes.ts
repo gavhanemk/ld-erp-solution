@@ -18,7 +18,12 @@ import {
 } from '../lib/storage'
 import {
   adjustableOn,
+  adjustableOnGrn,
   assertEditable,
+  assertIssuerMatches,
+  DOC_RULES,
+  effectFor,
+  GST_TREATMENTS,
   moveNoteStock,
   priceNote,
   REASON_RULES,
@@ -28,18 +33,30 @@ import {
 } from '../services/purchaseNote.service'
 import {
   createNoteSchema,
+  gstTreatmentSchema,
   noteListQuerySchema,
   updateNoteSchema,
 } from '../schemas/purchase-note.schemas'
 
 /**
- * Debit and credit notes against a supplier.
+ * Adjustments against a supplier's bill, of every kind.
  *
- * What the mill claims back, and what a supplier grants. One router for both:
- * they adjust the same bill against the same remaining balance and differ in
- * who signed the paper, so splitting them would have been two of every route
- * below, drifting apart from the first change onwards. `noteType` is a filter
- * on the list and a field on the form; everything else is shared.
+ * Our own claim, their credit note, their debit note. One router for all of
+ * them: they point at the same bill, validate against the same remaining
+ * balance and print on the same sheet, so splitting them would have been
+ * three of every route below, drifting apart from the first change onwards.
+ * `docType`, `issuedBy` and `effect` are filters on the list and fields on the
+ * form; everything else is shared.
+ *
+ * ── Three questions, not one ────────────────────────────────────────────────
+ *
+ * The purchase office answers exactly one of them: what happened in the
+ * godown. It does NOT decide what document results, who issues it, or what
+ * GST makes of it, and this router is careful never to infer any of those
+ * from the first. An adjustment does not have a direction because of the
+ * event behind it — it has one because of the document, which is why
+ * `effectFor` is keyed on `docType` and nothing anywhere reads a direction off
+ * a reason.
  *
  * Mounted at `/api/purchase/notes` ahead of the purchase router, so it
  * inherits the same permission module and the `/purchase/:id` routes there
@@ -102,6 +119,7 @@ const noteInclude = {
       amount: true,
       remarks: true,
       billLineId: true,
+      grnLineId: true,
       item: {
         select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
       },
@@ -156,23 +174,45 @@ async function taxContextFor(
 // ── Reading ─────────────────────────────────────────────────────────────────
 
 /**
- * The catalogue the form's "What happened?" list is built from.
+ * Everything the form's three questions are built from.
  *
  * Served rather than duplicated in the web app, so the wording a buyer reads
- * and the rule the server enforces cannot drift apart.
+ * and the rule the server enforces cannot drift apart — and served as three
+ * separate lists, because that is what they are. `commonly` is the document
+ * the form pre-selects for a reason, and the form labels it as a suggestion:
+ * it exists so the ordinary case needs no thought, not so the unusual case
+ * gets waved through as the ordinary one.
  */
 router.get('/reasons', requirePermission(MODULE, 'view'), (_req, res) => {
   res.json({
     success: true,
-    data: Object.entries(REASON_RULES).map(([value, r]) => ({
-      value,
-      label: r.label,
-      hint: r.hint,
-      defaultType: r.type,
-      effect: r.effect,
-      movesGoods: r.movesGoods,
-      consumesQty: r.consumesQty,
-    })),
+    data: {
+      /** What happened. An event. Carries no direction and no document. */
+      reasons: Object.entries(REASON_RULES).map(([value, r]) => ({
+        value,
+        label: r.label,
+        hint: r.hint,
+        movesGoods: r.movesGoods,
+        consumesQty: r.consumesQty,
+        commonly: r.commonly,
+      })),
+      /** What kind of document resulted. This is what sets the direction. */
+      docTypes: Object.entries(DOC_RULES).map(([value, d]) => ({
+        value,
+        label: d.label,
+        hint: d.hint,
+        issuedBy: d.issuedBy,
+        /** Null means the direction is a choice, not a definition. */
+        effect: d.effect,
+        needsSupplierDoc: d.needsSupplierDoc,
+      })),
+      /** How the accounts desk classifies it. Read-only to the purchase office. */
+      gstTreatments: Object.entries(GST_TREATMENTS).map(([value, g]) => ({
+        value,
+        label: g.label,
+        hint: g.hint,
+      })),
+    },
   })
 })
 
@@ -180,8 +220,11 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
   const q = noteListQuerySchema.parse(req.query)
 
   const where: Prisma.PurchaseNoteWhereInput = {
-    ...(q.noteType ? { noteType: q.noteType } : {}),
-    ...(q.status ? { status: q.status } : {}),
+    ...(q.docType ? { docType: { in: q.docType } } : {}),
+    ...(q.issuedBy ? { issuedBy: q.issuedBy } : {}),
+    ...(q.effect ? { effect: q.effect } : {}),
+    ...(q.gstTreatment ? { gstTreatment: q.gstTreatment } : {}),
+    ...(q.status ? { status: { in: q.status } } : {}),
     ...(q.reason ? { reason: q.reason } : {}),
     ...(q.supplierId ? { supplierId: q.supplierId } : {}),
     ...(q.billId ? { billId: q.billId } : {}),
@@ -215,7 +258,25 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
   // the rows underneath it.
   const summaryWhere: Prisma.PurchaseNoteWhereInput = { ...where, status: undefined }
 
-  const [rows, total, summary] = await Promise.all([
+  /*
+   * How many notes accounts has not yet classified for GST.
+   *
+   * Counted here rather than off the page. The screen used to filter the rows
+   * it had been sent, which made the figure quietly mean "on this page" — true
+   * while there was one page and wrong the moment there were two. It is a card
+   * the user can now press to narrow the list, and a card whose number does
+   * not match the rows pressing it produces is worse than no card at all.
+   *
+   * A cancelled note is left out for the same reason it is on screen: nothing
+   * is owed on it, so nobody has to classify it.
+   */
+  const unclassifiedWhere: Prisma.PurchaseNoteWhereInput = {
+    ...summaryWhere,
+    gstTreatment: 'NOT_REVIEWED',
+    status: { not: 'CANCELLED' },
+  }
+
+  const [rows, total, summary, unclassified] = await Promise.all([
     prisma.purchaseNote.findMany({
       where,
       include: noteInclude,
@@ -230,11 +291,20 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       _sum: { totalAmount: true },
       _count: { _all: true },
     }),
+    prisma.purchaseNote.aggregate({
+      where: unclassifiedWhere,
+      _sum: { totalAmount: true },
+      _count: { _all: true },
+    }),
   ])
 
   res.json({
     success: true,
     data: rows,
+    unclassified: {
+      count: unclassified._count._all,
+      amount: round2(Number(unclassified._sum.totalAmount ?? 0)),
+    },
     summary: Object.fromEntries(
       summary.map((s) => [
         s.status,
@@ -307,6 +377,55 @@ router.get('/adjustable/:billId', requirePermission(MODULE, 'view'), async (req,
   })
 })
 
+/**
+ * What a receipt still has left to note, line by line — for a note raised
+ * with no bill behind it.
+ *
+ * The counterpart to `/adjustable/:billId`. Goods rejected at the gate never
+ * get billed, so a bill has nothing to offer a note against them; this is
+ * what the "Raise a note" action on the goods-receipt screen reads before a
+ * line is typed, the same way the bill form reads the other route first.
+ */
+router.get('/from-grn/:grnId', requirePermission(MODULE, 'view'), async (req, res) => {
+  const exclude = typeof req.query.exclude === 'string' ? req.query.exclude : undefined
+
+  const [grn, matched] = await prisma.$transaction(async (tx) => [
+    await tx.gRN.findUnique({
+      where: { id: req.params.grnId },
+      select: {
+        id: true,
+        grnNumber: true,
+        status: true,
+        po: {
+          select: {
+            id: true,
+            poNumber: true,
+            supplier: { select: { id: true, code: true, name: true, gstin: true } },
+          },
+        },
+      },
+    }),
+    await adjustableOnGrn(tx, req.params.grnId, exclude),
+  ])
+
+  if (!grn) throw new AppError('That goods receipt no longer exists', 404, 'NOT_FOUND')
+  if (!grn.po)
+    throw new AppError(
+      'The order this receipt was raised against no longer exists',
+      404,
+      'NOT_FOUND'
+    )
+
+  res.json({
+    success: true,
+    data: {
+      grn: { id: grn.id, grnNumber: grn.grnNumber, status: grn.status },
+      po: grn.po,
+      lines: matched.lines,
+    },
+  })
+})
+
 router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const note = await prisma.purchaseNote.findUnique({
     where: { id: req.params.id },
@@ -323,7 +442,7 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
   })
   if (!note) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
 
-  const header = await getPrintHeader(note.noteType === 'DEBIT' ? 'DN' : 'SCN')
+  const header = await getPrintHeader(DOC_RULES[note.docType].series)
 
   res.json({
     success: true,
@@ -331,6 +450,8 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
       ...header,
       note,
       reasonLabel: REASON_RULES[note.reason].label,
+      docLabel: DOC_RULES[note.docType].label,
+      gstLabel: GST_TREATMENTS[note.gstTreatment].label,
       totalInWords: amountInWords(Number(note.totalAmount)),
       taxMode: Number(note.igst) > 0 ? 'IGST' : Number(note.cgst) > 0 ? 'CGST_SGST' : 'NONE',
     },
@@ -346,13 +467,22 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
  * Both ceilings are tested. Quantity stops the same hundred metres being
  * returned twice; value stops a line being claimed back for more than it was
  * ever charged, which a quantity check alone lets through as soon as somebody
- * types a rate the bill never carried.
+ * types a rate the bill never carried. Several notes may stand against one
+ * bill — `adjustableOn` sums every one of them that is still alive, so the
+ * ceiling is on the running total and not on any single note.
+ *
+ * Only reductions are capped. An adjustment that INCREASES the invoice is not
+ * bounded by what the invoice charged — a supplier billing for replacements
+ * they shipped is adding to it, and the eligible balance grows rather than
+ * shrinks. Testing an increase against "what is left to reduce" would refuse
+ * it for being larger than a number it has nothing to do with.
  */
 async function assertWithinBill(
   tx: Prisma.TransactionClient,
   opts: {
     billId: string
     reason: keyof typeof REASON_RULES
+    effect: 'REDUCES_PAYABLE' | 'INCREASES_PAYABLE'
     lines: NoteLineInput[]
     pricedLines: Array<{ taxableValue: number }>
     excludeNoteId?: string
@@ -361,6 +491,7 @@ async function assertWithinBill(
   const available = await adjustableOn(tx, opts.billId, opts.excludeNoteId)
   const byId = new Map(available.map((a) => [a.billLineId, a]))
   const consumesQty = REASON_RULES[opts.reason].consumesQty
+  const reduces = opts.effect === 'REDUCES_PAYABLE'
 
   // Several note lines may point at the same bill line; they have to be added
   // up before either ceiling is tested, or two half-claims each pass.
@@ -385,7 +516,7 @@ async function assertWithinBill(
       )
     }
 
-    if (consumesQty && qty > line.remainingQty + 0.0005) {
+    if (reduces && consumesQty && qty > line.remainingQty + 0.0005) {
       const unit = line.uom ? ` ${line.uom}` : ''
       throw new AppError(
         `Only ${line.remainingQty}${unit} of ${line.itemName} can still be adjusted against this bill` +
@@ -399,7 +530,7 @@ async function assertWithinBill(
     }
 
     const value = round2(wantedValue.get(billLineId) ?? 0)
-    if (value > line.remainingValue + 0.005) {
+    if (reduces && value > line.remainingValue + 0.005) {
       throw new AppError(
         `${line.itemName} was charged ₹${line.billedTaxable.toLocaleString('en-IN')} on this bill and ` +
           `₹${line.remainingValue.toLocaleString('en-IN')} of that is still adjustable. ` +
@@ -411,13 +542,30 @@ async function assertWithinBill(
   }
 }
 
+/**
+ * The supplier a receipt was received against, for a note raised off it with
+ * no bill behind it — the same derivation as `supplierId = bill.supplierId`
+ * below, for the other document a note can be anchored to.
+ */
+async function supplierFromGrn(tx: Prisma.TransactionClient, grnId: string): Promise<string> {
+  const grn = await tx.gRN.findUnique({
+    where: { id: grnId },
+    select: { po: { select: { supplierId: true } } },
+  })
+  if (!grn?.po) {
+    throw new AppError('That goods receipt no longer exists', 404, 'NOT_FOUND')
+  }
+  return grn.po.supplierId
+}
+
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createNoteSchema.parse(req.body)
 
   const note = await prisma.$transaction(async (tx) => {
-    // The supplier comes from the bill when there is one. A note whose
-    // supplier disagrees with the bill it adjusts is a note that reduces the
-    // wrong party's payable, so it is derived and not taken on trust.
+    // The supplier comes from the bill when there is one, and from the
+    // receipt when there is not — a note whose supplier disagrees with the
+    // document it adjusts is a note that reduces the wrong party's payable,
+    // so it is derived and not taken on trust either way.
     let supplierId = data.supplierId
     if (data.billId) {
       const bill = await tx.purchaseInvoice.findUnique({
@@ -433,6 +581,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         )
       }
       supplierId = bill.supplierId
+    } else if (data.grnId) {
+      supplierId = await supplierFromGrn(tx, data.grnId)
     }
 
     const isIntraState = await taxContextFor(tx, supplierId, data.billId)
@@ -451,28 +601,35 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       )
     }
 
+    /* The direction comes from the document, never from the event. For
+       every kind but OTHER it is a definition and `data.effect` is ignored;
+       for OTHER it is the explicit choice the form was made to ask for. */
+    assertIssuerMatches(data.docType, data.issuedBy)
+    const effect = effectFor(data.docType, data.effect ?? null)
+
     if (data.billId) {
       await assertWithinBill(tx, {
         billId: data.billId,
         reason: data.reason,
+        effect,
         lines: data.lines,
         pricedLines: priced.lines,
       })
     }
 
-    const noteNumber = await nextDocumentNumber(
-      tx,
-      data.noteType === 'DEBIT' ? 'DN' : 'SCN',
-      data.noteDate
-    )
+    /* Each kind draws from its own series. Sharing one between our claims and
+       the supplier's documents would put holes in a run that has to be
+       unbroken, and make "DN-2627-0007" ambiguous about whose it is. */
+    const noteNumber = await nextDocumentNumber(tx, DOC_RULES[data.docType].series, data.noteDate)
 
     return tx.purchaseNote.create({
       data: {
         noteNumber,
-        noteType: data.noteType,
         reason: data.reason,
         reasonNote: data.reasonNote ?? null,
-        effect: data.effect,
+        issuedBy: data.issuedBy,
+        docType: data.docType,
+        effect,
         supplierId,
         billId: data.billId ?? null,
         withoutBillReason: data.billId ? null : (data.withoutBillReason ?? null),
@@ -500,6 +657,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           create: priced.lines.map((l, i) => ({
             itemId: l.itemId,
             billLineId: l.billLineId ?? null,
+            grnLineId: l.grnLineId ?? null,
             description: l.description ?? null,
             hsnCode: l.hsnCode ?? null,
             originalQty: l.originalQty ?? null,
@@ -532,7 +690,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
   res.status(201).json({
     success: true,
     data: note,
-    message: `${note.noteNumber} saved as a draft. Submit it when you are ready.`,
+    message: `${note.noteNumber} saved as a draft. Post it when you are ready.`,
   })
 })
 
@@ -542,10 +700,13 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
   const note = await prisma.$transaction(async (tx) => {
     const before = await tx.purchaseNote.findUnique({
       where: { id: req.params.id },
-      select: { id: true, noteNumber: true, status: true, noteType: true, supplierId: true },
+      select: { id: true, noteNumber: true, status: true, docType: true, supplierId: true },
     })
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
     assertEditable(before.status, before.noteNumber)
+
+    assertIssuerMatches(data.docType, data.issuedBy)
+    const effect = effectFor(data.docType, data.effect ?? null)
 
     let supplierId = data.supplierId
     if (data.billId) {
@@ -562,6 +723,8 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
         )
       }
       supplierId = bill.supplierId
+    } else if (data.grnId) {
+      supplierId = await supplierFromGrn(tx, data.grnId)
     }
 
     const isIntraState = await taxContextFor(tx, supplierId, data.billId)
@@ -584,6 +747,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       await assertWithinBill(tx, {
         billId: data.billId,
         reason: data.reason,
+        effect,
         lines: data.lines,
         pricedLines: priced.lines,
         excludeNoteId: before.id,
@@ -598,10 +762,11 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
     return tx.purchaseNote.update({
       where: { id: before.id },
       data: {
-        noteType: data.noteType,
         reason: data.reason,
         reasonNote: data.reasonNote ?? null,
-        effect: data.effect,
+        issuedBy: data.issuedBy,
+        docType: data.docType,
+        effect,
         supplierId,
         billId: data.billId ?? null,
         withoutBillReason: data.billId ? null : (data.withoutBillReason ?? null),
@@ -628,6 +793,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
           create: priced.lines.map((l, i) => ({
             itemId: l.itemId,
             billLineId: l.billLineId ?? null,
+            grnLineId: l.grnLineId ?? null,
             description: l.description ?? null,
             hsnCode: l.hsnCode ?? null,
             originalQty: l.originalQty ?? null,
@@ -675,168 +841,6 @@ function assertTransition(from: string, to: string, noteNumber: string): void {
   }
 }
 
-router.post('/:id/submit', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const note = await prisma.$transaction(async (tx) => {
-    const before = await tx.purchaseNote.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, noteNumber: true, status: true, totalAmount: true },
-    })
-    if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
-    assertTransition(before.status, 'SUBMITTED', before.noteNumber)
-    if (Number(before.totalAmount) <= 0) {
-      throw new AppError(
-        `${before.noteNumber} claims nothing. There is nothing to submit.`,
-        400,
-        'NOTHING_CLAIMED'
-      )
-    }
-
-    return tx.purchaseNote.update({
-      where: { id: before.id },
-      data: { status: 'SUBMITTED', submittedById: req.user!.id, submittedAt: new Date() },
-      include: noteInclude,
-    })
-  })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'PurchaseNote',
-    entityId: note.id,
-    after: note,
-  })
-  res.json({ success: true, data: note, message: `${note.noteNumber} sent for approval.` })
-})
-
-/**
- * Approval, by somebody other than the person who raised it.
- *
- * docs/04-business-rules.md forbids the two being the same hand, and this is
- * the document where that matters most: it is a claim on a trading partner,
- * and a buyer who can raise and approve their own can write off a purchase
- * without anybody else in the building knowing.
- */
-router.post('/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
-  const note = await prisma.$transaction(async (tx) => {
-    const before = await tx.purchaseNote.findUnique({
-      where: { id: req.params.id },
-      select: {
-        id: true,
-        noteNumber: true,
-        status: true,
-        createdById: true,
-        createdBy: { select: { name: true } },
-      },
-    })
-    if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
-    assertTransition(before.status, 'APPROVED', before.noteNumber)
-    if (before.createdById === req.user!.id) {
-      throw new AppError(
-        `${before.noteNumber} was raised by you. Somebody else has to approve it.`,
-        403,
-        'SELF_APPROVAL'
-      )
-    }
-
-    return tx.purchaseNote.update({
-      where: { id: before.id },
-      data: { status: 'APPROVED', approvedById: req.user!.id, approvedAt: new Date() },
-      include: noteInclude,
-    })
-  })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'PurchaseNote',
-    entityId: note.id,
-    after: note,
-  })
-  res.json({ success: true, data: note, message: `${note.noteNumber} approved.` })
-})
-
-router.post('/:id/reject', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
-  const { reason } = reasonBody.parse(req.body ?? {})
-
-  const note = await prisma.$transaction(async (tx) => {
-    const before = await tx.purchaseNote.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, noteNumber: true, status: true },
-    })
-    if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
-    assertTransition(before.status, 'REJECTED', before.noteNumber)
-
-    return tx.purchaseNote.update({
-      where: { id: before.id },
-      data: {
-        status: 'REJECTED',
-        closedById: req.user!.id,
-        closedAt: new Date(),
-        closedReason: reason ?? null,
-      },
-      include: noteInclude,
-    })
-  })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'PurchaseNote',
-    entityId: note.id,
-    after: note,
-  })
-  res.json({
-    success: true,
-    data: note,
-    message: `${note.noteNumber} sent back. The buyer can reopen it as a draft.`,
-  })
-})
-
-/** A rejected note goes back to the buyer's hands rather than to the bin. */
-router.post('/:id/reopen', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const note = await prisma.$transaction(async (tx) => {
-    const before = await tx.purchaseNote.findUnique({
-      where: { id: req.params.id },
-      select: { id: true, noteNumber: true, status: true },
-    })
-    if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
-    assertTransition(before.status, 'DRAFT', before.noteNumber)
-
-    return tx.purchaseNote.update({
-      where: { id: before.id },
-      data: {
-        status: 'DRAFT',
-        submittedById: null,
-        submittedAt: null,
-        approvedById: null,
-        approvedAt: null,
-        closedById: null,
-        closedAt: null,
-        closedReason: null,
-      },
-      include: noteInclude,
-    })
-  })
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'PurchaseNote',
-    entityId: note.id,
-    after: note,
-  })
-  res.json({ success: true, data: note, message: `${note.noteNumber} is a draft again.` })
-})
-
-/**
- * Posts it — the only step that moves anything.
- *
- * Two legs, inside one transaction. The payable is recomputed from the bill's
- * posted notes, and the goods come off the rack where the reason says material
- * actually moved. Either both happen or neither does: a note that reduced a
- * payable without taking the cloth out of stock is how a godown ends up
- * holding fabric the books have already sent back.
- */
 router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequest, res) => {
   const result = await prisma.$transaction(async (tx) => {
     const before = await tx.purchaseNote.findUnique({
@@ -846,6 +850,9 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
         noteNumber: true,
         status: true,
         reason: true,
+        effect: true,
+        docType: true,
+        gstTreatment: true,
         warehouseId: true,
         noteDate: true,
         billId: true,
@@ -855,7 +862,24 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
     assertTransition(before.status, 'POSTED', before.noteNumber)
 
-    const moved = await moveNoteStock(tx, before, 'OUT')
+    /*
+     * An unclassified note posts, and says so.
+     *
+     * This was a hard block. It was the same jam the approval step had been,
+     * moved one press later: money the mill had genuinely agreed sat unposted
+     * waiting on a classification nobody was chasing. Blocking also puts the
+     * accounts desk on the critical path of every small adjustment, which is
+     * not where they asked to be.
+     *
+     * The separation the model exists for is kept by making the gap visible
+     * rather than impassable — the note carries NOT_REVIEWED, the list shows
+     * it amber, and the message below says it out loud at the moment of
+     * posting. What is NOT done is quietly deciding a treatment on the
+     * purchase office's behalf, which is the one outcome worth preventing.
+     */
+    const unclassified = before.gstTreatment === 'NOT_REVIEWED'
+
+    const moved = await moveNoteStock(tx, before, 'POST')
 
     await tx.purchaseNote.update({
       where: { id: before.id },
@@ -874,7 +898,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
       include: noteInclude,
     })
 
-    return { note, moved }
+    return { note, moved, unclassified }
   })
 
   await writeAuditLog(req, {
@@ -895,8 +919,13 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
         ? ` ${bill.billNumber} now stands at ₹${Number(bill.balanceAmount).toLocaleString('en-IN')}.`
         : '') +
       (result.moved
-        ? ` ${result.moved} line${result.moved === 1 ? '' : 's'} taken out of stock.`
-        : ''),
+        ? ` ${result.moved} line${result.moved === 1 ? '' : 's'} moved in stock.`
+        : '') +
+      /* Said at the moment it matters, not swallowed. The note is through and
+         the money has moved; what has NOT happened is anybody deciding what
+         this is for GST, and the person who just pressed the button is the
+         one who can go and ask. */
+      (result.unclassified ? ' Accounts has not classified it for GST yet.' : ''),
   })
 })
 
@@ -909,6 +938,70 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
  * same shape as reversing a supplier payment, which is the pattern this
  * codebase already settled on for undoing something that moved money.
  */
+/**
+ * The accounts desk says what this is for GST. Nobody else may.
+ *
+ * Gated on `purchase:post` rather than on a new action, because it is the
+ * same desk and the same decision: whoever puts a note through the books is
+ * the person who has to have classified it, and the post route refuses any
+ * note still sitting at NOT_REVIEWED.
+ *
+ * Deliberately its own route and not a field on the note form. Folded into
+ * the note, it becomes a dropdown a purchase clerk sees and fills in, and the
+ * separation this whole module was re-cut for would last about a week.
+ *
+ * Allowed on a posted note as well as a draft. A misclassification found
+ * after posting is corrected by correcting it — the alternative is cancelling
+ * a note that is correct in every other respect and burning a document number
+ * to fix a label.
+ */
+router.patch(
+  '/:id/gst-treatment',
+  requirePermission(MODULE, 'post'),
+  async (req: AuthRequest, res) => {
+    const data = gstTreatmentSchema.parse(req.body)
+
+    const before = await prisma.purchaseNote.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, noteNumber: true, status: true, gstTreatment: true },
+    })
+    if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
+    if (before.status === 'CANCELLED') {
+      throw new AppError(
+        `${before.noteNumber} is cancelled. There is nothing left on it to classify.`,
+        409,
+        'NOTE_CANCELLED'
+      )
+    }
+
+    const note = await prisma.purchaseNote.update({
+      where: { id: before.id },
+      data: {
+        gstTreatment: data.gstTreatment,
+        gstNote: data.gstNote ?? null,
+        gstTreatedById: req.user!.id,
+        gstTreatedAt: new Date(),
+      },
+      include: noteInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'PurchaseNote',
+      entityId: note.id,
+      before,
+      after: note,
+    })
+
+    res.json({
+      success: true,
+      data: note,
+      message: `${note.noteNumber} classified as ${GST_TREATMENTS[data.gstTreatment].label}.`,
+    })
+  }
+)
+
 router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { reason } = reasonBody.parse(req.body ?? {})
 
@@ -920,6 +1013,10 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         noteNumber: true,
         status: true,
         reason: true,
+        // Reversing a movement needs to know which way it went. Without this
+        // the reversal of a supplier debit note's goods-in would itself have
+        // been a goods-in.
+        effect: true,
         warehouseId: true,
         noteDate: true,
         billId: true,
@@ -930,7 +1027,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     assertTransition(before.status, 'CANCELLED', before.noteNumber)
 
     const wasPosted = before.status === 'POSTED'
-    const moved = wasPosted ? await moveNoteStock(tx, before, 'IN') : 0
+    const moved = wasPosted ? await moveNoteStock(tx, before, 'REVERSE') : 0
 
     const note = await tx.purchaseNote.update({
       where: { id: before.id },

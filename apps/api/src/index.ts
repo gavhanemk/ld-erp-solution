@@ -112,9 +112,56 @@ app.use(cors({
   ],
 }))
 
-// Rate Limiting
-const globalLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false })
-const authLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { error: 'Too many login attempts' } })
+/*
+ * Rate limiting, counted per IP.
+ *
+ * 500 requests in fifteen minutes sounds generous until you notice what it is
+ * counting. A screen like Stock or the purchase bills list makes a handful of
+ * calls every time it is opened, and the whole mill reaches this server from
+ * one office address, so the ceiling is shared by everybody behind that
+ * router rather than being a per-person allowance. A busy afternoon with four
+ * buyers and a store keeper is well inside it.
+ *
+ * What it looks like when it trips is the problem: the server answers "Too
+ * many requests", the browser quietly gets nothing back, and a dropdown that
+ * should list the open orders renders empty. Nothing on screen says the
+ * request was refused — you simply cannot receive goods against an order that
+ * appears not to exist. That is exactly how it was found.
+ *
+ * So development gets a ceiling high enough that it never interferes with
+ * working on the thing, and production keeps a real one. The auth limit stays
+ * tight in both: twenty password attempts a quarter of an hour is the point
+ * of it, and nobody signs in twenty times while developing.
+ */
+const inProduction = process.env.NODE_ENV === 'production'
+/*
+ * Both of these answer in the same shape as every other error the API sends
+ * — `{ success, message, code }`. They used to answer `{ error: '…' }`, which
+ * is a shape nothing on the front end reads: the browser client pulls
+ * `body.message`, found nothing, and fell back to "Request failed (429)".
+ * The one refusal a person most needs explained in words was the one that
+ * arrived as a bare number.
+ */
+const globalLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: inProduction ? 2000 : 20_000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many requests — slow down and try again in a few minutes.',
+    code: 'RATE_LIMITED',
+  },
+})
+const authLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: {
+    success: false,
+    message: 'Too many sign-in attempts. Wait a quarter of an hour and try again.',
+    code: 'RATE_LIMITED',
+  },
+})
 app.use('/api/', globalLimit)
 
 // Body & Logging

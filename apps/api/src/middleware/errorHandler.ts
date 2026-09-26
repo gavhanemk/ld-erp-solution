@@ -48,6 +48,31 @@ export const errorHandler = (
         code: 'NOT_FOUND',
       })
     }
+    /*
+     * A foreign key refusing to let go of a row something else is built on.
+     *
+     * Several relations through the purchase chain are `Restrict` deliberately
+     * — the bill line a note adjusts, the receipt line a bill claims, the
+     * order line a receipt was booked against — so that the database is the
+     * last line of defence when a guard above it is missed. Unmapped, that
+     * refusal fell through to the generic 500 and told the person at the
+     * screen the system had broken, when what actually happened is that the
+     * record is spoken for and the answer is to deal with the other document
+     * first.
+     *
+     * Deliberately vague about which document. The constraint gives a column
+     * name, not a document number, and guessing a friendly noun from it is how
+     * a message ends up naming the wrong thing. The routes that know name it
+     * properly; this is the net underneath them.
+     */
+    if (prismaErr.code === 'P2003') {
+      return res.status(409).json({
+        success: false,
+        message:
+          'Another document is still built on this record, so it cannot be changed or removed. Cancel that document first.',
+        code: 'IN_USE',
+      })
+    }
   }
 
   // Validation errors (Zod)

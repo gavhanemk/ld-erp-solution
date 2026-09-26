@@ -21,6 +21,15 @@ const lineSchema = z.object({
   poLineId: z.string().min(1, 'Every line has to say which order line it is against'),
   warehouseId: z.string().min(1, 'Pick the store the goods went into'),
   receivedQty: qty,
+  /*
+   * Still accepted from the wire, still ignored.
+   *
+   * The gate no longer refuses anything: everything that comes off the lorry
+   * is taken into stock, and whatever turns out to be wrong is settled
+   * afterwards on a debit note. Dropping the field outright would make an
+   * older client's receipt fail validation instead of simply behaving the new
+   * way, so it is parsed and then discarded where the lines are built.
+   */
   rejectedQty: qty.optional(),
   batchNumber: z.string().max(50).optional().nullable(),
 })
@@ -30,11 +39,11 @@ const lineSchema = z.object({
  * raising a new receipt and editing one already on the books, so the two
  * cannot drift into accepting different shapes of the same document.
  *
- * `receivedQty` is what came off the vehicle and `rejectedQty` is how much of
- * that was refused. What is actually taken into stock is the difference, worked
- * out here rather than typed: a store keeper counting rolls on a loading bay
- * should not also be doing subtraction, and the two figures disagreeing is the
- * commonest way a goods receipt goes wrong.
+ * `receivedQty` is what came off the vehicle, and all of it goes into stock.
+ * There is no longer a refusal at the gate: a store keeper counting rolls on a
+ * loading bay should be writing down one number, not three. Anything wrong with
+ * the goods is settled afterwards, on a debit note against the bill, where the
+ * quantity and the money are argued in one place instead of two.
  */
 const grnFields = {
   grnDate: z.coerce.date().optional(),
@@ -108,16 +117,6 @@ function refineGrnFields(data: { lines: z.infer<typeof lineSchema>[] }, ctx: z.R
   const seen = new Set<string>()
 
   data.lines.forEach((line, i) => {
-    const rejected = line.rejectedQty ?? 0
-
-    if (rejected > line.receivedQty) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['lines', i, 'rejectedQty'],
-        message: `You cannot reject ${rejected} out of the ${line.receivedQty} that arrived.`,
-      })
-    }
-
     /*
      * One order line may appear more than once, but only for different
      * stores.

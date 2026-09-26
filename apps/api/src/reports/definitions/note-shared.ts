@@ -1,5 +1,10 @@
 import type { Prisma } from '@prisma/client'
-import type { PurchaseNoteReason, PurchaseNoteStatus, PurchaseNoteType } from '@prisma/client'
+import type {
+  PurchaseAdjustmentDoc,
+  PurchaseAdjustmentIssuer,
+  PurchaseNoteReason,
+  PurchaseNoteStatus,
+} from '@prisma/client'
 import type { ReportColumn, ReportFilter, ReportParams, Tone } from '../types'
 import { dayRange } from './shared'
 
@@ -48,8 +53,7 @@ export const NOTE_REASON_WORDS: Record<PurchaseNoteReason, string> = {
   DAMAGED_MATERIAL: 'Damaged material',
   QUALITY_REJECTION: 'Quality rejection',
   WRONG_MATERIAL: 'Wrong material',
-  EXCESS_QUANTITY_BILLED: 'Excess quantity billed',
-  RATE_DIFFERENCE: 'Wrong rate charged',
+  WRONG_RATE: 'Wrong rate charged',
   EXCESS_BILLING: 'Excess billing',
   POST_PURCHASE_DISCOUNT: 'Discount after the bill',
   OTHER: 'Something else',
@@ -71,9 +75,24 @@ export const GOODS_FAILURE_REASONS: PurchaseNoteReason[] = [
   'SHORT_QUANTITY',
 ]
 
-export const NOTE_TYPE_WORDS: Record<PurchaseNoteType, string> = {
-  DEBIT: 'Debit note',
-  CREDIT: 'Credit note',
+/**
+ * What kind of document each row is.
+ *
+ * Four, not two. "Debit note" and "credit note" were a pair only while every
+ * adjustment was assumed to come off the bill — a supplier's debit note is
+ * also a debit note and moves the money the other way, and a register that
+ * calls both of them "Debit note" is a register that cannot be totalled.
+ */
+export const NOTE_TYPE_WORDS: Record<PurchaseAdjustmentDoc, string> = {
+  OUR_DEBIT_NOTE: 'Our claim',
+  SUPPLIER_CREDIT_NOTE: 'Their credit note',
+  SUPPLIER_DEBIT_NOTE: 'Their debit note',
+  OTHER: 'Other adjustment',
+}
+
+export const ISSUER_WORDS: Record<PurchaseAdjustmentIssuer, string> = {
+  OUR_COMPANY: 'Us',
+  SUPPLIER: 'Supplier',
 }
 
 /** The statuses that still stand. A cancelled or refused note claims nothing. */
@@ -88,6 +107,16 @@ export const reasonFilter: ReportFilter = {
   options: (Object.keys(NOTE_REASON_WORDS) as PurchaseNoteReason[]).map((value) => ({
     value,
     label: NOTE_REASON_WORDS[value],
+  })),
+}
+
+export const noteTypeFilter: ReportFilter = {
+  key: 'type',
+  label: 'Document',
+  type: 'select',
+  options: (Object.keys(NOTE_TYPE_WORDS) as PurchaseAdjustmentDoc[]).map((value) => ({
+    value,
+    label: NOTE_TYPE_WORDS[value],
   })),
 }
 
@@ -154,13 +183,13 @@ export const postedOnlyFilter: ReportFilter = {
  */
 export function noteWhere(
   params: ReportParams,
-  noteType?: PurchaseNoteType
+  docType?: PurchaseAdjustmentDoc
 ): Prisma.PurchaseNoteWhereInput {
   const range = dayRange(params)
   const min = params.minAmount ? SIZE_BANDS[params.minAmount] : undefined
 
   return {
-    ...(noteType ? { noteType } : {}),
+    ...(docType ? { docType } : {}),
     ...(params.status
       ? { status: params.status as PurchaseNoteStatus }
       : params.postedOnly === 'true'
@@ -191,7 +220,9 @@ export function noteWhere(
 export const noteSelect = {
   id: true,
   noteNumber: true,
-  noteType: true,
+  docType: true,
+  issuedBy: true,
+  gstTreatment: true,
   status: true,
   reason: true,
   reasonNote: true,
@@ -234,6 +265,27 @@ export const statusColumn: ReportColumn = {
   width: 17,
   badges: NOTE_STATUS_WORDS,
   badgeTones: NOTE_STATUS_TONES,
+}
+
+/**
+ * The document column, for a register that carries every kind at once.
+ *
+ * The tones separate the two that reduce the bill from the one that increases
+ * it, because that is the distinction a reader of this column is actually
+ * making and the four names on their own do not make it obvious.
+ */
+export const typeColumn: ReportColumn = {
+  key: 'type',
+  label: 'Document',
+  type: 'badge',
+  width: 16,
+  badges: NOTE_TYPE_WORDS,
+  badgeTones: {
+    OUR_DEBIT_NOTE: 'info',
+    SUPPLIER_CREDIT_NOTE: 'normal',
+    SUPPLIER_DEBIT_NOTE: 'warn',
+    OTHER: 'normal',
+  },
 }
 
 /**
