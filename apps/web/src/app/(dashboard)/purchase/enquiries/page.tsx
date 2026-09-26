@@ -5,6 +5,8 @@ import Link from 'next/link'
 import {
   AlertCircle,
   Check,
+  ChevronDown,
+  ChevronRight,
   Pencil,
   Plus,
   Printer,
@@ -88,6 +90,8 @@ export default function PurchaseEnquiriesPage() {
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
   const [supplierId, setSupplierId] = useState('')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
   const [card, setCard] = useState('')
 
   const [options, setOptions] = useState<{
@@ -132,6 +136,8 @@ export default function PurchaseEnquiriesPage() {
     if (debounced) params.set('q', debounced)
     if (status) params.set('status', status)
     if (supplierId) params.set('supplierId', supplierId)
+    if (fromDate) params.set('from', fromDate)
+    if (toDate) params.set('to', toDate)
     if (card) for (const [k, v] of Object.entries(CARD_FILTERS[card])) params.set(k, v)
 
     try {
@@ -146,7 +152,7 @@ export default function PurchaseEnquiriesPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, debounced, status, supplierId, card, rowsPerPage])
+  }, [page, debounced, status, supplierId, fromDate, toDate, card, rowsPerPage])
 
   useEffect(() => {
     void load()
@@ -304,11 +310,13 @@ export default function PurchaseEnquiriesPage() {
     setCard('')
     setStatus('')
     setSupplierId('')
+    setFromDate('')
+    setToDate('')
     setSearch('')
     setPage(1)
   }
 
-  const filtered = Boolean(card || status || supplierId || debounced)
+  const filtered = Boolean(card || status || supplierId || debounced || fromDate || toDate)
   const pages = meta?.pages ?? 1
 
   /** The suppliers on a row, said in as few words as the cell allows. */
@@ -426,6 +434,35 @@ export default function PurchaseEnquiriesPage() {
             <option value="ORDERED">Ordered</option>
             <option value="CLOSED">Closed</option>
           </select>
+          {/* Two dates, not a preset list — the enquiry date, so "what did we
+            ask about between the 3rd and the 11th" is answered directly. Each
+            box caps the other, so a range that reads backwards cannot be typed.
+            Same pair, same sizes, as the purchase order list. */}
+          <div className="flex shrink-0 items-center gap-1">
+            <input
+              type="date"
+              value={fromDate}
+              max={toDate || undefined}
+              onChange={(e) => {
+                setFromDate(e.target.value)
+                setPage(1)
+              }}
+              className="form-input w-auto"
+              aria-label="Enquiries from this date"
+            />
+            <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+            <input
+              type="date"
+              value={toDate}
+              min={fromDate || undefined}
+              onChange={(e) => {
+                setToDate(e.target.value)
+                setPage(1)
+              }}
+              className="form-input w-auto"
+              aria-label="Enquiries up to this date"
+            />
+          </div>
           <select
             value={supplierId}
             onChange={(e) => {
@@ -472,6 +509,7 @@ export default function PurchaseEnquiriesPage() {
             <div className="list-cards divide-border divide-y">
               {rows.map((e) => {
                 const s = ENQUIRY_STATUS[e.status]
+                const expanded = open === e.id
                 return (
                   <div key={e.id} className="p-3">
                     <div className="flex items-start justify-between gap-3">
@@ -505,6 +543,30 @@ export default function PurchaseEnquiriesPage() {
                         </>
                       )}
                     </div>
+                    {/* The same way in as the table has. A phone should not be
+                      the one screen where the items and the comparison are
+                      unreachable. */}
+                    <button
+                      type="button"
+                      onClick={() => setOpen(expanded ? null : e.id)}
+                      className="text-primary mt-2 flex items-center gap-1 text-xs"
+                      aria-expanded={expanded}
+                    >
+                      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                      {expanded ? 'Hide items' : 'Item details'}
+                    </button>
+                    {expanded && (
+                      <div className="border-border bg-secondary/30 mt-2 rounded-lg border">
+                        <EnquiryDetail
+                          enquiryId={e.id}
+                          onChanged={(msg) => {
+                            if (msg) setMessage(msg)
+                            void load()
+                          }}
+                          onError={setError}
+                        />
+                      </div>
+                    )}
                   </div>
                 )
               })}
@@ -517,6 +579,7 @@ export default function PurchaseEnquiriesPage() {
                     capitals over white read as another row of data; a tint
                     says where the list starts. Same as the order list. */}
                   <tr className="bg-secondary">
+                    <th style={{ width: 30 }} />
                     <th>Enquiry</th>
                     <th>Suppliers</th>
                     <th className="col-roomy">Date</th>
@@ -536,15 +599,33 @@ export default function PurchaseEnquiriesPage() {
                     return (
                       <Fragment key={e.id}>
                         <tr className={expanded ? 'bg-secondary/30' : undefined}>
+                          {/* The toggle gets a cell of its own rather than
+                            hiding on the number. A row that opens only when you
+                            happen to press the right four characters is a row
+                            most people never open — and the whole comparison
+                            lives underneath it. */}
                           <td>
                             <button
                               type="button"
+                              className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
                               onClick={() => setOpen(expanded ? null : e.id)}
-                              className="hover:text-primary text-left font-mono text-xs font-medium"
+                              title={expanded ? 'Hide items' : 'Show items'}
+                              aria-label={`${expanded ? 'Hide' : 'Show'} items on ${e.enquiryNumber}`}
                               aria-expanded={expanded}
                             >
-                              {e.enquiryNumber}
+                              {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                             </button>
+                          </td>
+                          <td>
+                            <a
+                              href={'/print/purchase-enquiry/' + e.id}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              title={'Open the printed sheet for ' + e.enquiryNumber}
+                            >
+                              {e.enquiryNumber}
+                            </a>
                             {e.location && (
                               <p className="text-muted-foreground text-[11px]">{e.location.name}</p>
                             )}
@@ -640,7 +721,7 @@ export default function PurchaseEnquiriesPage() {
                         </tr>
                         {expanded && (
                           <tr>
-                            <td colSpan={9} className="bg-secondary/20 p-0">
+                            <td colSpan={10} className="bg-secondary/20 p-0">
                               <EnquiryDetail
                                 enquiryId={e.id}
                                 onChanged={(msg) => {

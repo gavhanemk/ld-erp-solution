@@ -160,6 +160,87 @@ export function EnquiryDetail({
 
   return (
     <div className="space-y-4 p-4">
+      {/* ── What was asked for ────────────────────────────────────────────
+
+        First, because this is what the row's chevron promises: the items. Same
+        `.subtable` as the order, receipt and bill lists open into, so a person
+        moving between the five screens is reading the same table each time.
+
+        Ordered and unplaced sit here rather than only on the comparison,
+        because part-ordering is ordinary — 600 of the 1,240 now, the rest when
+        somebody can hold the price — and "what is left on this enquiry" is the
+        question that sends a buyer back to it weeks later. */}
+      <section>
+        <h4 className="text-foreground mb-2 text-sm font-semibold">
+          Items on this enquiry
+          <span className="text-muted-foreground ml-2 text-xs font-normal">
+            {lines.length} line{lines.length === 1 ? '' : 's'}
+          </span>
+        </h4>
+        <div className="border-border/70 overflow-x-auto rounded-lg border">
+          <table className="subtable w-full">
+            <thead>
+              <tr className="bg-secondary/60">
+                <th className="text-left" style={{ width: 34 }}>
+                  #
+                </th>
+                <th className="text-left">Item &amp; description</th>
+                <th className="text-left">HSN</th>
+                <th className="text-left">Against indent</th>
+                <th style={{ textAlign: 'right' }}>Asked</th>
+                <th style={{ textAlign: 'right' }}>We expected</th>
+                <th style={{ textAlign: 'right' }}>Ordered</th>
+                <th style={{ textAlign: 'right' }}>Still unplaced</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((l, i) => {
+                const unplaced = Number(l.pendingQty ?? Number(l.qty))
+                return (
+                  <tr key={l.id}>
+                    <td className="text-muted-foreground">{i + 1}</td>
+                    <td>
+                      <p className="text-xs font-medium">{l.item.name}</p>
+                      <p className="text-muted-foreground font-mono text-[10px]">{l.item.code}</p>
+                      {l.description && (
+                        <p className="text-muted-foreground text-[10px]">{l.description}</p>
+                      )}
+                    </td>
+                    <td className="text-muted-foreground text-[11px]">{l.hsnCode ?? '—'}</td>
+                    <td className="text-muted-foreground text-[11px]">
+                      {l.mrLine?.mr.mrNumber ?? '—'}
+                    </td>
+                    <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
+                      {qty(l.qty)}
+                      <span className="text-muted-foreground ml-1 text-[10px]">
+                        {l.item.uom?.symbol}
+                      </span>
+                    </td>
+                    {/* Ours, and greyed, because it is a guess. It must never
+                      read as a price somebody quoted. */}
+                    <td
+                      style={{ textAlign: 'right' }}
+                      className="text-muted-foreground text-xs tabular-nums"
+                    >
+                      {l.expectedRate == null ? '—' : money(l.expectedRate)}
+                    </td>
+                    <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
+                      {qty(l.orderedQty ?? 0)}
+                    </td>
+                    <td
+                      style={{ textAlign: 'right' }}
+                      className={`text-xs tabular-nums ${unplaced > 0 ? '' : 'text-muted-foreground'}`}
+                    >
+                      {qty(unplaced)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       {/* ── Who was asked ─────────────────────────────────────────────────── */}
       <section>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -562,46 +643,6 @@ export function EnquiryDetail({
           </p>
         </section>
       )}
-
-      {/* What the mill asked for, and how much of it has actually been placed. */}
-      <section>
-        <h4 className="text-foreground mb-2 text-sm font-semibold">What was asked for</h4>
-        <div className="border-border/70 overflow-x-auto rounded-lg border">
-          <table className="subtable w-full">
-            <thead>
-              <tr className="bg-secondary/60">
-                <th className="text-left">Item</th>
-                <th className="text-left">Against indent</th>
-                <th style={{ textAlign: 'right' }}>Asked</th>
-                <th style={{ textAlign: 'right' }}>Ordered</th>
-                <th style={{ textAlign: 'right' }}>Still unplaced</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.map((l) => (
-                <tr key={l.id}>
-                  <td>
-                    <p className="text-xs font-medium">{l.item.name}</p>
-                    <p className="text-muted-foreground font-mono text-[10px]">{l.item.code}</p>
-                  </td>
-                  <td className="text-muted-foreground text-[11px]">
-                    {l.mrLine?.mr.mrNumber ?? '—'}
-                  </td>
-                  <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                    {qty(l.qty)}
-                  </td>
-                  <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                    {qty(l.orderedQty ?? 0)}
-                  </td>
-                  <td style={{ textAlign: 'right' }} className="text-xs tabular-nums">
-                    {qty(l.pendingQty ?? Number(l.qty))}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
 
       {quoting && (
         <RecordQuoteDialog
