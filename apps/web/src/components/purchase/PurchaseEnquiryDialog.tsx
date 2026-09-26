@@ -245,9 +245,46 @@ export function PurchaseEnquiryDialog({
    * out to three suppliers. What was typed is kept either way, so nothing is
    * silently discarded and the dropdown beside it is still there to pick from.
    */
+  /** Items on offer for a row, narrowed by whatever category it has chosen. */
+  const itemsFor = useCallback(
+    (l: Line) => {
+      const want = l.subcategoryId || l.categoryId
+      if (!want) return items
+      const ids = new Set([want, ...subsOf(want).map((c) => c.id)])
+      return items.filter((i) => (i.category ? ids.has(i.category.id) : false))
+    },
+    [items, subsOf]
+  )
+
+  /*
+   * The rows as they are right now, for the handlers that need to read one
+   * without being rebuilt every time any of them changes.
+   *
+   * `pickByCode` fires on blur and has to know which category the row it fired
+   * on is sitting under; taking that from `lines` would put the whole array in
+   * its dependencies and rebuild every input's handler on every keystroke.
+   */
+  const linesRef = useRef<Line[]>(lines)
+  linesRef.current = lines
+
   const pickByCode = useCallback(
     (key: string, code: string) => {
-      const hit = items.find((i) => (i.code ?? '').toLowerCase() === code.trim().toLowerCase())
+      /*
+       * Matched inside the row's own category first.
+       *
+       * Two items in different categories can share a code in a master nobody
+       * has policed, and taking the first of them would quietly put the wrong
+       * item on an enquiry going out to three suppliers. Falling back to the
+       * whole master is deliberate: a buyer who types a code before touching
+       * the category boxes is doing the commonest thing, and refusing them
+       * would make the category a gate rather than a filter.
+       */
+      const line = linesRef.current.find((l) => l.key === key)
+      const pool = line ? itemsFor(line) : items
+      const wanted = code.trim().toLowerCase()
+      const hit =
+        pool.find((i) => (i.code ?? '').toLowerCase() === wanted) ??
+        items.find((i) => (i.code ?? '').toLowerCase() === wanted)
       if (!hit) {
         setLine(key, { codeText: code, itemId: '', uom: '' })
         return
@@ -264,17 +301,26 @@ export function PurchaseEnquiryDialog({
     [items, categories, setLine]
   )
 
-  /** Items on offer for a row, narrowed by whatever category it has chosen. */
-  const itemsFor = useCallback(
-    (l: Line) => {
-      const want = l.subcategoryId || l.categoryId
-      if (!want) return items
-      const ids = new Set([want, ...subsOf(want).map((c) => c.id)])
-      return items.filter((i) => (i.category ? ids.has(i.category.id) : false))
-    },
-    [items, subsOf]
+  /**
+   * The item codes a row may use, narrowed by the category above it.
+   *
+   * Fed to a `<datalist>` rather than a second dropdown: the old form's code
+   * box is typed into, and somebody who knows the code should be able to type
+   * it and move on. The list is what turns it from a box that accepts anything
+   * into one that suggests only what the chosen category holds.
+   */
+  const codesFor = useCallback(
+    (l: Line) =>
+      itemsFor(l)
+        .map((i) => i.code)
+        .filter(Boolean),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- itemsFor is stable
+    // in practice and listing it here would rebuild every row's list on every
+    // keystroke in the description beside it.
+    [items, categories]
   )
 
+  /** Items on offer for a row, narrowed by whatever category it has chosen. */
   /**
    * Picking an item fills in everything that describes it.
    *
@@ -658,8 +704,8 @@ export function PurchaseEnquiryDialog({
                     <tr className="bg-secondary">
                       {[
                         ['#', COL.num, 'left'],
-                        ['Item code', COL.code, 'left'],
                         ['Category', COL.category, 'left'],
+                        ['Item code', COL.code, 'left'],
                         ['Item', COL.item, 'left'],
                         ['Description', COL.description, 'left'],
                         ['Qty', COL.qty, 'right'],
@@ -682,23 +728,6 @@ export function PurchaseEnquiryDialog({
                       <tr key={l.key} className="border-border/60 border-b last:border-0">
                         <td className="text-muted-foreground px-2 py-1.5 align-top text-[11px]">
                           {i + 1}
-                        </td>
-                        <td className="px-2 py-1.5 align-top">
-                          <input
-                            value={l.codeText}
-                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
-                            onBlur={(e) => pickByCode(l.key, e.target.value)}
-                            placeholder="Items Code"
-                            className={`form-input font-mono ${
-                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
-                            }`}
-                            aria-label={`Row ${i + 1} item code`}
-                          />
-                          {l.codeText && !l.itemId && (
-                            <p className="mt-0.5 text-[10px] text-amber-400">
-                              no item with that code
-                            </p>
-                          )}
                         </td>
                         {/* Category over subcategory, stacked in one column.
                           They are how a row finds its item, not part of the
@@ -735,6 +764,34 @@ export function PurchaseEnquiryDialog({
                               </option>
                             ))}
                           </select>
+                        </td>
+                        {/* Second, and offering only what the category above it
+                          holds. Still a box to type into — somebody who knows
+                          the code should be able to type it and move on — but
+                          the list behind it suggests only the codes in scope,
+                          so the three controls narrow in one direction. */}
+                        <td className="px-2 py-1.5 align-top">
+                          <input
+                            value={l.codeText}
+                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
+                            onBlur={(e) => pickByCode(l.key, e.target.value)}
+                            list={'codes-' + l.key}
+                            placeholder="Items Code"
+                            className={`form-input font-mono ${
+                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
+                            }`}
+                            aria-label={`Row ${i + 1} item code`}
+                          />
+                          <datalist id={'codes-' + l.key}>
+                            {codesFor(l).map((c) => (
+                              <option key={c} value={c} />
+                            ))}
+                          </datalist>
+                          {l.codeText && !l.itemId && (
+                            <p className="mt-0.5 text-[10px] text-amber-400">
+                              no item with that code
+                            </p>
+                          )}
                         </td>
                         <td className="px-2 py-1.5 align-top">
                           <select

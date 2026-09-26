@@ -615,14 +615,36 @@ export default function PurchaseEnquiriesPage() {
                     says where the list starts. Same as the order list. */}
                   <tr className="bg-secondary">
                     <th style={{ width: 30 }} />
+                    {/* One fact per column.
+                      Five of these used to be a second line under another —
+                      the location under the number, "2 of 2 answered" under
+                      the supplier count, the order under the status. Stacked
+                      pairs read as one thing, so nothing in them can be
+                      scanned down or sorted on, and the cell they share ends
+                      up two lines tall on every row whether or not it has both.
+
+                      Which of them survives a narrow list is the `col-` tier:
+                      full at 1390px and up, then wide, then roomy. Never
+                      dropped: the number, the value, the status and the
+                      actions. */}
                     <th>Enquiry</th>
-                    <th>Suppliers</th>
+                    <th className="col-full">Location</th>
                     <th className="col-roomy">Date</th>
+                    <th className="col-full">Needed by</th>
                     <th className="col-full">Reference</th>
-                    <th className="col-full">Items</th>
+                    <th className="col-wide" style={{ textAlign: 'right' }}>
+                      Items
+                    </th>
+                    <th className="col-roomy" style={{ textAlign: 'right' }}>
+                      Asked
+                    </th>
+                    <th className="col-wide" style={{ textAlign: 'right' }}>
+                      Answered
+                    </th>
                     <th>Best quote</th>
                     <th style={{ textAlign: 'right' }}>Value</th>
                     <th>Status</th>
+                    <th className="col-roomy">Order</th>
                     <th />
                   </tr>
                 </thead>
@@ -661,28 +683,16 @@ export default function PurchaseEnquiriesPage() {
                             >
                               {e.enquiryNumber}
                             </a>
-                            {e.location && (
-                              <p className="text-muted-foreground text-[11px]">{e.location.name}</p>
-                            )}
                           </td>
-                          <td>
-                            <p className="text-sm">{suppliersOf(e)}</p>
-                            {/* Answered against asked, because "two of three
-                              are back" is the fact a buyer chasing quotes
-                              needs, and it cannot be read off a count. */}
-                            {e.supplierCount > 0 && (
-                              <p className="text-muted-foreground text-[11px]">
-                                {e.answeredCount} of {e.supplierCount} answered
-                                {waiting && ` · waiting ${waitingFor(waiting.sentAt)}`}
-                              </p>
-                            )}
+                          <td className="col-full text-muted-foreground text-xs">
+                            {e.location?.name ?? 'Head office'}
                           </td>
-                          <td className="col-roomy">
-                            <p className="text-xs">{formatDate(e.enquiryDate)}</p>
-                            {e.requiredDate && (
-                              <p className="text-muted-foreground text-[11px]">
-                                needed {formatDate(e.requiredDate)}
-                              </p>
+                          <td className="col-roomy text-xs">{formatDate(e.enquiryDate)}</td>
+                          <td className="col-full text-xs">
+                            {e.requiredDate ? (
+                              formatDate(e.requiredDate)
+                            ) : (
+                              <span className="text-muted-foreground/60">—</span>
                             )}
                           </td>
                           <td className="col-full">
@@ -692,10 +702,32 @@ export default function PurchaseEnquiriesPage() {
                               <span className="text-muted-foreground/60 text-xs">—</span>
                             )}
                           </td>
-                          <td className="col-full text-muted-foreground text-xs">
-                            {e.lines.length === 1
-                              ? e.lines[0].item.name
-                              : e.lines.length + ' items'}
+                          <td
+                            className="col-wide text-xs tabular-nums"
+                            style={{ textAlign: 'right' }}
+                          >
+                            {e.lines.length}
+                          </td>
+                          <td
+                            className="col-roomy text-xs tabular-nums"
+                            style={{ textAlign: 'right' }}
+                          >
+                            {e.supplierCount}
+                          </td>
+                          {/* Answered against asked, because "two of three are
+                            back" is the fact a buyer chasing quotes needs, and
+                            it cannot be read off either count alone. How long
+                            the slowest of them has had it goes underneath —
+                            it is the same fact, aged. */}
+                          <td className="col-wide" style={{ textAlign: 'right' }}>
+                            <p className="text-xs tabular-nums">
+                              {e.answeredCount} of {e.supplierCount}
+                            </p>
+                            {waiting && (
+                              <p className="text-muted-foreground text-[11px]">
+                                waiting {waitingFor(waiting.sentAt)}
+                              </p>
+                            )}
                           </td>
                           {/* The winner, named. The whole reason this document
                             exists is to answer "which of them is cheapest",
@@ -733,8 +765,13 @@ export default function PurchaseEnquiriesPage() {
                           </td>
                           <td>
                             <span className={s.cls}>{s.label}</span>
-                            {e.purchaseOrders.length > 0 && (
-                              <div className="mt-1 space-y-0.5">
+                          </td>
+                          {/* The orders raised from it. Under the status they
+                            read as part of it; the status is derived from them,
+                            which is not the same thing as being them. */}
+                          <td className="col-roomy">
+                            {e.purchaseOrders.length > 0 ? (
+                              <div className="space-y-0.5">
                                 {e.purchaseOrders.map((po) => (
                                   <Link
                                     key={po.id}
@@ -745,6 +782,8 @@ export default function PurchaseEnquiriesPage() {
                                   </Link>
                                 ))}
                               </div>
+                            ) : (
+                              <span className="text-muted-foreground/60 text-xs">—</span>
                             )}
                           </td>
                           <td>
@@ -762,7 +801,7 @@ export default function PurchaseEnquiriesPage() {
                               a strip of buttons was a row that opened into a
                               wall. What came back from the suppliers has its own
                               window, off the Actions menu. */}
-                            <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={14} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               <RowPanel
                                 icon={FileText}
                                 title="Item Details"
