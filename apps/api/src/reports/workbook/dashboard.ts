@@ -222,19 +222,35 @@ export function buildDashboard(
   }
 
   /*
-   * Says so when there is barely anything to look at.
+   * Says so when there is barely anything to look at — and says which of the
+   * two things actually happened.
    *
-   * A dashboard drawn over three rows is a row of single bars, and without
-   * this line the reader's conclusion is that the report is broken rather
-   * than that the period is empty. Cheaper to say it than to have somebody
-   * spend an afternoon deciding which.
+   * A dashboard drawn over three rows is a row of single bars, and without a
+   * line like this the reader's conclusion is that the report is broken rather
+   * than that the period is empty.
+   *
+   * It used to promise "the charts below", which on a young period is a
+   * promise the split further down then breaks: every panel holding one
+   * category becomes a tile, so a reader told to look at the charts finds a
+   * heading saying Single figures and no chart anywhere. That reads as the
+   * failure the line exists to rule out. It now counts the split first and
+   * names what is really there.
    */
+  const panelsUsable = analysis.panels.filter((p) => !isPointless(p))
+  const panelsAsCards = panelsUsable.filter(isCard).length
+  const panelsAsCharts = panelsUsable.length - panelsAsCards
+
   if (meta.rowCount > 0 && meta.rowCount < 5) {
     ws.mergeCells(row, 1, row, GRID)
     const thin = ws.getCell(row, 1)
+    const rows = `${meta.rowCount} ${meta.rowCount === 1 ? 'row' : 'rows'}`
     thin.value =
-      `This period holds ${meta.rowCount} ${meta.rowCount === 1 ? 'row' : 'rows'}, so the charts ` +
-      'below have very little to compare. They fill out as more documents are raised — nothing here is broken.'
+      panelsAsCharts === 0 && panelsAsCards > 0
+        ? `This period holds ${rows}, and every figure below has a single thing in it — one ` +
+          'supplier, one status. A chart of one bar says less than the number does, so they are ' +
+          'shown as numbers. Charts appear once there is more than one of something to compare.'
+        : `This period holds ${rows}, so the charts below have very little to compare. They fill ` +
+          'out as more documents are raised — nothing here is broken.'
     thin.font = { name: 'Calibri', size: 9, italic: true, color: { argb: TONE_INK.warn } }
     thin.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: PAPER.warn } }
     thin.alignment = { wrapText: true, vertical: 'middle', indent: 1 }
@@ -384,7 +400,9 @@ export function buildDashboard(
   }
 
   // ── Panels, two across. Cards take one row each instead. ──────────────
-  const usable = analysis.panels.filter((p) => !isPointless(p))
+  // Split once, above, so the thin-data line can say which of the two the
+  // reader is about to get.
+  const usable = panelsUsable
   const cards = usable.filter(isCard)
   const charts = usable.filter((p) => !isCard(p))
 
