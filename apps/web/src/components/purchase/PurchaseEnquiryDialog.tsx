@@ -79,11 +79,37 @@ interface Line {
   categoryId: string
   subcategoryId: string
   qty: string
+  /** The item's unit, shown under the quantity so a figure says what it counts. */
+  uom: string
   expectedRate: string
   description: string
   mrLineId: string | null
   mrNumber: string | null
 }
+
+/*
+ * The widths of the item table.
+ *
+ * Declared rather than left to the browser: `table-fixed` needs a number per
+ * column, and without one the cells size themselves off whatever is typed in
+ * them — which is how the code box ended up at 140px of a 1600px row while
+ * three full-width dropdowns stacked in the cell beside it.
+ *
+ * Only the item name and the description hold anything sentence-shaped; the
+ * rest are a code, a figure or a short dropdown and gain nothing from being
+ * wider. Their sum is the table's `min-w`, so a narrow screen scrolls rather
+ * than crushing eight columns into what it has.
+ */
+const COL = {
+  num: 'w-8',
+  code: 'w-32',
+  category: 'w-44',
+  item: 'w-72',
+  description: 'w-44',
+  qty: 'w-24',
+  rate: 'w-28',
+  remove: 'w-10',
+} as const
 
 const num = (v: string) => {
   const n = Number(v)
@@ -135,6 +161,7 @@ export function PurchaseEnquiryDialog({
           categoryId: '',
           subcategoryId: '',
           qty: String(Number(l.qty)),
+          uom: l.item.uom?.symbol ?? '',
           expectedRate: l.expectedRate == null ? '' : String(Number(l.expectedRate)),
           description: l.description ?? '',
           mrLineId: l.mrLineId,
@@ -158,7 +185,7 @@ export function PurchaseEnquiryDialog({
     Promise.all([
       api.get<{ data: Supplier[] }>('/masters/suppliers?limit=500&active=true'),
       api.get<{ data: Item[] }>('/masters/items?limit=1000&active=true'),
-      api.get<{ data: Category[] }>('/masters/categories?limit=500'),
+      api.get<{ data: Category[] }>('/masters/item-categories?limit=500'),
       api.get<{ data: Warehouse[] }>('/masters/warehouses?limit=200&active=true'),
     ])
       .then(([s, i, c, w]) => {
@@ -193,6 +220,7 @@ export function PurchaseEnquiryDialog({
     categoryId: '',
     subcategoryId: '',
     qty: '',
+    uom: '',
     expectedRate: '',
     description: '',
     mrLineId: null,
@@ -221,13 +249,14 @@ export function PurchaseEnquiryDialog({
     (key: string, code: string) => {
       const hit = items.find((i) => (i.code ?? '').toLowerCase() === code.trim().toLowerCase())
       if (!hit) {
-        setLine(key, { codeText: code, itemId: '' })
+        setLine(key, { codeText: code, itemId: '', uom: '' })
         return
       }
       const cat = categories.find((c) => c.id === hit.category?.id)
       setLine(key, {
         codeText: code,
         itemId: hit.id,
+        uom: hit.uom?.symbol ?? '',
         categoryId: cat?.parentId ?? cat?.id ?? '',
         subcategoryId: cat?.parentId ? cat.id : '',
       })
@@ -246,12 +275,62 @@ export function PurchaseEnquiryDialog({
     [items, subsOf]
   )
 
+  /**
+   * Picking an item fills in everything that describes it.
+   *
+   * The code box and both category boxes follow, so a row never sits there
+   * saying "Category: Fabric" over an item filed under Trims. The three
+   * controls are one question asked three ways, and whichever of them the buyer
+   * answers, the other two have to agree with it.
+   */
   const pickItem = useCallback(
     (key: string, itemId: string) => {
       const item = items.find((i) => i.id === itemId)
-      setLine(key, { itemId, codeText: item?.code ?? '' })
+      const cat = categories.find((c) => c.id === item?.category?.id)
+      setLine(key, {
+        itemId,
+        codeText: item?.code ?? '',
+        uom: item?.uom?.symbol ?? '',
+        categoryId: cat?.parentId ?? cat?.id ?? '',
+        subcategoryId: cat?.parentId ? cat.id : '',
+      })
     },
-    [items, setLine]
+    [items, categories, setLine]
+  )
+
+  /**
+   * Narrowing the category, which can invalidate the item already chosen.
+   *
+   * The item is cleared only when it genuinely no longer belongs under what was
+   * picked. Clearing it on every change would punish a buyer who chose the item
+   * first and then set the category to match — which is the commoner way round,
+   * because the code is what is on the indent slip in their hand.
+   */
+  const narrow = useCallback(
+    (key: string, patch: { categoryId?: string; subcategoryId?: string }) => {
+      setLines((prev) =>
+        prev.map((l) => {
+          if (l.key !== key) return l
+          const next = { ...l, ...patch }
+          if (patch.categoryId !== undefined) next.subcategoryId = ''
+          const want = next.subcategoryId || next.categoryId
+          if (want && next.itemId) {
+            const item = items.find((i) => i.id === next.itemId)
+            const ids = new Set([
+              want,
+              ...categories.filter((c) => c.parentId === want).map((c) => c.id),
+            ])
+            if (!item?.category || !ids.has(item.category.id)) {
+              next.itemId = ''
+              next.codeText = ''
+              next.uom = ''
+            }
+          }
+          return next
+        })
+      )
+    },
+    [items, categories]
   )
 
   /*
@@ -280,6 +359,7 @@ export function PurchaseEnquiryDialog({
             categoryId: cat?.parentId ?? cat?.id ?? '',
             subcategoryId: cat?.parentId ? cat.id : '',
             qty: String(p.qty),
+            uom: p.row.item.uom?.symbol ?? '',
             expectedRate: '',
             description: '',
             mrLineId: p.row.mrLineId,
@@ -429,16 +509,22 @@ export function PurchaseEnquiryDialog({
             </div>
           )}
 
-          {/* Said once, at the top, rather than discovered when the order is
-            raised. An enquiry that reads like an order is the one way this
-            document could do harm. */}
-          <p className="text-muted-foreground border-border/70 bg-secondary/30 rounded-lg border px-3 py-2 text-xs">
+          {/* Said once, and small. An enquiry that reads like an order is the
+            one way this document could do harm, so the line stays — but at the
+            weight of a caption rather than a banner, because it is the same
+            sentence every time and nobody needs it twice. */}
+          <p className="text-muted-foreground text-[11px]">
             Nothing here commits the mill. No stock is expected, nothing is owed, and the indent
             this answers still shows as needing to be ordered until a purchase order is raised.
           </p>
 
           <Section icon={FileText} title="Basic Details">
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
+            {/* Six short fields in one row at a desk, not two rows of three.
+              Every one of them is a date, a code or a line — nothing here holds
+              a sentence — so three columns spent half the width on whitespace
+              and pushed the item table, which is the part being worked on,
+              below the fold. Three columns on a tablet, two on a phone. */}
+            <div className="grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-3 xl:grid-cols-6">
               <div>
                 <label className="form-label" htmlFor="enq-location">
                   Location
@@ -558,23 +644,46 @@ export function PurchaseEnquiryDialog({
                 </p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="subtable w-full">
+              /* A fixed-width table, sized like the order form's.
+                 `table-fixed` with a declared width per column, and a `min-w`
+                 that is their sum — so a narrow screen scrolls sideways rather
+                 than crushing eight columns into whatever it has, and every row
+                 lines up with the header above it whatever is typed in it.
+                 The previous layout let the cells size themselves, which put
+                 the code box at 140px of a 1600px row and stacked three
+                 full-width dropdowns in the cell beside it. */
+              <div className="border-border bg-card overflow-x-auto rounded-lg border">
+                <table className="w-full min-w-[1000px] table-fixed border-collapse text-sm">
                   <thead>
-                    <tr className="bg-secondary/60">
-                      <th className="text-left" style={{ width: 140 }}>
-                        Item Code
-                      </th>
-                      <th className="text-left">Item &amp; Description</th>
-                      <th style={{ width: 110, textAlign: 'right' }}>Quantity</th>
-                      <th style={{ width: 110, textAlign: 'right' }}>Expected rate</th>
-                      <th style={{ width: 40 }} />
+                    <tr className="bg-secondary">
+                      {[
+                        ['#', COL.num, 'left'],
+                        ['Item code', COL.code, 'left'],
+                        ['Category', COL.category, 'left'],
+                        ['Item', COL.item, 'left'],
+                        ['Description', COL.description, 'left'],
+                        ['Qty', COL.qty, 'right'],
+                        ['Expected rate', COL.rate, 'right'],
+                        ['', COL.remove, 'left'],
+                      ].map(([label, width, align], i) => (
+                        <th
+                          key={label + '-' + i}
+                          className={`${width} border-border text-muted-foreground border-b px-2 py-1.5 align-bottom text-[10px] font-semibold uppercase tracking-wider ${
+                            align === 'right' ? 'text-right' : 'text-left'
+                          }`}
+                        >
+                          {label}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {lines.map((l) => (
-                      <tr key={l.key}>
-                        <td>
+                    {lines.map((l, i) => (
+                      <tr key={l.key} className="border-border/60 border-b last:border-0">
+                        <td className="text-muted-foreground px-2 py-1.5 align-top text-[11px]">
+                          {i + 1}
+                        </td>
+                        <td className="px-2 py-1.5 align-top">
                           <input
                             value={l.codeText}
                             onChange={(e) => setLine(l.key, { codeText: e.target.value })}
@@ -583,7 +692,7 @@ export function PurchaseEnquiryDialog({
                             className={`form-input font-mono ${
                               l.codeText && !l.itemId ? 'border-amber-500/60' : ''
                             }`}
-                            aria-label="Item code"
+                            aria-label={`Row ${i + 1} item code`}
                           />
                           {l.codeText && !l.itemId && (
                             <p className="mt-0.5 text-[10px] text-amber-400">
@@ -591,72 +700,73 @@ export function PurchaseEnquiryDialog({
                             </p>
                           )}
                         </td>
-                        <td>
-                          {/* Category over subcategory over item, as the old
-                            form has it. Each narrows the one below, and
-                            leaving them empty offers every item — a buyer who
-                            knows what they want should not have to file it
-                            first. */}
-                          <div className="flex flex-wrap gap-1.5">
-                            <select
-                              value={l.categoryId}
-                              onChange={(e) =>
-                                setLine(l.key, { categoryId: e.target.value, subcategoryId: '' })
-                              }
-                              className="form-input w-auto min-w-[120px] flex-1"
-                              aria-label="Category"
-                            >
-                              <option value="">Category …</option>
-                              {topCategories.map((c) => (
-                                <option key={c.id} value={c.id}>
-                                  {c.name}
-                                </option>
-                              ))}
-                            </select>
-                            <select
-                              value={l.subcategoryId}
-                              onChange={(e) => setLine(l.key, { subcategoryId: e.target.value })}
-                              disabled={!l.categoryId}
-                              className="form-input w-auto min-w-[120px] flex-1"
-                              aria-label="Subcategory"
-                            >
-                              <option value="">Subcategory …</option>
-                              {subsOf(l.categoryId).map((c) => (
-                                <option key={c.id} value={c.id}>
-                                  {c.name}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
+                        {/* Category over subcategory, stacked in one column.
+                          They are how a row finds its item, not part of the
+                          enquiry — neither is sent to the server — and as two
+                          full columns they took 256px of the row to narrow a
+                          dropdown. The order form settled this the same way. */}
+                        <td className="px-2 py-1.5 align-top">
+                          <select
+                            value={l.categoryId}
+                            onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
+                            className="form-input"
+                            aria-label={`Row ${i + 1} category`}
+                          >
+                            <option value="">All categories</option>
+                            {topCategories.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            value={l.subcategoryId}
+                            onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
+                            disabled={subsOf(l.categoryId).length === 0}
+                            className="form-input mt-1"
+                            aria-label={`Row ${i + 1} subcategory`}
+                          >
+                            <option value="">
+                              {subsOf(l.categoryId).length === 0 ? 'None' : 'All'}
+                            </option>
+                            {subsOf(l.categoryId).map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="px-2 py-1.5 align-top">
                           <select
                             value={l.itemId}
                             onChange={(e) => pickItem(l.key, e.target.value)}
                             disabled={loadingRefs}
-                            className="form-input mt-1.5"
-                            aria-label="Item"
+                            className="form-input"
+                            aria-label={`Row ${i + 1} item`}
                           >
-                            <option value="">{loadingRefs ? 'Loading items…' : 'Items'}</option>
-                            {itemsFor(l).map((i) => (
-                              <option key={i.id} value={i.id}>
-                                {i.code} · {i.name}
+                            <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
+                            {itemsFor(l).map((it) => (
+                              <option key={it.id} value={it.id}>
+                                {it.code} · {it.name}
                               </option>
                             ))}
                           </select>
-                          <textarea
-                            value={l.description}
-                            onChange={(e) => setLine(l.key, { description: e.target.value })}
-                            rows={2}
-                            placeholder="In our own words, if it differs"
-                            className="form-input mt-1.5"
-                            aria-label="Description"
-                          />
                           {l.mrNumber && (
                             <p className="text-muted-foreground mt-0.5 text-[10px]">
                               against indent {l.mrNumber}
                             </p>
                           )}
                         </td>
-                        <td>
+                        <td className="px-2 py-1.5 align-top">
+                          <input
+                            value={l.description}
+                            onChange={(e) => setLine(l.key, { description: e.target.value })}
+                            placeholder="If it differs"
+                            className="form-input"
+                            aria-label={`Row ${i + 1} description`}
+                          />
+                        </td>
+                        <td className="px-2 py-1.5 align-top">
                           <input
                             type="number"
                             step="0.001"
@@ -664,14 +774,17 @@ export function PurchaseEnquiryDialog({
                             value={l.qty}
                             onChange={(e) => setLine(l.key, { qty: e.target.value })}
                             className="form-input text-right"
-                            aria-label="Quantity"
+                            aria-label={`Row ${i + 1} quantity`}
                           />
+                          {l.uom && (
+                            <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
+                              {l.uom}
+                            </p>
+                          )}
                         </td>
-                        <td>
-                          {/* Ours, not theirs, and labelled as an estimate
-                            wherever it is shown. What a supplier quotes is
-                            recorded against his PI number and never typed on
-                            this form. */}
+                        {/* Ours, not theirs. What a supplier quotes is recorded
+                          against his PI number and never typed on this form. */}
+                        <td className="px-2 py-1.5 align-top">
                           <input
                             type="number"
                             step="0.01"
@@ -680,15 +793,15 @@ export function PurchaseEnquiryDialog({
                             onChange={(e) => setLine(l.key, { expectedRate: e.target.value })}
                             placeholder="—"
                             className="form-input text-right"
-                            aria-label="Expected rate"
+                            aria-label={`Row ${i + 1} expected rate`}
                           />
                         </td>
-                        <td style={{ textAlign: 'right' }}>
+                        <td className="px-2 py-1.5 align-top">
                           <button
                             type="button"
                             onClick={() => removeLine(l.key)}
-                            className="btn-ghost text-red-400"
-                            aria-label="Remove line"
+                            className="btn-ghost p-1 text-red-400"
+                            aria-label={`Remove row ${i + 1}`}
                           >
                             <Trash2 size={13} />
                           </button>
@@ -701,108 +814,100 @@ export function PurchaseEnquiryDialog({
             )}
           </Section>
 
-          {/* Suppliers only while raising. Once the enquiry exists they are
-            added and removed from the comparison panel, where their answers
-            live — a form that could drop a supplier would take his recorded PI
-            with him, and the order that quotes it would be left pointing at
-            nothing. */}
-          {!editing && (
-            <Section
-              icon={Truck}
-              title="Suppliers to ask"
-              summary={supplierIds.length ? supplierIds.length + ' chosen' : 'None yet'}
-            >
+          {/* The three side panels in one row.
+            None of them is the work — the items above are — and stacked they
+            pushed the save buttons two screens down on a form whose commonest
+            use is four lines and one supplier. Three across at a desk, two on a
+            tablet, one on a phone. They are no longer foldable: a panel that is
+            already a third of a row and open is quicker to read than a closed
+            strip that has to be found and pressed first. */}
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {!editing && (
+              <Section
+                icon={Truck}
+                title="Suppliers to ask"
+                summary={supplierIds.length ? supplierIds.length + ' chosen' : 'None yet'}
+              >
+                <p className="text-muted-foreground mb-2 text-xs">
+                  Tick everybody you want a rate from. Asking two or three is what makes the
+                  comparison worth reading — and you can add more once it is raised.
+                </p>
+                <div className="grid max-h-56 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
+                  {suppliers.map((s) => {
+                    const on = supplierIds.includes(s.id)
+                    return (
+                      <label
+                        key={s.id}
+                        className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                          on
+                            ? 'border-primary/40 bg-primary/5'
+                            : 'border-border/70 hover:bg-secondary/40'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() =>
+                            setSupplierIds((prev) =>
+                              prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id]
+                            )
+                          }
+                          className="accent-primary"
+                        />
+                        <span className="min-w-0 truncate">{s.name}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </Section>
+            )}
+
+            <Section icon={Paperclip} title="Attachments">
               <p className="text-muted-foreground mb-2 text-xs">
-                Tick everybody you want a rate from. Asking two or three is what makes the
-                comparison worth reading — and you can add more once it is raised.
+                Drawings and specifications, which go to everybody asked. A supplier&rsquo;s own
+                proforma invoice is filed against him when you record it, not here.
               </p>
-              <div className="grid max-h-56 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
-                {suppliers.map((s) => {
-                  const on = supplierIds.includes(s.id)
-                  return (
-                    <label
-                      key={s.id}
-                      className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
-                        on
-                          ? 'border-primary/40 bg-primary/5'
-                          : 'border-border/70 hover:bg-secondary/40'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        onChange={() =>
-                          setSupplierIds((prev) =>
-                            prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id]
-                          )
-                        }
-                        className="accent-primary"
-                      />
-                      <span className="min-w-0 truncate">{s.name}</span>
-                    </label>
-                  )
-                })}
+              <AttachmentsBox
+                ref={filesRef}
+                basePath="/purchase/enquiries"
+                linkBasePath="/purchase/enquiries/attachments"
+                recordId={record?.id}
+                filter={(a) => !(a as { quoteId?: string | null }).quoteId}
+                onError={setError}
+              />
+            </Section>
+
+            <Section icon={FileText} title="Notes and terms">
+              <div className="space-y-3">
+                <div>
+                  <label className="form-label" htmlFor="enq-notes">
+                    Notes to the suppliers
+                  </label>
+                  <textarea
+                    id="enq-notes"
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    rows={3}
+                    className="form-input"
+                    placeholder="Printed on their copies"
+                  />
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="enq-terms">
+                    Terms
+                  </label>
+                  <textarea
+                    id="enq-terms"
+                    value={terms}
+                    onChange={(e) => setTerms(e.target.value)}
+                    rows={3}
+                    className="form-input"
+                    placeholder="Printed on their copies"
+                  />
+                </div>
               </div>
             </Section>
-          )}
-
-          <Section
-            icon={Paperclip}
-            title="Drawings and specifications"
-            foldable
-            openByDefault={false}
-            summary="What every supplier gets a copy of"
-          >
-            <p className="text-muted-foreground mb-2 text-xs">
-              Files here go to everybody asked. A supplier&rsquo;s own proforma invoice is filed
-              against him when you record it, not here.
-            </p>
-            <AttachmentsBox
-              ref={filesRef}
-              basePath="/purchase/enquiries"
-              linkBasePath="/purchase/enquiries/attachments"
-              recordId={record?.id}
-              filter={(a) => !(a as { quoteId?: string | null }).quoteId}
-              onError={setError}
-            />
-          </Section>
-
-          <Section
-            icon={FileText}
-            title="Notes and terms"
-            foldable
-            openByDefault={false}
-            summary={notes || terms ? 'Filled in' : 'The mill’s standing terms, nothing extra'}
-          >
-            <div className="grid gap-3 lg:grid-cols-2">
-              <div>
-                <label className="form-label" htmlFor="enq-notes">
-                  Notes to the suppliers
-                </label>
-                <textarea
-                  id="enq-notes"
-                  value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
-                  rows={3}
-                  className="form-input"
-                  placeholder="Printed on their copies"
-                />
-              </div>
-              <div>
-                <label className="form-label" htmlFor="enq-terms">
-                  Terms
-                </label>
-                <textarea
-                  id="enq-terms"
-                  value={terms}
-                  onChange={(e) => setTerms(e.target.value)}
-                  rows={3}
-                  className="form-input"
-                  placeholder="Printed on their copies"
-                />
-              </div>
-            </div>
-          </Section>
+          </div>
         </div>
 
         <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-4 py-3">
