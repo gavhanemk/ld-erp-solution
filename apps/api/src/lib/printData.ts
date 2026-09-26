@@ -48,6 +48,9 @@ export interface PrintHeader {
 const DEFAULT_TITLES: Record<string, string> = {
   INV: 'TAX INVOICE',
   PO: 'PURCHASE ORDER',
+  // Not an order, and the heading is the first thing that says so. A supplier
+  // holding a sheet headed PURCHASE ORDER will treat it as one.
+  ENQ: 'PURCHASE ENQUIRY',
   DC: 'DELIVERY CHALLAN',
   JW: 'DELIVERY CHALLAN (JOB WORK)',
   // Our own booking record of a supplier's invoice, not a tax invoice we issue.
