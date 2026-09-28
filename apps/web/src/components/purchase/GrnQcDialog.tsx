@@ -241,9 +241,13 @@ export function GrnQcDialog({
   const readOnly = Boolean(standing) || cancelled
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+    /* Narrower than the document forms, and only as tall as it needs to be: a
+       check is a handful of lines and three fields, and at full screen width it
+       read as mostly empty space. The chrome is the module's own, as the new-item
+       window's is. */
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
       <div
-        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        className="glass-card po-form flex max-h-full w-full max-w-4xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="qc-dialog-title"
@@ -295,7 +299,7 @@ export function GrnQcDialog({
           </div>
         </div>
 
-        <div className="flex-1 space-y-2.5 overflow-y-auto px-5 py-3">
+        <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-5 py-3">
           {!readOnly && !loading && (
             <p className="text-muted-foreground text-[11px]">
               Enter only what was rejected and why — the rest counts as passed. Rejected goods move
@@ -333,7 +337,7 @@ export function GrnQcDialog({
           ) : (
             <>
               <Section icon={MessageSquare} title="Check Details">
-                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
                   <label className="block">
                     <span className="form-label">QC date</span>
                     <input
@@ -456,15 +460,15 @@ export function GrnQcDialog({
                 </div>
 
                 <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
-                  <table className="w-full min-w-[820px] table-fixed border-collapse text-sm">
+                  <table className="w-full min-w-[720px] table-fixed border-collapse text-sm">
                     <thead>
                       <tr className="bg-secondary">
                         {[
-                          ['Item', 'w-64', 'left'],
-                          ['Godown', 'w-40', 'left'],
-                          ['Received', 'w-28', 'right'],
-                          ['Approved', 'w-28', 'right'],
-                          ['Rejected', 'w-32', 'right'],
+                          ['Item', 'w-56', 'left'],
+                          ['Godown', 'w-36', 'left'],
+                          ['Received', 'w-24', 'right'],
+                          ['Approved', 'w-24', 'right'],
+                          ['Rejected', 'w-28', 'right'],
                           ['Rejection reason', '', 'left'],
                         ].map(([label, width, align]) => (
                           <th
