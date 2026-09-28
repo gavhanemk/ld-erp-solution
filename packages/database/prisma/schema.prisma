@@ -286,6 +286,8 @@ model User {
   postedNotes          PurchaseNote[]              @relation("NotePostedBy")
   closedNotes          PurchaseNote[]              @relation("NoteClosedBy")
   gstTreatedNotes      PurchaseNote[]              @relation("NoteGstTreatedBy")
+  createdReturns       PurchaseReturn[]            @relation("ReturnCreatedBy")
+  cancelledReturns     PurchaseReturn[]            @relation("ReturnCancelledBy")
   uploadedNoteFiles    PurchaseNoteAttachment[]    @relation("NoteAttachmentUploadedBy")
 
   @@index([email])
@@ -549,6 +551,7 @@ model Item {
   billLines     PurchaseInvoiceLine[]
   creditLines   CreditNoteLine[]
   noteLines     PurchaseNoteLine[]
+  returnLines   PurchaseReturnLine[]
   debitLines    DebitNoteLine[]
 
   @@index([code])
@@ -747,14 +750,15 @@ model Supplier {
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
-  addresses      SupplierAddress[]
-  enquiryQuotes  PurchaseEnquiryQuote[]
-  purchaseOrders PurchaseOrder[]
-  invoices       PurchaseInvoice[]
-  payments       SupplierPayment[]
-  purchaseNotes  PurchaseNote[]
-  debitNotes     DebitNote[]
-  workstations   Workstation[]
+  addresses       SupplierAddress[]
+  enquiryQuotes   PurchaseEnquiryQuote[]
+  purchaseOrders  PurchaseOrder[]
+  invoices        PurchaseInvoice[]
+  payments        SupplierPayment[]
+  purchaseNotes   PurchaseNote[]
+  purchaseReturns PurchaseReturn[]
+  debitNotes      DebitNote[]
+  workstations    Workstation[]
 
   @@index([code])
   @@map("suppliers")
@@ -781,6 +785,7 @@ model Warehouse {
 
   supplierPayments SupplierPayment[]
   purchaseNotes    PurchaseNote[]
+  returnLines      PurchaseReturnLine[]
 
   @@map("warehouses")
 }
@@ -1756,6 +1761,8 @@ model PurchaseInvoice {
   lines       PurchaseInvoiceLine[]
   charges     PurchaseInvoiceCharge[]
   adjustments PurchaseNote[]
+  /// Goods sent back against this bill, on a return challan each.
+  returns     PurchaseReturn[]
   debitNotes  DebitNote[]
 
   /// The same supplier bill must never be booked twice — a duplicate claims the
@@ -2723,7 +2730,9 @@ model PurchaseInvoiceLine {
 
   /// Adjustments raised against this line. What is left to adjust is this
   /// line's quantity less what these already claim.
-  noteLines PurchaseNoteLine[]
+  noteLines   PurchaseNoteLine[]
+  /// Goods physically sent back against this line.
+  returnLines PurchaseReturnLine[]
 
   @@index([billId])
   @@map("purchase_invoice_lines")
@@ -3045,6 +3054,17 @@ model PurchaseNote {
 
   noteDate DateTime @default(now())
 
+  /// The return challan this note was raised from, when the goods physically
+  /// went back. Set only by the challan itself, never by the note form.
+  ///
+  /// A note carrying one never moves stock: the challan already took the goods
+  /// off the rack at the gate, and posting the note is the money side of the
+  /// same event, not a second trip. `Restrict` because a challan with the note
+  /// it produced deleted from under it would leave goods gone and nothing
+  /// claimed for them.
+  returnId       String?
+  purchaseReturn PurchaseReturn? @relation(fields: [returnId], references: [id], onDelete: Restrict)
+
   /// The supplier's own document, when they are the one who wrote it. Their
   /// number and their date, kept as they printed them.
   supplierDocNo   String?
@@ -3112,7 +3132,110 @@ model PurchaseNote {
   @@index([billId])
   @@index([docType, status])
   @@index([issuedBy, status])
+  @@index([returnId])
   @@map("purchase_notes")
+}
+
+/// Whether a return challan still stands.
+///
+/// No draft: a challan is written at the gate as the vehicle is loaded, and the
+/// goods leave the moment it is saved. Cancelling puts them back — possible
+/// only while the debit note it produced is still a draft, because once that
+/// note is posted the supplier's account has been charged for the return.
+enum PurchaseReturnStatus {
+  DISPATCHED
+  CANCELLED
+}
+
+/// A purchase return challan — the outward gate pass for goods going back to a
+/// supplier.
+///
+/// The physical half of a return. The debit note is the financial half, and
+/// they are separate documents because they are signed by different people at
+/// different times: the godown loads the vehicle and the security gate lets it
+/// out against this, and accounts decides days later what the return is worth
+/// and posts the note. Before this existed a debit note did both, which meant
+/// goods could leave with no gate pass at all, or a gate pass could exist only
+/// once accounts had got round to it.
+///
+/// The chain is Purchase Bill → Return Challan → Debit Note. Every challan is
+/// raised against a bill, and saving one writes a draft note linked back to it.
+model PurchaseReturn {
+  id           String               @id @default(cuid())
+  /// PRC-0001 upward. One running series, like the rest of the purchase chain.
+  returnNumber String               @unique
+  status       PurchaseReturnStatus @default(DISPATCHED)
+  returnDate   DateTime             @default(now())
+
+  supplierId String
+  supplier   Supplier        @relation(fields: [supplierId], references: [id])
+  billId     String
+  bill       PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Restrict)
+
+  /// Why the goods are going back. Only the reasons where material moves.
+  reason     PurchaseNoteReason
+  reasonNote String?
+
+  /// How they are going. What the security gate checks and what an e-way bill
+  /// is raised against.
+  vehicleNo       String?
+  transporterName String?
+  lrNumber        String?
+  ewayBillNo      String?
+  driverName      String?
+
+  remarks String?
+
+  createdById   String
+  createdBy     User      @relation("ReturnCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  cancelledById String?
+  cancelledBy   User?     @relation("ReturnCancelledBy", fields: [cancelledById], references: [id])
+  cancelledAt   DateTime?
+  cancelReason  String?
+
+  lines      PurchaseReturnLine[]
+  debitNotes PurchaseNote[]
+
+  @@index([supplierId])
+  @@index([billId])
+  @@index([status, returnDate])
+  @@map("purchase_returns")
+}
+
+/// One item going back, from one godown, against one bill line.
+model PurchaseReturnLine {
+  id             String         @id @default(cuid())
+  returnId       String
+  purchaseReturn PurchaseReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id])
+
+  /// The bill line the goods were charged on. Required: a return with nothing
+  /// to be returned against cannot be valued, and cannot be checked against
+  /// what was bought.
+  billLineId String
+  billLine   PurchaseInvoiceLine @relation(fields: [billLineId], references: [id], onDelete: Restrict)
+
+  /// The godown it leaves from — per line, because one delivery is routinely
+  /// split across two stores and the goods go back from wherever they are.
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  qty       Decimal @db.Decimal(10, 3)
+  /// The bill's own rate and GST, frozen here for the challan's declared value
+  /// and carried onto the debit note it produces.
+  unitPrice Decimal @db.Decimal(10, 2)
+  gstRate   Decimal @default(0) @db.Decimal(5, 2)
+
+  remarks   String?
+  sortOrder Int     @default(0)
+
+  @@index([returnId])
+  @@index([billLineId])
+  @@map("purchase_return_lines")
 }
 
 model PurchaseNoteLine {

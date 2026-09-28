@@ -61,6 +61,10 @@ const DEFAULT_TITLES: Record<string, string> = {
   GRN: 'GOODS RECEIPT NOTE',
   // Ours, addressed to the supplier — a claim for money back.
   DN: 'DEBIT NOTE',
+  // Goods physically leaving for the supplier. "Challan" because that is what
+  // the security gate and the transporter both ask for by name; the debit note
+  // it produces is a separate sheet with its own heading.
+  PRC: 'PURCHASE RETURN CHALLAN',
   // Theirs. We are recording what they sent us, so the sheet says so rather
   // than pretending the mill issued a credit note to itself.
   SCN: "SUPPLIER'S CREDIT NOTE",

@@ -90,6 +90,10 @@ const navItems: NavItem[] = [
       { label: 'Purchase Orders', href: '/purchase/orders' },
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
       { label: 'Purchase Bills', href: '/purchase/bills' },
+      /* After the bill, because a return is always raised against one — and
+         before the notes, because the challan comes first and writes the
+         note. The menu reads in the order the paper does. */
+      { label: 'Purchase Returns', href: '/purchase/returns' },
       { label: 'Supplier Payments', href: '/purchase/payments' },
       /* Two entries for three kinds of document, on purpose. Ours and the
          supplier's debit notes both live under Debit Notes — they are both

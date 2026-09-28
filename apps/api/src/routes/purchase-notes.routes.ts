@@ -28,6 +28,7 @@ import {
   priceNote,
   REASON_RULES,
   syncBillAdjustments,
+  taxContextFor,
   TRANSITIONS,
   type NoteLineInput,
 } from '../services/purchaseNote.service'
@@ -95,6 +96,9 @@ const noteInclude = {
   },
   po: { select: { id: true, poNumber: true, poDate: true } },
   grn: { select: { id: true, grnNumber: true, grnDate: true } },
+  purchaseReturn: {
+    select: { id: true, returnNumber: true, status: true, returnDate: true },
+  },
   warehouse: { select: { id: true, code: true, name: true } },
   createdBy: { select: { id: true, name: true } },
   submittedBy: { select: { id: true, name: true } },
@@ -137,39 +141,6 @@ const noteInclude = {
     orderBy: { createdAt: 'asc' as const },
   },
 } satisfies Prisma.PurchaseNoteInclude
-
-/**
- * The state a supplier is in for tax, read once and frozen onto the note.
- *
- * Copied from the bill where there is one, because an adjustment has to carry
- * the same split as the document it corrects — a CGST bill credited with IGST
- * leaves a difference on the GST return that nobody can clear.
- */
-async function taxContextFor(
-  tx: Prisma.TransactionClient,
-  supplierId: string,
-  billId: string | null | undefined
-): Promise<boolean> {
-  if (billId) {
-    const bill = await tx.purchaseInvoice.findUnique({
-      where: { id: billId },
-      select: { igst: true, cgst: true, sgst: true },
-    })
-    if (bill && (Number(bill.igst) > 0 || Number(bill.cgst) > 0 || Number(bill.sgst) > 0)) {
-      return Number(bill.igst) <= 0
-    }
-  }
-
-  const [company, supplier] = await Promise.all([
-    tx.company.findFirst({ select: { stateCode: true, gstin: true } }),
-    tx.supplier.findUnique({ where: { id: supplierId }, select: { stateCode: true, gstin: true } }),
-  ])
-  const ours = company?.stateCode || company?.gstin?.slice(0, 2)
-  const theirs = supplier?.stateCode || supplier?.gstin?.slice(0, 2)
-  // An unregistered supplier carries no split to make, and a note against them
-  // carries no tax either. Treated as intra-state so nothing lands in IGST.
-  return !theirs || !ours || theirs === ours
-}
 
 // ── Reading ─────────────────────────────────────────────────────────────────
 
@@ -700,10 +671,56 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
   const note = await prisma.$transaction(async (tx) => {
     const before = await tx.purchaseNote.findUnique({
       where: { id: req.params.id },
-      select: { id: true, noteNumber: true, status: true, docType: true, supplierId: true },
+      select: {
+        id: true,
+        noteNumber: true,
+        status: true,
+        docType: true,
+        supplierId: true,
+        billId: true,
+        purchaseReturn: {
+          select: {
+            returnNumber: true,
+            lines: { select: { billLineId: true, qty: true } },
+          },
+        },
+      },
     })
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
     assertEditable(before.status, before.noteNumber)
+
+    /*
+     * A note raised from a return challan prices goods that have already left.
+     *
+     * The rate, the GST treatment and the wording are accounts' to settle — a
+     * supplier who accepts the return at a lower rate than he billed is common
+     * — but what went back, and how much of it, is what the gate pass says.
+     * A note that quietly claimed for eighty rolls against a challan for a
+     * hundred would leave twenty gone from stock and never charged back.
+     */
+    if (before.purchaseReturn) {
+      const want = new Map<string, number>()
+      for (const l of before.purchaseReturn.lines) {
+        want.set(l.billLineId, (want.get(l.billLineId) ?? 0) + Number(l.qty))
+      }
+      const got = new Map<string, number>()
+      for (const l of data.lines) {
+        if (!l.billLineId) continue
+        got.set(l.billLineId, (got.get(l.billLineId) ?? 0) + Number(l.qty))
+      }
+      const same =
+        data.billId === before.billId &&
+        data.lines.every((l) => Boolean(l.billLineId)) &&
+        want.size === got.size &&
+        [...want].every(([id, q]) => Math.abs((got.get(id) ?? -1) - q) < 0.0005)
+      if (!same) {
+        throw new AppError(
+          `${before.noteNumber} was raised from return challan ${before.purchaseReturn.returnNumber}, so its items and quantities are the ones that challan sent back. Change the rate or the GST here; to change what went back, cancel the challan and write a new one.`,
+          409,
+          'NOTE_FROM_RETURN'
+        )
+      }
+    }
 
     assertIssuerMatches(data.docType, data.issuedBy)
     const effect = effectFor(data.docType, data.effect ?? null)
@@ -856,6 +873,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
         warehouseId: true,
         noteDate: true,
         billId: true,
+        returnId: true,
         lines: { select: { itemId: true, qty: true, unitPrice: true } },
       },
     })
@@ -1020,11 +1038,27 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         warehouseId: true,
         noteDate: true,
         billId: true,
+        returnId: true,
+        purchaseReturn: { select: { returnNumber: true } },
         lines: { select: { itemId: true, qty: true, unitPrice: true } },
       },
     })
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
     assertTransition(before.status, 'CANCELLED', before.noteNumber)
+
+    /*
+     * Not on its own. Cancelling the note alone would leave the goods gone on
+     * the challan and nothing charged back for them — the one state this
+     * whole chain exists to make impossible. The challan is cancelled instead,
+     * which puts the stock back and takes this note with it.
+     */
+    if (before.purchaseReturn) {
+      throw new AppError(
+        `${before.noteNumber} was raised from return challan ${before.purchaseReturn.returnNumber}. Cancel the challan instead — that puts the goods back in stock and cancels this note with it.`,
+        409,
+        'NOTE_FROM_RETURN'
+      )
+    }
 
     const wasPosted = before.status === 'POSTED'
     const moved = wasPosted ? await moveNoteStock(tx, before, 'REVERSE') : 0
@@ -1079,6 +1113,13 @@ router.delete('/:id', requirePermission(MODULE, 'delete'), async (req: AuthReque
       include: noteInclude,
     })
     if (!before) throw new AppError('That note no longer exists', 404, 'NOT_FOUND')
+    if (before.purchaseReturn) {
+      throw new AppError(
+        `${before.noteNumber} was raised from return challan ${before.purchaseReturn.returnNumber}. Cancel the challan instead — the goods it sent back need a note against them for as long as it stands.`,
+        409,
+        'NOTE_FROM_RETURN'
+      )
+    }
     if (before.status !== 'DRAFT') {
       throw new AppError(
         `${before.noteNumber} has already been ${before.status.toLowerCase()}. Cancel it instead — the record has to stay.`,
