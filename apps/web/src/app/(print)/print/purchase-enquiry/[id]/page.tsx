@@ -217,15 +217,22 @@ export default function PurchaseEnquiryPrintPage() {
                   display: 'flex',
                   flexWrap: 'wrap',
                   alignItems: 'center',
-                  gap: '6px 12px',
-                  fontSize: 12,
+                  gap: '6px 9px',
+                  fontSize: 11.5,
                   color: GREY,
                 }}
               >
                 {contacts.map((c, i) => (
                   <span
                     key={c.text}
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 9,
+                      // An address or a GSTIN is one thing, and half of it on
+                      // the next line is worse than the whole of it there.
+                      whiteSpace: 'nowrap',
+                    }}
                   >
                     {i > 0 && <span style={{ color: RULE }}>·</span>}
                     <Contact icon={c.icon}>{c.text}</Contact>
@@ -245,7 +252,10 @@ export default function PurchaseEnquiryPrintPage() {
             <div
               style={{
                 borderRadius: 9,
-                minWidth: 300,
+                // 272, not 300. The longest thing in it is a date, and the
+                // 28px it was holding for nothing is 28px the contact line
+                // needed to stay on one row.
+                minWidth: 272,
                 overflow: 'hidden',
                 boxShadow: '0 4px 14px rgba(23, 58, 108, 0.13)',
               }}
@@ -589,12 +599,12 @@ export default function PurchaseEnquiryPrintPage() {
  */
 function Contact({ icon: Icon, children }: { icon: React.ElementType; children: React.ReactNode }) {
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
       <span
         style={{
-          width: 21,
-          height: 21,
-          borderRadius: 6,
+          width: 19,
+          height: 19,
+          borderRadius: 5,
           background: NAVY,
           display: 'inline-flex',
           alignItems: 'center',
@@ -602,7 +612,7 @@ function Contact({ icon: Icon, children }: { icon: React.ElementType; children: 
           flexShrink: 0,
         }}
       >
-        <Icon size={12} color="#fff" strokeWidth={2.2} />
+        <Icon size={11} color="#fff" strokeWidth={2.3} />
       </span>
       {children}
     </span>
