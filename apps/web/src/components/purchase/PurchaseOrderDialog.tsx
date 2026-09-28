@@ -33,12 +33,10 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
-import type {
-  EnquiryQuote,
-  EnquiryRecord as EnquiryLite,
-} from '@/components/purchase/enquiryTypes'
+import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
+import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 
 /**
  * Raising a purchase order.
@@ -363,6 +361,17 @@ const inr = (v: number) =>
  * scrolls hides its own right-hand end: the buyer could not see the amount
  * while typing the rate.
  */
+/**
+ * A value the item dropdown carries that is not an item.
+ *
+ * Picking it opens the new-item window instead of setting the row. A row in
+ * the dropdown is where somebody looks when the thing they want is not in the
+ * dropdown — a button elsewhere on the panel is not, and they abandon the
+ * form or pick a near-enough item instead. The second is worse: six months on,
+ * the purchase history says the mill bought something it did not.
+ */
+const ADD_NEW = '__new__'
+
 const COL = {
   num: 'w-8',
   remove: 'w-8',
@@ -550,6 +559,13 @@ export function PurchaseOrderDialog({
   const [supplierId, setSupplierId] = useState('')
   const [poType, setPoType] = useState<PoType>('NONE')
   const [indentOpen, setIndentOpen] = useState(false)
+  /**
+   * Which row asked for an item the master does not hold yet.
+   *
+   * The index, not the line itself: the window is modal, so no row can be
+   * added or removed while it is open and the index cannot go stale under it.
+   */
+  const [newItemFor, setNewItemFor] = useState<number | null>(null)
   const [warehouseId, setWarehouseId] = useState('')
   /// The date on the order. Asked for now, so a back-dated order lands in the
   /// right month rather than always taking today.
@@ -1299,6 +1315,11 @@ export function PurchaseOrderDialog({
   const pickItemFor = (index: number, itemId: string) => {
     setError(null)
 
+    if (itemId === ADD_NEW) {
+      setNewItemFor(index)
+      return
+    }
+
     if (!itemId) {
       setLine(index, { itemId: '', codeText: '' })
       return
@@ -2025,9 +2046,8 @@ export function PurchaseOrderDialog({
                 {quote.piValidUntil &&
                   (new Date(quote.piValidUntil).getTime() < Date.now() ? (
                     <span className="text-[11px] font-medium text-amber-400">
-                      his price lapsed on{' '}
-                      {new Date(quote.piValidUntil).toLocaleDateString('en-IN')} — worth confirming
-                      before you send this
+                      his price lapsed on {new Date(quote.piValidUntil).toLocaleDateString('en-IN')}{' '}
+                      — worth confirming before you send this
                     </span>
                   ) : (
                     <span className="text-muted-foreground text-[11px]">
@@ -2308,10 +2328,12 @@ export function PurchaseOrderDialog({
               same ten controls — one to enter a line, one to correct it — and
               about 180px of height spent saying everything twice.
 
-              There are thirteen columns, so the table scrolls sideways and the
-              two that say *which* line this is stay pinned to the left edge.
-              Scrolled to the far right you can still see you are on the poplin
-              and not the buttons. */}
+              The row is filled in the order the question is actually asked:
+              the category and its subcategory first, then the code and the
+              item, which offer only what that category holds. The row number
+              and its delete stay pinned to the left edge, so on a table
+              scrolled sideways you can still tell row four from row five and
+              still remove it. */}
             <Section
               icon={Package}
               title="Item Details"
@@ -2365,8 +2387,8 @@ export function PurchaseOrderDialog({
                       {[
                         ['#', `${COL.num} sticky left-0 z-20 bg-secondary`, 'left'],
                         ['', `${COL.remove} sticky left-8 z-20 bg-secondary`, 'left'],
-                        ['Item', `${COL.item} sticky left-16 z-20 bg-secondary`, 'left'],
                         ['Category', COL.category, 'left'],
+                        ['Item', `${COL.item} border-border border-r`, 'left'],
                         ['Style no.', COL.style, 'left'],
                         ['Description', COL.description, 'left'],
                         ['Qty', COL.qty, 'right'],
@@ -2450,81 +2472,13 @@ export function PurchaseOrderDialog({
                             </div>
                           </td>
 
-                          <td
-                            className={`${COL.item} border-border sticky left-16 z-10 border-r bg-inherit`}
-                          >
-                            {/* The code and the name are one cell, as they are
-                              on the mill's old form.
-
-                              They were two columns of 128px each, which is
-                              enough for neither: an item code was cut off at
-                              "PKG-TAPE-(" and the name at "Choose an it". They
-                              name the same thing, so one wide cell shows both
-                              whole and gives the table back a column. */}
-                            <div className="space-y-1">
-                              {/* A real combobox, using the browser's own: type
-                                a code and the list narrows, or open it and pick
-                                one. `datalist` rather than a hand-built dropdown
-                                because it needs no package, it keeps the cell a
-                                plain text box for anyone who already knows the
-                                code by heart, and it cannot be scrolled out of
-                                the table the way an absolutely positioned menu
-                                inside a sideways-scrolling grid can.
-
-                                One list per row, because each row narrows its
-                                items by its own category. */}
-                              <input
-                                className={`${cell} font-mono`}
-                                list={`po-codes-${i}`}
-                                placeholder="Item code"
-                                value={line.codeText ?? ''}
-                                onChange={(e) => typeCodeFor(i, e.target.value)}
-                                aria-label={`Row ${i + 1} item code`}
-                              />
-                              <datalist id={`po-codes-${i}`}>
-                                {choices.map((it) => (
-                                  <option key={it.id} value={it.code ?? ''} label={it.name} />
-                                ))}
-                              </datalist>
-                              <select
-                                className={cell}
-                                value={line.itemId}
-                                onChange={(e) => pickItemFor(i, e.target.value)}
-                                aria-label={`Row ${i + 1} item`}
-                              >
-                                <option value="">
-                                  {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
-                                </option>
-                                {choices.map((it) => (
-                                  <option key={it.id} value={it.id}>
-                                    {it.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                            {/* What the row is, under what it is called: the
-                              HSN the tax hangs off, and the indent it answers
-                              where it came off one. Both live here because
-                              this cell is pinned — scrolled to the far right,
-                              typing a rate, you can still see which request
-                              you are pricing. */}
-                            {(item?.hsnCode || line.mrNumber) && (
-                              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
-                                {item?.hsnCode && (
-                                  <span className="text-muted-foreground">HSN {item.hsnCode}</span>
-                                )}
-                                {line.mrNumber && (
-                                  <span
-                                    className="text-primary"
-                                    title={`Raised against ${line.mrNumber}`}
-                                  >
-                                    {line.mrNumber}
-                                  </span>
-                                )}
-                              </p>
-                            )}
-                          </td>
-
+                          {/* First, because it is the first thing decided.
+                            It was the fourth column, after the item it exists
+                            to narrow, which read as a label on a choice already
+                            made rather than the filter it is — a buyer scrolled
+                            the whole master looking for a button because the
+                            box that would have cut it to eleven rows was past
+                            the thing they were hunting through. */}
                           <td className={COL.category}>
                             <div className="space-y-1">
                               <select
@@ -2569,6 +2523,80 @@ export function PurchaseOrderDialog({
                                 ))}
                               </select>
                             </div>
+                          </td>
+
+                          <td className={`${COL.item} border-border border-r`}>
+                            {/* The code and the name are one cell, as they are
+                              on the mill's old form.
+
+                              They were two columns of 128px each, which is
+                              enough for neither: an item code was cut off at
+                              "PKG-TAPE-(" and the name at "Choose an it". They
+                              name the same thing, so one wide cell shows both
+                              whole and gives the table back a column. */}
+                            <div className="space-y-1">
+                              {/* A real combobox, using the browser's own: type
+                                a code and the list narrows, or open it and pick
+                                one. `datalist` rather than a hand-built dropdown
+                                because it needs no package, it keeps the cell a
+                                plain text box for anyone who already knows the
+                                code by heart, and it cannot be scrolled out of
+                                the table the way an absolutely positioned menu
+                                inside a sideways-scrolling grid can.
+
+                                One list per row, because each row narrows its
+                                items by its own category. */}
+                              <input
+                                className={`${cell} font-mono`}
+                                list={`po-codes-${i}`}
+                                placeholder="Item code"
+                                value={line.codeText ?? ''}
+                                onChange={(e) => typeCodeFor(i, e.target.value)}
+                                aria-label={`Row ${i + 1} item code`}
+                              />
+                              <datalist id={`po-codes-${i}`}>
+                                {choices.map((it) => (
+                                  <option key={it.id} value={it.code ?? ''} label={it.name} />
+                                ))}
+                              </datalist>
+                              <select
+                                className={cell}
+                                value={line.itemId}
+                                onChange={(e) => pickItemFor(i, e.target.value)}
+                                aria-label={`Row ${i + 1} item`}
+                              >
+                                <option value="">
+                                  {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
+                                </option>
+                                <option value={ADD_NEW}>+ Add a new item…</option>
+                                {choices.map((it) => (
+                                  <option key={it.id} value={it.id}>
+                                    {it.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            {/* What the row is, under what it is called: the
+                              HSN the tax hangs off, and the indent it answers
+                              where it came off one. Both belong beside the
+                              name rather than in columns of their own — they
+                              are read, never typed, and neither is worth 100px
+                              of a row that already has eleven cells. */}
+                            {(item?.hsnCode || line.mrNumber) && (
+                              <p className="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
+                                {item?.hsnCode && (
+                                  <span className="text-muted-foreground">HSN {item.hsnCode}</span>
+                                )}
+                                {line.mrNumber && (
+                                  <span
+                                    className="text-primary"
+                                    title={`Raised against ${line.mrNumber}`}
+                                  >
+                                    {line.mrNumber}
+                                  </span>
+                                )}
+                              </p>
+                            )}
                           </td>
 
                           <td className={COL.style}>
@@ -2808,64 +2836,7 @@ export function PurchaseOrderDialog({
                         </button>
                       </div>
 
-                      <div className="space-y-1">
-                        <label className={fieldLabel}>Item</label>
-                        {/* Code and name side by side rather than stacked — the
-                          code is short enough that giving it a full row of its
-                          own on a phone was one more screen of scrolling per
-                          line for nothing the width needed. */}
-                        <div className="flex gap-1.5">
-                          {/* `cell` carries `w-full`, which would fight a
-                            flex-basis override here — spelled out without it
-                            so the fixed code column and the flexible name
-                            column actually hold the widths they are given. */}
-                          <input
-                            className="form-input h-9 w-24 shrink-0 px-2 font-mono text-xs"
-                            list={`po-codes-m-${i}`}
-                            placeholder="Code"
-                            value={line.codeText ?? ''}
-                            onChange={(e) => typeCodeFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={`po-codes-m-${i}`}>
-                            {choices.map((it) => (
-                              <option key={it.id} value={it.code ?? ''} label={it.name} />
-                            ))}
-                          </datalist>
-                          <select
-                            className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
-                            value={line.itemId}
-                            onChange={(e) => pickItemFor(i, e.target.value)}
-                            aria-label={`Row ${i + 1} item`}
-                          >
-                            <option value="">
-                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
-                            </option>
-                            {choices.map((it) => (
-                              <option key={it.id} value={it.id}>
-                                {it.name}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        {(item?.hsnCode || line.mrNumber) && (
-                          <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
-                            {item?.hsnCode && (
-                              <span className="text-muted-foreground">HSN {item.hsnCode}</span>
-                            )}
-                            {line.mrNumber && (
-                              <span
-                                className="text-primary"
-                                title={`Raised against ${line.mrNumber}`}
-                              >
-                                {line.mrNumber}
-                              </span>
-                            )}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="mt-2 grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                           <label className={fieldLabel}>Category</label>
                           <select
@@ -2901,6 +2872,64 @@ export function PurchaseOrderDialog({
                             ))}
                           </select>
                         </div>
+                      </div>
+
+                      <div className="mt-2 space-y-1">
+                        <label className={fieldLabel}>Item</label>
+                        {/* Code and name side by side rather than stacked — the
+                          code is short enough that giving it a full row of its
+                          own on a phone was one more screen of scrolling per
+                          line for nothing the width needed. */}
+                        <div className="flex gap-1.5">
+                          {/* `cell` carries `w-full`, which would fight a
+                            flex-basis override here — spelled out without it
+                            so the fixed code column and the flexible name
+                            column actually hold the widths they are given. */}
+                          <input
+                            className="form-input h-9 w-24 shrink-0 px-2 font-mono text-xs"
+                            list={`po-codes-m-${i}`}
+                            placeholder="Code"
+                            value={line.codeText ?? ''}
+                            onChange={(e) => typeCodeFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item code`}
+                          />
+                          <datalist id={`po-codes-m-${i}`}>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.code ?? ''} label={it.name} />
+                            ))}
+                          </datalist>
+                          <select
+                            className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
+                            value={line.itemId}
+                            onChange={(e) => pickItemFor(i, e.target.value)}
+                            aria-label={`Row ${i + 1} item`}
+                          >
+                            <option value="">
+                              {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
+                            </option>
+                            <option value={ADD_NEW}>+ Add a new item…</option>
+                            {choices.map((it) => (
+                              <option key={it.id} value={it.id}>
+                                {it.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {(item?.hsnCode || line.mrNumber) && (
+                          <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
+                            {item?.hsnCode && (
+                              <span className="text-muted-foreground">HSN {item.hsnCode}</span>
+                            )}
+                            {line.mrNumber && (
+                              <span
+                                className="text-primary"
+                                title={`Raised against ${line.mrNumber}`}
+                              >
+                                {line.mrNumber}
+                              </span>
+                            )}
+                          </p>
+                        )}
                       </div>
 
                       <div className="mt-2 grid grid-cols-2 gap-2">
@@ -4215,6 +4244,70 @@ export function PurchaseOrderDialog({
           onClose={() => setIndentOpen(false)}
           onAdd={addFromIndent}
           alreadyPicked={new Set(lines.map((l) => l.mrLineId).filter(Boolean) as string[])}
+        />
+      )}
+
+      {newItemFor !== null && (
+        <NewItemDialog
+          categories={categories.map((c) => ({
+            id: c.id,
+            name: c.name,
+            parentId: c.parentId ?? null,
+          }))}
+          categoryId={lines[newItemFor]?.categoryId}
+          subcategoryId={lines[newItemFor]?.subcategoryId}
+          onClose={() => setNewItemFor(null)}
+          onCreated={(created: NewItem) => {
+            const index = newItemFor
+            setNewItemFor(null)
+
+            /*
+             * Added to the list this form is holding as well as to the master.
+             * Without it the item exists on the server and not in the dropdown,
+             * and the row that asked for it still cannot pick it — the master
+             * list is fetched once, when the form opens.
+             *
+             * `categoryId` is spelled out because this form's items carry the
+             * id flat while the master returns the category nested, and
+             * `itemsFor` narrows on the flat one. Without it the new item
+             * would sit outside every category and vanish the moment the row
+             * it was made for narrowed to the category it was filed under.
+             */
+            const option: Option = {
+              id: created.id,
+              code: created.code,
+              name: created.name,
+              hsnCode: created.hsnCode,
+              uom: created.uom,
+              category: created.category
+                ? { id: created.category.id, name: created.category.name }
+                : null,
+              categoryId: created.category?.id ?? null,
+            }
+            setItems((prev) => [...prev, option])
+
+            /*
+             * Set on the row directly rather than through `pickItemFor`, which
+             * reads the item out of `itemById` — a map built from `items` by
+             * the render that has not happened yet.
+             *
+             * The rate is left empty, as it is for every other item on this
+             * form: what the supplier quoted is the only rate a purchase order
+             * carries, and a figure typed into the master an instant ago is
+             * not that. The enquiry form does offer it, and that is not the
+             * same thing — an expected rate is the mill's own guess.
+             */
+            const cat = categories.find((c) => c.id === option.categoryId)
+            setLine(index, {
+              itemId: option.id,
+              codeText: option.code ?? '',
+              ...(cat
+                ? cat.parentId
+                  ? { categoryId: cat.parentId, subcategoryId: cat.id }
+                  : { categoryId: cat.id, subcategoryId: '' }
+                : {}),
+            })
+          }}
         />
       )}
     </>,
