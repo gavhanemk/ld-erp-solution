@@ -750,108 +750,77 @@ export function PurchaseEnquiryDialog({
                  lines up with the header above it whatever is typed in it.
                  The previous layout let the cells size themselves, which put
                  the code box at 140px of a 1600px row and stacked three
-                 full-width dropdowns in the cell beside it. */
-              <div className="border-border bg-card overflow-x-auto rounded-lg border">
-                <table className="w-full min-w-[1000px] table-fixed border-collapse text-sm">
-                  <thead>
-                    <tr className="bg-secondary">
-                      {[
-                        ['#', COL.num, 'left'],
-                        ['Category', COL.category, 'left'],
-                        ['Item code', COL.code, 'left'],
-                        ['Item', COL.item, 'left'],
-                        ['Description', COL.description, 'left'],
-                        ['Qty', COL.qty, 'right'],
-                        ['Expected rate', COL.rate, 'right'],
-                        ['', COL.remove, 'left'],
-                      ].map(([label, width, align], i) => (
-                        <th
-                          key={label + '-' + i}
-                          className={`${width} border-border text-muted-foreground border-b px-2 py-1.5 align-bottom text-[10px] font-semibold uppercase tracking-wider ${
-                            align === 'right' ? 'text-right' : 'text-left'
-                          }`}
-                        >
-                          {label}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {lines.map((l, i) => (
-                      <tr key={l.key} className="border-border/60 border-b last:border-0">
-                        <td className="text-muted-foreground px-2 py-1.5 align-top text-[11px]">
-                          {i + 1}
-                        </td>
-                        {/* Category over subcategory, stacked in one column.
-                          They are how a row finds its item, not part of the
-                          enquiry — neither is sent to the server — and as two
-                          full columns they took 256px of the row to narrow a
-                          dropdown. The order form settled this the same way. */}
-                        <td className="px-2 py-1.5 align-top">
-                          <select
-                            value={l.categoryId}
-                            onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
-                            className="form-input"
-                            aria-label={`Row ${i + 1} category`}
+                 full-width dropdowns in the cell beside it.
+
+                 On a phone the same lines are cards instead: one field under
+                 the next, so the quantity is reached by scrolling down, not by
+                 dragging the table sideways. Same state, same handlers. */
+              <>
+                <div className="space-y-3 sm:hidden">
+                  {lines.map((l, i) => {
+                    const fieldLabel =
+                      'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+                    return (
+                      <div key={l.key} className="border-border bg-card rounded-lg border p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-muted-foreground text-xs font-semibold tabular-nums">
+                            Line {i + 1}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => removeLine(l.key)}
+                            className="btn-ghost p-1 text-red-400"
+                            aria-label={`Remove row ${i + 1}`}
                           >
-                            <option value="">All categories</option>
-                            {topCategories.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <label className={fieldLabel}>Category</label>
+                            <select
+                              value={l.categoryId}
+                              onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
+                              className="form-input h-9 w-full"
+                              aria-label={`Row ${i + 1} category`}
+                            >
+                              <option value="">All</option>
+                              {topCategories.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="space-y-1">
+                            <label className={fieldLabel}>Subcategory</label>
+                            <select
+                              value={l.subcategoryId}
+                              onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
+                              disabled={subsOf(l.categoryId).length === 0}
+                              className="form-input h-9 w-full"
+                              aria-label={`Row ${i + 1} subcategory`}
+                            >
+                              <option value="">
+                                {subsOf(l.categoryId).length === 0 ? 'None' : 'All'}
                               </option>
-                            ))}
-                          </select>
-                          <select
-                            value={l.subcategoryId}
-                            onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
-                            disabled={subsOf(l.categoryId).length === 0}
-                            className="form-input mt-1"
-                            aria-label={`Row ${i + 1} subcategory`}
-                          >
-                            <option value="">
-                              {subsOf(l.categoryId).length === 0 ? 'None' : 'All'}
-                            </option>
-                            {subsOf(l.categoryId).map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        {/* Second, and offering only what the category above it
-                          holds. Still a box to type into — somebody who knows
-                          the code should be able to type it and move on — but
-                          the list behind it suggests only the codes in scope,
-                          so the three controls narrow in one direction. */}
-                        <td className="px-2 py-1.5 align-top">
-                          <input
-                            value={l.codeText}
-                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
-                            onBlur={(e) => pickByCode(l.key, e.target.value)}
-                            list={'codes-' + l.key}
-                            placeholder="Items Code"
-                            className={`form-input font-mono ${
-                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
-                            }`}
-                            aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={'codes-' + l.key}>
-                            {codesFor(l).map((c) => (
-                              <option key={c} value={c} />
-                            ))}
-                          </datalist>
-                          {l.codeText && !l.itemId && (
-                            <p className="mt-0.5 text-[10px] text-amber-400">
-                              no item with that code
-                            </p>
-                          )}
-                        </td>
-                        <td className="px-2 py-1.5 align-top">
+                              {subsOf(l.categoryId).map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="mt-2 space-y-1">
+                          <label className={fieldLabel}>Item</label>
                           <select
                             value={l.itemId}
                             onChange={(e) => pickItem(l.key, e.target.value)}
                             disabled={loadingRefs}
-                            className="form-input"
+                            className="form-input h-9 w-full"
                             aria-label={`Row ${i + 1} item`}
                           >
                             <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
@@ -863,65 +832,252 @@ export function PurchaseEnquiryDialog({
                             ))}
                           </select>
                           {l.mrNumber && (
-                            <p className="text-muted-foreground mt-0.5 text-[10px]">
+                            <p className="text-muted-foreground text-[10px]">
                               against indent {l.mrNumber}
                             </p>
                           )}
-                        </td>
-                        <td className="px-2 py-1.5 align-top">
+                        </div>
+
+                        <div className="mt-2 space-y-1">
+                          <label className={fieldLabel}>Item code</label>
+                          <input
+                            value={l.codeText}
+                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
+                            onBlur={(e) => pickByCode(l.key, e.target.value)}
+                            list={'codes-m-' + l.key}
+                            placeholder="Or type the code"
+                            className={`form-input h-9 w-full font-mono ${
+                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
+                            }`}
+                            aria-label={`Row ${i + 1} item code`}
+                          />
+                          <datalist id={'codes-m-' + l.key}>
+                            {codesFor(l).map((c) => (
+                              <option key={c} value={c} />
+                            ))}
+                          </datalist>
+                          {l.codeText && !l.itemId && (
+                            <p className="text-[10px] text-amber-400">no item with that code</p>
+                          )}
+                        </div>
+
+                        <div className="mt-2 space-y-1">
+                          <label className={fieldLabel}>Description</label>
                           <input
                             value={l.description}
                             onChange={(e) => setLine(l.key, { description: e.target.value })}
                             placeholder="If it differs"
-                            className="form-input"
+                            className="form-input h-9 w-full"
                             aria-label={`Row ${i + 1} description`}
                           />
-                        </td>
-                        <td className="px-2 py-1.5 align-top">
-                          <input
-                            type="number"
-                            step="0.001"
-                            min="0"
-                            value={l.qty}
-                            onChange={(e) => setLine(l.key, { qty: e.target.value })}
-                            className="form-input text-right"
-                            aria-label={`Row ${i + 1} quantity`}
-                          />
-                          {l.uom && (
-                            <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
-                              {l.uom}
-                            </p>
-                          )}
-                        </td>
-                        {/* Ours, not theirs. What a supplier quotes is recorded
-                          against his PI number and never typed on this form. */}
-                        <td className="px-2 py-1.5 align-top">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            value={l.expectedRate}
-                            onChange={(e) => setLine(l.key, { expectedRate: e.target.value })}
-                            placeholder="—"
-                            className="form-input text-right"
-                            aria-label={`Row ${i + 1} expected rate`}
-                          />
-                        </td>
-                        <td className="px-2 py-1.5 align-top">
-                          <button
-                            type="button"
-                            onClick={() => removeLine(l.key)}
-                            className="btn-ghost p-1 text-red-400"
-                            aria-label={`Remove row ${i + 1}`}
+                        </div>
+
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <label className={fieldLabel}>Qty{l.uom ? ` (${l.uom})` : ''}</label>
+                            <input
+                              type="number"
+                              step="0.001"
+                              min="0"
+                              inputMode="decimal"
+                              value={l.qty}
+                              onChange={(e) => setLine(l.key, { qty: e.target.value })}
+                              className="form-input h-9 w-full text-right"
+                              aria-label={`Row ${i + 1} quantity`}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className={fieldLabel}>Expected rate</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              inputMode="decimal"
+                              value={l.expectedRate}
+                              onChange={(e) => setLine(l.key, { expectedRate: e.target.value })}
+                              placeholder="—"
+                              className="form-input h-9 w-full text-right"
+                              aria-label={`Row ${i + 1} expected rate`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
+                  <table className="w-full min-w-[1000px] table-fixed border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-secondary">
+                        {[
+                          ['#', COL.num, 'left'],
+                          ['Category', COL.category, 'left'],
+                          ['Item code', COL.code, 'left'],
+                          ['Item', COL.item, 'left'],
+                          ['Description', COL.description, 'left'],
+                          ['Qty', COL.qty, 'right'],
+                          ['Expected rate', COL.rate, 'right'],
+                          ['', COL.remove, 'left'],
+                        ].map(([label, width, align], i) => (
+                          <th
+                            key={label + '-' + i}
+                            className={`${width} border-border text-muted-foreground border-b px-2 py-1.5 align-bottom text-[10px] font-semibold uppercase tracking-wider ${
+                              align === 'right' ? 'text-right' : 'text-left'
+                            }`}
                           >
-                            <Trash2 size={13} />
-                          </button>
-                        </td>
+                            {label}
+                          </th>
+                        ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {lines.map((l, i) => (
+                        <tr key={l.key} className="border-border/60 border-b last:border-0">
+                          <td className="text-muted-foreground px-2 py-1.5 align-top text-[11px]">
+                            {i + 1}
+                          </td>
+                          {/* Category over subcategory, stacked in one column.
+                          They are how a row finds its item, not part of the
+                          enquiry — neither is sent to the server — and as two
+                          full columns they took 256px of the row to narrow a
+                          dropdown. The order form settled this the same way. */}
+                          <td className="px-2 py-1.5 align-top">
+                            <select
+                              value={l.categoryId}
+                              onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
+                              className="form-input"
+                              aria-label={`Row ${i + 1} category`}
+                            >
+                              <option value="">All categories</option>
+                              {topCategories.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={l.subcategoryId}
+                              onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
+                              disabled={subsOf(l.categoryId).length === 0}
+                              className="form-input mt-1"
+                              aria-label={`Row ${i + 1} subcategory`}
+                            >
+                              <option value="">
+                                {subsOf(l.categoryId).length === 0 ? 'None' : 'All'}
+                              </option>
+                              {subsOf(l.categoryId).map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          {/* Second, and offering only what the category above it
+                          holds. Still a box to type into — somebody who knows
+                          the code should be able to type it and move on — but
+                          the list behind it suggests only the codes in scope,
+                          so the three controls narrow in one direction. */}
+                          <td className="px-2 py-1.5 align-top">
+                            <input
+                              value={l.codeText}
+                              onChange={(e) => setLine(l.key, { codeText: e.target.value })}
+                              onBlur={(e) => pickByCode(l.key, e.target.value)}
+                              list={'codes-' + l.key}
+                              placeholder="Items Code"
+                              className={`form-input font-mono ${
+                                l.codeText && !l.itemId ? 'border-amber-500/60' : ''
+                              }`}
+                              aria-label={`Row ${i + 1} item code`}
+                            />
+                            <datalist id={'codes-' + l.key}>
+                              {codesFor(l).map((c) => (
+                                <option key={c} value={c} />
+                              ))}
+                            </datalist>
+                            {l.codeText && !l.itemId && (
+                              <p className="mt-0.5 text-[10px] text-amber-400">
+                                no item with that code
+                              </p>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 align-top">
+                            <select
+                              value={l.itemId}
+                              onChange={(e) => pickItem(l.key, e.target.value)}
+                              disabled={loadingRefs}
+                              className="form-input"
+                              aria-label={`Row ${i + 1} item`}
+                            >
+                              <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
+                              <option value={ADD_NEW}>+ Add a new item…</option>
+                              {itemsFor(l).map((it) => (
+                                <option key={it.id} value={it.id}>
+                                  {it.code} · {it.name}
+                                </option>
+                              ))}
+                            </select>
+                            {l.mrNumber && (
+                              <p className="text-muted-foreground mt-0.5 text-[10px]">
+                                against indent {l.mrNumber}
+                              </p>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 align-top">
+                            <input
+                              value={l.description}
+                              onChange={(e) => setLine(l.key, { description: e.target.value })}
+                              placeholder="If it differs"
+                              className="form-input"
+                              aria-label={`Row ${i + 1} description`}
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 align-top">
+                            <input
+                              type="number"
+                              step="0.001"
+                              min="0"
+                              value={l.qty}
+                              onChange={(e) => setLine(l.key, { qty: e.target.value })}
+                              className="form-input text-right"
+                              aria-label={`Row ${i + 1} quantity`}
+                            />
+                            {l.uom && (
+                              <p className="text-muted-foreground mt-0.5 text-right text-[10px]">
+                                {l.uom}
+                              </p>
+                            )}
+                          </td>
+                          {/* Ours, not theirs. What a supplier quotes is recorded
+                          against his PI number and never typed on this form. */}
+                          <td className="px-2 py-1.5 align-top">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={l.expectedRate}
+                              onChange={(e) => setLine(l.key, { expectedRate: e.target.value })}
+                              placeholder="—"
+                              className="form-input text-right"
+                              aria-label={`Row ${i + 1} expected rate`}
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 align-top">
+                            <button
+                              type="button"
+                              onClick={() => removeLine(l.key)}
+                              className="btn-ghost p-1 text-red-400"
+                              aria-label={`Remove row ${i + 1}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </Section>
 

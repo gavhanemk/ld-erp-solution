@@ -387,7 +387,139 @@ export function ReturnChallanDialog({
 
               {/* ── What is going ────────────────────────────────────────── */}
               <Section icon={Package} title="Items Going Back">
-                <div className="border-border bg-card overflow-x-auto rounded-lg border">
+                {/* On a phone, one card per row — the same rows and handlers
+                  as the table below, which a phone would have to drag
+                  sideways to reach the quantity box. */}
+                <div className="space-y-3 sm:hidden">
+                  {rows.map((r, i) => {
+                    const l = lineById.get(r.billLineId)
+                    if (!l) return null
+                    const first = rows.findIndex((x) => x.billLineId === r.billLineId) === i
+                    const over = (goingByLine.get(r.billLineId) ?? 0) > l.remainingQty + 0.0005
+                    const onHand = r.warehouseId === l.warehouseId ? l.onHand : null
+                    const short = onHand != null && num(r.qty) > onHand + 0.0005
+                    const fieldLabel =
+                      'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
+                    return (
+                      <div key={r.key} className="border-border bg-card rounded-lg border p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-foreground text-sm font-medium">
+                              {l.itemName}
+                              {!first && (
+                                <span className="text-muted-foreground font-normal">
+                                  {' '}
+                                  — another godown
+                                </span>
+                              )}
+                            </p>
+                            <p className="text-muted-foreground font-mono text-[10px]">
+                              {l.itemCode}
+                              {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
+                            </p>
+                            {first && l.rejectedQty > 0 && (
+                              <p className="text-[10px] text-amber-500">
+                                {l.rejectedQty} rejected at the gate
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1">
+                            <button
+                              type="button"
+                              className="btn-ghost text-muted-foreground p-1"
+                              onClick={() => splitRow(r.key)}
+                              aria-label={`${l.itemName}: add another godown`}
+                            >
+                              <Plus size={14} />
+                            </button>
+                            {!first && (
+                              <button
+                                type="button"
+                                className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                onClick={() => dropRow(r.key)}
+                                aria-label="Remove this godown row"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {first && (
+                          <div className="border-border/70 mt-2 grid grid-cols-2 gap-2 border-t pt-2 text-xs">
+                            <div>
+                              <p className={fieldLabel}>Billed</p>
+                              <p className="tabular-nums">
+                                {l.billedQty} {l.uom ?? ''}
+                              </p>
+                            </div>
+                            <div>
+                              <p className={fieldLabel}>Can go back</p>
+                              <p className={`tabular-nums ${over ? 'text-red-400' : ''}`}>
+                                {l.remainingQty} {l.uom ?? ''}
+                              </p>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="mt-2 space-y-1">
+                          <label className={fieldLabel}>From godown</label>
+                          <select
+                            className="form-input h-9 w-full"
+                            value={r.warehouseId}
+                            onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}
+                            aria-label={`${l.itemName} leaves from`}
+                          >
+                            <option value="">Pick…</option>
+                            {warehouses.map((w) => (
+                              <option key={w.id} value={w.id}>
+                                {w.name}
+                              </option>
+                            ))}
+                          </select>
+                          <p
+                            className={`text-[10px] ${short ? 'text-red-400' : 'text-muted-foreground'}`}
+                          >
+                            {onHand != null
+                              ? `${onHand} ${l.uom ?? ''} in this godown`
+                              : 'Stock is checked when you save'}
+                          </p>
+                        </div>
+
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <label className={fieldLabel}>Qty going back</label>
+                            <input
+                              type="number"
+                              step="any"
+                              min={0}
+                              inputMode="decimal"
+                              className={`form-input h-9 w-full text-right ${
+                                over || short ? 'border-red-500/60' : ''
+                              }`}
+                              placeholder="0"
+                              value={r.qty}
+                              onChange={(e) => setRow(r.key, { qty: e.target.value })}
+                              aria-label={`${l.itemName} quantity going back`}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className={fieldLabel}>Remark</label>
+                            <input
+                              className="form-input h-9 w-full"
+                              value={r.remarks}
+                              onChange={(e) => setRow(r.key, { remarks: e.target.value })}
+                              placeholder="Optional"
+                              aria-label={`${l.itemName} remark`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
                   <table className="w-full min-w-[980px] table-fixed border-collapse text-sm">
                     <thead>
                       <tr className="bg-secondary">
