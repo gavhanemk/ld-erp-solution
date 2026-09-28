@@ -1768,20 +1768,11 @@ export function PurchaseBillDialog({
                       setDueDate(e.target.value)
                     }}
                   />
-                  {/* Where the date came from, so a filled box is not a
-                    mystery. It says the term and what it was counted off,
-                    because "28-10-2026" on its own tells nobody whether the
-                    form used their terms or a guess. */}
-                  {supplier && dueDate && (
-                    <p
-                      className={`mt-1 text-xs ${
-                        supplier.isMsme ? 'text-amber-400' : 'text-muted-foreground'
-                      }`}
-                    >
-                      {termDays} days from {supplierInvoiceDate ? 'their bill' : "today's"} date
-                      {supplier.isMsme && ' · MSME, so 45 is the legal limit'}
-                    </p>
-                  )}
+                  {/* The line under this box said which term the date was
+                    worked out from and, for a small supplier, that 45 days is
+                    the legal ceiling. Taken off on request. The date is still
+                    worked out the same way — see `termDays` — it simply no
+                    longer explains itself here. */}
                 </div>
 
                 <div className="col-span-full flex items-end md:col-span-2">
