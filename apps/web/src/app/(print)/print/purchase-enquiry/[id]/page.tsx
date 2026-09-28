@@ -1,41 +1,56 @@
 'use client'
 
-import { Fragment, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
-import { Sprout } from 'lucide-react'
+import {
+  Building2,
+  ClipboardList,
+  FileText,
+  Mail,
+  Pencil,
+  Phone,
+  ReceiptText,
+  Rows3,
+  Sprout,
+  Truck,
+  Users,
+} from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
 
 /**
- * The printed purchase requisition — what the mill sends each supplier.
+ * The printed purchase requisition — what the mill sends a supplier.
  *
- * Laid out on the sheet the group already sends from its other system, so a
- * supplier who has dealt with Linkd sees a document he recognises: logo at the
- * head, the title, a strip of numbers, the vendor, bill-to and ship-to, the
- * lines, and who prepared it. The one difference is that there are no rates
- * — this asks for a price rather than naming one. The supplier answers with a
- * proforma invoice quoting our requisition number, that PI is recorded in the
- * app against the requisition, and the order is raised against it.
+ * In the mill's own sheet style — the letterhead, the navy document block,
+ * tinted panels — carrying what the group's purchase order sheet carries: the
+ * vendor with his address, bill-to and ship-to, the lines by SKU, who prepared
+ * it and who to call. No rates: this asks for a price. The supplier answers
+ * with a proforma invoice quoting our requisition number, the PI is recorded
+ * in the app against the requisition, and the order is raised against it.
  *
- * One requisition is sent to several suppliers, and each copy is addressed to
- * its own: the Vendor block carries that supplier's name and address. So the
- * sheet prints one page per supplier asked, in the order they were added.
- * `?quote=<id>` prints just the one — the printer icon on his card.
+ * One sheet. A requisition goes to several suppliers, and the Vendor block
+ * names one of them — which one is picked in a bar above the sheet that never
+ * prints. Pick a supplier, print, pick the next, print again: the same
+ * template, each copy carrying its own supplier's address. `?quote=<id>`
+ * opens with that supplier already picked, which is what the printer icon on
+ * a supplier's card does.
  *
- * What it never carries is who else was asked or what they said. Each page
- * names one supplier, and the comparison lives in the app.
+ * What it never carries is who else was asked or what they said.
  */
 
 const NAVY = '#173a6c'
-/** The panel bands and table head — the navy a shade lifted, as the reference has it. */
-const BAND = '#1c4580'
-const TINT = '#eef3fa'
-const TINT_SOFT = '#f6f9fd'
+/**
+ * The navy stepped back, for the second thing in a cell — an item code beside
+ * a name, a GSTIN under an address. In grey they read as disabled.
+ */
+const SOFT = '#4f7ba8'
+const TINT = '#e9eff8'
+const TINT_SOFT = '#f4f7fc'
 const INK = '#1f2b3d'
-const GREY = '#4a5870'
-const MUTED = '#6b7a91'
-const RULE = '#c9d4e3'
+const GREY = '#44536b'
+const RULE = '#b9c4d4'
+const RULE_SOFT = '#dbe4ef'
 
 const SANS = 'var(--font-inter), Inter, system-ui, sans-serif'
 
@@ -44,40 +59,120 @@ const NUM: React.CSSProperties = {
   fontFeatureSettings: '"tnum" 1',
 }
 
-const longDate = (iso: string) =>
-  new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
+const shortDate = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' })
 
 /*
  * Screen and paper are not the same sheet.
  *
- * On screen each copy is a card on a tinted ground, stacked with a gap, so it
- * is obvious there are three of them. On paper each copy starts a new page,
- * and the card, its shadow and the ground all go. The filled bands are told
- * to print as filled — a browser drops backgrounds by default, and the white
- * headings in them would print white on white.
+ * On screen the sheet is a card on a tinted ground, with the toolbar and the
+ * vendor picker above it. On paper the card, its shadow, the ground, the
+ * toolbar and the picker all go, and the filled bands are told to print as
+ * filled — a browser drops backgrounds by default, and the white column names
+ * on the navy head would print white on white.
+ *
+ * The toolbar's own styles live here, as they do on every other printed
+ * sheet. This page was missing them, which is why its toolbar showed as a
+ * run of unstyled words — and, without `.no-print`, would have come out on
+ * the paper.
  */
 const SHEET_CSS = `
-  .req-page { background: #e9eef6; padding: 32px 16px 44px; }
+  .print-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    max-width: 900px;
+    margin: 0 auto 10px;
+    padding: 8px 12px;
+    background: #fff;
+    border-radius: 8px;
+    font: 13px Inter, system-ui, sans-serif;
+    color: #1f2b3d;
+  }
+  .print-toolbar .tb-hint { color: #5a6880; font-size: 12px; margin-right: auto; }
+  .print-toolbar .tb-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid #aebfd6;
+    border-radius: 6px;
+    background: #fff;
+    color: #173a6c;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .print-toolbar .tb-primary { background: #173a6c; border-color: #173a6c; color: #fff; }
+
+  .req-page {
+    background: #e9eef6;
+    background-image:
+      radial-gradient(1100px 420px at -8% 26%, rgba(255, 255, 255, 0.8), transparent 62%),
+      radial-gradient(900px 520px at 108% 6%, rgba(255, 255, 255, 0.55), transparent 58%);
+    min-height: 100vh;
+    padding: 20px 16px 44px;
+  }
+  .req-picker {
+    max-width: 900px;
+    margin: 0 auto 14px;
+    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid #c9d6e8;
+    border-radius: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    font: 13px Inter, system-ui, sans-serif;
+    color: #1f2b3d;
+  }
+  .req-picker select {
+    font: inherit;
+    padding: 6px 10px;
+    border: 1px solid #aebfd6;
+    border-radius: 6px;
+    background: #fff;
+    color: #173a6c;
+    font-weight: 600;
+    min-width: 240px;
+  }
+  .req-picker .hint { color: #5a6880; font-size: 12px; }
   .req-sheet {
     background: #fff;
-    max-width: 820px;
+    max-width: 900px;
     margin: 0 auto;
+    border-radius: 16px;
     box-shadow: 0 18px 50px rgba(23, 58, 108, 0.14);
-    padding: 0 40px 28px;
-    border-top: 5px solid ${NAVY};
+    padding: 34px 36px 30px;
   }
-  .req-sheet + .req-sheet { margin-top: 32px; }
   .req-sheet, .req-sheet * {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
   @media print {
-    .req-page { background: #fff; padding: 0; }
-    .req-sheet { box-shadow: none; max-width: none; padding: 0 0 12px; }
-    .req-sheet + .req-sheet { margin-top: 0; break-before: page; page-break-before: always; }
+    .no-print { display: none !important; }
+    html, body { background: #fff !important; }
+    .req-page { background: #fff; background-image: none; padding: 0; min-height: 0; }
+    .req-sheet { box-shadow: none; border-radius: 0; max-width: none; padding: 0; }
     @page { margin: 12mm; }
   }
 `
+
+/**
+ * What his proforma invoice should carry. A PI that comes back with a rate
+ * and nothing else cannot be compared with the others: one is ex-works, one
+ * delivered, one has buried the freight.
+ */
+const PI_MUST_SHOW = [
+  'Rate per unit, for each item',
+  'GST %',
+  'Freight and packing, if extra',
+  'Delivery time',
+  'Payment terms',
+  'How long the price holds',
+]
 
 interface Recipient {
   quoteId: string
@@ -97,7 +192,6 @@ interface PrintData {
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null; showSignature: boolean } | null
   enquiry: EnquiryRecord
-  forQuoteId: string | null
   recipients: Recipient[]
   shipTo: { name: string; address: string | null } | null
   preparedBy: { name: string; phone: string | null; email: string | null } | null
@@ -106,23 +200,30 @@ interface PrintData {
 export default function PurchaseRequisitionPrintPage() {
   const params = useParams<{ id: string }>()
   const search = useSearchParams()
-  const quoteId = search.get('quote')
+  const wantedQuote = search.get('quote')
 
   const [data, setData] = useState<PrintData | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** Which supplier the Vendor block names. */
+  const [picked, setPicked] = useState<string>('')
 
   useEffect(() => {
     void (async () => {
       try {
+        // Every supplier asked, always — the picker offers all of them, and
+        // `?quote=` only decides which one it starts on.
         const res = await api.get<{ data: PrintData }>(
-          '/purchase/enquiries/' + params.id + '/print' + (quoteId ? '?quote=' + quoteId : '')
+          '/purchase/enquiries/' + params.id + '/print'
         )
         setData(res.data)
+        const start =
+          res.data.recipients.find((r) => r.quoteId === wantedQuote) ?? res.data.recipients[0]
+        setPicked(start?.quoteId ?? '')
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'Could not build the sheet.')
       }
     })()
-  }, [params.id, quoteId])
+  }, [params.id, wantedQuote])
 
   if (error) {
     return <p style={{ fontFamily: SANS, padding: 40, color: '#b91c1c' }}>{error}</p>
@@ -132,475 +233,532 @@ export default function PurchaseRequisitionPrintPage() {
   }
 
   const e = data.enquiry
-  // With nobody asked yet, one unaddressed copy rather than none at all.
-  const copies: Array<Recipient | null> = data.recipients.length ? data.recipients : [null]
-  const single = data.recipients.length === 1 ? data.recipients[0] : null
+  const co = data.company
+  const to = data.recipients.find((r) => r.quoteId === picked) ?? null
+  const prep = data.preparedBy
+  const showSignature = data.template?.showSignature !== false
+
+  const contacts = [
+    co.gstin ? { icon: ReceiptText, text: 'GSTIN ' + co.gstin } : null,
+    co.phone ? { icon: Phone, text: co.phone } : null,
+    co.email ? { icon: Mail, text: co.email } : null,
+  ].filter(Boolean) as Array<{ icon: React.ElementType; text: string }>
+
+  const companyPlace = [[co.city, co.state].filter(Boolean).join(', '), co.pincode]
+    .filter(Boolean)
+    .join(' - ')
+  const companyTax = co.gstin
+    ? 'GSTIN ' + co.gstin + (co.stateCode ? ' · State code ' + co.stateCode : '')
+    : null
 
   return (
     <>
       <style>{SHEET_CSS}</style>
-      <PrintToolbar
-        backHref="/purchase/enquiries"
-        backLabel="Enquiries"
-        copies={copies.length}
-        fileName={'Requisition ' + e.enquiryNumber + (single ? ' ' + single.name : '')}
-      />
       <div className="req-page">
-        {copies.map((r, i) => (
-          <Fragment key={r?.quoteId ?? i}>
-            <Sheet data={data} to={r} />
-          </Fragment>
-        ))}
+        <PrintToolbar
+          backHref="/purchase/enquiries"
+          backLabel="Enquiries"
+          copies={1}
+          fileName={'Requisition ' + e.enquiryNumber + (to ? ' ' + to.name : '')}
+        />
+
+        {/* The only thing that changes between copies, chosen here and never
+          printed. One supplier: nothing to choose, so it just says whose
+          copy this is. */}
+        {data.recipients.length > 0 && (
+          <div className="req-picker no-print">
+            <span style={{ fontWeight: 600 }}>Vendor on this sheet</span>
+            {data.recipients.length > 1 ? (
+              <select
+                value={picked}
+                onChange={(ev) => setPicked(ev.target.value)}
+                aria-label="Supplier this copy is addressed to"
+              >
+                {data.recipients.map((r) => (
+                  <option key={r.quoteId} value={r.quoteId}>
+                    {r.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <strong style={{ color: NAVY }}>{to?.name}</strong>
+            )}
+            <span className="hint">
+              {data.recipients.length > 1
+                ? `Asked ${data.recipients.length} suppliers — pick one, print, then pick the next. Each copy carries its own supplier's address.`
+                : 'The Vendor block carries this supplier’s address.'}
+            </span>
+          </div>
+        )}
+
+        <div className="req-sheet" style={{ fontFamily: SANS, color: INK }}>
+          {/* ── Letterhead and document block ─────────────────────────────── */}
+          <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                {co.logoUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={co.logoUrl}
+                    alt=""
+                    style={{ height: 38, width: 'auto', objectFit: 'contain' }}
+                  />
+                ) : (
+                  <Sprout size={34} style={{ color: '#2f9e7e' }} strokeWidth={1.8} />
+                )}
+                <h1
+                  style={{
+                    margin: 0,
+                    fontSize: 30,
+                    fontWeight: 700,
+                    letterSpacing: -0.6,
+                    color: NAVY,
+                  }}
+                >
+                  {co.name}
+                </h1>
+              </div>
+              {co.address && (
+                <p style={{ margin: '11px 0 0', fontSize: 12.5, color: GREY, lineHeight: 1.55 }}>
+                  {[co.address, co.city, co.state, co.pincode].filter(Boolean).join(', ')}
+                </p>
+              )}
+              <div
+                style={{
+                  margin: '11px 0 0',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  gap: '6px 9px',
+                  fontSize: 11.5,
+                  color: GREY,
+                }}
+              >
+                {contacts.map((c, i) => (
+                  <span
+                    key={c.text}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 9,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {i > 0 && <span style={{ color: RULE }}>·</span>}
+                    <Contact icon={c.icon}>{c.text}</Contact>
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div
+              style={{
+                borderRadius: 9,
+                minWidth: 272,
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(23, 58, 108, 0.13)',
+              }}
+            >
+              <div
+                style={{
+                  background: NAVY,
+                  color: '#fff',
+                  padding: '9px 14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  letterSpacing: 0.4,
+                  textTransform: 'uppercase',
+                }}
+              >
+                <FileText size={15} />
+                Purchase Requisition
+              </div>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <tbody>
+                  <MetaRow i={0} label="Requisition No" value={e.enquiryNumber} mono />
+                  <MetaRow i={1} label="Date" value={shortDate(e.enquiryDate)} mono />
+                  <MetaRow
+                    i={2}
+                    label="Required by"
+                    value={e.requiredDate ? shortDate(e.requiredDate) : '—'}
+                    mono
+                  />
+                  <MetaRow i={3} label="Reference" value={e.reference || '—'} mono />
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div style={{ height: 2, background: NAVY, margin: '22px 0 0', borderRadius: 2 }} />
+
+          {/* ── Vendor ─────────────────────────────────────────────────────── */}
+          <Panel icon={Users} title="Vendor">
+            <div style={{ padding: '12px 16px 14px', fontSize: 12, lineHeight: 1.6 }}>
+              {to ? (
+                <>
+                  <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: NAVY }}>{to.name}</p>
+                  {to.address && <p style={{ margin: '3px 0 0', color: GREY }}>{to.address}</p>}
+                  {(to.city || to.state || to.pincode) && (
+                    <p style={{ margin: 0, color: GREY }}>
+                      {[[to.city, to.state].filter(Boolean).join(', '), to.pincode]
+                        .filter(Boolean)
+                        .join(' - ')}
+                    </p>
+                  )}
+                  <p style={{ margin: '3px 0 0', color: SOFT }}>
+                    {[
+                      to.phone,
+                      to.email,
+                      to.gstin &&
+                        'GSTIN ' + to.gstin + (to.stateCode ? ' · State code ' + to.stateCode : ''),
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                </>
+              ) : (
+                <p style={{ margin: 0, color: GREY }}>
+                  No supplier has been added to this requisition yet.
+                </p>
+              )}
+            </div>
+          </Panel>
+
+          {/* ── Bill to, ship to ─────────────────────────────────────────────── */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+              gap: 14,
+            }}
+          >
+            <Panel icon={Building2} title="Bill to">
+              <div style={{ padding: '12px 16px 14px', fontSize: 12, lineHeight: 1.6 }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: NAVY }}>
+                  {co.legalName || co.name}
+                </p>
+                {co.address && <p style={{ margin: '3px 0 0', color: GREY }}>{co.address}</p>}
+                {companyPlace && <p style={{ margin: 0, color: GREY }}>{companyPlace}</p>}
+                {companyTax && <p style={{ margin: '3px 0 0', color: SOFT }}>{companyTax}</p>}
+              </div>
+            </Panel>
+            <Panel icon={Truck} title="Ship to">
+              <div style={{ padding: '12px 16px 14px', fontSize: 12, lineHeight: 1.6 }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: NAVY }}>
+                  {co.name}
+                  {data.shipTo ? ' (' + data.shipTo.name + ')' : ''}
+                </p>
+                {data.shipTo?.address && (
+                  <p style={{ margin: '3px 0 0', color: GREY }}>{data.shipTo.address}</p>
+                )}
+                {co.address && <p style={{ margin: 0, color: GREY }}>{co.address}</p>}
+                {companyPlace && <p style={{ margin: 0, color: GREY }}>{companyPlace}</p>}
+                {(prep || co.phone) && (
+                  <p style={{ margin: '3px 0 0', color: SOFT }}>
+                    {[prep?.name, prep?.phone || co.phone].filter(Boolean).join(' · ')}
+                  </p>
+                )}
+              </div>
+            </Panel>
+          </div>
+
+          {/* ── The lines ──────────────────────────────────────────────────────
+            By SKU, as the group's sheets list them. No rate or amount — those
+            come back on his PI. */}
+          <Panel icon={Rows3} title="Items required" flush>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: NAVY, color: '#fff' }}>
+                  <th style={{ ...TH, width: 54, paddingLeft: 16 }}>S.No</th>
+                  <th style={{ ...TH, width: 130 }}>SKU</th>
+                  <th style={TH}>Item Description</th>
+                  <th style={{ ...TH, width: 70 }}>HSN</th>
+                  <th style={{ ...TH, width: 96, textAlign: 'right' }}>Qty</th>
+                  <th style={{ ...TH, width: 66, paddingRight: 16 }}>Unit</th>
+                </tr>
+              </thead>
+              <tbody>
+                {e.lines.map((l, i) => (
+                  <tr
+                    key={l.id}
+                    style={{
+                      background: i % 2 ? TINT_SOFT : '#fff',
+                      borderTop: '1px solid ' + RULE_SOFT,
+                    }}
+                  >
+                    <td style={{ ...TD, paddingLeft: 16, color: SOFT, ...NUM }}>{i + 1}</td>
+                    <td style={{ ...TD, color: SOFT, fontFamily: 'monospace' }}>{l.item.code}</td>
+                    <td style={TD}>
+                      <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
+                      {l.description && (
+                        <div style={{ color: GREY, fontSize: 11, marginTop: 2 }}>
+                          {l.description}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ ...TD, color: SOFT, ...NUM }}>{l.hsnCode ?? '—'}</td>
+                    <td style={{ ...TD, textAlign: 'right', fontWeight: 600, ...NUM }}>
+                      {qtyFmt(l.qty)}
+                    </td>
+                    <td style={{ ...TD, paddingRight: 16, color: GREY }}>
+                      {l.item.uom?.symbol ?? '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Panel>
+
+          {/* ── What we need back ──────────────────────────────────────────── */}
+          <Panel icon={ClipboardList} title="Please send your proforma invoice (PI)">
+            <div style={{ padding: '12px 16px 14px', fontSize: 12, color: INK }}>
+              <p style={{ margin: 0 }}>
+                Please send your proforma invoice for the items above, quoting our requisition no.{' '}
+                <strong style={{ color: NAVY, fontFamily: 'monospace' }}>{e.enquiryNumber}</strong>.
+                Your PI should show:
+              </p>
+              <ul
+                style={{
+                  margin: '9px 0 0',
+                  padding: '0 0 0 18px',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                  gap: '5px 20px',
+                  color: GREY,
+                }}
+              >
+                {PI_MUST_SHOW.map((q) => (
+                  <li key={q}>{q}</li>
+                ))}
+              </ul>
+            </div>
+          </Panel>
+
+          {(e.notes || e.terms) && (
+            <div style={{ marginTop: 16, display: 'grid', gap: 12 }}>
+              {e.notes && <Note icon={Pencil} title="Notes" body={e.notes} />}
+              {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
+            </div>
+          )}
+
+          {/* ── Who prepared it, who signs ─────────────────────────────────── */}
+          <div
+            style={{
+              marginTop: 24,
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'flex-end',
+              gap: 40,
+            }}
+          >
+            <div style={{ fontSize: 11.5, color: GREY }}>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  letterSpacing: 0.6,
+                  textTransform: 'uppercase',
+                  color: NAVY,
+                }}
+              >
+                Prepared by
+              </p>
+              {prep && (
+                <>
+                  <p style={{ margin: '8px 0 0', fontSize: 15, fontWeight: 700, color: NAVY }}>
+                    {prep.name}
+                  </p>
+                  <p style={{ margin: '2px 0 0', color: SOFT }}>
+                    {[prep.phone, prep.email].filter(Boolean).join(' | ')}
+                  </p>
+                </>
+              )}
+            </div>
+            {showSignature && (
+              <div style={{ width: 230, textAlign: 'right', fontSize: 11.5, color: GREY }}>
+                <p style={{ margin: 0 }}>For {co.name}</p>
+                <div style={{ height: 38 }} />
+                <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 6 }}>
+                  Authorised signatory
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* ── The foot ───────────────────────────────────────────────────── */}
+          <div
+            style={{
+              marginTop: 22,
+              padding: '10px 14px',
+              background: TINT_SOFT,
+              border: '1px solid ' + RULE_SOFT,
+              borderRadius: 10,
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+              gap: 18,
+              fontSize: 10.5,
+              color: GREY,
+              lineHeight: 1.5,
+            }}
+          >
+            <span>
+              This is a computer generated document and does not require a physical signature. It is
+              a requisition, not a purchase order.
+            </span>
+            <span>
+              For queries contact: <strong style={{ color: NAVY }}>{prep?.name ?? co.name}</strong>
+              {[prep?.phone || co.phone, prep?.email || co.email]
+                .filter(Boolean)
+                .map((x) => ' | ' + x)
+                .join('')}
+            </span>
+          </div>
+        </div>
       </div>
     </>
   )
 }
 
-/** One supplier's copy. */
-function Sheet({ data, to }: { data: PrintData; to: Recipient | null }) {
-  const e = data.enquiry
-  const co = data.company
-  const prep = data.preparedBy
-
-  const companyCity = [co.city, co.state].filter(Boolean).join(', ')
-  const companyTail = [companyCity, co.pincode].filter(Boolean).join(' - ')
-
-  return (
-    <div className="req-sheet" style={{ fontFamily: SANS, color: INK }}>
-      {/* ── The head ─────────────────────────────────────────────────────────
-        The mark centred on a navy arc, the way the group's sheets open. The
-        arc is drawn, not an image, so it prints crisp at any size and in the
-        mill's own navy. */}
-      <div style={{ position: 'relative', height: 118, textAlign: 'center' }}>
-        <svg
-          viewBox="0 0 400 60"
-          preserveAspectRatio="none"
-          aria-hidden
-          style={{
-            position: 'absolute',
-            left: '50%',
-            top: 0,
-            transform: 'translateX(-50%)',
-            width: 300,
-            height: 58,
-          }}
-        >
-          <path d="M0 0 H400 C340 0 300 58 200 58 C100 58 60 0 0 0 Z" fill={NAVY} />
-        </svg>
-        <div
-          style={{
-            position: 'absolute',
-            left: '50%',
-            top: 16,
-            transform: 'translateX(-50%)',
-            width: 76,
-            height: 76,
-            borderRadius: '50%',
-            background: '#fff',
-            border: '3px solid ' + NAVY,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            overflow: 'hidden',
-          }}
-        >
-          {co.logoUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={co.logoUrl}
-              alt={co.name ?? ''}
-              style={{ maxWidth: 58, maxHeight: 58, objectFit: 'contain' }}
-            />
-          ) : (
-            <Sprout size={34} style={{ color: '#2f9e7e' }} strokeWidth={1.8} />
-          )}
-        </div>
-        <p
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            bottom: 0,
-            margin: 0,
-            fontSize: 13,
-            fontWeight: 700,
-            letterSpacing: 2,
-            textTransform: 'uppercase',
-            color: NAVY,
-          }}
-        >
-          {co.name}
-        </p>
-      </div>
-
-      <div style={{ height: 1.5, background: NAVY, margin: '14px 0 0' }} />
-
-      <h1
-        style={{
-          margin: '18px 0 16px',
-          textAlign: 'center',
-          fontSize: 26,
-          fontWeight: 800,
-          letterSpacing: 3,
-          color: NAVY,
-        }}
-      >
-        PURCHASE REQUISITION
-      </h1>
-
-      {/* ── The numbers ──────────────────────────────────────────────────── */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-          background: TINT_SOFT,
-          border: '1px solid ' + RULE,
-          borderRadius: 4,
-        }}
-      >
-        <Stat label="Requisition No" value={e.enquiryNumber} />
-        <Stat label="Reference" value={e.reference || '—'} />
-        <Stat label="Date" value={longDate(e.enquiryDate)} />
-        <Stat label="Required by" value={e.requiredDate ? longDate(e.requiredDate) : '—'} last />
-      </div>
-
-      {/* ── Vendor ─────────────────────────────────────────────────────────
-        This copy's supplier, in full — the only part of the sheet that
-        differs between copies. */}
-      <Box title="Vendor" style={{ marginTop: 14 }}>
-        {to ? (
-          <>
-            <p
-              style={{
-                margin: 0,
-                fontSize: 15,
-                fontWeight: 600,
-                color: NAVY,
-                textTransform: 'uppercase',
-                letterSpacing: 0.3,
-              }}
-            >
-              {to.name}
-            </p>
-            <div style={{ marginTop: 7, fontSize: 11.5, lineHeight: 1.65, color: GREY }}>
-              {to.phone && <div>{to.phone}</div>}
-              {to.email && <div>{to.email}</div>}
-              {to.address && <div style={{ marginTop: 4 }}>{to.address}</div>}
-              {(to.city || to.state || to.pincode) && (
-                <div>
-                  {[to.city, [to.state, to.pincode].filter(Boolean).join(' - ')]
-                    .filter(Boolean)
-                    .join(', ')}
-                </div>
-              )}
-              {to.gstin && (
-                <div style={{ marginTop: 4 }}>
-                  GSTIN {to.gstin}
-                  {to.stateCode ? ' · State code ' + to.stateCode : ''}
-                </div>
-              )}
-            </div>
-          </>
-        ) : (
-          <p style={{ margin: 0, fontSize: 12, color: MUTED }}>
-            No supplier has been added to this requisition yet.
-          </p>
-        )}
-      </Box>
-
-      {/* ── Bill to, ship to ────────────────────────────────────────────── */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-          gap: 12,
-          marginTop: 12,
-        }}
-      >
-        <Box title="Bill to">
-          <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: NAVY }}>
-            {co.legalName || co.name}
-          </p>
-          <div style={{ marginTop: 6, fontSize: 11.5, lineHeight: 1.6, color: GREY }}>
-            {co.address && <div>{co.address}</div>}
-            {companyTail && <div>{companyTail}</div>}
-            {co.gstin && (
-              <div style={{ marginTop: 4 }}>
-                GSTIN {co.gstin}
-                {co.stateCode ? ' · State code ' + co.stateCode : ''}
-              </div>
-            )}
-          </div>
-        </Box>
-        <Box title="Ship to">
-          <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: NAVY }}>
-            {co.name}
-            {data.shipTo ? ` (${data.shipTo.name})` : ''}
-          </p>
-          <div style={{ marginTop: 6, fontSize: 11.5, lineHeight: 1.6, color: GREY }}>
-            {data.shipTo?.address && <div>{data.shipTo.address}</div>}
-            {co.address && <div>{co.address}</div>}
-            {companyTail && <div>{companyTail}</div>}
-            {co.gstin && (
-              <div>
-                GSTIN {co.gstin}
-                {co.stateCode ? ' · State code ' + co.stateCode : ''}
-              </div>
-            )}
-            {(prep || co.email) && (
-              <div style={{ marginTop: 4 }}>
-                {[prep?.name, prep?.phone || co.phone, prep?.email || co.email]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </div>
-            )}
-          </div>
-        </Box>
-      </div>
-
-      {/* ── The lines ──────────────────────────────────────────────────────
-        As the reference lays them out, without the rate and amount: those
-        come back on his PI. */}
-      <div
-        style={{
-          marginTop: 14,
-          border: '1px solid ' + RULE,
-          borderRadius: 4,
-          overflow: 'hidden',
-        }}
-      >
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
-          <thead>
-            <tr style={{ background: BAND, color: '#fff' }}>
-              <th style={{ ...TH, width: 52, textAlign: 'center' }}>S.No</th>
-              <th style={{ ...TH, width: 120 }}>SKU</th>
-              <th style={TH}>Item Description</th>
-              <th style={{ ...TH, width: 60 }}>HSN</th>
-              <th style={{ ...TH, width: 90, textAlign: 'right' }}>Qty</th>
-              <th style={{ ...TH, width: 64, paddingRight: 14 }}>Unit</th>
-            </tr>
-          </thead>
-          <tbody>
-            {e.lines.map((l, i) => (
-              <tr key={l.id} style={{ borderTop: i ? '1px solid ' + RULE : 'none' }}>
-                <td style={{ ...TD, textAlign: 'center', color: GREY, ...NUM }}>{i + 1}</td>
-                <td style={{ ...TD, color: GREY }}>{l.item.code}</td>
-                <td style={TD}>
-                  <span style={{ fontWeight: 700, color: INK }}>{l.item.name}</span>
-                  {l.description && (
-                    <div style={{ color: MUTED, fontSize: 10.5, marginTop: 2 }}>
-                      {l.description}
-                    </div>
-                  )}
-                </td>
-                <td style={{ ...TD, color: GREY, ...NUM }}>{l.hsnCode ?? '—'}</td>
-                <td style={{ ...TD, textAlign: 'right', fontWeight: 600, ...NUM }}>
-                  {qtyFmt(l.qty)}
-                </td>
-                <td style={{ ...TD, paddingRight: 14, color: GREY }}>
-                  {l.item.uom?.symbol ?? '—'}
-                </td>
-              </tr>
-            ))}
-            {/* Where the reference says rates include tax, this says what his
-              PI has to carry — the one thing without which his reply cannot
-              be recorded against this sheet or compared with the others. */}
-            <tr style={{ borderTop: '1px solid ' + RULE, background: TINT_SOFT }}>
-              <td
-                colSpan={6}
-                style={{
-                  padding: '8px 14px',
-                  fontSize: 10.5,
-                  fontStyle: 'italic',
-                  color: MUTED,
-                  lineHeight: 1.5,
-                }}
-              >
-                Please send your proforma invoice quoting our requisition no. showing rate per unit,
-                GST %, freight &amp; packing, delivery time, payment terms and how long the price
-                holds.
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        {/* The band the reference gives the grand total. Here it carries the
-          number his PI must quote, because that is what matches the two. */}
-        <div
-          style={{
-            background: NAVY,
-            color: '#fff',
-            padding: '13px 16px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 16,
-          }}
-        >
-          <span style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6 }}>
-            QUOTE THIS NUMBER ON YOUR PI
-          </span>
-          <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: 0.5, ...NUM }}>
-            {e.enquiryNumber}
-          </span>
-        </div>
-      </div>
-
-      {(e.notes || e.terms) && (
-        <div style={{ marginTop: 14, fontSize: 11.5, color: GREY, lineHeight: 1.55 }}>
-          {e.notes && (
-            <p style={{ margin: 0, whiteSpace: 'pre-line' }}>
-              <strong style={{ color: NAVY }}>Notes: </strong>
-              {e.notes}
-            </p>
-          )}
-          {e.terms && (
-            <p style={{ margin: e.notes ? '4px 0 0' : 0, whiteSpace: 'pre-line' }}>
-              <strong style={{ color: NAVY }}>Terms: </strong>
-              {e.terms}
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* ── Who prepared it, who signs ─────────────────────────────────────── */}
-      <div
-        style={{
-          marginTop: 24,
-          display: 'flex',
-          justifyContent: 'space-between',
-          gap: 40,
-          fontSize: 10.5,
-          fontWeight: 700,
-          letterSpacing: 0.6,
-          color: GREY,
-          textTransform: 'uppercase',
-        }}
-      >
-        <span>Prepared by</span>
-        {data.template?.showSignature !== false && <span>Authorised signatory</span>}
-      </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 40 }}>
-        <div style={{ flex: 1, maxWidth: 300 }}>
-          <div style={{ height: 30, borderBottom: '1px solid ' + RULE }} />
-          {prep && (
-            <>
-              <p style={{ margin: '10px 0 0', fontSize: 16, fontWeight: 600, color: NAVY }}>
-                {prep.name}
-              </p>
-              <p style={{ margin: '2px 0 0', fontSize: 10.5, color: MUTED }}>
-                {[prep.phone, prep.email].filter(Boolean).join(' | ')}
-              </p>
-            </>
-          )}
-        </div>
-        {data.template?.showSignature !== false && (
-          <div style={{ flex: 1, maxWidth: 220 }}>
-            <div style={{ height: 30, borderBottom: '1px solid ' + RULE }} />
-            <p style={{ margin: '10px 0 0', fontSize: 10.5, color: MUTED, textAlign: 'right' }}>
-              For {co.name}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* ── The foot ───────────────────────────────────────────────────────── */}
-      <div
-        style={{
-          marginTop: 18,
-          background: TINT,
-          borderRadius: 4,
-          padding: '10px 14px',
-          display: 'grid',
-          gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-          gap: 16,
-          fontSize: 10,
-          color: GREY,
-          lineHeight: 1.5,
-        }}
-      >
-        <span>
-          This is a computer generated document and does not require a physical signature. It is a
-          requisition, not a purchase order.
-        </span>
-        <span>
-          For queries contact: <strong style={{ color: NAVY }}>{prep?.name ?? co.name}</strong>
-          {[prep?.phone || co.phone, prep?.email || co.email]
-            .filter(Boolean)
-            .map((x) => ' | ' + x)
-            .join('')}
-        </span>
-      </div>
-    </div>
-  )
-}
-
-const TH: React.CSSProperties = {
-  padding: '9px 8px',
-  textAlign: 'left',
-  fontWeight: 700,
-  fontSize: 10.5,
-  letterSpacing: 0.5,
-  textTransform: 'uppercase',
-}
-
+const TH: React.CSSProperties = { padding: '10px 8px', textAlign: 'left', fontWeight: 600 }
 const TD: React.CSSProperties = { padding: '10px 8px', verticalAlign: 'top' }
 
-/** A cell in the numbers strip. */
-function Stat({ label, value, last = false }: { label: string; value: string; last?: boolean }) {
+/** One of the three ways to reach us, its icon on a filled tile. */
+function Contact({ icon: Icon, children }: { icon: React.ElementType; children: React.ReactNode }) {
   return (
-    <div style={{ padding: '9px 12px', borderRight: last ? 'none' : '1px solid ' + RULE }}>
-      <p
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+      <span
         style={{
-          margin: 0,
-          fontSize: 9.5,
-          fontWeight: 700,
-          letterSpacing: 0.6,
-          textTransform: 'uppercase',
-          color: MUTED,
+          width: 19,
+          height: 19,
+          borderRadius: 5,
+          background: NAVY,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
         }}
       >
-        {label}
-      </p>
-      <p style={{ margin: '3px 0 0', fontSize: 13, fontWeight: 700, color: NAVY, ...NUM }}>
-        {value}
-      </p>
-    </div>
+        <Icon size={11} color="#fff" strokeWidth={2.3} />
+      </span>
+      {children}
+    </span>
   )
 }
 
-/** A panel with a navy title band, as the reference draws Vendor, Bill To and Ship To. */
-function Box({
+/**
+ * A titled band, tinted through. `flush` drops the body's padding and tint,
+ * for the item table whose own navy head sits directly under the bar.
+ */
+function Panel({
+  icon: Icon,
   title,
+  flush = false,
   children,
-  style,
 }: {
+  icon: React.ElementType
   title: string
+  flush?: boolean
   children: React.ReactNode
-  style?: React.CSSProperties
 }) {
   return (
     <div
       style={{
-        border: '1px solid ' + RULE,
-        borderRadius: 4,
+        marginTop: 14,
+        borderRadius: 10,
         overflow: 'hidden',
-        ...style,
+        background: flush ? '#fff' : TINT_SOFT,
+        border: '1px solid ' + RULE_SOFT,
       }}
     >
       <div
         style={{
-          background: BAND,
-          color: '#fff',
-          padding: '7px 14px',
-          fontSize: 10.5,
+          background: TINT,
+          padding: '9px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 9,
+          fontSize: 11.5,
           fontWeight: 700,
-          letterSpacing: 0.8,
+          letterSpacing: 0.6,
           textTransform: 'uppercase',
+          color: NAVY,
         }}
       >
+        <Icon size={15} />
         {title}
       </div>
-      <div style={{ padding: '11px 14px 13px' }}>{children}</div>
+      {children}
+    </div>
+  )
+}
+
+/** One label-and-value line in the document block. */
+function MetaRow({
+  i,
+  label,
+  value,
+  mono = false,
+}: {
+  i: number
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <tr style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
+      <td style={{ padding: '7px 14px', color: GREY, whiteSpace: 'nowrap' }}>{label}</td>
+      <td
+        style={{
+          padding: '7px 14px',
+          textAlign: 'right',
+          fontWeight: 700,
+          color: NAVY,
+          whiteSpace: 'nowrap',
+          ...(mono ? { fontFamily: 'monospace' } : {}),
+          ...NUM,
+        }}
+      >
+        {value}
+      </td>
+    </tr>
+  )
+}
+
+/** A titled paragraph — notes, terms. */
+function Note({
+  icon: Icon,
+  title,
+  body,
+}: {
+  icon: React.ElementType
+  title: string
+  body: string
+}) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <p
+        style={{
+          margin: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          fontSize: 11.5,
+          fontWeight: 700,
+          letterSpacing: 0.6,
+          textTransform: 'uppercase',
+          color: NAVY,
+        }}
+      >
+        <Icon size={15} />
+        {title}
+      </p>
+      <p style={{ margin: '6px 0 0 23px', fontSize: 12, color: GREY, whiteSpace: 'pre-line' }}>
+        {body}
+      </p>
     </div>
   )
 }

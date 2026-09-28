@@ -61,6 +61,21 @@ const qtyFmt = (v: number | string) =>
   Number(v).toLocaleString('en-IN', { maximumFractionDigits: 3 })
 
 const SHEET_CSS = `
+  /* The toolbar's own styles, as every printed sheet carries them. Without
+     them it shows as a run of unstyled words, and without .no-print it
+     comes out on the paper. */
+  .print-toolbar {
+    display: flex; align-items: center; gap: 14px; max-width: 900px;
+    margin: 0 auto 12px; padding: 8px 12px; background: #fff; border-radius: 8px;
+    font: 13px Inter, system-ui, sans-serif; color: #1f2b3d;
+  }
+  .print-toolbar .tb-hint { color: #5a6880; font-size: 12px; margin-right: auto; }
+  .print-toolbar .tb-btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+    border: 1px solid #aebfd6; border-radius: 6px; background: #fff; color: #173a6c;
+    font-size: 13px; font-weight: 600; text-decoration: none; cursor: pointer;
+  }
+  .print-toolbar .tb-primary { background: #173a6c; border-color: #173a6c; color: #fff; }
   .prc-page {
     background: #e9eef6;
     background-image:
@@ -77,6 +92,8 @@ const SHEET_CSS = `
     padding: 34px 36px 30px;
   }
   @media print {
+    .no-print { display: none !important; }
+    html, body { background: #fff !important; }
     .prc-page { background: #fff; background-image: none; padding: 0; }
     .prc-sheet { box-shadow: none; border-radius: 0; max-width: none; padding: 0; }
     /* The navy head carries white column names. Without this a browser drops
@@ -193,14 +210,13 @@ export default function PurchaseReturnPrintPage() {
   return (
     <>
       <style>{SHEET_CSS}</style>
-      <PrintToolbar
-        backHref="/purchase/returns"
-        backLabel="Returns"
-        copies={1}
-        fileName={c.returnNumber + ' ' + c.supplier.name}
-      />
-
       <div className="prc-page">
+        <PrintToolbar
+          backHref="/purchase/returns"
+          backLabel="Returns"
+          copies={1}
+          fileName={c.returnNumber + ' ' + c.supplier.name}
+        />
         <div className="prc-sheet" style={{ fontFamily: SANS, color: INK, position: 'relative' }}>
           {/* A cancelled challan still prints — the gate may need to see why a
             vehicle it signed out has no paper behind it any more — but it says
