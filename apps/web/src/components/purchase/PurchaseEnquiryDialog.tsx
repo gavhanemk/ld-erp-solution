@@ -122,6 +122,28 @@ const iso = (d: string | null | undefined) => (d ? new Date(d).toISOString().sli
 let seq = 0
 const nextKey = () => 'l' + ++seq
 
+/**
+ * An empty row.
+ *
+ * Out here rather than inside the component because the form opens with one
+ * already on it, and the state initialiser that makes it runs before anything
+ * declared in the component body exists.
+ */
+const blank = (): Line => ({
+  key: nextKey(),
+  id: null,
+  itemId: '',
+  codeText: '',
+  categoryId: '',
+  subcategoryId: '',
+  qty: '',
+  uom: '',
+  expectedRate: '',
+  description: '',
+  mrLineId: null,
+  mrNumber: null,
+})
+
 export function PurchaseEnquiryDialog({
   record,
   onClose,
@@ -168,7 +190,8 @@ export function PurchaseEnquiryDialog({
           mrLineId: l.mrLineId,
           mrNumber: l.mrLine?.mr.mrNumber ?? null,
         }))
-      : []
+      : // Always one row to type into. An empty table has nowhere to start.
+        [blank()]
   )
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
@@ -215,21 +238,6 @@ export function PurchaseEnquiryDialog({
     [categories]
   )
 
-  const blank = (): Line => ({
-    key: nextKey(),
-    id: null,
-    itemId: '',
-    codeText: '',
-    categoryId: '',
-    subcategoryId: '',
-    qty: '',
-    uom: '',
-    expectedRate: '',
-    description: '',
-    mrLineId: null,
-    mrNumber: null,
-  })
-
   const addLine = useCallback(() => setLines((p) => [...p, blank()]), [])
 
   const setLine = useCallback((key: string, patch: Partial<Line>) => {
@@ -237,7 +245,10 @@ export function PurchaseEnquiryDialog({
   }, [])
 
   const removeLine = useCallback((key: string) => {
-    setLines((prev) => prev.filter((l) => l.key !== key))
+    setLines((prev) => {
+      const left = prev.filter((l) => l.key !== key)
+      return left.length ? left : [blank()]
+    })
   }, [])
 
   /**
@@ -405,12 +416,17 @@ export function PurchaseEnquiryDialog({
    * enquiry rather than straight onto an order is the honest route when the
    * rate is not known: the request keeps its link to the job through
    * `mrLineId`, and that travels on to the order when one is raised.
+   *
+   * Blank rows already on the form are cleared out first: the form opens with
+   * one empty row, and keeping it would leave a row with no item on an enquiry
+   * somebody is about to raise — which the footer then refuses to save,
+   * pointing at a row they never typed in.
    */
   const takeIndent = useCallback(
     (picks: IndentPick[]) => {
       setIndentOpen(false)
       setLines((prev) => [
-        ...prev,
+        ...prev.filter((l) => l.itemId),
         ...picks.map((p) => {
           const cat = categories.find(
             (c) => c.id === (p.row.item as { category?: { id: string } }).category?.id
