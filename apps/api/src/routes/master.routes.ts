@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter } from '../lib/crud'
 import { writeAuditLog } from '../lib/audit'
@@ -22,6 +23,7 @@ import {
   createStyleSchema,
   createSupplierSchema,
   createUomSchema,
+  createBankAccountSchema,
   createWarehouseSchema,
   createWorkstationSchema,
   updateBomSchema,
@@ -41,6 +43,7 @@ import {
   updateStyleSchema,
   updateSupplierSchema,
   updateUomSchema,
+  updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
 } from '../schemas/master.schemas'
@@ -83,6 +86,206 @@ router.use(
   }),
 )
 
+// ─────────────────────────────────────────────────────────────
+// Supplier addresses — a supplier can bill from more than one place
+//
+// Declared above the `/suppliers` CRUD mount on purpose. `router.use` matches
+// on a prefix, so mounted after it these paths would be handed to the CRUD
+// router, which would read "cmxyz/addresses" as an id and answer 404.
+// ─────────────────────────────────────────────────────────────
+
+const supplierAddressSchema = z.object({
+  label: z.string().max(60).optional().nullable(),
+  address: z.string().min(1, 'The address cannot be empty').max(400),
+  city: z.string().max(80).optional().nullable(),
+  state: z.string().max(80).optional().nullable(),
+  stateCode: z.string().max(2).optional().nullable(),
+  pincode: z.string().max(10).optional().nullable(),
+  country: z.string().max(60).optional().nullable(),
+  gstin: z.string().max(15).optional().nullable(),
+  /** Makes this the one a new order is offered first, and demotes the others. */
+  isDefault: z.boolean().optional(),
+})
+
+router.get(
+  '/suppliers/:id/addresses',
+  requirePermission(MODULE, 'view'),
+  async (req: AuthRequest, res) => {
+    const supplier = await prisma.supplier.findUnique({
+      where: { id: req.params.id },
+      select: { id: true },
+    })
+    if (!supplier) throw new AppError('Supplier not found', 404, 'NOT_FOUND')
+
+    const rows = await prisma.supplierAddress.findMany({
+      where: { supplierId: req.params.id, isActive: true },
+      // The default first, then oldest first, so the list does not reshuffle
+      // itself every time somebody adds one.
+      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    })
+    res.json({ success: true, data: rows })
+  }
+)
+
+/**
+ * Adds an address to a supplier.
+ *
+ * This is what "Add new address" on the purchase order form calls, and the
+ * point of it is that the address is kept: it goes on the supplier master, so
+ * the next order to that supplier offers it too, rather than living on one
+ * order as typed text.
+ */
+router.post(
+  '/suppliers/:id/addresses',
+  requirePermission(MODULE, 'create'),
+  async (req: AuthRequest, res) => {
+    const supplier = await prisma.supplier.findUnique({
+      where: { id: req.params.id },
+      select: { id: true, name: true, address: true },
+    })
+    if (!supplier) throw new AppError('Supplier not found', 404, 'NOT_FOUND')
+
+    const data = supplierAddressSchema.parse(req.body)
+
+    const created = await prisma.$transaction(async (tx) => {
+      const existing = await tx.supplierAddress.count({
+        where: { supplierId: supplier.id, isActive: true },
+      })
+
+      // The first address a supplier gets is its default whether or not
+      // anybody said so — otherwise the form has a list with nothing marked.
+      const beDefault = data.isDefault === true || existing === 0
+
+      if (beDefault) {
+        await tx.supplierAddress.updateMany({
+          where: { supplierId: supplier.id, isDefault: true },
+          data: { isDefault: false },
+        })
+      }
+
+      const row = await tx.supplierAddress.create({
+        data: {
+          supplierId: supplier.id,
+          label: data.label?.trim() || null,
+          address: data.address.trim(),
+          city: data.city?.trim() || null,
+          state: data.state?.trim() || null,
+          stateCode: data.stateCode?.trim() || null,
+          pincode: data.pincode?.trim() || null,
+          country: data.country?.trim() || 'India',
+          gstin: data.gstin?.trim() || null,
+          isDefault: beDefault,
+        },
+      })
+
+      /*
+       * The flat fields on the supplier are kept in step when this becomes the
+       * default.
+       *
+       * Those columns are read all over the ERP — the printed order, the bill,
+       * the supplier list — and rewriting every one of those to look up an
+       * address row is a much larger change than this. So the default address
+       * is mirrored back, and the supplier's own fields go on meaning "the
+       * address we use for this supplier".
+       */
+      if (beDefault) {
+        await tx.supplier.update({
+          where: { id: supplier.id },
+          data: {
+            address: row.address,
+            city: row.city,
+            state: row.state,
+            stateCode: row.stateCode,
+            pincode: row.pincode,
+            ...(row.gstin ? { gstin: row.gstin } : {}),
+          },
+        })
+      }
+
+      return row
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'SupplierAddress',
+      entityId: created.id,
+      after: created,
+    })
+
+    res.status(201).json({
+      success: true,
+      data: created,
+      message: `Address added to ${supplier.name}.`,
+    })
+  }
+)
+
+/** Edits one. The same mirroring applies when it is the default. */
+router.patch(
+  '/suppliers/:supplierId/addresses/:id',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const before = await prisma.supplierAddress.findUnique({ where: { id: req.params.id } })
+    if (!before || before.supplierId !== req.params.supplierId) {
+      throw new AppError('Address not found', 404, 'NOT_FOUND')
+    }
+
+    const data = supplierAddressSchema.partial().parse(req.body)
+
+    const after = await prisma.$transaction(async (tx) => {
+      if (data.isDefault === true) {
+        await tx.supplierAddress.updateMany({
+          where: { supplierId: before.supplierId, isDefault: true },
+          data: { isDefault: false },
+        })
+      }
+
+      const row = await tx.supplierAddress.update({
+        where: { id: before.id },
+        data: {
+          ...(data.label !== undefined ? { label: data.label?.trim() || null } : {}),
+          ...(data.address !== undefined ? { address: data.address.trim() } : {}),
+          ...(data.city !== undefined ? { city: data.city?.trim() || null } : {}),
+          ...(data.state !== undefined ? { state: data.state?.trim() || null } : {}),
+          ...(data.stateCode !== undefined ? { stateCode: data.stateCode?.trim() || null } : {}),
+          ...(data.pincode !== undefined ? { pincode: data.pincode?.trim() || null } : {}),
+          ...(data.country !== undefined ? { country: data.country?.trim() || 'India' } : {}),
+          ...(data.gstin !== undefined ? { gstin: data.gstin?.trim() || null } : {}),
+          ...(data.isDefault !== undefined ? { isDefault: data.isDefault } : {}),
+        },
+      })
+
+      if (row.isDefault) {
+        await tx.supplier.update({
+          where: { id: row.supplierId },
+          data: {
+            address: row.address,
+            city: row.city,
+            state: row.state,
+            stateCode: row.stateCode,
+            pincode: row.pincode,
+            ...(row.gstin ? { gstin: row.gstin } : {}),
+          },
+        })
+      }
+
+      return row
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'SupplierAddress',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({ success: true, data: after, message: 'Address saved.' })
+  }
+)
+
 router.use(
   '/suppliers',
   crudRouter({
@@ -108,7 +311,13 @@ router.use(
     searchFields: ['name', 'code', 'description', 'hsnCode'],
     sortableFields: ['name', 'code', 'createdAt', 'standardRate'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { category: true, uom: true },
+    // taxRate travels with the item so an order form can fill the GST in from
+    // the item itself. Without it the purchase order screen read
+    // `item.taxRate.rate`, found nothing, and left the field blank for someone
+    // to type from memory — and a rate typed from memory is the one thing the
+    // business rules say must never happen. The alternative source, the tax
+    // rate list in Settings, needs a permission a purchase clerk does not have.
+    include: { category: true, uom: true, taxRate: true },
   }),
 )
 
@@ -124,6 +333,22 @@ router.use(
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
     include: { sizeGroup: { select: { id: true, name: true } } },
+  }),
+)
+
+// No `injectOnCreate`: a bank account belongs to the business, not to one
+// of its stores, and the model carries no companyId to fill in.
+router.use(
+  '/bank-accounts',
+  crudRouter({
+    model: 'bankAccount',
+    module: MODULE,
+    entityType: 'BankAccount',
+    createSchema: createBankAccountSchema,
+    updateSchema: updateBankAccountSchema,
+    searchFields: ['accountName', 'bankName', 'accountNumber'],
+    sortableFields: ['accountName', 'bankName'],
+    defaultSort: { field: 'accountName', order: 'asc' },
   }),
 )
 
@@ -310,7 +535,7 @@ router.use(
     createSchema: createChargeTypeSchema,
     updateSchema: updateChargeTypeSchema,
     searchFields: ['name'],
-    sortableFields: ['name', 'defaultGstRate'],
+    sortableFields: ['name', 'defaultGstRate', 'percentOfValue'],
     defaultSort: { field: 'name', order: 'asc' },
   }),
 )

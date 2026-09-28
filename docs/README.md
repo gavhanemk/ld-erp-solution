@@ -13,6 +13,7 @@ Read them in this order. The first two are compulsory before you write any code.
 | 4 | [Business rules](04-business-rules.md) | Before you touch numbering, tax, stock or money. The things that must never break. |
 | 5 | [Running and deploying](05-running-deploying.md) | To start it, fix it, back it up, put it live. |
 | 6 | [Git commands](06-git-commands.md) | When you know the rule and want the line to type. Branching, pushing, merging, undoing. |
+| 7 | [Business processes](07-business-processes.md) | Before you build a module that isn't Purchase yet. What actually happens at the mill, step by step — Purchase, job work, production, VHAGAR, sales, HR, accounts — and what's still an open question for the business. |
 
 ## The short version
 

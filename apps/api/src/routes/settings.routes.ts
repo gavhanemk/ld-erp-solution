@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import bcrypt from 'bcryptjs'
 import { prisma } from '@ld-erp/database'
+import { formatDocumentNumber } from '../lib/docNumber'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -12,12 +13,14 @@ import {
   createNumberSeriesSchema,
   createRoleSchema,
   createTaxRateSchema,
+  createTdsSectionSchema,
   createUserSchema,
   preferencesPatchSchema,
   resetPasswordSchema,
   updateNumberSeriesSchema,
   updateRoleSchema,
   updateTaxRateSchema,
+  updateTdsSectionSchema,
   updateUserSchema,
   withDefaults,
 } from '../schemas/settings.schemas'
@@ -569,7 +572,15 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   VCH: 'Voucher',
 }
 
-/** SO-2425-0001 — the number the next document of this type will carry. */
+/**
+ * What the next number off this series will look like — SO-2425-0001.
+ *
+ * Built by the same function that issues the real one, rather than a second
+ * copy of the same arithmetic. The copy that used to live here had already
+ * drifted: a series with no financial year previewed as "PO--0001" while the
+ * order actually written was "PO-0001". A preview that disagrees with the
+ * document is worse than no preview.
+ */
 function sampleNumber(s: {
   prefix: string
   separator: string
@@ -577,7 +588,7 @@ function sampleNumber(s: {
   lastNumber: number
   padding: number
 }): string {
-  return [s.prefix, s.financialYear, String(s.lastNumber + 1).padStart(s.padding, '0')].join(s.separator)
+  return formatDocumentNumber({ ...s, lastNumber: s.lastNumber + 1 })
 }
 
 router.get('/number-series', requirePermission(SETTINGS, 'view'), async (_req, res) => {
@@ -757,6 +768,86 @@ router.delete('/tax-rates/:id', requirePermission(SETTINGS, 'delete'), async (re
   })
 
   res.json({ success: true, message: `${before.name} is no longer offered on new documents.` })
+})
+
+// ═══════════════════════════════════════════
+// TDS SECTIONS
+// ═══════════════════════════════════════════
+
+router.get('/tds-sections', requirePermission(SETTINGS, 'view'), async (_req, res) => {
+  const sections = await prisma.tdsSection.findMany({
+    where: { companyId: await companyId() },
+    orderBy: [{ section: 'asc' }, { rate: 'asc' }],
+  })
+  res.json({ success: true, data: sections.map((s) => ({ ...s, rate: Number(s.rate) })) })
+})
+
+router.post('/tds-sections', requirePermission(SETTINGS, 'create'), async (req: AuthRequest, res) => {
+  const data = createTdsSectionSchema.parse(req.body)
+  const company = await companyId()
+
+  const created = await prisma.$transaction(async (tx) => {
+    if (data.isDefault) await tx.tdsSection.updateMany({ where: { companyId: company }, data: { isDefault: false } })
+    return tx.tdsSection.create({ data: { ...data, companyId: company } })
+  })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'CREATE',
+    entityType: 'TdsSection',
+    entityId: created.id,
+    after: created,
+  })
+
+  res.status(201).json({ success: true, data: { ...created, rate: Number(created.rate) } })
+})
+
+router.patch('/tds-sections/:id', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const data = updateTdsSectionSchema.parse(req.body)
+
+  const before = await prisma.tdsSection.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('TDS section not found', 404, 'NOT_FOUND')
+
+  // Exactly one section may be the default, so setting a new one clears the rest
+  // in the same transaction.
+  const after = await prisma.$transaction(async (tx) => {
+    if (data.isDefault) {
+      await tx.tdsSection.updateMany({
+        where: { companyId: before.companyId, id: { not: before.id } },
+        data: { isDefault: false },
+      })
+    }
+    return tx.tdsSection.update({ where: { id: before.id }, data })
+  })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'TdsSection',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, data: { ...after, rate: Number(after.rate) } })
+})
+
+router.delete('/tds-sections/:id', requirePermission(SETTINGS, 'delete'), async (req: AuthRequest, res) => {
+  const before = await prisma.tdsSection.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('TDS section not found', 404, 'NOT_FOUND')
+
+  const after = await prisma.tdsSection.update({ where: { id: before.id }, data: { isActive: false } })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'DELETE',
+    entityType: 'TdsSection',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, message: `${before.label} is no longer offered on new documents.` })
 })
 
 // ═══════════════════════════════════════════

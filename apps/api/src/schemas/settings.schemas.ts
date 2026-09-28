@@ -133,6 +133,18 @@ export const createTaxRateSchema = z.object({
 
 export const updateTaxRateSchema = createTaxRateSchema.partial()
 
+// ── TDS sections ─────────────────────────────────────────────────────────────
+
+export const createTdsSectionSchema = z.object({
+  section: z.string().min(1, 'Section is required').max(20),
+  label: z.string().min(1, 'Label is required').max(80),
+  rate: z.number().min(0, 'Cannot be negative').max(100, 'Cannot exceed 100%'),
+  isDefault: z.boolean().default(false),
+  isActive: z.boolean().default(true),
+})
+
+export const updateTdsSectionSchema = createTdsSectionSchema.partial()
+
 // ── Preferences ──────────────────────────────────────────────────────────────
 
 export interface PreferenceDefinition {

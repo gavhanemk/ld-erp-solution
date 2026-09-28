@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { AlertCircle, RefreshCw } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { Pagination } from '@/components/tables/Pagination'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -266,27 +267,7 @@ function LedgerTable() {
           </div>
         )}
 
-        {pages > 1 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border">
-            <button
-              className="btn-ghost text-xs"
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page === 1 || loading}
-            >
-              Previous
-            </button>
-            <span className="text-xs text-muted-foreground">
-              Page {page} of {pages}
-            </span>
-            <button
-              className="btn-ghost text-xs"
-              onClick={() => setPage((p) => Math.min(pages, p + 1))}
-              disabled={page === pages || loading}
-            >
-              Next
-            </button>
-          </div>
-        )}
+        <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
       </div>
     </div>
   )

@@ -374,7 +374,7 @@ export async function executeTool(
             where: { entryDate: { gte: sod, lte: eod } },
             _sum: { achieved: true, target: true, rejection: true },
           }),
-          prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null } }),
+          prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null, deletedAt: null } }),
           prisma.materialRequisition.count({ where: { status: 'PENDING' } }),
           prisma.salesInvoice.aggregate({
             where: { invoiceDate: { gte: som } },
@@ -432,7 +432,7 @@ export async function executeTool(
     case 'get_pending_approvals': {
       const [pos, sos, mrs] = await Promise.all([
         prisma.purchaseOrder.findMany({
-          where: { status: 'DRAFT', approvedAt: null },
+          where: { status: 'DRAFT', approvedAt: null, deletedAt: null },
           include: { supplier: { select: { name: true } } },
           orderBy: { createdAt: 'asc' },
           take: 15,
@@ -515,7 +515,8 @@ export async function executeTool(
     }
 
     case 'get_purchase_orders': {
-      const where: Record<string, unknown> = {}
+      // The assistant sees what a person sees, and a binned order is not it.
+      const where: Record<string, unknown> = { deletedAt: null }
       if (args.status) where.status = args.status
       if (args.supplier) where.supplier = { name: like(args.supplier) }
 

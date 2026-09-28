@@ -146,6 +146,7 @@ export function PrintSheet({
   showBank,
   preparedBy,
   footerNote,
+  afterTotals,
 }: {
   company: Record<string, string | null>
   title: string
@@ -165,6 +166,12 @@ export function PrintSheet({
   showBank?: boolean
   preparedBy: string | null
   footerNote: string | null
+  /**
+   * Anything that belongs below the totals and above the signatures — in
+   * practice the HSN-wise tax summary, which every supplier's own invoice
+   * carries and which the bill has to be checked against line for line.
+   */
+  afterTotals?: React.ReactNode
 }) {
   const companyName = company.legalName || company.name || ''
 
@@ -305,6 +312,8 @@ export function PrintSheet({
           </tbody>
         </table>
 
+        {afterTotals}
+
         {/* 58% matches the supplier box and the totals block, so the three
             splits down the sheet fall on the same line. */}
         <table className="signblock" style={{ width: '100%' }}>
@@ -426,6 +435,14 @@ const PRINT_CSS = `
 .note { font-size: 9.5px; }
 .totals .grand td { font-weight: 800; }
 .totals .grand td.num { font-size: 12px; }
+
+/* The HSN-wise tax summary. Full width rather than tucked beside the totals:
+   it is a table in its own right and a clerk reads down its columns. */
+.hsn { margin-top: 6px; }
+.hsn th { text-align: center; font-size: 9px; }
+.hsn th.num, .hsn td.num { text-align: right; }
+.hsn td { font-size: 9.5px; }
+.hsn .grand td { font-weight: 800; }
 .tax-note { font-size: 9px; margin-top: 4px; }
 
 .signblock { margin-top: 10px; }

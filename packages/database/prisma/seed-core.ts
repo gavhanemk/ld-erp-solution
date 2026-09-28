@@ -335,11 +335,27 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'MO', prefix: 'MO' },
     { docType: 'GRN', prefix: 'GRN' },
     { docType: 'INV', prefix: 'INV' },
+    // Our booking reference for a supplier's bill. The supplier's own invoice
+    // number is recorded separately — this one only has to be unique here.
+    { docType: 'PB', prefix: 'PB' },
+    { docType: 'SP', prefix: 'SP' },
     { docType: 'MR', prefix: 'MR' },
     { docType: 'DC', prefix: 'DC' },
     { docType: 'JW', prefix: 'JW' },
     { docType: 'CN', prefix: 'CN' },
+    // The four adjustment series, one per kind of document.
+    //
+    // Separate runs rather than one shared one: our own claim, the supplier's
+    // credit note and the supplier's debit note are three different documents
+    // with three different signatures on them, and a shared series makes
+    // "DN-2627-0007" ambiguous about whose it is while punching holes in a run
+    // that has to be unbroken. DN was already here; the other three were added
+    // when the model stopped pretending an adjustment was either a debit or a
+    // credit.
     { docType: 'DN', prefix: 'DN' },
+    { docType: 'SCN', prefix: 'SCN' },
+    { docType: 'SDN', prefix: 'SDN' },
+    { docType: 'PADJ', prefix: 'PADJ' },
     { docType: 'VCH', prefix: 'VCH' },
     // Stock moving between our own stores, and a correction after a count.
     // Both used to leave nothing but a ledger row tagged with the clock.
@@ -348,6 +364,27 @@ export async function seedCore(prisma: PrismaClient) {
   ]
 
   for (const s of series) {
+    /*
+     * One series per document type, not one per year.
+     *
+     * The upsert below is keyed on (company, docType, financialYear), which is
+     * the right unique key for the table and the wrong question to ask here.
+     * The mill numbers its purchase orders on a single running sequence with
+     * no year on it — `PO-0004`, not `PO-2627-0004` — so a re-seed did not
+     * match that row and quietly added a second PO series for the current
+     * year, sitting at zero. `nextDocumentNumber` prefers the series whose
+     * year matches the document's, so the next purchase order would have come
+     * out `PO-2627-0001` and restarted a sequence four orders in.
+     *
+     * Found on 23 Sep 2026, after exactly that happened. The seed's job is to
+     * make sure a type *has* a series, so that is what it now checks.
+     */
+    const already = await prisma.numberSeries.findFirst({
+      where: { companyId: company.id, docType: s.docType },
+      select: { id: true },
+    })
+    if (already) continue
+
     await prisma.numberSeries.upsert({
       where: {
         companyId_docType_financialYear: {
@@ -389,13 +426,46 @@ export async function seedCore(prisma: PrismaClient) {
     })
   }
 
+  // 9c. TDS sections. Only the entries LD confirmed a rate for are seeded —
+  // commission (194H), rent (194I) and salary showed up in their old system
+  // too, but without a readable rate, so those are left for LD to add
+  // themselves from Settings rather than guessed at here.
+  const tdsSections = [
+    { section: '194C', label: 'Contractor payments — Individual/HUF', rate: 1, isDefault: false },
+    { section: '194C', label: 'Contractor payments — Company/Others', rate: 2, isDefault: false },
+    { section: '194J', label: 'Technical services fees', rate: 2, isDefault: false },
+    { section: '194J', label: 'Professional fees', rate: 10, isDefault: false },
+  ]
+
+  for (const t of tdsSections) {
+    await prisma.tdsSection.upsert({
+      where: { companyId_section_label: { companyId: company.id, section: t.section, label: t.label } },
+      update: { rate: t.rate, isDefault: t.isDefault },
+      create: { ...t, companyId: company.id },
+    })
+  }
+
   // 10. Permission matrix (module x action), then wire it to the roles.
   // Without these rows every non-Admin user is refused by requirePermission.
   const MODULES = [
     'dashboard', 'masters', 'sales', 'purchase', 'inventory',
     'production', 'accounts', 'hr', 'vhagar', 'maintenance', 'ai', 'settings', 'admin',
   ]
-  const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export']
+  /*
+   * `post` is separate from `approve` on purpose.
+   *
+   * A purchase note is agreed by one desk and put through the books by
+   * another: the purchase manager approves that the mill is owed the money,
+   * and accounts decides when it comes off the payable. Folding the second
+   * into `approve` would mean giving the accounts desk the right to approve
+   * purchase orders in order to let them post a debit note — which is the
+   * opposite of what separating the two is for.
+   *
+   * Seeded across every module rather than only purchase, because the matrix
+   * is a matrix and a sparse action is cheaper than a special case. Nothing
+   * else guards on it yet.
+   */
+  const ACTIONS = ['view', 'create', 'edit', 'delete', 'approve', 'export', 'post']
 
   const permissionIds = new Map<string, string>()
   for (const module of MODULES) {
@@ -424,7 +494,7 @@ export async function seedCore(prisma: PrismaClient) {
     // MD/CEO reviews and signs off; they do not key in transactions.
     {
       roleId: mdRole.id,
-      grants: only(['view', 'approve', 'export'], ...MODULES),
+      grants: only(['view', 'approve', 'export', 'post'], ...MODULES),
     },
 
     {
@@ -433,6 +503,9 @@ export async function seedCore(prisma: PrismaClient) {
         ...full('accounts'),
         ...only(['view', 'export'], 'dashboard', 'masters', 'sales', 'purchase', 'ai'),
         ...only(['view'], 'inventory', 'production'),
+        // Accounts put debit and credit notes through the books. They still
+        // cannot raise one, approve one, or touch a purchase order.
+        ...only(['post'], 'purchase'),
       ],
     },
 

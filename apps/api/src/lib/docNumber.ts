@@ -104,11 +104,22 @@ export function formatDocumentNumber(series: {
   lastNumber: number
   padding: number
 }): string {
+  /*
+   * An empty part is left out rather than joined, so a series with no
+   * financial year reads "PO-0001" and not "PO--0001".
+   *
+   * That is how the mill numbers its purchase orders: one running sequence,
+   * not one per year. A purchase order is an internal document — it is the tax
+   * invoice that has to restart each financial year, and those series still
+   * carry their year.
+   */
   return [
     series.prefix,
     series.financialYear,
     String(series.lastNumber).padStart(series.padding, '0'),
-  ].join(series.separator)
+  ]
+    .filter((part) => part !== '')
+    .join(series.separator)
 }
 
 /**

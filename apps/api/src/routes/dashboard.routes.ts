@@ -30,7 +30,7 @@ router.get('/summary', async (req: AuthRequest, res) => {
       where: { entryDate: { gte: startOfDay, lte: endOfDay } },
       _sum: { achieved: true, target: true, rejection: true },
     }),
-    prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null } }),
+    prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null, deletedAt: null } }),
     prisma.materialRequisition.count({ where: { status: 'PENDING' } }),
     prisma.salesInvoice.aggregate({
       where: { invoiceDate: { gte: startOfMonth } },
@@ -95,7 +95,7 @@ router.get('/alerts', async (req: AuthRequest, res) => {
     : []
 
   const pendingApprovals = await prisma.purchaseOrder.count({
-    where: { status: 'DRAFT', approvedAt: null },
+    where: { status: 'DRAFT', approvedAt: null, deletedAt: null },
   })
 
   res.json({
@@ -320,7 +320,7 @@ router.get('/pending-approvals', async (req, res) => {
 
   const [purchaseOrders, salesOrders, requisitions] = await Promise.all([
     prisma.purchaseOrder.findMany({
-      where: { status: 'DRAFT', approvedAt: null },
+      where: { status: 'DRAFT', approvedAt: null, deletedAt: null },
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: { supplier: { select: { name: true } } },

@@ -48,6 +48,8 @@ configured.
 | `MO` | Manufacturing order |
 | `GRN` | Goods receipt |
 | `INV` | Sales invoice |
+| `PB` | Purchase bill — our booking reference for a supplier's invoice |
+| `SP` | Supplier payment |
 | `MR` | Material requisition |
 | `DC` | Delivery challan |
 | `JW` | Job work challan |

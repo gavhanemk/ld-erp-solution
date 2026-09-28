@@ -369,6 +369,31 @@ export const createWarehouseSchema = z.object({
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
 
+/**
+ * The accounts money leaves from — what a supplier payment calls "Paid
+ * through". The mill's own vouchers name one on every payment that is not
+ * cash, so the list has to be somewhere a person can add to.
+ *
+ * IFSC is eleven characters with a fixed shape: four letters, a zero, then
+ * six of either. Wrong and the money does not move, so it is worth refusing
+ * at the form rather than at the bank.
+ */
+export const createBankAccountSchema = z.object({
+  accountName: name,
+  bankName: z.string().min(1, 'Which bank it is with').max(120),
+  accountNumber: z.string().min(1, 'The account number is required').max(30),
+  ifscCode: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, 'An IFSC code looks like HDFC0001234'),
+  branch: optionalText,
+  accountType: z.enum(['CURRENT', 'SAVINGS', 'CC', 'OD']).optional(),
+  openingBalance: z.coerce.number().optional(),
+  isActive,
+})
+export const updateBankAccountSchema = createBankAccountSchema.partial()
+
 export const createDepartmentSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
   code,
@@ -538,7 +563,28 @@ export const updateBrokerSchema = createBrokerSchema.partial()
 
 export const createChargeTypeSchema = z.object({
   name,
+  /*
+   * The GST charged on this charge — 5% on dyeing, 18% on freight.
+   *
+   * It is not how big the charge is. The amount is typed in on each order,
+   * the way the mill's old system worked: only the tax is worked out for you.
+   */
   defaultGstRate: z.number().min(0).max(100).default(0),
+  /*
+   * What this charge usually comes to as a share of the order.
+   *
+   * A different thing entirely from the rate above, and the two are easy to
+   * confuse because they are both percentages and are often the same number:
+   * this one is how big the charge is, that one is the tax on it.
+   *
+   * Nothing applies it on its own. A charge is still typed in on every order,
+   * because what a transporter asks for is agreed on a call and not derived
+   * from anything. This is only the figure the percentage helper on the
+   * purchase order opens at, so the usual rate takes one press instead of a
+   * calculator. 0 means nobody has set one, and the helper opens on the GST
+   * rate instead — which is at least the number printed on the row.
+   */
+  percentOfValue: z.number().min(0).max(100).default(0),
   applyOnSale: z.boolean().default(true),
   applyOnPurchase: z.boolean().default(false),
   isActive,

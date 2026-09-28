@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
+  BarChart3,
   LayoutDashboard, ShoppingCart, Package, Warehouse, Factory,
   BookOpen, Users, Wrench, Bot, Settings, ChevronLeft, ChevronRight,
   LogOut, Bell, Zap, ChevronDown, ChevronRight as ChevronRightIcon,
@@ -13,9 +14,16 @@ import { cn } from '@/lib/utils'
 import { api, currentUser, tokens } from '@/lib/api'
 import { useAppSettings } from '@/lib/appSettings'
 
-/** "Mahesh Ghavane" -> "MG"; a single name gives its first two letters. */
+/**
+ * "Mahesh Gavhane" -> "MG"; a single name gives its first two letters.
+ *
+ * `\s+`, not `s+`. It was splitting on the letter "s", so "Mahesh Gavhane"
+ * became ["Mahe", "h Gavhane"] and the avatar read "MH" — wrong for any name
+ * containing an s, right for every name that does not, which is why it
+ * survived.
+ */
 function initialsOf(name: string): string {
-  const parts = name.trim().split(/s+/).filter(Boolean)
+  const parts = name.trim().split(/\s+/).filter(Boolean)
   if (parts.length === 0) return '?'
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
@@ -44,10 +52,12 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { label: 'Reports', href: '/reports', icon: BarChart3 },
   {
     label: 'Masters', icon: Layers,
     children: [
       { label: 'Items & Products', href: '/masters/items' },
+      { label: 'Item Categories', href: '/masters/item-categories' },
       { label: 'Styles & SKU', href: '/masters/styles' },
       { label: 'Bill of Materials', href: '/masters/bom' },
       { label: 'Size Runs', href: '/masters/size-runs' },
@@ -57,6 +67,7 @@ const navItems: NavItem[] = [
       { label: 'Workstations', href: '/masters/workstations' },
       { label: 'Extra Charges', href: '/masters/charges' },
       { label: 'Warehouses', href: '/masters/warehouses' },
+      { label: 'Bank Accounts', href: '/masters/bank-accounts' },
     ],
   },
   {
@@ -73,8 +84,15 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Purchase Orders', href: '/purchase/orders' },
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
-      { label: 'Purchase Bills', href: '/purchase/bills', planned: true },
-      { label: 'Supplier Payments', href: '/purchase/payments', planned: true },
+      { label: 'Purchase Bills', href: '/purchase/bills' },
+      { label: 'Supplier Payments', href: '/purchase/payments' },
+      /* Two entries for three kinds of document, on purpose. Ours and the
+         supplier's debit notes both live under Debit Notes — they are both
+         debit notes, and the row says whose it is and which way the money
+         goes. A menu that split them made you know the answer before you
+         could look it up. */
+      { label: 'Debit Notes', href: '/purchase/debit-notes' },
+      { label: 'Credit Notes', href: '/purchase/credit-notes' },
     ],
   },
   {
@@ -132,9 +150,31 @@ const navItems: NavItem[] = [
 interface SidebarProps {
   collapsed: boolean
   onCollapse: (v: boolean) => void
+  /**
+   * Whether the drawer is showing, on the screens where this is a drawer.
+   *
+   * Below `lg` the sidebar is 260px of a screen that may only be 390px wide,
+   * so it slides in over the page instead of sitting beside it. Above `lg` it
+   * is always there and this is ignored.
+   */
+  mobileOpen: boolean
+  onMobileClose: () => void
 }
 
-export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
+/**
+ * A menu group's label, as an id.
+ *
+ * Only needs to be stable and unique within the sidebar, which a lowercased
+ * label with its spaces and punctuation knocked out is — "HR & Payroll"
+ * becomes "hr-payroll".
+ */
+const slug = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+
+export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
   const [openMenus, setOpenMenus] = useState<string[]>(['Masters'])
@@ -175,6 +215,20 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
     )
   }
 
+  /*
+   * Following a link closes the drawer.
+   *
+   * On a phone the drawer covers the page, so without this you tap a menu
+   * item, the page behind you changes, and you are still looking at the menu
+   * — which reads as the tap not having worked.
+   */
+  useEffect(() => {
+    onMobileClose()
+    // Only when the route changes. Including the callback would close the
+    // drawer on every render of the layout above it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname])
+
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/')
 
   const isGroupActive = (item: NavItem) =>
@@ -185,7 +239,12 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
       className={cn(
         'h-screen flex flex-col fixed left-0 top-0 z-40 transition-all duration-300',
         'border-r border-[hsl(var(--sidebar-border))]',
-        collapsed ? 'w-[68px]' : 'w-[260px]'
+        collapsed ? 'w-[68px]' : 'w-[260px]',
+        /* Below lg this is a drawer: off the left edge until it is asked for,
+           and always in place from lg up. 260px of a 390px screen left 130px
+           for the screen itself, which is not a layout, it is a sliver. */
+        'lg:translate-x-0',
+        mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'
       )}
       style={{ background: 'hsl(var(--sidebar-bg))' }}
     >
@@ -214,8 +273,17 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
 
               return (
                 <div key={item.label}>
+                  {/* `aria-expanded` says whether the group is open, and
+                    `aria-controls` says what it opens. Neither was here, so
+                    the chevron was the only indication and it is drawn, not
+                    announced — a screen reader could not tell an open Purchase
+                    menu from a closed one, and nor could anything else driving
+                    the page. Collapsed to icons the button does not expand
+                    anything, so it claims nothing. */}
                   <button
                     onClick={() => !collapsed && toggleMenu(item.label)}
+                    aria-expanded={collapsed ? undefined : isOpen}
+                    aria-controls={collapsed ? undefined : `nav-group-${slug(item.label)}`}
                     className={cn(
                       'nav-item group w-full',
                       groupActive && 'text-teal-400'
@@ -240,7 +308,10 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
                   </button>
 
                   {!collapsed && isOpen && (
-                    <div className="ml-4 mt-0.5 pl-4 border-l border-border/50 space-y-0.5 animate-fade-in">
+                    <div
+                      id={`nav-group-${slug(item.label)}`}
+                      className="ml-4 mt-0.5 pl-4 border-l border-border/50 space-y-0.5 animate-fade-in"
+                    >
                       {item.children.map((child) =>
                         child.planned ? (
                           <div
@@ -378,9 +449,11 @@ export function Sidebar({ collapsed, onCollapse }: SidebarProps) {
           </div>
         )}
 
+        {/* Hidden where this is a drawer: a drawer is open or shut, and a
+            68px-wide drawer over a 390px screen is neither. */}
         <button
           onClick={() => onCollapse(!collapsed)}
-          className="btn-ghost w-full justify-center py-2 text-muted-foreground"
+          className="btn-ghost hidden w-full justify-center py-2 text-muted-foreground lg:flex"
         >
           {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
           {!collapsed && <span className="text-xs">Collapse</span>}
