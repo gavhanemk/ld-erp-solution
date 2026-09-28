@@ -2,7 +2,19 @@
 
 import { useEffect, useState } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
-import { FileText, Mail, Pencil, Phone, ReceiptText, Rows3, Sprout, Users } from 'lucide-react'
+import {
+  ClipboardList,
+  FileText,
+  Mail,
+  MessageSquareReply,
+  Pencil,
+  Phone,
+  ReceiptText,
+  Rows3,
+  Sprout,
+  Truck,
+  Users,
+} from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { money, qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
@@ -10,16 +22,16 @@ import { money, qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/
 /**
  * The printed purchase enquiry — a request for quotation.
  *
- * One document, and it goes out. Our letterhead, what we want and how much of
- * it, an empty Rate and GST column for the supplier to fill in, a ruled block
- * for the facts we need back, and both signatures. There is no second version
- * and nothing on it that cannot be handed to anybody: print it once and send
- * the same sheet to four suppliers.
+ * One document, and it goes out. Laid out the way an RFQ is read by the man
+ * who receives it: who is asking, who it is to, what is wanted, when and
+ * where it is wanted, what to put in the reply, and a ruled block to put it
+ * in. Print it once and send the same sheet to four suppliers.
  *
- * `?quote=<id>` only addresses it. With one, the To block carries that
- * supplier's name and, once his proforma is recorded, his own rates — which is
- * the copy filed beside the order. Without one the To block is a ruled line to
- * write a name on, the way an enquiry pad has always worked.
+ * `?quote=<id>` only addresses it. With one, the Supplier block carries that
+ * supplier's name and, once his proforma is recorded, the Supplier Rate column
+ * carries his own rates — which is the copy filed beside the order. Without
+ * one the block is ruled lines to write a name on, the way an enquiry pad has
+ * always worked.
  *
  * What it deliberately does **not** carry is who else was asked or what they
  * said. That comparison is the buyer's, it lives on the Compare panel in the
@@ -29,18 +41,17 @@ import { money, qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/
  * The palette is the one the purchase order and the bill already print in —
  * navy masthead, tinted section bars, a filled navy line-grid head. They share
  * a look because they share these constants, not because they share a
- * component: each sheet's middle is too different to abstract, and the three
- * attempts to do so all ended in a component with eleven boolean props.
+ * component: each sheet's middle is too different to abstract.
  */
 
 const NAVY = '#173a6c'
 /**
  * The navy stepped back, for the second thing in a cell.
  *
- * An item code beside an item name, an HSN beside a quantity, "lowest" beside
- * a supplier — each is a qualifier on the thing before it, and in grey they
- * read as disabled rather than secondary. A lighter tone of the same blue
- * keeps them part of the same sentence.
+ * An item code beside an item name, an HSN beside a quantity — each is a
+ * qualifier on the thing before it, and in grey they read as disabled rather
+ * than secondary. A lighter tone of the same blue keeps them part of the same
+ * sentence.
  */
 const SOFT = '#4f7ba8'
 const TINT = '#e9eff8'
@@ -109,6 +120,23 @@ const SHEET_CSS = `
   }
 `
 
+/*
+ * What the supplier is asked to put in his reply.
+ *
+ * Listed before the ruled block rather than only as its labels, because a
+ * supplier who quotes on his own letterhead — which is most of them — reads
+ * the list and answers it in his own layout. Without it the reply comes back
+ * as a rate and nothing else, and the freight turns up on the bill.
+ */
+const PLEASE_QUOTE = [
+  'Unit price / rate',
+  'GST %',
+  'Freight / packing charges',
+  'Delivery time',
+  'Payment terms',
+  'Quote validity',
+]
+
 interface PrintData {
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null; showSignature: boolean } | null
@@ -147,6 +175,7 @@ export default function PurchaseEnquiryPrintPage() {
   const e = data.enquiry
   const forQuote = quoteId ? (e.quotes.find((q) => q.id === quoteId) ?? null) : null
   const co = data.company
+  const neededBy = e.requiredDate ? shortDate(e.requiredDate) : null
 
   /*
    * The three ways to reach us, gathered before they are drawn so the dots
@@ -161,7 +190,6 @@ export default function PurchaseEnquiryPrintPage() {
   ].filter(Boolean) as Array<{ icon: React.ElementType; text: string }>
 
   const showSignature = data.template?.showSignature !== false
-  const hasNotes = Boolean(e.notes || e.terms)
 
   return (
     <>
@@ -170,21 +198,15 @@ export default function PurchaseEnquiryPrintPage() {
         backHref="/purchase/enquiries"
         backLabel="Enquiries"
         copies={1}
-        fileName={forQuote ? e.enquiryNumber + ' ' + forQuote.supplier.name : e.enquiryNumber}
+        fileName={'RFQ ' + e.enquiryNumber + (forQuote ? ' ' + forQuote.supplier.name : '')}
       />
 
       <div className="enq-page">
         <div className="enq-sheet" style={{ fontFamily: SANS, color: INK }}>
           {/* ── Letterhead ─────────────────────────────────────────────────
-            The name at 30px beside the mark, the address under it, and the
-            three ways to reach us on one line with an icon each. Icons rather
-            than the words "Phone" and "Email": they are read at a glance by
-            somebody scanning a sheet for a number, and they cost no width.
-
-            Each icon sits in a filled navy tile rather than standing as a
-            hairline glyph. At 13px an outlined phone and an outlined envelope
-            are the same smudge on a fax, and this line is the one somebody
-            squints at. A filled tile survives the second photocopy. */}
+            Who is asking. The name beside the mark, the address under it,
+            and the three ways to reach us on one line, each on a filled tile
+            that survives the second photocopy. */}
           <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -233,8 +255,6 @@ export default function PurchaseEnquiryPrintPage() {
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: 9,
-                      // An address or a GSTIN is one thing, and half of it on
-                      // the next line is worse than the whole of it there.
                       whiteSpace: 'nowrap',
                     }}
                   >
@@ -246,19 +266,16 @@ export default function PurchaseEnquiryPrintPage() {
             </div>
 
             {/* ── The document block ───────────────────────────────────────
-              Which paper this is, and its five identifying facts. Alternating
-              tints rather than rules between them: at five rows a ruled grid
-              reads as a second table competing with the real one below.
+              What this paper is, named the way the trade names it: a request
+              for quotation. "Purchase enquiry" is our word for the record in
+              the app; the supplier's clerk files it under RFQ.
 
-              It floats on its own shadow rather than sitting in a box. The
-              hairline border put a second frame a few pixels inside the card's
-              own, which at the top corner of the sheet read as a misprint. */}
+              "Quote by" is the date the goods are needed for, which is also
+              the latest a quotation is any use — the same date the delivery
+              requirement below repeats, as it is asked. */}
             <div
               style={{
                 borderRadius: 9,
-                // 272, not 300. The longest thing in it is a date, and the
-                // 28px it was holding for nothing is 28px the contact line
-                // needed to stay on one row.
                 minWidth: 272,
                 overflow: 'hidden',
                 boxShadow: '0 4px 14px rgba(23, 58, 108, 0.13)',
@@ -279,24 +296,13 @@ export default function PurchaseEnquiryPrintPage() {
                 }}
               >
                 <FileText size={15} />
-                Purchase Enquiry
+                Request for Quotation
               </div>
               <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <tbody>
-                  <MetaRow i={0} label="Enquiry No" value={e.enquiryNumber} mono />
+                  <MetaRow i={0} label="RFQ No" value={e.enquiryNumber} mono />
                   <MetaRow i={1} label="Date" value={shortDate(e.enquiryDate)} mono />
-                  <MetaRow
-                    i={2}
-                    label="Required by"
-                    value={e.requiredDate ? shortDate(e.requiredDate) : '—'}
-                    mono
-                  />
-                  {/* Which of the mill's stores it is for was here and is
-                    not any more. It is ours, not his — he delivers where the
-                    purchase order tells him to, and until there is an order
-                    there is nothing to tell him. On a sheet that goes out it
-                    was a fifth row saying nothing to the man reading it. */}
-                  <MetaRow i={3} label="Reference" value={e.reference || '—'} mono />
+                  <MetaRow i={2} label="Quote by" value={neededBy ?? '—'} mono />
                 </tbody>
               </table>
             </div>
@@ -305,77 +311,53 @@ export default function PurchaseEnquiryPrintPage() {
           {/* The rule that separates who we are from what we are asking. */}
           <div style={{ height: 2, background: NAVY, margin: '22px 0 0', borderRadius: 2 }} />
 
-          {/* ── Who it is to ───────────────────────────────────────────────
-            Named where we are printing one supplier's copy, and a line to
-            write a name on where we are not. The enquiry goes to three or
-            four of them and is printed once; whoever it is handed to writes
-            their own name on it, which is what an enquiry pad has always
-            done. */}
-          <Panel icon={Users} title="To">
-            {forQuote ? (
-              <div style={{ padding: '13px 16px' }}>
-                <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: NAVY }}>
-                  {forQuote.supplier.name}
-                </p>
-                <p style={{ margin: '4px 0 0', fontSize: 12, color: SOFT }}>
-                  {forQuote.supplier.code}
-                  {forQuote.supplier.gstin && ' · GSTIN ' + forQuote.supplier.gstin}
-                </p>
-              </div>
-            ) : (
-              <div style={{ padding: '14px 16px' }}>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10 }}>
-                  <span style={{ fontSize: 13, color: GREY, flexShrink: 0 }}>M/s</span>
-                  <span
-                    style={{ flex: 1, borderBottom: '1px solid ' + RULE, height: 20 }}
-                    aria-hidden
-                  />
-                </div>
-                <p style={{ margin: '11px 0 0', fontSize: 11.5, color: GREY }}>
-                  Kindly quote your best rate for the items below, and say how long you will hold
-                  it.
-                </p>
-              </div>
-            )}
+          {/* ── Supplier ───────────────────────────────────────────────────
+            Filled where we are printing one supplier's copy, ruled lines to
+            write on where we are not. The enquiry goes to three or four of
+            them and is printed once; whoever it is handed to writes their own
+            name on it, which is what an enquiry pad has always done. */}
+          <Panel icon={Users} title="Supplier">
+            <div style={{ padding: '12px 16px 14px', display: 'grid', gap: 10 }}>
+              <FillLine label="M/s" value={forQuote?.supplier.name} strong />
+              <FillLine
+                label="Contact"
+                value={
+                  forQuote
+                    ? [
+                        forQuote.supplier.email,
+                        forQuote.supplier.gstin && 'GSTIN ' + forQuote.supplier.gstin,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ') || undefined
+                    : undefined
+                }
+              />
+            </div>
           </Panel>
 
-          {/* ── The line grid ────────────────────────────────────────────── */}
-          <div
-            style={{
-              marginTop: 18,
-              borderRadius: 10,
-              overflow: 'hidden',
-              border: '1px solid ' + RULE_SOFT,
-            }}
-          >
+          {/* ── Requested items ─────────────────────────────────────────────
+            The unit in a column of its own rather than tacked onto the
+            quantity. A supplier pricing per metre against a quantity in rolls
+            quotes the wrong unit, and a column headed UOM is the one thing on
+            the sheet he cannot read past.
+
+            No GST column and no total. GST is one of the things he is asked
+            to quote below; a column for it beside every line invited six
+            copies of "18" and a total nobody on either side could check. The
+            Supplier Rate column is empty for him to fill in — on a copy
+            printed after his proforma is recorded it carries his own figures,
+            and that is the version filed beside the order. */}
+          <Panel icon={Rows3} title="Requested items" flush>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ background: NAVY, color: '#fff' }}>
-                  <th style={{ padding: '11px 14px', textAlign: 'left', width: 46 }}>
-                    <Rows3 size={15} style={{ display: 'block' }} />
-                  </th>
-                  <th style={{ padding: '11px 8px', textAlign: 'left', fontWeight: 600 }}>
-                    Item &amp; Description
-                  </th>
-                  <th
-                    style={{ padding: '11px 8px', textAlign: 'left', width: 82, fontWeight: 600 }}
-                  >
-                    HSN
-                  </th>
-                  <th
-                    style={{ padding: '11px 8px', textAlign: 'right', width: 104, fontWeight: 600 }}
-                  >
-                    Quantity
-                  </th>
-                  <th
-                    style={{ padding: '11px 8px', textAlign: 'right', width: 92, fontWeight: 600 }}
-                  >
-                    Rate
-                  </th>
-                  <th
-                    style={{ padding: '11px 16px', textAlign: 'right', width: 74, fontWeight: 600 }}
-                  >
-                    GST %
+                  <th style={{ ...TH, width: 42, paddingLeft: 16 }}>#</th>
+                  <th style={TH}>Item / Description</th>
+                  <th style={{ ...TH, width: 78 }}>HSN</th>
+                  <th style={{ ...TH, width: 88, textAlign: 'right' }}>Qty</th>
+                  <th style={{ ...TH, width: 64 }}>UOM</th>
+                  <th style={{ ...TH, width: 150, textAlign: 'right', paddingRight: 16 }}>
+                    Supplier Rate
                   </th>
                 </tr>
               </thead>
@@ -387,11 +369,11 @@ export default function PurchaseEnquiryPrintPage() {
                       key={l.id}
                       style={{
                         background: i % 2 ? TINT_SOFT : '#fff',
-                        borderBottom: '1px solid ' + RULE_SOFT,
+                        borderTop: '1px solid ' + RULE_SOFT,
                       }}
                     >
-                      <td style={{ padding: '10px 14px', color: SOFT, ...NUM }}>{i + 1}</td>
-                      <td style={{ padding: '10px 8px' }}>
+                      <td style={{ ...TD, paddingLeft: 16, color: SOFT, ...NUM }}>{i + 1}</td>
+                      <td style={TD}>
                         <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
                         <span style={{ color: SOFT }}> · {l.item.code}</span>
                         {l.description && (
@@ -400,142 +382,148 @@ export default function PurchaseEnquiryPrintPage() {
                           </div>
                         )}
                       </td>
-                      <td style={{ padding: '10px 8px', color: SOFT, ...NUM }}>
-                        {l.hsnCode ?? '—'}
-                      </td>
-                      <td style={{ padding: '10px 8px', textAlign: 'right', ...NUM }}>
-                        {qtyFmt(l.qty)}{' '}
-                        <span style={{ color: GREY }}>{l.item.uom?.symbol ?? ''}</span>
-                      </td>
-                      {/* Left empty on the copy he has not answered yet — the
-                        column is what he is being asked to fill in. Once his PI
-                        is recorded the sheet reprints with his own figures, and
-                        that is the version filed beside the order. */}
-                      <td style={{ padding: '10px 8px', textAlign: 'right', color: GREY, ...NUM }}>
-                        {ql?.quotedRate != null ? money(ql.quotedRate) : '—'}
-                      </td>
-                      <td style={{ padding: '10px 16px', textAlign: 'right', color: GREY, ...NUM }}>
-                        {ql?.gstRate != null ? Number(ql.gstRate) : '—'}
+                      <td style={{ ...TD, color: SOFT, ...NUM }}>{l.hsnCode ?? '—'}</td>
+                      <td style={{ ...TD, textAlign: 'right', ...NUM }}>{qtyFmt(l.qty)}</td>
+                      <td style={{ ...TD, color: GREY }}>{l.item.uom?.symbol ?? '—'}</td>
+                      {/* A ruled space to write in, not a dash. A dash says
+                        "nothing here"; this column is the one he is being
+                        asked to fill. */}
+                      <td style={{ ...TD, paddingRight: 16, textAlign: 'right', ...NUM }}>
+                        {ql?.quotedRate != null ? (
+                          <span style={{ fontWeight: 700, color: NAVY }}>
+                            ₹{money(ql.quotedRate)}
+                          </span>
+                        ) : (
+                          <span
+                            aria-hidden
+                            style={{
+                              display: 'inline-block',
+                              width: 110,
+                              borderBottom: '1px solid ' + RULE,
+                              height: 14,
+                            }}
+                          />
+                        )}
                       </td>
                     </tr>
                   )
                 })}
-                {/* Ruled blank rows to a minimum depth.
-                  Every copy of this sheet is now a copy somebody is asked to
-                  write rates into, and a two-line enquiry printed as a two-line
-                  table reads as a torn-off stub. They were briefly held back
-                  from the office copy, which was read rather than written on —
-                  there is no office copy any more. */}
-                {Array.from({ length: Math.max(0, 6 - e.lines.length) }).map((_, i) => (
-                  <tr
-                    key={'pad' + i}
-                    style={{
-                      background: (e.lines.length + i) % 2 ? TINT_SOFT : '#fff',
-                      borderBottom: '1px solid ' + RULE_SOFT,
-                    }}
-                  >
-                    <td style={{ padding: '10px 14px', color: SOFT, ...NUM }}>
-                      {e.lines.length + i + 1}
-                    </td>
-                    <td colSpan={5} style={{ padding: '10px 8px' }}>
-                      &nbsp;
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr style={{ background: TINT_SOFT, fontWeight: 700, color: NAVY }}>
-                  <td colSpan={4} style={{ padding: '12px 10px', textAlign: 'right' }}>
-                    {forQuote?.answered ? 'Total on PI ' + forQuote.piNumber : 'Your total'}
-                  </td>
-                  <td colSpan={2} style={{ padding: '12px 16px', textAlign: 'right', ...NUM }}>
-                    {forQuote?.answered ? '₹' + money(forQuote.piAmount ?? forQuote.value) : '—'}
-                  </td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          {/* ── What we are asking him to send back ──────────────────────
-            The point of the supplier's copy. A form that asks a man for five
-            facts and leaves him nowhere to write them gets them back on his own
-            letterhead in his own order, which is how a comparison stops being
-            comparable. It is the point of the sheet, so it is on every copy
-            of it. */}
-          <Panel icon={Pencil} title="Your quotation">
-            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-              <tbody>
-                <ReplyRow i={0} label="Your PI / quotation no." />
-                <ReplyRow i={1} label="Price held until" />
-                <ReplyRow i={2} label="Delivery in (days)" />
-                <ReplyRow i={3} label="Payment terms" />
-                <ReplyRow i={4} label="Freight / packing" />
               </tbody>
             </table>
           </Panel>
 
-          {/* Said on the paper, not only on the screen. A supplier holding a
-            sheet that looks like an order will treat it as one. */}
-          <div
-            style={{
-              marginTop: 16,
-              padding: '11px 16px',
-              background: TINT_SOFT,
-              border: '1px solid ' + RULE_SOFT,
-              borderRadius: 10,
-              display: 'flex',
-              gap: 10,
-              alignItems: 'flex-start',
-              fontSize: 11.5,
-              color: GREY,
-            }}
-          >
-            <FileText size={15} style={{ marginTop: 1, flexShrink: 0, color: SOFT }} />
-            <span>
-              This is an enquiry, not a purchase order. It places no order and commits neither
-              party. Please quote your rate, your GST and how long you will hold the price.
-            </span>
-          </div>
+          {/* ── Delivery requirement ────────────────────────────────────────
+            When, and where. Where is a line to write on: which of the mill's
+            stores takes it is settled on the purchase order, not here, and
+            printing a godown name on a sheet that goes to four suppliers told
+            each of them something about the mill they had no use for. The
+            buyer writes it in when it matters to the price — delivered to
+            Bhiwandi is not the same quote as ex-works Surat. */}
+          <Panel icon={Truck} title="Delivery requirement">
+            <div style={{ padding: '12px 16px 14px', display: 'grid', gap: 10 }}>
+              <FillLine label="Required delivery by" value={neededBy ?? undefined} strong />
+              <FillLine label="Delivery location" />
+            </div>
+          </Panel>
 
-          {/* ── The foot ────────────────────────────────────────────────────
-            What we said, and who signs it, on one row.
-            They were stacked, which put 30px of nothing between a two-line
-            note and the signature and left the sheet ending in a column of
-            air. Side by side the note fills the width it has and the
-            signature takes the corner it is going to be signed in. */}
-          {(hasNotes || showSignature) && (
-            <div
+          {/* ── What to put in the reply ─────────────────────────────────── */}
+          <Panel icon={ClipboardList} title="Please quote">
+            <ul
               style={{
-                marginTop: 20,
-                display: 'flex',
-                gap: 32,
-                alignItems: 'flex-start',
+                margin: 0,
+                padding: '12px 16px 14px 34px',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                gap: '6px 20px',
+                fontSize: 12,
+                color: INK,
               }}
             >
-              <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 24 }}>
-                {e.notes && <Note icon={Pencil} title="Notes" body={e.notes} />}
-                {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
-              </div>
+              {PLEASE_QUOTE.map((q) => (
+                <li key={q} style={{ paddingLeft: 2 }}>
+                  {q}
+                </li>
+              ))}
+            </ul>
+          </Panel>
 
-              {/* Both sides sign a sheet that is going out, because what comes
-                back is his quotation and needs his name on it. Named where we
-                know who he is, "For (supplier)" where we do not — a blank over
-                the line is what he signs above either way. */}
-              {showSignature && (
-                <div style={{ display: 'flex', gap: 28, flexShrink: 0 }}>
-                  <Sign
-                    name={'For ' + (forQuote ? forQuote.supplier.name : 'the supplier')}
-                    caption={'Signature & seal · Date'}
-                  />
-                  <Sign name={'For ' + co.name} caption="Authorised signatory" />
-                </div>
-              )}
+          {/* ── The ruled reply ─────────────────────────────────────────────
+            In pairs, as they are answered: his number beside its date, how
+            long the price holds beside how long delivery takes, the terms
+            beside the freight. A supplier who writes back on this sheet
+            answers every question in the same place, which is the only way
+            four replies line up for comparison. */}
+          <Panel icon={MessageSquareReply} title="Supplier response">
+            <div
+              style={{
+                padding: '12px 16px 16px',
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                gap: '14px 28px',
+              }}
+            >
+              <FillLine label="Supplier quotation no." value={forQuote?.piNumber ?? undefined} />
+              <FillLine
+                label="Date"
+                value={forQuote?.piDate ? shortDate(forQuote.piDate) : undefined}
+              />
+              <FillLine
+                label="Price validity"
+                value={forQuote?.piValidUntil ? shortDate(forQuote.piValidUntil) : undefined}
+              />
+              <FillLine label="Delivery" />
+              <FillLine label="Payment terms" />
+              <FillLine label="Freight" />
+            </div>
+          </Panel>
+
+          {/* ── Notes, and who signs ────────────────────────────────────────
+            What we said, and both signatures, on one row. Both sides sign
+            because what comes back is his quotation and needs his name on
+            it. */}
+          <div
+            style={{
+              marginTop: 18,
+              display: 'flex',
+              gap: 32,
+              alignItems: 'flex-start',
+            }}
+          >
+            <div style={{ flex: 1, minWidth: 0, display: 'grid', gap: 12 }}>
+              <Note
+                icon={Pencil}
+                title="Notes"
+                body={
+                  e.notes ||
+                  'Please quote ex-works / delivered basis and mention GST, freight, packing and applicable commercial terms separately.'
+                }
+              />
+              {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
+            </div>
+          </div>
+
+          {showSignature && (
+            <div
+              style={{
+                marginTop: 26,
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 40,
+              }}
+            >
+              <Sign
+                name={forQuote ? 'For ' + forQuote.supplier.name : 'Supplier signature'}
+                caption={'Signature & seal · Date'}
+                align="left"
+              />
+              <Sign name={'For ' + co.name} caption="Authorised signatory" align="right" />
             </div>
           )}
 
-          {/* The number on the foot as well as the head. A sheet that comes
-            back as a fax or a photograph of one page has to still say which
-            enquiry it answers. */}
+          {/* The number on the foot as well as the head, and what the paper
+            is not. A sheet that comes back as a photograph of one page has to
+            still say which enquiry it answers — and a supplier holding a
+            sheet that looks like an order will treat it as one. */}
           <div
             style={{
               marginTop: 22,
@@ -550,7 +538,8 @@ export default function PurchaseEnquiryPrintPage() {
           >
             <span>
               {e.enquiryNumber}
-              {forQuote ? ' · ' + forQuote.supplier.name : ''}
+              {forQuote ? ' · ' + forQuote.supplier.name : ''} · A request for quotation, not a
+              purchase order
             </span>
             <span>{data.template?.footerNote || co.name}</span>
           </div>
@@ -558,6 +547,17 @@ export default function PurchaseEnquiryPrintPage() {
       </div>
     </>
   )
+}
+
+const TH: React.CSSProperties = {
+  padding: '10px 8px',
+  textAlign: 'left',
+  fontWeight: 600,
+}
+
+const TD: React.CSSProperties = {
+  padding: '10px 8px',
+  verticalAlign: 'top',
 }
 
 /**
@@ -592,52 +592,87 @@ function Contact({ icon: Icon, children }: { icon: React.ElementType; children: 
 /**
  * A titled band, tinted through rather than ruled round.
  *
- * The tinted bar is what makes a section findable on a sheet that has four of
- * them. The icon is not decoration: at a glance it separates the people band
- * from the paperwork band without the reader having to start reading.
- *
- * The body carries the same tint at a quarter of the strength with white rows
- * floating on it, so the band and what it holds read as one panel. A white
- * body under a tinted bar read as a table that happened to have a coloured
- * strip above it.
+ * The tinted bar is what makes a section findable on a sheet that has six of
+ * them, and the icon separates them at a glance before anybody starts
+ * reading. `flush` drops the body's padding, for the item table whose own
+ * navy head sits directly under the bar.
  */
 function Panel({
   icon: Icon,
   title,
+  flush = false,
   children,
 }: {
   icon: React.ElementType
   title: string
+  flush?: boolean
   children: React.ReactNode
 }) {
   return (
     <div
       style={{
-        marginTop: 18,
+        marginTop: 14,
         borderRadius: 10,
         overflow: 'hidden',
-        background: TINT_SOFT,
+        background: flush ? '#fff' : TINT_SOFT,
         border: '1px solid ' + RULE_SOFT,
       }}
     >
       <div
         style={{
           background: TINT,
-          padding: '10px 16px',
+          padding: '9px 16px',
           display: 'flex',
           alignItems: 'center',
           gap: 9,
-          fontSize: 12,
+          fontSize: 11.5,
           fontWeight: 700,
           letterSpacing: 0.6,
           textTransform: 'uppercase',
           color: NAVY,
         }}
       >
-        <Icon size={16} />
+        <Icon size={15} />
         {title}
       </div>
       {children}
+    </div>
+  )
+}
+
+/**
+ * A label and the line it is answered on.
+ *
+ * Printed with its value where we already know it — the supplier we are
+ * addressing, his PI number once recorded — and ruled empty where we do not,
+ * so the same sheet works as a form to fill in and as the filled-in copy.
+ */
+function FillLine({
+  label,
+  value,
+  strong = false,
+}: {
+  label: string
+  value?: string | null
+  strong?: boolean
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, fontSize: 12 }}>
+      <span style={{ color: GREY, flexShrink: 0, whiteSpace: 'nowrap' }}>{label}:</span>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          borderBottom: '1px solid ' + RULE,
+          minHeight: 18,
+          paddingBottom: 2,
+          fontWeight: strong ? 700 : 500,
+          color: NAVY,
+          ...NUM,
+        }}
+      >
+        {value || ' '}
+      </span>
     </div>
   )
 }
@@ -675,26 +710,6 @@ function MetaRow({
   )
 }
 
-/** A ruled line for the supplier to write on. */
-function ReplyRow({ i, label }: { i: number; label: string }) {
-  return (
-    <tr style={{ background: i % 2 ? 'rgba(255,255,255,0.45)' : '#fff' }}>
-      <td
-        style={{
-          padding: '11px 16px',
-          color: GREY,
-          whiteSpace: 'nowrap',
-          width: '38%',
-          fontSize: 12,
-        }}
-      >
-        {label}
-      </td>
-      <td style={{ padding: '11px 16px', borderBottom: '1px solid ' + RULE }}>&nbsp;</td>
-    </tr>
-  )
-}
-
 /** A titled paragraph at the foot — notes, terms. */
 function Note({
   icon: Icon,
@@ -706,24 +721,24 @@ function Note({
   body: string
 }) {
   return (
-    <div style={{ flex: 1, minWidth: 0 }}>
+    <div style={{ minWidth: 0 }}>
       <p
         style={{
           margin: 0,
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          fontSize: 12,
+          fontSize: 11.5,
           fontWeight: 700,
           letterSpacing: 0.6,
           textTransform: 'uppercase',
           color: NAVY,
         }}
       >
-        <Icon size={16} />
+        <Icon size={15} />
         {title}
       </p>
-      <p style={{ margin: '7px 0 0 24px', fontSize: 12, color: GREY, whiteSpace: 'pre-line' }}>
+      <p style={{ margin: '6px 0 0 23px', fontSize: 12, color: GREY, whiteSpace: 'pre-line' }}>
         {body}
       </p>
     </div>
@@ -731,13 +746,21 @@ function Note({
 }
 
 /** Somebody's name over the line they sign on. */
-function Sign({ name, caption }: { name: string; caption: string }) {
+function Sign({
+  name,
+  caption,
+  align,
+}: {
+  name: string
+  caption: string
+  align: 'left' | 'right'
+}) {
   return (
-    <div style={{ minWidth: 196, textAlign: 'right', fontSize: 11.5, color: GREY }}>
+    <div style={{ width: 230, textAlign: align, fontSize: 11.5, color: GREY }}>
       <p style={{ margin: 0 }}>{name}</p>
       {/* The room to actually sign in. Any less and a signature runs over the
         line it is meant to sit on. */}
-      <div style={{ height: 38 }} />
+      <div style={{ height: 40 }} />
       <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 6 }}>{caption}</p>
     </div>
   )
