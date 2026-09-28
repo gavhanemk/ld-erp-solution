@@ -189,6 +189,8 @@ interface Option {
   applyOnPurchase?: boolean
   /** Payment to an MSME supplier falls due within 45 days by law. */
   isMsme?: boolean
+  /** The terms agreed with this supplier — what the due date is counted in. */
+  creditDays?: number | null
 }
 
 interface GrnOption {
@@ -258,6 +260,31 @@ const num = (v: unknown) => {
 
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/**
+ * The longest a bill to a registered small supplier may be left unpaid.
+ *
+ * Section 15 of the MSMED Act. Forty-five days is a ceiling, not a term —
+ * shorter can be agreed and usually has been, longer cannot be — so it is
+ * used as the fallback when the master carries no terms, and as a cap over
+ * whatever it does carry.
+ */
+const MSME_DAYS = 45
+
+/**
+ * A date this many days later, in the `yyyy-mm-dd` a date input wants.
+ *
+ * Built out of the local parts rather than `toISOString`, which converts to
+ * UTC first: east of Greenwich that hands back the day before, so a bill dated
+ * the 28th would fall due on the 11th rather than the 12th.
+ */
+const addDays = (iso: string, days: number) => {
+  const d = new Date(iso + 'T00:00:00')
+  if (Number.isNaN(d.getTime())) return ''
+  d.setDate(d.getDate() + days)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
+}
 
 export function PurchaseBillDialog({
   open,
@@ -358,6 +385,8 @@ export function PurchaseBillDialog({
     setSupplierInvoiceDate(record?.supplierInvoiceDate?.slice(0, 10) ?? '')
     setBillDate((record?.billDate ?? new Date().toISOString()).slice(0, 10))
     setDueDate(record?.dueDate?.slice(0, 10) ?? '')
+    // An existing bill's date is somebody's decision, already taken.
+    dueTyped.current = Boolean(record?.dueDate)
     setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
     setIsReverseCharge(record?.isReverseCharge ?? false)
     setTdsSection(record?.tdsSection ?? '')
@@ -420,6 +449,18 @@ export function PurchaseBillDialog({
   useEffect(() => {
     supplierIdRef.current = supplierId
   }, [supplierId])
+
+  /**
+   * Whether the due date on screen is one somebody typed.
+   *
+   * The date fills itself in from the supplier's terms, and re-fills whenever
+   * the supplier or their bill date changes — but the moment a clerk types one
+   * of their own, that is the answer and nothing may overwrite it. An extension
+   * agreed on the phone is exactly the kind of thing that gets typed here and
+   * would have been silently reverted by the next keystroke in the date beside
+   * it.
+   */
+  const dueTyped = useRef(false)
 
   const autoPulled = useRef<string | null>(null)
   useEffect(() => {
@@ -553,6 +594,44 @@ export function PurchaseBillDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
+
+  /**
+   * How long this supplier gives us, in days.
+   *
+   * Their own agreed terms where the master holds them — every supplier on the
+   * mill's list has them, and they run from 15 to 45 — and ${MSME_DAYS} where
+   * it does not. Capped at ${MSME_DAYS} for a registered small supplier
+   * whatever the master says, because that is the law's ceiling and a longer
+   * term agreed with them is not enforceable anyway.
+   *
+   * Filling the legal maximum for everybody would have been the simpler rule
+   * and the wrong one: Ambika Stitching Unit is on 15 days, and a bill quietly
+   * dated 45 would be a month late by the time anybody looked — with interest
+   * running on it, since they are an MSME.
+   */
+  const termDays = useMemo(() => {
+    const agreed = Number(supplier?.creditDays ?? 0)
+    const base = agreed > 0 ? agreed : MSME_DAYS
+    return supplier?.isMsme ? Math.min(base, MSME_DAYS) : base
+  }, [supplier])
+
+  /*
+   * Counted from the date on their bill, which is what the terms in the master
+   * say ("30 days from bill date") and what the supplier will count from when
+   * he rings about it. Until that box is filled in, from the day we are
+   * booking it — a due date that is roughly right beats an empty box, and it
+   * corrects itself the moment their date is typed.
+   */
+  const dueFrom = supplierInvoiceDate || billDate
+
+  useEffect(() => {
+    if (!open || dueTyped.current) return
+    // The terms come off the supplier, so there is nothing to work out until
+    // there is one. A date guessed before then would visibly correct itself
+    // the moment one is picked, which reads as the form changing its mind.
+    if (!supplierId || !dueFrom) return
+    setDueDate(addDays(dueFrom, termDays))
+  }, [open, supplierId, dueFrom, termDays])
 
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
@@ -1218,7 +1297,7 @@ export function PurchaseBillDialog({
             space-y-5, which on a form this tall reads as a different app —
             twice the air of every other dialog, and a band of nothing under
             the header before anything to fill in. */}
-          <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+          <div className="flex-1 space-y-2.5 overflow-y-auto px-5 py-3">
             {error && (
               <div
                 id="bill-form-error"
@@ -1246,9 +1325,8 @@ export function PurchaseBillDialog({
                 ) : (
                   <>
                     <p className="text-muted-foreground mb-2 text-[11px] leading-snug">
-                      Tick every delivery this invoice covers — one bill can settle several. Find it
-                      by the supplier&rsquo;s challan or bill number, by the order, or by our own
-                      receipt number; each box narrows the others.
+                      One bill can settle several deliveries — tick every one it covers. Each box
+                      below narrows the others.
                     </p>
 
                     {/* ── The ways in ──────────────────────────────────────
@@ -1684,11 +1762,24 @@ export function PurchaseBillDialog({
                     type="date"
                     className="form-input"
                     value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
+                    onChange={(e) => {
+                      // Theirs from here on. See `dueTyped`.
+                      dueTyped.current = true
+                      setDueDate(e.target.value)
+                    }}
                   />
-                  {supplier?.isMsme && (
-                    <p className="mt-1 text-xs text-amber-400">
-                      MSME supplier — payment is due within 45 days by law.
+                  {/* Where the date came from, so a filled box is not a
+                    mystery. It says the term and what it was counted off,
+                    because "28-10-2026" on its own tells nobody whether the
+                    form used their terms or a guess. */}
+                  {supplier && dueDate && (
+                    <p
+                      className={`mt-1 text-xs ${
+                        supplier.isMsme ? 'text-amber-400' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {termDays} days from {supplierInvoiceDate ? 'their bill' : "today's"} date
+                      {supplier.isMsme && ' · MSME, so 45 is the legal limit'}
                     </p>
                   )}
                 </div>
@@ -1856,7 +1947,7 @@ export function PurchaseBillDialog({
                       ].map((h, i) => (
                         <th
                           key={h || i}
-                          className={`text-muted-foreground px-3 py-2 text-[10px] font-semibold uppercase tracking-wider ${
+                          className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
                             ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount (₹)'].includes(h)
                               ? 'text-right'
                               : 'text-left'
@@ -1875,9 +1966,9 @@ export function PurchaseBillDialog({
                           key={i}
                           className="border-border/50 border-b last:border-0 [&>td]:align-top"
                         >
-                          <td className="min-w-[200px] px-3 py-2">
+                          <td className="min-w-[200px] px-3 py-1.5">
                             <select
-                              className="form-input h-9"
+                              className="form-input h-8"
                               value={line.itemId}
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
@@ -1895,7 +1986,7 @@ export function PurchaseBillDialog({
                               </p>
                             )}
                           </td>
-                          <td className="min-w-[130px] px-3 py-2">
+                          <td className="min-w-[130px] px-3 py-1.5">
                             {line.grnNumber ? (
                               <>
                                 <span className="badge-info">{line.grnNumber}</span>
@@ -1919,7 +2010,7 @@ export function PurchaseBillDialog({
                               <span className="text-muted-foreground text-xs">Not matched</span>
                             )}
                           </td>
-                          <td className="w-28 px-3 py-2">
+                          <td className="w-28 px-3 py-1.5">
                             {/* The wheel and the arrow keys move this by whole units.
                            Not 0.001, which moved it by a thousandth of a piece; and not 1,
                            which would refuse 1500.5 metres of fabric outright. "any" steps
@@ -1928,7 +2019,7 @@ export function PurchaseBillDialog({
                               type="number"
                               step="any"
                               min={0}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               value={String(line.qty)}
                               onChange={(e) => setLine(i, { qty: e.target.value })}
                               aria-label={`Line ${i + 1} quantity`}
@@ -1939,12 +2030,12 @@ export function PurchaseBillDialog({
                               </p>
                             )}
                           </td>
-                          <td className="w-28 px-3 py-2">
+                          <td className="w-28 px-3 py-1.5">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               value={String(line.unitPrice)}
                               onChange={(e) => setLineRate(i, e.target.value)}
                               aria-label={`Line ${i + 1} rate`}
@@ -1955,25 +2046,25 @@ export function PurchaseBillDialog({
                               </p>
                             )}
                           </td>
-                          <td className="w-20 px-3 py-2">
+                          <td className="w-20 px-3 py-1.5">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
                               max={100}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               value={String(line.discount)}
                               onChange={(e) => setLine(i, { discount: e.target.value })}
                               aria-label={`Line ${i + 1} discount`}
                             />
                           </td>
-                          <td className="w-20 px-3 py-2">
+                          <td className="w-20 px-3 py-1.5">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
                               max={100}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               disabled={taxMode === 'NONE'}
                               value={taxMode === 'NONE' ? '' : String(line.gstRate)}
                               onChange={(e) => setLine(i, { gstRate: e.target.value })}
@@ -1983,7 +2074,7 @@ export function PurchaseBillDialog({
                           <td className="w-32 px-3 py-2 text-right font-medium tabular-nums">
                             {inr(totals.lineGross[i] ?? 0)}
                           </td>
-                          <td className="w-12 px-3 py-2">
+                          <td className="w-12 px-3 py-1.5">
                             <button
                               type="button"
                               onClick={() =>
@@ -2160,7 +2251,7 @@ export function PurchaseBillDialog({
               untouched — there is simply no longer anywhere to type a new
               one. */}
             <Section icon={Calculator} title="Totals">
-              <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
+              <div className="border-border bg-secondary/40 h-fit space-y-1.5 rounded-lg border p-2.5 text-sm">
                 <Row label="Goods subtotal" value={totals.subtotal} />
                 <div className="flex items-center justify-between gap-4">
                   <label htmlFor="bill-discount" className="text-muted-foreground">

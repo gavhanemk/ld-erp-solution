@@ -80,7 +80,7 @@ export function Section({
   return (
     <section className="border-border bg-card rounded-xl border">
       <div
-        className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-3 ${
+        className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 ${
           shut ? '' : 'border-border/70 border-b'
         }`}
       >
@@ -117,7 +117,7 @@ export function Section({
           <div className="ml-auto flex flex-wrap items-center gap-2 [&>*]:ml-0">{actions}</div>
         )}
       </div>
-      {!shut && <div className="p-4">{children}</div>}
+      {!shut && <div className="px-4 pb-3.5 pt-3">{children}</div>}
     </section>
   )
 }
