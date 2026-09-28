@@ -177,6 +177,21 @@ const PI_MUST_SHOW = [
   'How long the price holds',
 ]
 
+/**
+ * Who the supplier invoices. The group's office, not the mill — the goods
+ * come to the mill (Ship to), the bill goes to Mumbai. Not in the company
+ * settings, so it lives here until it has somewhere to be edited.
+ */
+const BILL_TO = {
+  name: 'Linkd',
+  lines: [
+    'Essgee Option One, 3rd Floor,',
+    'Office No. 333-338, Near Tilak Bhavan,',
+    'Opp. Indiabulls, Senapati Bapat Marg, Prabhadevi,',
+    'Mumbai - 400013',
+  ],
+}
+
 interface Recipient {
   quoteId: string
   code: string
@@ -443,29 +458,23 @@ export default function PurchaseRequisitionPrintPage() {
             <Panel icon={Building2} title="Bill to">
               <div style={{ padding: '7px 14px 8px', fontSize: 11.5, lineHeight: 1.45 }}>
                 <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: NAVY }}>
-                  {co.legalName || co.name}
+                  {BILL_TO.name}
                 </p>
-                {co.address && <p style={{ margin: '2px 0 0', color: GREY }}>{co.address}</p>}
-                {companyPlace && <p style={{ margin: 0, color: GREY }}>{companyPlace}</p>}
-                {companyTax && <p style={{ margin: '2px 0 0', color: SOFT }}>{companyTax}</p>}
+                {BILL_TO.lines.map((line, i) => (
+                  <p key={line} style={{ margin: i ? 0 : '2px 0 0', color: GREY }}>
+                    {line}
+                  </p>
+                ))}
               </div>
             </Panel>
             <Panel icon={Truck} title="Ship to">
               <div style={{ padding: '7px 14px 8px', fontSize: 11.5, lineHeight: 1.45 }}>
                 <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: NAVY }}>
-                  {co.name}
-                  {data.shipTo ? ' (' + data.shipTo.name + ')' : ''}
+                  {co.legalName || co.name}
                 </p>
-                {data.shipTo?.address && (
-                  <p style={{ margin: '2px 0 0', color: GREY }}>{data.shipTo.address}</p>
-                )}
-                {co.address && <p style={{ margin: 0, color: GREY }}>{co.address}</p>}
+                {co.address && <p style={{ margin: '2px 0 0', color: GREY }}>{co.address}</p>}
                 {companyPlace && <p style={{ margin: 0, color: GREY }}>{companyPlace}</p>}
-                {(prep || co.phone) && (
-                  <p style={{ margin: '2px 0 0', color: SOFT }}>
-                    {[prep?.name, prep?.phone || co.phone].filter(Boolean).join(' · ')}
-                  </p>
-                )}
+                {companyTax && <p style={{ margin: '2px 0 0', color: SOFT }}>{companyTax}</p>}
               </div>
             </Panel>
           </div>
