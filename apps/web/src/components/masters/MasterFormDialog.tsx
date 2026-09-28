@@ -380,11 +380,13 @@ export function MasterFormDialog<T extends { id: string }>({
    */
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      {/* Capped and centred. A master has a dozen fields, not an item table;
+        stretched across a wide screen each box ran half the monitor long. */}
       <form
         id="master-form"
         onSubmit={submit}
         noValidate
-        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        className="glass-card po-form flex h-full max-h-full w-full max-w-5xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="master-form-title"
