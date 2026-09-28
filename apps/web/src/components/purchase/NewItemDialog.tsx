@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Loader2, Package, X } from 'lucide-react'
+import { AlertCircle, Boxes, IndianRupee, Loader2, Package, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
+import { Section } from '@/components/purchase/Section'
 
 /**
  * Adding an item to the master without leaving the form that needed it.
@@ -87,7 +88,11 @@ export function NewItemDialog({
   const [type, setType] = useState('RAW_MATERIAL')
   const [uomId, setUomId] = useState('')
   const [hsnCode, setHsnCode] = useState('')
+  const [description, setDescription] = useState('')
   const [rate, setRate] = useState('')
+  const [reorderLevel, setReorderLevel] = useState('')
+  const [minStock, setMinStock] = useState('')
+  const [maxStock, setMaxStock] = useState('')
 
   const [uoms, setUoms] = useState<Uom[]>([])
   const [saving, setSaving] = useState(false)
@@ -99,6 +104,18 @@ export function NewItemDialog({
       .then((r) => setUoms(r.data))
       .catch(() => setError('Could not load the units. Close and try again.'))
   }, [])
+
+  /** The chosen unit's symbol, so the stock figures say what they count. */
+  const uomSymbol = useMemo(() => uoms.find((u) => u.id === uomId)?.symbol ?? '', [uoms, uomId])
+
+  /*
+   * A minimum above a maximum, which the server refuses outright.
+   *
+   * Caught here so it shows as a tinted edge on both boxes while they are
+   * being typed, rather than as a sentence after a round trip that also lost
+   * everything else on the form.
+   */
+  const stockBackwards = minStock !== '' && maxStock !== '' && Number(minStock) > Number(maxStock)
 
   const tops = useMemo(() => categories.filter((c) => !c.parentId), [categories])
   const subs = useMemo(
@@ -114,8 +131,9 @@ export function NewItemDialog({
     if (hsnCode && !/^[0-9]{4,8}$/.test(hsnCode.trim())) {
       out.push('An HSN code is 4 to 8 digits, nothing else')
     }
+    if (stockBackwards) out.push('Minimum stock cannot be above maximum stock')
     return out
-  }, [name, categoryId, uomId, hsnCode])
+  }, [name, categoryId, uomId, hsnCode, stockBackwards])
 
   const save = useCallback(async () => {
     if (problems.length) return
@@ -133,7 +151,14 @@ export function NewItemDialog({
         categoryId: subcategoryId || categoryId,
         uomId,
         ...(hsnCode.trim() ? { hsnCode: hsnCode.trim() } : {}),
+        ...(description.trim() ? { description: description.trim() } : {}),
+        // Each left out entirely when blank rather than sent as zero. Zero is a
+        // real reorder level — "tell me the moment it runs out" — and is not
+        // the same answer as "nobody has decided one".
         ...(rate.trim() ? { standardRate: Number(rate) } : {}),
+        ...(reorderLevel.trim() ? { reorderLevel: Number(reorderLevel) } : {}),
+        ...(minStock.trim() ? { minStock: Number(minStock) } : {}),
+        ...(maxStock.trim() ? { maxStock: Number(maxStock) } : {}),
       })
       onCreated(res.data)
     } catch (err) {
@@ -141,7 +166,22 @@ export function NewItemDialog({
     } finally {
       setSaving(false)
     }
-  }, [problems, name, code, type, categoryId, subcategoryId, uomId, hsnCode, rate, onCreated])
+  }, [
+    problems,
+    name,
+    code,
+    type,
+    categoryId,
+    subcategoryId,
+    uomId,
+    hsnCode,
+    description,
+    rate,
+    reorderLevel,
+    minStock,
+    maxStock,
+    onCreated,
+  ])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -157,7 +197,7 @@ export function NewItemDialog({
        window from somewhere else. */
     <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm">
       <div
-        className="glass-card po-form my-4 flex w-full max-w-2xl flex-col overflow-hidden"
+        className="glass-card po-form my-4 flex w-full max-w-4xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-item-title"
@@ -192,161 +232,233 @@ export function NewItemDialog({
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <label className="form-label" htmlFor="ni-cat">
-                Category
-              </label>
-              <select
-                id="ni-cat"
-                value={categoryId}
-                onChange={(e) => {
-                  setCategoryId(e.target.value)
-                  setSubcategoryId('')
-                }}
-                className="form-input"
-              >
-                <option value="">Pick a category</option>
-                {tops.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
+          {/* The same three groups the Masters screen files an item under, with
+            the same labels and the same help under each. This writes to that
+            master, so somebody who fills this in and later opens the item there
+            should recognise what they typed and find it where they left it. */}
+          <Section icon={Package} title="Identity">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="form-label" htmlFor="ni-cat">
+                  Category
+                </label>
+                <select
+                  id="ni-cat"
+                  value={categoryId}
+                  onChange={(e) => {
+                    setCategoryId(e.target.value)
+                    setSubcategoryId('')
+                  }}
+                  className="form-input"
+                >
+                  <option value="">Pick a category</option>
+                  {tops.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="ni-sub">
+                  Subcategory
+                </label>
+                <select
+                  id="ni-sub"
+                  value={subcategoryId}
+                  onChange={(e) => setSubcategoryId(e.target.value)}
+                  disabled={subs.length === 0}
+                  className="form-input"
+                >
+                  <option value="">{subs.length === 0 ? 'None under this' : 'None'}</option>
+                  {subs.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="form-help">Where it is filed, if there is one.</p>
+              </div>
             </div>
-            <div>
-              <label className="form-label" htmlFor="ni-sub">
-                Subcategory
-              </label>
-              <select
-                id="ni-sub"
-                value={subcategoryId}
-                onChange={(e) => setSubcategoryId(e.target.value)}
-                disabled={subs.length === 0}
-                className="form-input"
-              >
-                <option value="">{subs.length === 0 ? 'None under this' : 'None'}</option>
-                {subs.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                Where it is filed, if there is one.
-              </p>
-            </div>
-          </div>
 
-          <div>
-            <label className="form-label" htmlFor="ni-name">
-              Item name
-            </label>
-            <input
-              id="ni-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Cotton Oxford 20s — Navy"
-              className="form-input"
-              autoFocus
-            />
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div>
-              <label className="form-label" htmlFor="ni-code">
-                Item code
+            <div className="mt-3">
+              <label className="form-label" htmlFor="ni-name">
+                Item name
               </label>
               <input
-                id="ni-code"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="Allotted on save"
-                className="form-input font-mono"
-              />
-              {/* Left blank on purpose. Two people typing codes by hand is how
-                a master ends up holding FAB-COT-3 and FAB-COT-003. */}
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                Leave empty unless it already has one.
-              </p>
-            </div>
-            <div>
-              <label className="form-label" htmlFor="ni-uom">
-                Unit
-              </label>
-              <select
-                id="ni-uom"
-                value={uomId}
-                onChange={(e) => setUomId(e.target.value)}
+                id="ni-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Cotton Poplin 40s"
                 className="form-input"
-              >
-                <option value="">Pick a unit</option>
-                {uoms.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.symbol} · {u.name}
-                  </option>
-                ))}
-              </select>
-              {/* Not paperwork. An item with no unit makes every quantity ever
-                recorded against it ambiguous, and nothing later can repair it. */}
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                What its quantity is counted in.
-              </p>
-            </div>
-            <div>
-              <label className="form-label" htmlFor="ni-type">
-                Type
-              </label>
-              <select
-                id="ni-type"
-                value={type}
-                onChange={(e) => setType(e.target.value)}
-                className="form-input"
-              >
-                {TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-              <p className="text-muted-foreground mt-1 text-[11px]">
-                {TYPES.find((t) => t.value === type)?.hint}
-              </p>
-            </div>
-            <div>
-              <label className="form-label" htmlFor="ni-hsn">
-                HSN code
-              </label>
-              <input
-                id="ni-hsn"
-                value={hsnCode}
-                onChange={(e) => setHsnCode(e.target.value)}
-                placeholder="Optional"
-                className="form-input font-mono"
+                autoFocus
               />
-              <p className="text-muted-foreground mt-1 text-[11px]">4 to 8 digits.</p>
             </div>
-          </div>
 
-          <div className="sm:max-w-[16rem]">
-            <label className="form-label" htmlFor="ni-rate">
-              Standard rate
-            </label>
-            <input
-              id="ni-rate"
-              type="number"
-              step="0.01"
-              min="0"
-              value={rate}
-              onChange={(e) => setRate(e.target.value)}
-              placeholder="Optional"
-              className="form-input text-right"
-            />
-            {/* The mill's own working figure, not a price anybody has quoted —
-              which is the whole reason the enquiry is being raised. */}
-            <p className="text-muted-foreground mt-1 text-[11px]">
-              What we expect to pay. Not a quoted price.
-            </p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <label className="form-label" htmlFor="ni-code">
+                  Item code
+                </label>
+                <input
+                  id="ni-code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="Allotted on save"
+                  className="form-input font-mono"
+                />
+                {/* Left blank on purpose. Two people typing codes by hand is how
+                  a master ends up holding FAB-COT-3 and FAB-COT-003. */}
+                <p className="form-help">Leave empty unless it already has one.</p>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="ni-type">
+                  Item type
+                </label>
+                <select
+                  id="ni-type"
+                  value={type}
+                  onChange={(e) => setType(e.target.value)}
+                  className="form-input"
+                >
+                  {TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                {/* Decides which lists it turns up on for everybody else. */}
+                <p className="form-help">{TYPES.find((t) => t.value === type)?.hint}</p>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="ni-uom">
+                  Unit of measure
+                </label>
+                <select
+                  id="ni-uom"
+                  value={uomId}
+                  onChange={(e) => setUomId(e.target.value)}
+                  className="form-input"
+                >
+                  <option value="">Pick a unit</option>
+                  {uoms.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.symbol} · {u.name}
+                    </option>
+                  ))}
+                </select>
+                {/* Not paperwork. An item with no unit makes every quantity ever
+                  recorded against it ambiguous, and nothing later can repair it. */}
+                <p className="form-help">What its quantity is counted in.</p>
+              </div>
+              <div>
+                <label className="form-label" htmlFor="ni-hsn">
+                  HSN code
+                </label>
+                <input
+                  id="ni-hsn"
+                  value={hsnCode}
+                  onChange={(e) => setHsnCode(e.target.value)}
+                  placeholder="52081200"
+                  className="form-input font-mono"
+                />
+                <p className="form-help">4 to 8 digits, used on GST invoices.</p>
+              </div>
+            </div>
+
+            <div className="mt-3">
+              <label className="form-label" htmlFor="ni-desc">
+                Description
+              </label>
+              <textarea
+                id="ni-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                rows={2}
+                placeholder="Composition, width, finish — whatever tells this apart from the one beside it"
+                className="form-input"
+              />
+            </div>
+          </Section>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <Section icon={IndianRupee} title="Costing">
+              <div className="sm:max-w-[14rem]">
+                <label className="form-label" htmlFor="ni-rate">
+                  Standard rate
+                </label>
+                <input
+                  id="ni-rate"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={rate}
+                  onChange={(e) => setRate(e.target.value)}
+                  placeholder="145.50"
+                  className="form-input text-right"
+                />
+                {/* The mill's own working figure, not a price anybody quoted —
+                  which is the whole reason the enquiry is being raised. It
+                  lands in the expected-rate column on the line, where it is
+                  labelled as an estimate and stays editable. */}
+                <p className="form-help">
+                  What we expect to pay, for costing a BOM before real purchase rates exist. Not a
+                  quoted price.
+                </p>
+              </div>
+            </Section>
+
+            <Section icon={Boxes} title="Stock control">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div>
+                  <label className="form-label" htmlFor="ni-reorder">
+                    Reorder level
+                  </label>
+                  <input
+                    id="ni-reorder"
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    value={reorderLevel}
+                    onChange={(e) => setReorderLevel(e.target.value)}
+                    placeholder="500"
+                    className="form-input text-right"
+                  />
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="ni-min">
+                    Minimum stock
+                  </label>
+                  <input
+                    id="ni-min"
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    value={minStock}
+                    onChange={(e) => setMinStock(e.target.value)}
+                    className={`form-input text-right ${stockBackwards ? 'border-amber-500/60' : ''}`}
+                  />
+                </div>
+                <div>
+                  <label className="form-label" htmlFor="ni-max">
+                    Maximum stock
+                  </label>
+                  <input
+                    id="ni-max"
+                    type="number"
+                    step="0.001"
+                    min="0"
+                    value={maxStock}
+                    onChange={(e) => setMaxStock(e.target.value)}
+                    className={`form-input text-right ${stockBackwards ? 'border-amber-500/60' : ''}`}
+                  />
+                </div>
+              </div>
+              <p className="form-help mt-2">
+                All three optional, and all in {uomSymbol || 'the unit above'}. The reorder level
+                raises an alert when stock falls below it.
+              </p>
+            </Section>
           </div>
         </div>
 
