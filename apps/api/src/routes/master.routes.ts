@@ -48,6 +48,24 @@ import {
   updateWorkstationSchema,
 } from '../schemas/master.schemas'
 
+const ITEM_TYPES = new Set([
+  'RAW_MATERIAL',
+  'SEMI_FINISHED',
+  'FINISHED_GOOD',
+  'CONSUMABLE',
+  'PACKING_MATERIAL',
+  'TRIM',
+])
+
+/** A filter on an optional link, where the choice 'none' means "not set". */
+const noneOr = (field: string) => (values: string[]) => {
+  const ids = values.filter((v) => v !== 'none')
+  const or: Record<string, unknown>[] = []
+  if (ids.length) or.push({ [field]: { in: ids } })
+  if (values.includes('none')) or.push({ [field]: null })
+  return { OR: or }
+}
+
 const router = Router()
 const MODULE = 'masters'
 
@@ -308,8 +326,35 @@ router.use(
     entityType: 'Item',
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
-    searchFields: ['name', 'code', 'description', 'hsnCode'],
+    // Typing "linen" finds linen items by their category as well as their
+    // name; "cutting" finds what the cutting floor uses.
+    searchFields: [
+      'name',
+      'code',
+      'description',
+      'hsnCode',
+      'category.name',
+      'category.parent.name',
+      'department.name',
+      'uom.name',
+    ],
     sortableFields: ['name', 'code', 'createdAt', 'standardRate'],
+    filters: {
+      type: {
+        // Only real item types reach Prisma; anything else would be a 500.
+        where: (v) => ({ type: { in: v.filter((t) => ITEM_TYPES.has(t)) } }),
+        facets: ['type'],
+      },
+      // A main category takes in everything filed under its sub-categories.
+      categoryId: {
+        where: (v) => ({ OR: [{ categoryId: { in: v } }, { category: { parentId: { in: v } } }] }),
+        facets: ['categoryId'],
+      },
+      subCategoryId: { where: (v) => ({ categoryId: { in: v } }), facets: ['categoryId'] },
+      departmentId: { where: noneOr('departmentId'), facets: ['departmentId'] },
+      uomId: { where: (v) => ({ uomId: { in: v } }), facets: ['uomId'] },
+    },
+    facets: ['type', 'categoryId', 'departmentId', 'uomId'],
     defaultSort: { field: 'name', order: 'asc' },
     // taxRate travels with the item so an order form can fill the GST in from
     // the item itself. Without it the purchase order screen read

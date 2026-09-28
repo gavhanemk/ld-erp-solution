@@ -15,8 +15,23 @@ export interface CrudOptions {
   entityType: string
   createSchema: ZodTypeAny
   updateSchema: ZodTypeAny
-  /** String columns matched against ?q= (case-insensitive contains). */
+  /**
+   * String columns matched against ?q= (case-insensitive contains). A dotted
+   * path reaches through a relation, so 'category.name' finds items by the
+   * name of their category.
+   */
   searchFields?: string[]
+  /**
+   * Query parameters the list accepts as filters, each turning its values
+   * into a where clause. Several values come comma-separated and mean "any of
+   * these". Nothing outside this list is ever passed to Prisma.
+   */
+  filters?: Record<string, CrudFilter>
+  /**
+   * Scalar columns GET /facets counts rows by, so a filter dropdown can show
+   * how many records each choice would leave.
+   */
+  facets?: string[]
   /** Columns accepted in ?sort=; anything else is rejected rather than passed to Prisma. */
   sortableFields?: string[]
   defaultSort?: { field: string; order: 'asc' | 'desc' }
@@ -36,12 +51,30 @@ export interface CrudOptions {
   injectOnCreate?: () => Promise<Record<string, unknown>>
 }
 
+export interface CrudFilter {
+  where: (values: string[]) => Record<string, unknown>
+  /**
+   * The facets this filter is left out of. A filter never narrows its own
+   * counts: with Type = Trim picked, the Type list must still say how many
+   * Raw Material there are, or the other choices all read zero.
+   */
+  facets?: string[]
+}
+
 const MAX_PAGE_SIZE = 200
+
+/** 'category.parent.name' → { category: { parent: { name: leaf } } } */
+function nested(path: string, leaf: unknown): Record<string, unknown> {
+  return path
+    .split('.')
+    .reduceRight<unknown>((inner, key) => ({ [key]: inner }), leaf) as Record<string, unknown>
+}
 
 /**
  * Builds the standard master-data REST surface for one model:
  *
- *   GET    /            list with pagination, search, sort and active filter
+ *   GET    /            list with pagination, search, sort, active and other filters
+ *   GET    /facets      how many records each filter choice would leave
  *   GET    /:id         single record
  *   POST   /            create
  *   PATCH  /:id         partial update
@@ -62,6 +95,8 @@ export function crudRouter(options: CrudOptions): Router {
     include,
     softDelete = true,
     injectOnCreate,
+    filters = {},
+    facets = [],
   } = options
 
   const router = Router({ mergeParams: true })
@@ -70,10 +105,65 @@ export function crudRouter(options: CrudOptions): Router {
   // dynamically. Prisma's per-model types cannot be expressed here.
   const delegate = () => (prisma as unknown as Record<string, any>)[model]
 
+  /**
+   * The where clause for a list request: active flag, search, and every
+   * filter, except those that `skipFacet` says to leave out.
+   */
+  const buildWhere = (req: AuthRequest, skipFacet?: string) => {
+    const and: Record<string, unknown>[] = []
+
+    // ?active=true|false filters; omitting it returns both.
+    if (req.query.active === 'true') and.push({ isActive: true })
+    else if (req.query.active === 'false') and.push({ isActive: false })
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+    if (q && searchFields.length > 0) {
+      and.push({
+        OR: searchFields.map((field) => nested(field, { contains: q, mode: 'insensitive' })),
+      })
+    }
+
+    for (const [key, filter] of Object.entries(filters)) {
+      if (skipFacet && filter.facets?.includes(skipFacet)) continue
+      const raw = req.query[key]
+      if (typeof raw !== 'string' || !raw) continue
+      const values = [...new Set(raw.split(',').map((v) => v.trim()).filter(Boolean))]
+        .filter((v) => v.length <= 64)
+        .slice(0, 50)
+      if (values.length) and.push(filter.where(values))
+    }
+
+    return and.length ? { AND: and } : {}
+  }
+
+  /*
+   * How many records each choice in a filter would leave, given everything
+   * else on screen: the search, the other filters, the active flag.
+   * Registered before /:id so "facets" is not taken for a record id.
+   */
+  router.get('/facets', requirePermission(module, 'view'), async (req: AuthRequest, res) => {
+    const counts: Record<string, Record<string, number>> = {}
+    await Promise.all(
+      facets.map(async (field) => {
+        const groups: Array<Record<string, unknown> & { _count: { _all: number } }> =
+          await delegate().groupBy({
+            by: [field],
+            where: buildWhere(req, field),
+            _count: { _all: true },
+          })
+        counts[field] = Object.fromEntries(
+          // A record with nothing set is counted under 'none', so "No department"
+          // can be offered as a choice of its own.
+          groups.map((g) => [g[field] == null ? 'none' : String(g[field]), g._count._all]),
+        )
+      }),
+    )
+    res.json({ success: true, data: counts })
+  })
+
   router.get('/', requirePermission(module, 'view'), async (req: AuthRequest, res) => {
     const page = Math.max(1, Number(req.query.page) || 1)
     const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(req.query.limit) || 25))
-    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
 
     const sortField = typeof req.query.sort === 'string' ? req.query.sort : defaultSort.field
     if (!sortableFields.includes(sortField)) {
@@ -85,17 +175,7 @@ export function crudRouter(options: CrudOptions): Router {
     }
     const sortOrder = req.query.order === 'asc' ? 'asc' : defaultSort.order
 
-    const where: Record<string, unknown> = {}
-
-    // ?active=true|false filters; omitting it returns both.
-    if (req.query.active === 'true') where.isActive = true
-    else if (req.query.active === 'false') where.isActive = false
-
-    if (q && searchFields.length > 0) {
-      where.OR = searchFields.map((field) => ({
-        [field]: { contains: q, mode: 'insensitive' },
-      }))
-    }
+    const where = buildWhere(req)
 
     const [rows, total] = await Promise.all([
       delegate().findMany({

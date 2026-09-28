@@ -10,9 +10,11 @@ import {
   AlertCircle,
   Pencil,
   Ban,
+  X,
 } from 'lucide-react'
-import { ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
+import { api, ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
 import { MasterFormDialog, type FormField } from './MasterFormDialog'
+import { FilterMenu, type FilterChoice } from './FilterMenu'
 import { useAppSettings } from '@/lib/appSettings'
 
 export interface Column<T> {
@@ -24,6 +26,40 @@ export interface Column<T> {
   /** Only columns the API whitelists may be sorted; others render unclickable. */
   sortable?: boolean
   className?: string
+}
+
+type Row = Record<string, unknown>
+type Picked = Record<string, string[]>
+
+/**
+ * A dropdown filter over the list. The API has to accept `key` as a filter
+ * (see `filters` in the route's crudRouter options).
+ */
+export interface FilterDef {
+  /** Query parameter the choices are sent as. */
+  key: string
+  label: string
+  /** Fixed choices, for an enum like item type. */
+  options?: { value: string; label: string }[]
+  /** Or choices loaded from another master. */
+  optionsFrom?: {
+    resource: string
+    /** Keeps only the rows to offer, given what the other filters have ticked. */
+    filter?: (row: Row, picked: Picked) => boolean
+    /** Defaults to the row's name. Sees what else is ticked, to say less when it can. */
+    label?: (row: Row, picked: Picked) => string
+  }
+  /** The facet whose counts label each choice. */
+  facet?: string
+  /**
+   * For a count that has to be added up rather than read off: a main
+   * category counts the items under its sub-categories too.
+   */
+  count?: (value: string, counts: Record<string, number>, rows: Row[]) => number
+  /** Offers "not set" as a choice of its own, under this label. */
+  noneLabel?: string
+  /** Emptied when this other filter changes, as a sub-category is by its category. */
+  dependsOn?: string
 }
 
 interface MasterTableProps<T> {
@@ -47,6 +83,8 @@ interface MasterTableProps<T> {
   formColumns?: 3 | 4
   /** Singular noun used in the dialog heading, e.g. "Customer". */
   entityName?: string
+  /** Dropdown filters shown beside the search. */
+  filterDefs?: FilterDef[]
 }
 
 export function MasterTable<T extends { id: string; isActive?: boolean }>({
@@ -61,6 +99,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   formFields,
   formColumns,
   entityName,
+  filterDefs = [],
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -91,10 +130,127 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     return () => clearTimeout(timer)
   }, [search])
 
+  // What each dropdown has ticked, by query parameter.
+  const [picked, setPicked] = useState<Picked>({})
+  // The rows each master-backed dropdown offers, loaded once.
+  const [filterRows, setFilterRows] = useState<Record<string, Row[]>>({})
+  // Per facet, how many records each value would leave.
+  const [facetCounts, setFacetCounts] = useState<Record<string, Record<string, number>> | null>(
+    null,
+  )
+
   // A new search or filter invalidates the current page number.
+  const pickedKey = JSON.stringify(picked)
   useEffect(() => {
     setPage(1)
-  }, [debouncedSearch, activeOnly])
+  }, [debouncedSearch, activeOnly, pickedKey])
+
+  // Everything that narrows the list, as the API takes it. The list and the
+  // counts are asked the same question, so they can never disagree.
+  const filtersKey = JSON.stringify(filters)
+  const narrowing = useMemo<ListParams>(() => {
+    const params: ListParams = {
+      q: debouncedSearch || undefined,
+      active: activeOnly ? true : undefined,
+      ...filters,
+    }
+    for (const [key, values] of Object.entries(picked)) {
+      if (values.length) params[key] = values.join(',')
+    }
+    return params
+    // Compared by contents: `filters` is an object literal at most call sites.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, activeOnly, pickedKey, filtersKey])
+
+  // Dropdowns fed from another master load their rows once.
+  const filterDefsKey = filterDefs.map((f) => f.key).join()
+  useEffect(() => {
+    let cancelled = false
+    for (const def of filterDefs) {
+      if (!def.optionsFrom) continue
+      masterResource<Row>(def.optionsFrom.resource)
+        .list({ limit: 200, active: true })
+        .then((res) => {
+          if (!cancelled) setFilterRows((prev) => ({ ...prev, [def.key]: res.data }))
+        })
+        .catch(() => {
+          if (!cancelled) setFilterRows((prev) => ({ ...prev, [def.key]: [] }))
+        })
+    }
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterDefsKey])
+
+  // The counts follow the search and every filter; the newest request wins.
+  const facetRequest = useRef(0)
+  const hasFacets = filterDefs.some((f) => f.facet)
+  useEffect(() => {
+    if (!hasFacets) return
+    const id = ++facetRequest.current
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(narrowing)) {
+      if (v !== undefined && v !== '') qs.set(k, String(v))
+    }
+    api
+      .get<{ data: Record<string, Record<string, number>> }>(`/masters/${resource}/facets?${qs}`)
+      .then((res) => {
+        if (id === facetRequest.current) setFacetCounts(res.data)
+      })
+      .catch(() => {
+        // Without counts the dropdowns still filter; they just show no numbers.
+        if (id === facetRequest.current) setFacetCounts({})
+      })
+  }, [narrowing, resource, hasFacets])
+
+  const choicesFor = (def: FilterDef): FilterChoice[] | undefined => {
+    const counts = def.facet && facetCounts ? (facetCounts[def.facet] ?? {}) : undefined
+    const countOf = (value: string, rows: Row[]) =>
+      counts === undefined
+        ? undefined
+        : def.count
+          ? def.count(value, counts, rows)
+          : (counts[value] ?? 0)
+
+    let list: FilterChoice[]
+    if (def.optionsFrom) {
+      const rows = filterRows[def.key]
+      if (!rows) return undefined
+      const { filter, label } = def.optionsFrom
+      list = rows
+        .filter((r) => !filter || filter(r, picked))
+        .map((r) => ({
+          value: String(r.id),
+          label: label ? label(r, picked) : String(r.name ?? r.id),
+          count: countOf(String(r.id), rows),
+        }))
+    } else {
+      list = (def.options ?? []).map((o) => ({ ...o, count: countOf(o.value, []) }))
+    }
+    if (def.noneLabel) list.push({ value: 'none', label: def.noneLabel, count: countOf('none', []) })
+    return list
+  }
+
+  const setFilter = (key: string, values: string[]) =>
+    setPicked((prev) => {
+      const next = { ...prev, [key]: values }
+      for (const def of filterDefs) if (def.dependsOn === key) next[def.key] = []
+      return next
+    })
+
+  // Each ticked choice as a removable chip, named as it is in its list.
+  const chips = filterDefs.flatMap((def) => {
+    const values = picked[def.key] ?? []
+    if (!values.length) return []
+    const choices = choicesFor(def) ?? []
+    return values.map((value) => ({
+      key: def.key,
+      value,
+      text: `${def.label}: ${choices.find((c) => c.value === value)?.label ?? '…'}`,
+    }))
+  })
+  const narrowed = chips.length > 0 || Boolean(debouncedSearch)
 
   // Responses can arrive out of order; only the newest request may render.
   const requestId = useRef(0)
@@ -108,11 +264,9 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
       const res: Paginated<T> = await client.list({
         page,
         limit: rowsPerPage,
-        q: debouncedSearch || undefined,
         sort,
         order,
-        active: activeOnly ? true : undefined,
-        ...filters,
+        ...narrowing,
       })
 
       if (id !== requestId.current) return
@@ -131,10 +285,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     } finally {
       if (id === requestId.current) setLoading(false)
     }
-    // `filters` is an object literal at most call sites, so it is compared by
-    // its contents rather than identity to avoid an endless reload loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, page, rowsPerPage, debouncedSearch, sort, order, activeOnly, JSON.stringify(filters)])
+  }, [client, page, rowsPerPage, sort, order, narrowing])
 
   useEffect(() => {
     void load()
@@ -207,25 +358,85 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
         </div>
       </div>
 
-      <div className="glass-card p-4 flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-60 flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border">
-          <Search size={15} className="text-muted-foreground" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={searchPlaceholder}
-            className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
-          />
+      {/* Raised above the table so an open dropdown lies over it, not under it. */}
+      <div className="glass-card relative z-20 space-y-3 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex h-10 min-w-60 flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+            <Search size={15} className="text-muted-foreground" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={searchPlaceholder}
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          {filterDefs.map((def) => (
+            <FilterMenu
+              key={def.key}
+              label={def.label}
+              choices={choicesFor(def)}
+              selected={picked[def.key] ?? []}
+              onChange={(values) => setFilter(def.key, values)}
+            />
+          ))}
+
+          <label className="ml-1 flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={activeOnly}
+              onChange={(e) => setActiveOnly(e.target.checked)}
+              className="accent-teal-500"
+            />
+            Active only
+          </label>
         </div>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={activeOnly}
-            onChange={(e) => setActiveOnly(e.target.checked)}
-            className="accent-teal-500"
-          />
-          Active only
-        </label>
+
+        {chips.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            {chips.map((c) => (
+              <span
+                key={`${c.key}:${c.value}`}
+                className="border-primary/30 bg-primary/10 inline-flex items-center gap-1 rounded-full border py-0.5 pl-2.5 pr-1 text-xs text-foreground"
+              >
+                {c.text}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setFilter(
+                      c.key,
+                      (picked[c.key] ?? []).filter((v) => v !== c.value),
+                    )
+                  }
+                  className="rounded-full p-0.5 text-muted-foreground hover:text-foreground"
+                  aria-label={`Remove ${c.text}`}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setPicked({})
+                setSearch('')
+              }}
+              className="text-primary text-xs font-medium hover:underline"
+            >
+              Clear all
+            </button>
+          </div>
+        )}
       </div>
 
       {(error || actionError) && (
@@ -281,7 +492,11 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                     colSpan={columns.length + (editable ? 1 : 0)}
                     className="text-center py-10 text-muted-foreground"
                   >
-                    {debouncedSearch ? `No matches for "${debouncedSearch}".` : emptyMessage}
+                    {narrowed
+                      ? `Nothing matches${debouncedSearch ? ` "${debouncedSearch}"` : ''}${
+                          chips.length ? ' with these filters' : ''
+                        }.`
+                      : emptyMessage}
                   </td>
                 </tr>
               )}

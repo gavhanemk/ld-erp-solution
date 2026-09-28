@@ -1,9 +1,18 @@
 'use client'
 
 import { AlertTriangle } from 'lucide-react'
-import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
-import { formatCurrency } from '@/lib/utils'
+
+/**
+ * A rate in full, in Indian grouping: ₹1,290 and ₹0.35, never "₹1.3K". A rate
+ * is typed onto orders from this column, so it has to be the exact figure.
+ */
+const rate = (n: number) =>
+  `₹${n.toLocaleString('en-IN', {
+    minimumFractionDigits: Number.isInteger(n) ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`
 
 interface Item {
   id: string
@@ -31,7 +40,13 @@ const TYPE_LABEL: Record<string, { label: string; cls: string }> = {
 }
 
 const columns: Column<Item>[] = [
-  { key: 'code', header: 'Code', sortable: true, className: 'font-mono text-xs text-teal-400' },
+  // A code is one token; broken over two lines it reads as two.
+  {
+    key: 'code',
+    header: 'Code',
+    sortable: true,
+    className: 'whitespace-nowrap font-mono text-xs text-teal-400',
+  },
   { key: 'name', header: 'Item', sortable: true, className: 'font-medium' },
   {
     key: 'type',
@@ -41,22 +56,24 @@ const columns: Column<Item>[] = [
       return <span className={t.cls}>{t.label}</span>
     },
   },
+  // An item is filed under one category. When that is a sub-category, its
+  // parent is the Category and it is the Sub Category; when it is a main
+  // category, there is no sub-category to show.
   {
     key: 'category',
     header: 'Category',
     render: (i) =>
       i.category ? (
-        i.category.parent ? (
-          <span>
-            <span className="text-muted-foreground">{i.category.parent.name} › </span>
-            {i.category.name}
-          </span>
-        ) : (
-          i.category.name
-        )
+        (i.category.parent?.name ?? i.category.name)
       ) : (
         <span className="text-muted-foreground">—</span>
       ),
+  },
+  {
+    key: 'subCategory',
+    header: 'Sub Category',
+    render: (i) =>
+      i.category?.parent ? i.category.name : <span className="text-muted-foreground">—</span>,
   },
   {
     key: 'uom',
@@ -78,7 +95,7 @@ const columns: Column<Item>[] = [
     sortable: true,
     render: (i) =>
       i.standardRate ? (
-        <span className="font-semibold">{formatCurrency(Number(i.standardRate))}</span>
+        <span className="whitespace-nowrap font-semibold">{rate(Number(i.standardRate))}</span>
       ) : (
         <span className="text-muted-foreground">—</span>
       ),
@@ -89,7 +106,7 @@ const columns: Column<Item>[] = [
     align: 'right',
     render: (i) =>
       i.reorderLevel ? (
-        <span className="inline-flex items-center gap-1 text-xs">
+        <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs">
           <AlertTriangle size={12} className="text-amber-400" />
           {Number(i.reorderLevel).toLocaleString('en-IN')} {i.uom?.symbol ?? ''}
         </span>
@@ -206,6 +223,63 @@ const formFields: FormField[] = [
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new documents' },
 ]
 
+type Row = Record<string, unknown>
+
+/*
+ * Five dropdowns over the list. Each counts what it would leave given the
+ * search and the others, and the sub-category list shows only the children
+ * of the categories ticked (all of them, with their parent named, when none
+ * is).
+ */
+const filterDefs: FilterDef[] = [
+  {
+    key: 'type',
+    label: 'Type',
+    facet: 'type',
+    options: Object.entries(TYPE_LABEL).map(([value, v]) => ({ value, label: v.label })),
+  },
+  {
+    key: 'categoryId',
+    label: 'Category',
+    facet: 'categoryId',
+    optionsFrom: { resource: 'item-categories', filter: (r) => !r.parentId },
+    // A main category's count takes in every item under its sub-categories.
+    count: (id, counts, rows) =>
+      (counts[id] ?? 0) +
+      rows.filter((r) => r.parentId === id).reduce((n, r) => n + (counts[String(r.id)] ?? 0), 0),
+  },
+  {
+    key: 'subCategoryId',
+    label: 'Sub Category',
+    facet: 'categoryId',
+    dependsOn: 'categoryId',
+    optionsFrom: {
+      resource: 'item-categories',
+      filter: (r, picked) =>
+        Boolean(r.parentId) &&
+        (!picked.categoryId?.length || picked.categoryId.includes(String(r.parentId))),
+      // The parent is named only when more than one could be meant.
+      label: (r, picked) => {
+        const parent = (r.parent as Row | null)?.name
+        return parent && picked.categoryId?.length !== 1 ? `${r.name} (${parent})` : String(r.name)
+      },
+    },
+  },
+  {
+    key: 'departmentId',
+    label: 'Department',
+    facet: 'departmentId',
+    noneLabel: 'No department',
+    optionsFrom: { resource: 'departments' },
+  },
+  {
+    key: 'uomId',
+    label: 'Unit',
+    facet: 'uomId',
+    optionsFrom: { resource: 'uoms', label: (r) => `${r.name} (${r.symbol})` },
+  },
+]
+
 export default function ItemsPage() {
   return (
     <MasterTable<Item>
@@ -215,8 +289,9 @@ export default function ItemsPage() {
       columns={columns}
       formFields={formFields}
       formColumns={4}
+      filterDefs={filterDefs}
       defaultSort="name"
-      searchPlaceholder="Search name, code, HSN, description..."
+      searchPlaceholder="Search name, code, HSN, category, department..."
       emptyMessage="No items yet. Add fabric, thread, buttons and other materials here."
     />
   )
