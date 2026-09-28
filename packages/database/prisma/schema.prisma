@@ -646,8 +646,7 @@ model BOM {
   isActive      Boolean   @default(true)
   /// Material only, for one garment at the base size. Deliberately not an
   /// average across the size run: an order is never an equal split of sizes,
-  /// and the split lives on the order rather than here. Lines the customer
-  /// supplies are left out — the mill never pays for that cloth.
+  /// and the split lives on the order rather than here.
   totalCost     Decimal?  @db.Decimal(10, 2)
   /// The sum of the LABOUR rows in costLines. It used to be read off the linked
   /// routing, whose rates were demo figures nobody at the mill had entered.
@@ -707,9 +706,10 @@ model BOMLine {
   effectiveQty     Decimal     @db.Decimal(10, 4)
   unitCost         Decimal?    @db.Decimal(10, 4)
   totalCost        Decimal?    @db.Decimal(10, 4)
-  /// Cut-make-trim: the customer sends this, usually the fabric. It stays on
-  /// the BOM because an order still has to know it is used, but it costs the
-  /// mill nothing and is left out of the BOM's material cost.
+  /// Not used. Added on 28 Sep for a "supplied by customer" tick that was
+  /// taken off the form the same day; nothing reads or writes it, and every
+  /// row is false. Left in place rather than dropped, because dropping it is
+  /// another change to the shared database — see MIGRATION-NOTES.md.
   customerSupplied Boolean     @default(false)
   notes            String?
   sortOrder        Int         @default(0)

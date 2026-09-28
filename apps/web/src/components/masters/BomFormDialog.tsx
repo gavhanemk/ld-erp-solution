@@ -49,8 +49,6 @@ export interface BomLine {
   effectiveQty?: number | string
   unitCost?: number | string | null
   totalCost?: number | string | null
-  /** Sent by the customer (cut-make-trim): listed, but not costed. */
-  customerSupplied?: boolean
   notes?: string | null
   sizes?: BomLineSize[]
   componentItem?: {
@@ -94,7 +92,7 @@ export interface Bom {
   version: string
   status: string
   isActive: boolean
-  /** Material only; lines the customer supplies are left out. */
+  /** Material only. */
   totalCost: string | number | null
   /**
    * The costing below is sent only to people who may approve masters. For
@@ -208,8 +206,6 @@ interface EditLine {
   departmentId: string
   qtyPerUnit: string
   unitCost: string
-  /** The buyer sends this, usually the fabric. Listed, but costed at nothing. */
-  customerSupplied: boolean
   carried: CarriedOver
 }
 
@@ -231,7 +227,6 @@ const emptyLine = (): EditLine => ({
   departmentId: '',
   qtyPerUnit: '',
   unitCost: '',
-  customerSupplied: false,
   carried: nothingCarried,
 })
 
@@ -357,7 +352,6 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             departmentId: l.departmentId ?? '',
             qtyPerUnit: String(l.qtyPerUnit),
             unitCost: l.unitCost != null ? String(l.unitCost) : '',
-            customerSupplied: Boolean(l.customerSupplied),
             carried: {
               component: l.component ?? null,
               wastagePercent: Number(l.wastagePercent ?? 0),
@@ -494,33 +488,30 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
   /**
    * Mirrors the server's costing so the number is on screen before saving: a
-   * blank rate falls back to the item's standard rate, a wastage carried over
-   * from an older line still inflates the consumed quantity, and the customer's
-   * own cloth costs nothing.
+   * blank rate falls back to the item's standard rate, and a wastage carried
+   * over from an older line still inflates the consumed quantity.
    */
   const priceOf = (line: EditLine) => {
     const item = itemsById.get(line.componentItemId)
     const hasItem = Boolean(line.componentItemId)
     const hasQty = line.qtyPerUnit.trim() !== ''
     const typedRate = line.unitCost.trim() !== ''
-    const supplied = line.customerSupplied
     const standardRate = item?.standardRate != null ? Number(item.standardRate) : null
     const qty = Number(line.qtyPerUnit) || 0
     const wastage = line.carried.wastagePercent
-    const rate = supplied ? 0 : typedRate ? Number(line.unitCost) : (standardRate ?? 0)
+    const rate = typedRate ? Number(line.unitCost) : (standardRate ?? 0)
     const effective = round(qty * (1 + wastage / 100), 4)
     return {
       cost: round(effective * rate, 2),
       unit: item?.uom?.symbol ?? '',
       wastage,
       standardRate,
-      supplied,
       hasItem,
       hasQty,
       // What a line still needs. Shown as an amber outline on the box itself, so
       // the row keeps its height instead of growing a line of text beneath it.
       needsQty: hasItem && !hasQty,
-      needsRate: hasItem && !supplied && !typedRate && standardRate === null,
+      needsRate: hasItem && !typedRate && standardRate === null,
       needsProcess: hasItem && !line.departmentId,
     }
   }
@@ -692,7 +683,6 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
         ...(l.departmentId ? { departmentId: l.departmentId } : {}),
         qtyPerUnit: Number(l.qtyPerUnit),
         ...(l.unitCost.trim() !== '' ? { unitCost: Number(l.unitCost) } : {}),
-        customerSupplied: l.customerSupplied,
         wastagePercent: l.carried.wastagePercent,
         ...(l.carried.component ? { component: l.carried.component } : {}),
         ...(l.carried.notes ? { notes: l.carried.notes } : {}),
@@ -974,9 +964,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
           </>,
           <>
             Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as
-            &ldquo;std&rdquo; in the box; an amber outline marks what a line still needs. Tick
-            Customer&apos;s for anything the buyer sends, such as their own fabric — it stays on the
-            list but costs nothing.
+            &ldquo;std&rdquo; in the box; an amber outline marks what a line still needs.
           </>,
         )}
 
@@ -986,11 +974,10 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
           type and row dividers, tighter cells.
         */}
         <div className="overflow-x-auto rounded-lg border border-border bg-card">
-          <table className="w-full min-w-[960px] table-fixed text-sm">
+          <table className="w-full min-w-[860px] table-fixed text-sm">
             <colgroup>
               <col />
               <col className="w-40" />
-              <col className="w-24" />
               {/* Wide enough for 1.7325 beside its unit and the number spinner. */}
               <col className="w-36" />
               <col className="w-32" />
@@ -1002,9 +989,6 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 <th className={cn(th, 'pl-3 text-left')}>Item</th>
                 <th className={cn(th, 'text-left')} title="The department that takes this item from the store">
                   Process
-                </th>
-                <th className={cn(th, 'text-center')} title="Supplied by the customer: listed, but not costed">
-                  Customer&apos;s
                 </th>
                 <th className={cn(th, 'text-right')}>Qty / pc</th>
                 <th className={cn(th, 'text-right')}>
@@ -1088,17 +1072,6 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                         ))}
                       </select>
                     </td>
-                    <td className="px-2 py-2 text-center align-middle">
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 accent-teal-500"
-                        checked={line.customerSupplied}
-                        disabled={frozen}
-                        aria-label={`Line ${index + 1} is supplied by the customer`}
-                        title="Supplied by the customer: listed, but not costed"
-                        onChange={(e) => setLine(index, { customerSupplied: e.target.checked })}
-                      />
-                    </td>
                     <td className="px-2 py-2 align-middle">
                       {/* The unit sits inside the box, where it reads with the figure. */}
                       <div className="relative">
@@ -1138,18 +1111,15 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                           inputMode="decimal"
                           className={cn(field, 'pl-7 text-right tabular-nums', p.needsRate && 'border-accent')}
                           value={line.unitCost}
-                          // The customer's cloth is not bought, so it needs no rate.
-                          disabled={frozen || p.supplied}
+                          disabled={frozen}
                           // "std 178", never a bare "178": a figure that looks
                           // typed is how an empty box got mistaken for a filled one.
-                          placeholder={
-                            p.supplied ? '—' : p.standardRate !== null ? `std ${p.standardRate}` : ''
-                          }
+                          placeholder={p.standardRate !== null ? `std ${p.standardRate}` : ''}
                           aria-label={`Line ${index + 1} rate${p.unit ? ` per ${p.unit}` : ''}`}
                           title={
                             p.needsRate
                               ? 'This item has no standard rate. Type one.'
-                              : p.standardRate !== null && !p.supplied
+                              : p.standardRate !== null
                                 ? `Blank uses the standard rate, ${formatRupees(p.standardRate)}${p.unit ? ` per ${p.unit}` : ''}`
                                 : undefined
                           }
@@ -1159,25 +1129,19 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                     </td>
                     <td className="px-2 py-2 align-middle">
                       <div className={readout}>
-                        {p.supplied ? (
-                          <span className="text-xs text-muted-foreground">Customer&apos;s</span>
-                        ) : (
-                          <>
-                            {p.wastage > 0 && (
-                              // A line saved when wastage was still typed here keeps it,
-                              // so its cost is more than quantity times rate. Said, not hidden.
-                              <span
-                                className="mr-auto text-xs text-accent"
-                                title={`Includes ${p.wastage}% wastage saved on this line earlier`}
-                              >
-                                +{p.wastage}%
-                              </span>
-                            )}
-                            <span className="whitespace-nowrap font-mono text-sm font-semibold text-foreground">
-                              {p.hasItem && p.hasQty ? formatRupees(p.cost) : '—'}
-                            </span>
-                          </>
+                        {p.wastage > 0 && (
+                          // A line saved when wastage was still typed here keeps it,
+                          // so its cost is more than quantity times rate. Said, not hidden.
+                          <span
+                            className="mr-auto text-xs text-accent"
+                            title={`Includes ${p.wastage}% wastage saved on this line earlier`}
+                          >
+                            +{p.wastage}%
+                          </span>
                         )}
+                        <span className="whitespace-nowrap font-mono text-sm font-semibold text-foreground">
+                          {p.hasItem && p.hasQty ? formatRupees(p.cost) : '—'}
+                        </span>
                       </div>
                     </td>
                     <td className="py-2 pl-2 pr-3 align-middle">
@@ -1194,7 +1158,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
             <tfoot>
               <tr className="bg-primary/5">
-                <td colSpan={5} className="py-3 pl-3 pr-2">
+                <td colSpan={4} className="py-3 pl-3 pr-2">
                   <div className="flex items-center justify-between gap-3">
                     <Layers size={16} className="shrink-0 text-primary" />
                     <span className="text-right text-sm font-medium text-primary">

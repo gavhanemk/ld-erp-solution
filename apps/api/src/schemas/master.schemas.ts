@@ -300,8 +300,6 @@ export const bomLineSchema = z.object({
   qtyPerUnit: decimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
-  /** Sent by the customer (cut-make-trim): listed, but left out of the cost. */
-  customerSupplied: z.boolean().optional(),
   notes: optionalText,
   sortOrder: z.number().int().min(0).optional(),
   sizes: z

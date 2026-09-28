@@ -615,8 +615,7 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
             <div>
               <h3 className={sectionTitle}>Material — components ({lines.length})</h3>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                What goes into one piece. The material cost is the total of the Cost column;
-                anything the customer supplies is listed but not costed.
+                What goes into one piece. The material cost is the total of the Cost column.
               </p>
             </div>
 
@@ -692,15 +691,10 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
                             {line.componentItem?.uom?.symbol ?? '—'}
                           </td>
                           <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
-                            {line.customerSupplied && line.unitCost == null ? '—' : formatRupees(line.unitCost)}
+                            {formatRupees(line.unitCost)}
                           </td>
                           <td className={cn(td, 'text-right font-mono font-semibold text-foreground')}>
-                            {line.customerSupplied ? (
-                              // The buyer's own cloth: listed, but the mill pays nothing for it.
-                              <span className="badge-neutral font-sans font-medium">Customer&apos;s</span>
-                            ) : (
-                              formatRupees(line.totalCost)
-                            )}
+                            {formatRupees(line.totalCost)}
                           </td>
                         </tr>
 

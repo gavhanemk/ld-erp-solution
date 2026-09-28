@@ -15,9 +15,12 @@ just its material. The form has three steps, and each step saves before moving o
 
 **How it works:**
 
-- **Materials** is the form as it was, plus a **Customer's** tick per line. Tick
-  it for anything the buyer sends, such as their own fabric in cut-make-trim.
-  The line stays on the BOM, but it costs nothing and needs no rate.
+- **Materials** is the form as it was.
+  - A "supplied by customer" tick per line was added on 28 Sep and removed the
+    same day, on request.
+  - Its database column (`bom_lines.customerSupplied`) was already applied, so it
+    stays. It is unused and always false.
+  - A cut-make-trim BOM therefore costs the customer's fabric like any other line.
 - **Costing** holds two tables:
   - **Labour:** one row per job, in ₹ per piece, with an optional department.
     **Fill from routing** copies in a routing's rated steps as a starting point.
@@ -46,7 +49,6 @@ just its material. The form has three steps, and each step saves before moving o
   price is worked out again from the saved margin.
 - **Copy** carries over the costing rows, the margin and the price, but not who
   priced it.
-- **Approval** no longer asks for a rate on customer-supplied lines.
 - **The AI assistant is unchanged:** it still reports material cost only, so it
   cannot quote a price to someone who may not see one.
 

@@ -831,7 +831,6 @@ type IncomingBomLine = {
   qtyPerUnit: number | string
   wastagePercent?: number
   unitCost?: number | string | null
-  customerSupplied?: boolean
   notes?: string | null
   sortOrder?: number
   sizes?: IncomingBomLineSize[]
@@ -845,9 +844,6 @@ type IncomingBomLine = {
  * An item with no rate anywhere now raises a warning instead of costing at
  * zero. A total that quietly leaves a component out looks exactly like a total
  * that is right, which is the worse of the two failures.
- *
- * A line the customer supplies costs the mill nothing, so it carries no cost
- * and needs no rate — a warning about the buyer's own fabric would be noise.
  *
  * Sizes are a sparse override: a size with no row of its own consumes what the
  * line consumes. That fallback is what keeps a BOM with no size run behaving
@@ -880,16 +876,12 @@ async function priceBomLines(lines: IncomingBomLine[]) {
         : null
     const standard = item.standardRate !== null ? Number(item.standardRate) : null
     const rate = typed ?? standard
-    const supplied = Boolean(line.customerSupplied)
 
-    if (rate === null && !supplied) {
+    if (rate === null) {
       warnings.push({ itemId: item.id, code: item.code, name: item.name })
     }
 
-    // The customer's cloth is costed at nothing. A rate typed against it is
-    // kept, in case somebody wants to know what it would have cost.
-    const unitCost = supplied ? (typed !== null ? round(typed, 4) : null) : round(rate ?? 0, 4)
-    const costRate = supplied ? 0 : (unitCost ?? 0)
+    const unitCost = round(rate ?? 0, 4)
     const effectiveQty = round(qty * factor, 4)
 
     // The line's wastage, not a per-size one: size changes how much cloth a
@@ -901,7 +893,7 @@ async function priceBomLines(lines: IncomingBomLine[]) {
         sizeId: s.sizeId,
         qtyPerUnit: sizeQty,
         effectiveQty: sizeEffective,
-        totalCost: round(sizeEffective * costRate, 2),
+        totalCost: round(sizeEffective * unitCost, 2),
       }
     })
 
@@ -915,8 +907,7 @@ async function priceBomLines(lines: IncomingBomLine[]) {
       unitCost,
       // Worked out from the rounded quantity and the rounded rate, so that
       // Effective x Rate really does come to Cost on the screen.
-      totalCost: round(effectiveQty * costRate, 2),
-      customerSupplied: supplied,
+      totalCost: round(effectiveQty * unitCost, 2),
       notes: line.notes ?? null,
       sortOrder: line.sortOrder ?? index,
       sizes,
@@ -1555,10 +1546,7 @@ router.patch(
 
     // A rate of zero prints as confidently as a real one, so an approval is
     // refused rather than freezing a total that quietly leaves components out.
-    // The customer's own cloth is the exception: it is meant to cost nothing.
-    const rateless = before.lines.filter(
-      (l) => !l.customerSupplied && (l.unitCost === null || Number(l.unitCost) === 0),
-    )
+    const rateless = before.lines.filter((l) => l.unitCost === null || Number(l.unitCost) === 0)
     if (rateless.length > 0) {
       const names = rateless.map((l) => l.componentItem.name).join(', ')
       throw new AppError(
@@ -1769,7 +1757,6 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
             effectiveQty: l.effectiveQty,
             unitCost: l.unitCost,
             totalCost: l.totalCost,
-            customerSupplied: l.customerSupplied,
             notes: l.notes,
             sortOrder: l.sortOrder,
             ...(l.sizes.length > 0

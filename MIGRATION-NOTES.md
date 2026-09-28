@@ -20,7 +20,7 @@ It was dry-run first inside a transaction that was rolled back, then applied wit
 | Table | Change |
 |---|---|
 | `bom` | New `overheadCost`, `costPerPiece`, `marginPercent`, `sellingPrice`, `pricedById`, `pricedAt` |
-| `bom_lines` | New `customerSupplied` (default false): the buyer sends it, so it is listed but costs nothing |
+| `bom_lines` | New `customerSupplied` (default false). **Unused:** the "supplied by customer" tick it was for was removed from the form on the same day, before merging. Every row is false and no code reads it. Dropping it would need another migration |
 | `bom_cost_lines` | New table: a BOM's labour and overhead rows (kind, name, optional department, ₹ per piece or %, the typed value, the worked-out amount) |
 
 Two new enums: `BOMCostKind` (LABOUR, OVERHEAD) and `BOMCostBasis` (PER_PIECE, PERCENT).
