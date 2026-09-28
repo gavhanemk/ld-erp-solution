@@ -8,19 +8,23 @@ import { PrintToolbar } from '@/components/print/PrintSheet'
 import { money, qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
 
 /**
- * The printed purchase enquiry.
+ * The printed purchase enquiry — a request for quotation.
  *
- * Two documents on one sheet, decided by `?quote=`:
+ * One document, and it goes out. Our letterhead, what we want and how much of
+ * it, an empty Rate and GST column for the supplier to fill in, a ruled block
+ * for the facts we need back, and both signatures. There is no second version
+ * and nothing on it that cannot be handed to anybody: print it once and send
+ * the same sheet to four suppliers.
  *
- *   **A supplier's copy** is what goes out. It is addressed to him, carries the
- *   quantities with an empty Rate column for him to fill in, and ends with a
- *   ruled block for the four facts the mill needs back. It shows nothing about
- *   any other supplier: sending a man a sheet with his competitors' names on it
- *   is not a way to get a keen price.
+ * `?quote=<id>` only addresses it. With one, the To block carries that
+ * supplier's name and, once his proforma is recorded, his own rates — which is
+ * the copy filed beside the order. Without one the To block is a ruled line to
+ * write a name on, the way an enquiry pad has always worked.
  *
- *   **The mill's working copy** is what the buyer files. Every supplier asked,
- *   what each of them answered, and which was lowest. Never sent to anybody,
- *   and it says so on its face.
+ * What it deliberately does **not** carry is who else was asked or what they
+ * said. That comparison is the buyer's, it lives on the Compare panel in the
+ * app, and a sheet that goes to a supplier with his competitors' names and
+ * totals on it is not a way to get a keen price out of him.
  *
  * The palette is the one the purchase order and the bill already print in —
  * navy masthead, tinted section bars, a filled navy line-grid head. They share
@@ -275,7 +279,7 @@ export default function PurchaseEnquiryPrintPage() {
                 }}
               >
                 <FileText size={15} />
-                Purchase Enquiry{forQuote ? '' : ' — Office Copy'}
+                Purchase Enquiry
               </div>
               <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <tbody>
@@ -287,8 +291,12 @@ export default function PurchaseEnquiryPrintPage() {
                     value={e.requiredDate ? shortDate(e.requiredDate) : '—'}
                     mono
                   />
+                  {/* Which of the mill's stores it is for was here and is
+                    not any more. It is ours, not his — he delivers where the
+                    purchase order tells him to, and until there is an order
+                    there is nothing to tell him. On a sheet that goes out it
+                    was a fifth row saying nothing to the man reading it. */}
                   <MetaRow i={3} label="Reference" value={e.reference || '—'} mono />
-                  <MetaRow i={4} label="Location" value={e.location?.name ?? 'Head office'} />
                 </tbody>
               </table>
             </div>
@@ -297,8 +305,13 @@ export default function PurchaseEnquiryPrintPage() {
           {/* The rule that separates who we are from what we are asking. */}
           <div style={{ height: 2, background: NAVY, margin: '22px 0 0', borderRadius: 2 }} />
 
-          {/* ── Who it is to ─────────────────────────────────────────────── */}
-          <Panel icon={Users} title={forQuote ? 'To' : 'Suppliers asked'}>
+          {/* ── Who it is to ───────────────────────────────────────────────
+            Named where we are printing one supplier's copy, and a line to
+            write a name on where we are not. The enquiry goes to three or
+            four of them and is printed once; whoever it is handed to writes
+            their own name on it, which is what an enquiry pad has always
+            done. */}
+          <Panel icon={Users} title="To">
             {forQuote ? (
               <div style={{ padding: '13px 16px' }}>
                 <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: NAVY }}>
@@ -310,57 +323,19 @@ export default function PurchaseEnquiryPrintPage() {
                 </p>
               </div>
             ) : (
-              /* The office copy names everybody and what each of them said.
-                 This is the sheet the buyer defends the choice with months
-                 later, so the losing quotes belong on it. */
-              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ color: GREY, borderBottom: '1px solid ' + RULE_SOFT }}>
-                    <th style={{ textAlign: 'left', padding: '9px 16px', fontWeight: 500 }}>
-                      Supplier
-                    </th>
-                    <th style={{ textAlign: 'left', padding: '9px 8px', fontWeight: 500 }}>PI</th>
-                    <th style={{ textAlign: 'right', padding: '9px 8px', fontWeight: 500 }}>
-                      Total
-                    </th>
-                    <th style={{ textAlign: 'left', padding: '9px 16px', fontWeight: 500 }}>
-                      Holds to
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {e.quotes.map((q, i) => {
-                    const won = e.best?.quoteId === q.id && !q.declinedAt
-                    return (
-                      <tr
-                        key={q.id}
-                        style={{
-                          background: i % 2 ? 'rgba(255,255,255,0.45)' : '#fff',
-                          borderBottom:
-                            i === e.quotes.length - 1 ? 'none' : '1px solid ' + RULE_SOFT,
-                        }}
-                      >
-                        <td style={{ padding: '9px 16px', fontWeight: 700, color: NAVY }}>
-                          {q.supplier.name}
-                          {won && <span style={{ fontWeight: 400, color: SOFT }}> - lowest</span>}
-                          {q.declinedAt && (
-                            <span style={{ fontWeight: 400, color: SOFT }}> - passed over</span>
-                          )}
-                        </td>
-                        <td style={{ padding: '9px 8px', fontFamily: 'monospace', color: INK }}>
-                          {q.piNumber ?? '—'}
-                        </td>
-                        <td style={{ padding: '9px 8px', textAlign: 'right', ...NUM }}>
-                          {q.answered ? '₹' + money(q.piAmount ?? q.value) : '—'}
-                        </td>
-                        <td style={{ padding: '9px 16px', ...NUM }}>
-                          {q.piValidUntil ? shortDate(q.piValidUntil) : '—'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+              <div style={{ padding: '14px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10 }}>
+                  <span style={{ fontSize: 13, color: GREY, flexShrink: 0 }}>M/s</span>
+                  <span
+                    style={{ flex: 1, borderBottom: '1px solid ' + RULE, height: 20 }}
+                    aria-hidden
+                  />
+                </div>
+                <p style={{ margin: '11px 0 0', fontSize: 11.5, color: GREY }}>
+                  Kindly quote your best rate for the items below, and say how long you will hold
+                  it.
+                </p>
+              </div>
             )}
           </Panel>
 
@@ -445,29 +420,28 @@ export default function PurchaseEnquiryPrintPage() {
                     </tr>
                   )
                 })}
-                {/* Ruled blank rows, on the supplier's copy only.
-                  A two-line enquiry printed as a two-line table reads as a
-                  torn-off stub, and a supplier being asked to write rates into
-                  it needs the room to write them. The office copy is read, not
-                  written on: four empty numbered rows under the two real ones
-                  said the enquiry was unfinished when it was complete. */}
-                {forQuote &&
-                  Array.from({ length: Math.max(0, 6 - e.lines.length) }).map((_, i) => (
-                    <tr
-                      key={'pad' + i}
-                      style={{
-                        background: (e.lines.length + i) % 2 ? TINT_SOFT : '#fff',
-                        borderBottom: '1px solid ' + RULE_SOFT,
-                      }}
-                    >
-                      <td style={{ padding: '10px 14px', color: SOFT, ...NUM }}>
-                        {e.lines.length + i + 1}
-                      </td>
-                      <td colSpan={5} style={{ padding: '10px 8px' }}>
-                        &nbsp;
-                      </td>
-                    </tr>
-                  ))}
+                {/* Ruled blank rows to a minimum depth.
+                  Every copy of this sheet is now a copy somebody is asked to
+                  write rates into, and a two-line enquiry printed as a two-line
+                  table reads as a torn-off stub. They were briefly held back
+                  from the office copy, which was read rather than written on —
+                  there is no office copy any more. */}
+                {Array.from({ length: Math.max(0, 6 - e.lines.length) }).map((_, i) => (
+                  <tr
+                    key={'pad' + i}
+                    style={{
+                      background: (e.lines.length + i) % 2 ? TINT_SOFT : '#fff',
+                      borderBottom: '1px solid ' + RULE_SOFT,
+                    }}
+                  >
+                    <td style={{ padding: '10px 14px', color: SOFT, ...NUM }}>
+                      {e.lines.length + i + 1}
+                    </td>
+                    <td colSpan={5} style={{ padding: '10px 8px' }}>
+                      &nbsp;
+                    </td>
+                  </tr>
+                ))}
               </tbody>
               <tfoot>
                 <tr style={{ background: TINT_SOFT, fontWeight: 700, color: NAVY }}>
@@ -486,21 +460,19 @@ export default function PurchaseEnquiryPrintPage() {
             The point of the supplier's copy. A form that asks a man for five
             facts and leaves him nowhere to write them gets them back on his own
             letterhead in his own order, which is how a comparison stops being
-            comparable. Never on the office copy: the mill is not quoting
-            itself. */}
-          {forQuote && (
-            <Panel icon={Pencil} title="Your quotation">
-              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-                <tbody>
-                  <ReplyRow i={0} label="Your PI / quotation no." />
-                  <ReplyRow i={1} label="Price held until" />
-                  <ReplyRow i={2} label="Delivery in (days)" />
-                  <ReplyRow i={3} label="Payment terms" />
-                  <ReplyRow i={4} label="Freight / packing" />
-                </tbody>
-              </table>
-            </Panel>
-          )}
+            comparable. It is the point of the sheet, so it is on every copy
+            of it. */}
+          <Panel icon={Pencil} title="Your quotation">
+            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+              <tbody>
+                <ReplyRow i={0} label="Your PI / quotation no." />
+                <ReplyRow i={1} label="Price held until" />
+                <ReplyRow i={2} label="Delivery in (days)" />
+                <ReplyRow i={3} label="Payment terms" />
+                <ReplyRow i={4} label="Freight / packing" />
+              </tbody>
+            </table>
+          </Panel>
 
           {/* Said on the paper, not only on the screen. A supplier holding a
             sheet that looks like an order will treat it as one. */}
@@ -520,9 +492,8 @@ export default function PurchaseEnquiryPrintPage() {
           >
             <FileText size={15} style={{ marginTop: 1, flexShrink: 0, color: SOFT }} />
             <span>
-              {forQuote
-                ? 'This is an enquiry, not a purchase order. It places no order and commits neither party. Please quote your rate, your GST and how long you will hold the price.'
-                : 'Office copy. Not to be sent to any supplier.'}
+              This is an enquiry, not a purchase order. It places no order and commits neither
+              party. Please quote your rate, your GST and how long you will hold the price.
             </span>
           </div>
 
@@ -547,16 +518,15 @@ export default function PurchaseEnquiryPrintPage() {
               </div>
 
               {/* Both sides sign a sheet that is going out, because what comes
-                back is his quotation and needs his name on it. The office copy
-                signs once — there is nobody else in the room. */}
+                back is his quotation and needs his name on it. Named where we
+                know who he is, "For (supplier)" where we do not — a blank over
+                the line is what he signs above either way. */}
               {showSignature && (
                 <div style={{ display: 'flex', gap: 28, flexShrink: 0 }}>
-                  {forQuote && (
-                    <Sign
-                      name={'For ' + forQuote.supplier.name}
-                      caption={'Signature & seal · Date'}
-                    />
-                  )}
+                  <Sign
+                    name={'For ' + (forQuote ? forQuote.supplier.name : 'the supplier')}
+                    caption={'Signature & seal · Date'}
+                  />
                   <Sign name={'For ' + co.name} caption="Authorised signatory" />
                 </div>
               )}
@@ -580,7 +550,7 @@ export default function PurchaseEnquiryPrintPage() {
           >
             <span>
               {e.enquiryNumber}
-              {forQuote ? ' · ' + forQuote.supplier.name : ' · office copy'}
+              {forQuote ? ' · ' + forQuote.supplier.name : ''}
             </span>
             <span>{data.template?.footerNote || co.name}</span>
           </div>
