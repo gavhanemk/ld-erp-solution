@@ -1917,20 +1917,24 @@ export function PurchaseOrderDialog({
         ) : (
           <SaveIcon size={15} />
         )}
-        Save as draft
+        {/* Short on a phone, so the three choices share one row. */}
+        <span className="sm:hidden">Draft</span>
+        <span className="hidden sm:inline">Save as draft</span>
       </button>
       <button
         type="button"
         onClick={() => void save('print')}
         className="btn-secondary"
         disabled={busy || incomplete}
+        title="Save and print"
       >
         {saving === 'print' ? (
           <Loader2 size={15} className="animate-spin" />
         ) : (
           <Printer size={15} />
         )}
-        Save and print
+        <span className="sm:hidden">Print</span>
+        <span className="hidden sm:inline">Save and print</span>
       </button>
       {primarySave}
     </>
@@ -2065,16 +2069,16 @@ export function PurchaseOrderDialog({
               </div>
             )}
             <Section icon={FileText} title="Basic Details">
-              {/* `auto-fit`, not a fixed two columns, so each pairs with
-                the field beside it instead of stacking six deep on a
-                phone — where it's going with who it's from, which order
-                this is with when — but a track that cannot hold a date
-                input drops to one column instead of clipping it to
-                "dd-m". `order` moves them back into the desktop's three
+              {/* `auto-fit`, not a fixed two columns: fields pair up only
+                while each box is 160px or more, and drop to one column
+                below that. At 105px a phone paired them and clipped the
+                location and supplier pickers to "Head offic" and "Choose
+                su" — stacking is longer, but every box says what is in it.
+                `order` moves them back into the desktop's three
                 grouped rows (location/number/date, then supplier/
                 reference/remark) without changing the DOM, so tab order
                 still matches what is on screen at every width. */}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-x-4 gap-y-3 md:grid-cols-3">
                 <div className="order-1 md:order-1">
                   <label className="form-label" htmlFor="po-location">
                     Location
@@ -3756,9 +3760,9 @@ export function PurchaseOrderDialog({
           </div>
 
           {/* Footer — stays put, so Save never has to be hunted for at the bottom of a long form */}
-          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-3 border-t px-5 py-3.5">
+          <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
             {incomplete && (
-              <p className="warn-text mr-auto flex max-w-xl items-start gap-1.5 text-xs">
+              <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
                 <AlertCircle size={13} className="mt-px shrink-0" />
                 <span>
                   {!supplierId
@@ -3781,7 +3785,14 @@ export function PurchaseOrderDialog({
                 </span>
               </p>
             )}
-            <button type="button" onClick={onClose} className="btn-secondary" disabled={busy}>
+            {/* Not on a phone: the ✕ in the header closes the form, and the
+              row is kept for the three ways to save. */}
+            <button
+              type="button"
+              onClick={onClose}
+              className="btn-secondary hidden sm:inline-flex"
+              disabled={busy}
+            >
               Cancel
             </button>
             {saveActions}

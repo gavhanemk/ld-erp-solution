@@ -349,199 +349,346 @@ export default function PurchaseReturnsPage() {
             </p>
           </div>
         ) : (
-          <div className="w-full overflow-x-auto">
-            <table className="data-table table-compact w-full">
-              <thead>
-                <tr className="bg-secondary">
-                  <th style={{ width: 30 }} />
-                  <th className="whitespace-nowrap">Challan</th>
-                  <th className="whitespace-nowrap">Date</th>
-                  <th className="whitespace-nowrap">Supplier</th>
-                  <th className="whitespace-nowrap">Against bill</th>
-                  <th className="whitespace-nowrap">Reason</th>
-                  <th className="whitespace-nowrap">Vehicle</th>
-                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
-                    Items
-                  </th>
-                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
-                    Value
-                  </th>
-                  <th className="whitespace-nowrap">Debit note</th>
-                  <th className="whitespace-nowrap">Status</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const s = STATUS[r.status]
-                  const expanded = open === r.id
-                  return (
-                    <Fragment key={r.id}>
-                      <tr className={expanded ? 'bg-secondary/30' : undefined}>
-                        <td>
-                          <button
-                            type="button"
-                            onClick={() => setOpen(expanded ? null : r.id)}
-                            className="btn-ghost p-1"
-                            aria-expanded={expanded}
-                            aria-label={`${expanded ? 'Hide' : 'Show'} items on ${r.returnNumber}`}
-                          >
-                            {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                          </button>
-                        </td>
-                        <td>
+          <div className="list-scope">
+            {/* ── On a phone, not a table ──────────────────────────────────
+              The same switch every purchase list makes: under 700px of list
+              each challan is a block, so nothing has to be dragged sideways
+              to reach the value or the actions. */}
+            <div className="list-cards divide-border divide-y">
+              {rows.map((r) => {
+                const s = STATUS[r.status]
+                const expanded = open === r.id
+                return (
+                  <div key={r.id} className="p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
                           <a
                             href={'/print/purchase-return/' + r.id}
                             target="_blank"
                             rel="noreferrer"
-                            className="whitespace-nowrap font-mono text-xs font-semibold text-teal-400 hover:underline"
+                            className="font-mono text-xs font-semibold text-teal-400 underline-offset-2 hover:underline"
                             title={'Open the gate pass for ' + r.returnNumber}
                           >
                             {r.returnNumber}
                           </a>
-                        </td>
-                        <td className="whitespace-nowrap text-xs">{day(r.returnDate)}</td>
-                        <td className="max-w-[12rem] truncate text-sm">{r.supplier.name}</td>
-                        <td className="whitespace-nowrap">
-                          <Link
-                            href={'/purchase/bills?q=' + encodeURIComponent(r.bill.billNumber)}
-                            className="text-primary font-mono text-xs hover:underline"
-                          >
-                            {r.bill.billNumber}
-                          </Link>
-                          {r.bill.supplierInvoiceNo && (
-                            <p className="text-muted-foreground font-mono text-[10px]">
-                              theirs {r.bill.supplierInvoiceNo}
-                            </p>
-                          )}
-                        </td>
-                        <td className="max-w-[11rem] truncate text-xs" title={r.reasonNote ?? ''}>
-                          {r.reasonLabel}
-                        </td>
-                        <td className="whitespace-nowrap font-mono text-xs">
-                          {r.vehicleNo || <span className="text-muted-foreground/60">—</span>}
-                        </td>
-                        <td className="text-xs tabular-nums" style={{ textAlign: 'right' }}>
-                          {r.lines.length}
-                        </td>
-                        <td
-                          className="whitespace-nowrap text-sm font-medium tabular-nums"
-                          style={{ textAlign: 'right' }}
-                        >
-                          ₹{money(r.totalValue)}
-                        </td>
-                        <td className="whitespace-nowrap">
-                          {r.debitNotes.length === 0 ? (
-                            <span className="text-muted-foreground/60 text-xs">—</span>
-                          ) : (
-                            r.debitNotes.map((n) => (
-                              <div key={n.id} className="flex items-center gap-1.5">
-                                <Link
-                                  href={
-                                    '/purchase/debit-notes?q=' + encodeURIComponent(n.noteNumber)
-                                  }
-                                  className="text-primary font-mono text-xs hover:underline"
-                                >
-                                  {n.noteNumber}
-                                </Link>
-                                <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
-                                  {NOTE_STATUS[n.status]?.label ?? n.status}
-                                </span>
-                              </div>
-                            ))
-                          )}
-                        </td>
-                        <td>
                           <span className={s.cls} title={r.cancelReason ?? undefined}>
                             {s.label}
                           </span>
-                        </td>
-                        <td>
-                          <ActionMenu label={`Actions for ${r.returnNumber}`} items={actions(r)} />
-                        </td>
-                      </tr>
-                      {expanded && (
-                        <tr>
-                          <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
-                            <RowPanel
-                              icon={FileText}
-                              title="Items Returned"
-                              note={`${r.lines.length} ${
-                                r.lines.length === 1 ? 'line' : 'lines'
-                              } on ${r.returnNumber}`}
+                        </div>
+                        <p className="text-foreground mt-1 font-medium leading-snug">
+                          {r.supplier.name}
+                        </p>
+                      </div>
+                      <span className="text-foreground shrink-0 text-right font-semibold tabular-nums">
+                        ₹{money(r.totalValue)}
+                      </span>
+                    </div>
+
+                    <dl className="mt-2.5 grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-muted-foreground">Date</dt>
+                      <dd className="text-foreground min-w-0">{day(r.returnDate)}</dd>
+                      <dt className="text-muted-foreground">Against bill</dt>
+                      <dd className="min-w-0">
+                        <Link
+                          href={'/purchase/bills?q=' + encodeURIComponent(r.bill.billNumber)}
+                          className="text-primary font-mono hover:underline"
+                        >
+                          {r.bill.billNumber}
+                        </Link>
+                        {r.bill.supplierInvoiceNo && (
+                          <span className="text-muted-foreground font-mono">
+                            {' '}
+                            · theirs {r.bill.supplierInvoiceNo}
+                          </span>
+                        )}
+                      </dd>
+                      <dt className="text-muted-foreground">Reason</dt>
+                      <dd className="text-foreground min-w-0">
+                        {r.reasonLabel}
+                        {r.reasonNote && (
+                          <span className="text-muted-foreground"> — {r.reasonNote}</span>
+                        )}
+                      </dd>
+                      <dt className="text-muted-foreground">Vehicle</dt>
+                      <dd className="text-foreground min-w-0 font-mono">
+                        {r.vehicleNo || <span className="text-muted-foreground">—</span>}
+                      </dd>
+                      <dt className="text-muted-foreground">Debit note</dt>
+                      <dd className="min-w-0">
+                        {r.debitNotes.length === 0 ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          r.debitNotes.map((n) => (
+                            <span key={n.id} className="mr-2 inline-flex items-center gap-1.5">
+                              <Link
+                                href={'/purchase/debit-notes?q=' + encodeURIComponent(n.noteNumber)}
+                                className="text-primary font-mono hover:underline"
+                              >
+                                {n.noteNumber}
+                              </Link>
+                              <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
+                                {NOTE_STATUS[n.status]?.label ?? n.status}
+                              </span>
+                            </span>
+                          ))
+                        )}
+                      </dd>
+                    </dl>
+
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        onClick={() => setOpen(expanded ? null : r.id)}
+                        className="bg-primary/10 text-primary hover:bg-primary/20 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors"
+                        aria-expanded={expanded}
+                      >
+                        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {expanded ? 'Hide items' : `Items returned (${r.lines.length})`}
+                      </button>
+                      <ActionMenu label={`Actions for ${r.returnNumber}`} items={actions(r)} />
+                    </div>
+
+                    {expanded && (
+                      <div className="border-border bg-secondary/40 divide-border/60 mt-2.5 max-h-[22rem] divide-y overflow-y-auto rounded-lg border">
+                        {r.lines.map((l) => (
+                          <div key={l.id} className="flex items-start justify-between gap-3 p-2.5">
+                            <div className="min-w-0">
+                              <p className="text-xs font-medium">{l.item.name}</p>
+                              <p className="text-muted-foreground mt-0.5 text-[10px]">
+                                <span className="font-mono">{l.item.code}</span>
+                                {' · '}from {l.warehouse.name}
+                                {l.billLine.grnLine && (
+                                  <>
+                                    {' · '}
+                                    <span className="font-mono">
+                                      {l.billLine.grnLine.grn.grnNumber}
+                                    </span>
+                                  </>
+                                )}
+                              </p>
+                              {l.remarks && (
+                                <p className="text-muted-foreground mt-0.5 text-[10px]">
+                                  {l.remarks}
+                                </p>
+                              )}
+                            </div>
+                            <div className="shrink-0 text-right text-xs tabular-nums">
+                              <p>
+                                {qty(l.qty)}{' '}
+                                <span className="text-muted-foreground text-[10px]">
+                                  {l.item.uom?.symbol}
+                                </span>
+                              </p>
+                              <p className="text-muted-foreground text-[10px]">
+                                ₹{money(Number(l.qty) * Number(l.unitPrice))}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="list-rows w-full overflow-x-auto">
+              <table className="data-table table-compact w-full">
+                <thead>
+                  <tr className="bg-secondary">
+                    <th style={{ width: 30 }} />
+                    <th className="whitespace-nowrap">Challan</th>
+                    <th className="whitespace-nowrap">Date</th>
+                    <th className="whitespace-nowrap">Supplier</th>
+                    <th className="whitespace-nowrap">Against bill</th>
+                    <th className="whitespace-nowrap">Reason</th>
+                    <th className="whitespace-nowrap">Vehicle</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Items
+                    </th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                      Value
+                    </th>
+                    <th className="whitespace-nowrap">Debit note</th>
+                    <th className="whitespace-nowrap">Status</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    const s = STATUS[r.status]
+                    const expanded = open === r.id
+                    return (
+                      <Fragment key={r.id}>
+                        <tr className={expanded ? 'bg-secondary/30' : undefined}>
+                          <td>
+                            <button
+                              type="button"
+                              onClick={() => setOpen(expanded ? null : r.id)}
+                              className="btn-ghost p-1"
+                              aria-expanded={expanded}
+                              aria-label={`${expanded ? 'Hide' : 'Show'} items on ${r.returnNumber}`}
                             >
-                              <table className="subtable w-full table-fixed">
-                                <thead className="sticky top-0 z-10">
-                                  <tr>
-                                    {[
-                                      ['Item code', '12%', false],
-                                      ['Item', '26%', false],
-                                      ['HSN', '8%', false],
-                                      ['Received on', '11%', false],
-                                      ['From godown', '15%', false],
-                                      ['Qty', '10%', true],
-                                      ['Rate', '9%', true],
-                                      ['Value', '9%', true],
-                                    ].map(([h, w, right]) => (
-                                      <th
-                                        key={String(h)}
-                                        style={{ width: String(w) }}
-                                        className={right ? 'text-right' : undefined}
-                                      >
-                                        {h}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {r.lines.map((l) => (
-                                    <tr
-                                      key={l.id}
-                                      className="border-border/40 border-b last:border-0"
-                                    >
-                                      <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
-                                        {l.item.code}
-                                      </td>
-                                      <td className="px-3 py-1.5">
-                                        <p className="text-xs">{l.item.name}</p>
-                                        {l.remarks && (
-                                          <p className="text-muted-foreground text-[10px]">
-                                            {l.remarks}
-                                          </p>
-                                        )}
-                                      </td>
-                                      <td className="text-muted-foreground px-3 py-1.5 text-xs">
-                                        {l.billLine.hsnCode ?? '—'}
-                                      </td>
-                                      <td className="text-muted-foreground px-3 py-1.5 font-mono text-xs">
-                                        {l.billLine.grnLine?.grn.grnNumber ?? '—'}
-                                      </td>
-                                      <td className="px-3 py-1.5 text-xs">{l.warehouse.name}</td>
-                                      <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                        {qty(l.qty)}
-                                        <span className="text-muted-foreground ml-1 text-[10px]">
-                                          {l.item.uom?.symbol}
-                                        </span>
-                                      </td>
-                                      <td className="text-muted-foreground px-3 py-1.5 text-right text-xs tabular-nums">
-                                        {money(l.unitPrice)}
-                                      </td>
-                                      <td className="px-3 py-1.5 text-right text-xs tabular-nums">
-                                        {money(Number(l.qty) * Number(l.unitPrice))}
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </RowPanel>
+                              {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                            </button>
+                          </td>
+                          <td>
+                            <a
+                              href={'/print/purchase-return/' + r.id}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="whitespace-nowrap font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              title={'Open the gate pass for ' + r.returnNumber}
+                            >
+                              {r.returnNumber}
+                            </a>
+                          </td>
+                          <td className="whitespace-nowrap text-xs">{day(r.returnDate)}</td>
+                          <td className="max-w-[12rem] truncate text-sm">{r.supplier.name}</td>
+                          <td className="whitespace-nowrap">
+                            <Link
+                              href={'/purchase/bills?q=' + encodeURIComponent(r.bill.billNumber)}
+                              className="text-primary font-mono text-xs hover:underline"
+                            >
+                              {r.bill.billNumber}
+                            </Link>
+                            {r.bill.supplierInvoiceNo && (
+                              <p className="text-muted-foreground font-mono text-[10px]">
+                                theirs {r.bill.supplierInvoiceNo}
+                              </p>
+                            )}
+                          </td>
+                          <td className="max-w-[11rem] truncate text-xs" title={r.reasonNote ?? ''}>
+                            {r.reasonLabel}
+                          </td>
+                          <td className="whitespace-nowrap font-mono text-xs">
+                            {r.vehicleNo || <span className="text-muted-foreground/60">—</span>}
+                          </td>
+                          <td className="text-xs tabular-nums" style={{ textAlign: 'right' }}>
+                            {r.lines.length}
+                          </td>
+                          <td
+                            className="whitespace-nowrap text-sm font-medium tabular-nums"
+                            style={{ textAlign: 'right' }}
+                          >
+                            ₹{money(r.totalValue)}
+                          </td>
+                          <td className="whitespace-nowrap">
+                            {r.debitNotes.length === 0 ? (
+                              <span className="text-muted-foreground/60 text-xs">—</span>
+                            ) : (
+                              r.debitNotes.map((n) => (
+                                <div key={n.id} className="flex items-center gap-1.5">
+                                  <Link
+                                    href={
+                                      '/purchase/debit-notes?q=' + encodeURIComponent(n.noteNumber)
+                                    }
+                                    className="text-primary font-mono text-xs hover:underline"
+                                  >
+                                    {n.noteNumber}
+                                  </Link>
+                                  <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
+                                    {NOTE_STATUS[n.status]?.label ?? n.status}
+                                  </span>
+                                </div>
+                              ))
+                            )}
+                          </td>
+                          <td>
+                            <span className={s.cls} title={r.cancelReason ?? undefined}>
+                              {s.label}
+                            </span>
+                          </td>
+                          <td>
+                            <ActionMenu
+                              label={`Actions for ${r.returnNumber}`}
+                              items={actions(r)}
+                            />
                           </td>
                         </tr>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
+                        {expanded && (
+                          <tr>
+                            <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <RowPanel
+                                icon={FileText}
+                                title="Items Returned"
+                                note={`${r.lines.length} ${
+                                  r.lines.length === 1 ? 'line' : 'lines'
+                                } on ${r.returnNumber}`}
+                              >
+                                <table className="subtable w-full table-fixed">
+                                  <thead className="sticky top-0 z-10">
+                                    <tr>
+                                      {[
+                                        ['Item code', '12%', false],
+                                        ['Item', '26%', false],
+                                        ['HSN', '8%', false],
+                                        ['Received on', '11%', false],
+                                        ['From godown', '15%', false],
+                                        ['Qty', '10%', true],
+                                        ['Rate', '9%', true],
+                                        ['Value', '9%', true],
+                                      ].map(([h, w, right]) => (
+                                        <th
+                                          key={String(h)}
+                                          style={{ width: String(w) }}
+                                          className={right ? 'text-right' : undefined}
+                                        >
+                                          {h}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {r.lines.map((l) => (
+                                      <tr
+                                        key={l.id}
+                                        className="border-border/40 border-b last:border-0"
+                                      >
+                                        <td className="text-muted-foreground whitespace-nowrap px-3 py-1.5 font-mono text-xs">
+                                          {l.item.code}
+                                        </td>
+                                        <td className="px-3 py-1.5">
+                                          <p className="text-xs">{l.item.name}</p>
+                                          {l.remarks && (
+                                            <p className="text-muted-foreground text-[10px]">
+                                              {l.remarks}
+                                            </p>
+                                          )}
+                                        </td>
+                                        <td className="text-muted-foreground px-3 py-1.5 text-xs">
+                                          {l.billLine.hsnCode ?? '—'}
+                                        </td>
+                                        <td className="text-muted-foreground px-3 py-1.5 font-mono text-xs">
+                                          {l.billLine.grnLine?.grn.grnNumber ?? '—'}
+                                        </td>
+                                        <td className="px-3 py-1.5 text-xs">{l.warehouse.name}</td>
+                                        <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                          {qty(l.qty)}
+                                          <span className="text-muted-foreground ml-1 text-[10px]">
+                                            {l.item.uom?.symbol}
+                                          </span>
+                                        </td>
+                                        <td className="text-muted-foreground px-3 py-1.5 text-right text-xs tabular-nums">
+                                          {money(l.unitPrice)}
+                                        </td>
+                                        <td className="px-3 py-1.5 text-right text-xs tabular-nums">
+                                          {money(Number(l.qty) * Number(l.unitPrice))}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </RowPanel>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 

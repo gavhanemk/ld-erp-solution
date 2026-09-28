@@ -580,9 +580,12 @@ export function PurchaseEnquiryDialog({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            {/* Desktop only, as on Receive goods: on a phone the footer
+              already has it, and a second copy here squeezed the title to
+              "New Pur…". */}
             <button
               type="button"
-              className="btn-primary"
+              className="btn-primary hidden md:inline-flex"
               onClick={save}
               disabled={saving || problems.length > 0}
             >
@@ -617,8 +620,10 @@ export function PurchaseEnquiryDialog({
               Every one of them is a date, a code or a line — nothing here holds
               a sentence — so three columns spent half the width on whitespace
               and pushed the item table, which is the part being worked on,
-              below the fold. Three columns on a tablet, two on a phone. */}
-            <div className="grid grid-cols-2 gap-x-3 gap-y-2 md:grid-cols-3 xl:grid-cols-6">
+              below the fold. Three columns on a tablet; on a phone, side by side only
+              while each box is 160px or more — any narrower and the location and
+              reference boxes clip to "Head offic" and "Job no, indent sli". */}
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-x-3 gap-y-2 md:grid-cols-3 xl:grid-cols-6">
               <div>
                 <label className="form-label" htmlFor="enq-location">
                   Location
