@@ -857,9 +857,22 @@ async function assertBomRefsExist(
 const bomName = (styleCode: string, color: string | null | undefined) =>
   color ? `${styleCode} in ${color}` : styleCode
 
-const versionClash = (styleCode: string, color: string | null | undefined, version: string) =>
+/**
+ * `typed` is false when no version was sent and 1.0 was assumed. The BOM form
+ * no longer asks for a version, so "give this one a different version" would be
+ * advice with nowhere to act on it — and a second BOM for one colour is meant
+ * to start as a copy anyway.
+ */
+const versionClash = (
+  styleCode: string,
+  color: string | null | undefined,
+  version: string,
+  typed = true,
+) =>
   new AppError(
-    `${bomName(styleCode, color)} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`,
+    typed
+      ? `${bomName(styleCode, color)} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`
+      : `${bomName(styleCode, color)} already has a BOM. To start a new version, copy that one from the BOM list.`,
     409,
     'BOM_VERSION_EXISTS',
   )
@@ -873,6 +886,7 @@ function rethrowVersionClash(
   styleCode: string,
   color: string | null | undefined,
   version: string,
+  typed = true,
 ): never {
   const code = (err as { code?: string }).code
   const target = (err as { meta?: { target?: unknown } }).meta?.target
@@ -880,7 +894,7 @@ function rethrowVersionClash(
     ? target.includes('version')
     : String(target ?? '').includes('version')
 
-  if (code === 'P2002' && hitVersion) throw versionClash(styleCode, color, version)
+  if (code === 'P2002' && hitVersion) throw versionClash(styleCode, color, version, typed)
   throw err
 }
 
@@ -896,6 +910,7 @@ async function assertVersionFree(
   version: string,
   styleCode: string,
   excludeId?: string,
+  typed = true,
 ): Promise<void> {
   const clash = await prisma.bOM.findFirst({
     where: {
@@ -906,7 +921,7 @@ async function assertVersionFree(
     },
     select: { id: true },
   })
-  if (clash) throw versionClash(styleCode, color, version)
+  if (clash) throw versionClash(styleCode, color, version, typed)
 }
 
 router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -986,7 +1001,8 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
   })
 
   const useVersion = version ?? '1.0'
-  await assertVersionFree(styleId, colour, useVersion, style.code)
+  const typedVersion = version !== undefined
+  await assertVersionFree(styleId, colour, useVersion, style.code, undefined, typedVersion)
 
   const { priced, totalCost, labourCost, warnings } = await priceBomLines(lines, routingId)
 
@@ -1008,7 +1024,7 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
       include: bomInclude,
     })
   } catch (err) {
-    rethrowVersionClash(err, style.code, colour, useVersion)
+    rethrowVersionClash(err, style.code, colour, useVersion, typedVersion)
   }
 
   await writeAuditLog(req, {

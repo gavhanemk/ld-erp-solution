@@ -1,9 +1,72 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Thu 17 Sep 2026 — BOM per colour, and a department per line_
+_Last updated: Mon 28 Sep 2026 — the BOM form trimmed to what is used_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## BOM form — redesigned, and trimmed to what is used (Sat 26 Sep)
+
+Laid out to a reference design supplied on 26 Sep, and cut down to the fields
+something actually reads today.
+
+**On the form now:**
+
+- Style and Colour.
+- Per line:
+  - Item, with an icon for its category.
+  - Process.
+  - Qty / pc, with the unit shown inside the box.
+  - Rate in ₹; blank means the standard rate.
+  - Cost.
+  - A **+** beside Delete, which adds a new line directly below that one.
+- Notes.
+
+**Taken off the form, and why:**
+
+- **Version.** A new BOM starts at 1.0, and later versions still come from Copy
+  on the BOM list. An open BOM still shows its version in the header.
+- **Wastage %.** Removed on request: consumption is now typed with the wastage
+  already in it. **This reverses the 17 Sep decision below that "wastage stays
+  as its own column".** The column stays in the database, and a line saved with
+  a wastage keeps it. The form sends it back unchanged and shows "+5%" in the
+  cost box, so the cost still adds up on screen.
+- **Part, Sized on, quantities by size, Routing, Active.** Nothing reads these
+  yet. On 26 Sep nothing outside the BOM list used them, and the MO cannot be
+  created at all. Existing values are kept on save, not wiped. Offering and
+  retiring a BOM is done from the BOM list.
+- **Effective.** It only ever showed quantity plus wastage.
+
+**Kept on purpose: Process.** Roadmap step 1.2 raises one store requisition per
+department from it. Every BOM saved without it would need reopening then.
+
+**Fixed along the way:**
+
+- **Saving an approved BOM always failed.** The form sent the locked lines, and
+  the API refused them with a 409. It now sends only the notes, and the button
+  says "Save notes".
+- **Clearer message when a style and colour already has a BOM.** When the form
+  sends no version, the API used to say "give this one a different version",
+  which the form can no longer do. It now says to copy the existing BOM from the
+  list.
+- **Routing hint on the BOM list.** It no longer tells people to "edit this BOM
+  to link a routing".
+
+**Not changed:**
+
+- The database.
+- The BOM list's expanded view. It still shows wastage, effective quantity and
+  quantities by size for BOMs that have them.
+- The copy dialog, which still takes a version.
+
+**Tested:**
+
+- Type-check passes for both apps.
+- Rendered with sample data in both themes.
+- The save request was checked for a draft BOM and for an approved one.
+- **Not yet tried against the shared database.**
 
 ---
 

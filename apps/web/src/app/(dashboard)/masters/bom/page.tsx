@@ -679,7 +679,9 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
                       {bom.routing.name}. Labour is the total of the Paid column.
                     </>
                   ) : (
-                    'No routing is linked, so labour is not in the cost yet. Edit this BOM to link one.'
+                    // The BOM form no longer links a routing, so this no longer
+                    // sends anyone there to do it.
+                    'No routing is linked, so labour is not in the cost yet.'
                   )}
                 </p>
               </div>

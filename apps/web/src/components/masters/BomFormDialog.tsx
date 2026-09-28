@@ -1,7 +1,24 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useState } from 'react'
-import { X, Loader2, AlertCircle, Plus, Trash2, Ruler, ExternalLink } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  X,
+  Loader2,
+  AlertCircle,
+  Plus,
+  Trash2,
+  Box,
+  Layers,
+  FileText,
+  Save,
+  Shirt,
+  Cylinder,
+  CircleDot,
+  Tag,
+  Package,
+  Scissors,
+  type LucideIcon,
+} from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatRupees } from '@/lib/utils'
 
@@ -79,33 +96,20 @@ interface ItemOption {
   id: string
   code: string
   name: string
+  type?: string
   standardRate?: string | number | null
   uom?: { symbol: string } | null
+  category?: { name: string } | null
 }
 
 interface StyleOption {
   id: string
   code: string
   name: string
-  sizeGroupId: string | null
   colors: string[]
 }
 
 interface DepartmentOption {
-  id: string
-  code: string
-  name: string
-}
-
-interface SizeOption {
-  id: string
-  code: string
-  label: string
-  sequence: number
-  sizeGroupId: string
-}
-
-interface RoutingOption {
   id: string
   code: string
   name: string
@@ -118,38 +122,66 @@ interface Props {
   record?: Bom | null
 }
 
-/** What the form holds while it is being typed, before it becomes a payload. */
-interface EditLine {
-  componentItemId: string
-  component: string
-  /** The department that draws it from the store. Blank is allowed but warned. */
-  departmentId: string
-  qtyPerUnit: string
-  wastagePercent: string
-  unitCost: string
-  notes: string
-  /** Whether this component's consumption differs by size. */
-  sizeWise: boolean
-  /** sizeId to quantity, only for the sizes actually typed. */
-  sizeQty: Record<string, string>
-  /** The step used by "Fill sizes", kept per line. */
-  step: string
+/**
+ * What an older line was saved with that this form no longer asks for: the
+ * part it goes into, a wastage percent, a note, and quantities by size. None of
+ * it is shown, but all of it is sent back as it came, so opening and saving an
+ * old BOM does not quietly wipe it or change what it costs.
+ */
+interface CarriedOver {
+  component: string | null
+  wastagePercent: number
+  notes: string | null
+  sizes: { sizeId: string; qtyPerUnit: number }[]
 }
 
+const nothingCarried: CarriedOver = { component: null, wastagePercent: 0, notes: null, sizes: [] }
+
+/** What the form holds while it is being typed, before it becomes a payload. */
+interface EditLine {
+  /** A stable React key, so a line added mid-list does not take over the next line's inputs. */
+  rowKey: number
+  componentItemId: string
+  /**
+   * The department that draws it from the store. Nothing reads it yet; it is
+   * asked for now because production orders are to raise one store request per
+   * department from the BOM, and every BOM typed without it would need opening
+   * again then. Blank is allowed but outlined.
+   */
+  departmentId: string
+  qtyPerUnit: string
+  unitCost: string
+  carried: CarriedOver
+}
+
+let nextRowKey = 0
+
 const emptyLine = (): EditLine => ({
+  rowKey: nextRowKey++,
   componentItemId: '',
-  component: '',
   departmentId: '',
   qtyPerUnit: '',
-  wastagePercent: '0',
   unitCost: '',
-  notes: '',
-  sizeWise: false,
-  sizeQty: {},
-  step: '',
+  carried: nothingCarried,
 })
 
 const round = (n: number, dp: number) => Number(n.toFixed(dp))
+
+/**
+ * A picture of what kind of thing a line is, so a long list can be scanned
+ * without reading every name. Read from the item's category, then its type;
+ * anything unrecognised gets a plain box.
+ */
+function itemIcon(item?: ItemOption): LucideIcon {
+  const kind = `${item?.category?.name ?? ''} ${item?.type ?? ''}`.toLowerCase()
+  if (kind.includes('fabric')) return Shirt
+  if (kind.includes('thread')) return Cylinder
+  if (kind.includes('button') || kind.includes('fastener')) return CircleDot
+  if (kind.includes('label') || kind.includes('tag')) return Tag
+  if (kind.includes('pack')) return Package
+  if (kind.includes('trim')) return Scissors
+  return Box
+}
 
 /** The same three of the six fixed status colours the BOM list uses. */
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
@@ -158,28 +190,27 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   OBSOLETE: { label: 'Obsolete', cls: 'badge-neutral' },
 }
 
+/**
+ * The form asks only for what the BOM is used for today: the style and colour
+ * it is for, what one piece consumes and at what rate, and which department
+ * draws each item from the store. The rest of a BOM — its routing, base size
+ * and whether it is offered — is left as it is on an existing BOM and at its
+ * default on a new one; offering and retiring are done from the BOM list.
+ */
 export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
   const isEdit = Boolean(record)
   const frozen = Boolean(record && record.status !== 'DRAFT')
 
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
-  const [sizes, setSizes] = useState<SizeOption[]>([])
-  const [routings, setRoutings] = useState<RoutingOption[]>([])
-  // Tracked separately from the list, so "no routing set up yet" is only said
-  // once the answer is actually known — not while it is still loading, and not
-  // when the request failed.
-  const [routingState, setRoutingState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle')
   const [departments, setDepartments] = useState<DepartmentOption[]>([])
 
   const [styleId, setStyleId] = useState('')
   const [color, setColor] = useState('')
-  const [version, setVersion] = useState('1.0')
-  const [routingId, setRoutingId] = useState('')
-  const [baseSizeId, setBaseSizeId] = useState('')
   const [notes, setNotes] = useState('')
-  const [isActive, setIsActive] = useState(true)
   const [lines, setLines] = useState<EditLine[]>([emptyLine()])
+  // The line a row's + button just added, which takes the cursor.
+  const [addedKey, setAddedKey] = useState<number | null>(null)
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -190,26 +221,22 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
     setStyleId(record?.styleId ?? '')
     setColor(record?.color ?? '')
-    setVersion(record?.version ?? '1.0')
-    setRoutingId(record?.routingId ?? '')
-    setBaseSizeId(record?.baseSizeId ?? '')
     setNotes(record?.notes ?? '')
-    setIsActive(record?.isActive ?? true)
+    setAddedKey(null)
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
+            rowKey: nextRowKey++,
             componentItemId: l.componentItemId,
-            component: l.component ?? '',
             departmentId: l.departmentId ?? '',
             qtyPerUnit: String(l.qtyPerUnit),
-            wastagePercent: String(l.wastagePercent ?? 0),
             unitCost: l.unitCost != null ? String(l.unitCost) : '',
-            notes: l.notes ?? '',
-            sizeWise: (l.sizes?.length ?? 0) > 0,
-            sizeQty: Object.fromEntries(
-              (l.sizes ?? []).map((s) => [s.sizeId, String(s.qtyPerUnit)]),
-            ),
-            step: '',
+            carried: {
+              component: l.component ?? null,
+              wastagePercent: Number(l.wastagePercent ?? 0),
+              notes: l.notes ?? null,
+              sizes: (l.sizes ?? []).map((s) => ({ sizeId: s.sizeId, qtyPerUnit: Number(s.qtyPerUnit) })),
+            },
           }))
         : [emptyLine()],
     )
@@ -219,43 +246,15 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     void Promise.all([
       masterResource<StyleOption>('styles').list({ limit: 200, active: true }),
       masterResource<ItemOption>('items').list({ limit: 200, active: true }),
-      masterResource<SizeOption>('sizes').list({ limit: 200 }),
       masterResource<DepartmentOption>('departments').list({ limit: 200, active: true }),
     ])
-      .then(([s, i, z, d]) => {
+      .then(([s, i, d]) => {
         setStyles((s as Paginated<StyleOption>).data)
         setItems((i as Paginated<ItemOption>).data)
-        setSizes((z as Paginated<SizeOption>).data)
         setDepartments((d as Paginated<DepartmentOption>).data)
       })
-      .catch(() => setError('Could not load styles, items, sizes and departments.'))
+      .catch(() => setError('Could not load styles, items and departments.'))
   }, [open, record])
-
-  // Routings belong to a style, so the list is refetched when the style changes.
-  useEffect(() => {
-    if (!open || !styleId) {
-      setRoutings([])
-      setRoutingState('idle')
-      return
-    }
-    let cancelled = false
-    setRoutingState('loading')
-    void api
-      .get<Paginated<RoutingOption>>(`/masters/routings?styleId=${styleId}&active=true&limit=200`)
-      .then((res) => {
-        if (cancelled) return
-        setRoutings(res.data)
-        setRoutingState('ready')
-      })
-      .catch(() => {
-        if (cancelled) return
-        setRoutings([])
-        setRoutingState('failed')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [open, styleId])
 
   useEffect(() => {
     if (!open) return
@@ -299,13 +298,6 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
   // rather than rendering as an empty choice.
   const colourOptions =
     color && !styleColours.includes(color) ? [...styleColours, color] : styleColours
-  const groupSizes = useMemo(
-    () =>
-      style?.sizeGroupId
-        ? sizes.filter((s) => s.sizeGroupId === style.sizeGroupId).sort((a, b) => a.sequence - b.sequence)
-        : [],
-    [sizes, style],
-  )
 
   if (!open) return null
 
@@ -313,10 +305,21 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     setLines((ls) => ls.map((l, i) => (i === index ? { ...l, ...patch } : l)))
   }
 
+  /** A new blank line directly below this one, rather than at the foot of a long list. */
+  const addLineAfter = (index: number) => {
+    const line = emptyLine()
+    setAddedKey(line.rowKey)
+    setLines((ls) => [...ls.slice(0, index + 1), line, ...ls.slice(index + 1)])
+  }
+
+  const removeLine = (index: number) => {
+    setLines((ls) => (ls.length === 1 ? [emptyLine()] : ls.filter((_, i) => i !== index)))
+  }
+
   /**
-   * Mirrors the server's costing so the number is on screen before saving:
-   * wastage inflates the consumed quantity, and a blank rate falls back to the
-   * item's standard rate.
+   * Mirrors the server's costing so the number is on screen before saving: a
+   * blank rate falls back to the item's standard rate, and a wastage carried
+   * over from an older line still inflates the consumed quantity.
    */
   const priceOf = (line: EditLine) => {
     const item = itemsById.get(line.componentItemId)
@@ -325,16 +328,14 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     const typedRate = line.unitCost.trim() !== ''
     const standardRate = item?.standardRate != null ? Number(item.standardRate) : null
     const qty = Number(line.qtyPerUnit) || 0
-    const wastage = Number(line.wastagePercent) || 0
-    const factor = 1 + wastage / 100
+    const wastage = line.carried.wastagePercent
     const rate = typedRate ? Number(line.unitCost) : (standardRate ?? 0)
-    const effective = round(qty * factor, 4)
+    const effective = round(qty * (1 + wastage / 100), 4)
     return {
-      effective,
       rate,
       cost: round(effective * rate, 2),
       unit: item?.uom?.symbol ?? '',
-      factor,
+      wastage,
       standardRate,
       hasItem,
       hasQty,
@@ -353,52 +354,41 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     2,
   )
 
-  /** Per-size totals, so the cost of a 3XL is visible before saving. */
-  const sizeTotals = groupSizes
-    .map((size) => {
-      let cost = 0
-      let anyWise = false
-      lines.forEach((line, i) => {
-        const { factor, rate, cost: base } = priced[i]
-        const own = line.sizeWise ? line.sizeQty[size.id] : undefined
-        if (own !== undefined && own !== '') {
-          anyWise = true
-          cost += round(round(Number(own) * factor, 4) * rate, 2)
-        } else {
-          cost += base
-        }
-      })
-      return { label: size.label, cost, anyWise }
-    })
-    .filter((s) => s.anyWise)
-
   const filledLines = lines.filter((l) => l.componentItemId).length
   const missingQty = priced.filter((p) => p.needsQty).length
   const missingProcess = priced.filter((p) => p.needsProcess).length
-
-  /**
-   * A size set is built as a fixed increment per size, not six free numbers.
-   * Filling walks outward from the base size so the merchandiser edits the
-   * exceptions rather than typing the whole run.
-   */
-  const fillSizes = (index: number) => {
-    const line = lines[index]
-    const base = Number(line.qtyPerUnit) || 0
-    const step = Number(line.step) || 0
-    const anchor = groupSizes.findIndex((s) => s.id === baseSizeId)
-    const from = anchor >= 0 ? anchor : Math.floor(groupSizes.length / 2)
-    const next: Record<string, string> = {}
-    groupSizes.forEach((s, i) => {
-      next[s.id] = String(round(base + step * (i - from), 4))
-    })
-    setLine(index, { sizeQty: next })
-  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
     setError(null)
     setFieldErrors({})
+
+    const send = async (body: Record<string, unknown>) => {
+      try {
+        const res = isEdit
+          ? await api.patch<{ message?: string }>(`/masters/bom/${record!.id}`, body)
+          : await api.post<{ message?: string }>('/masters/bom', body)
+        onSaved(res?.message)
+        onClose()
+      } catch (err) {
+        if (err instanceof ApiError) {
+          if (err.fieldErrors) setFieldErrors(err.fieldErrors)
+          setError(err.message)
+        } else {
+          setError('Could not save. Is the API running?')
+        }
+      } finally {
+        setSaving(false)
+      }
+    }
+
+    // An approved BOM's components are locked, and the server refuses a save
+    // that sends them at all — so only the note goes, which it does allow.
+    if (frozen) {
+      await send({ notes })
+      return
+    }
 
     // A line with an item but no quantity used to be dropped on save without a
     // word, and with an example figure sitting in the empty box it looked like a
@@ -421,24 +411,17 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
 
     const payloadLines = lines
       .filter((l) => l.componentItemId && l.qtyPerUnit.trim() !== '')
-      .map((l, index) => {
-        const sizes = l.sizeWise
-          ? Object.entries(l.sizeQty)
-              .filter(([, v]) => v !== '' && v != null)
-              .map(([sizeId, v]) => ({ sizeId, qtyPerUnit: Number(v) }))
-          : []
-        return {
-          componentItemId: l.componentItemId,
-          ...(l.component ? { component: l.component } : {}),
-          ...(l.departmentId ? { departmentId: l.departmentId } : {}),
-          qtyPerUnit: Number(l.qtyPerUnit),
-          wastagePercent: Number(l.wastagePercent) || 0,
-          ...(l.unitCost.trim() !== '' ? { unitCost: Number(l.unitCost) } : {}),
-          ...(l.notes ? { notes: l.notes } : {}),
-          ...(sizes.length > 0 ? { sizes } : {}),
-          sortOrder: index,
-        }
-      })
+      .map((l, index) => ({
+        componentItemId: l.componentItemId,
+        ...(l.departmentId ? { departmentId: l.departmentId } : {}),
+        qtyPerUnit: Number(l.qtyPerUnit),
+        ...(l.unitCost.trim() !== '' ? { unitCost: Number(l.unitCost) } : {}),
+        wastagePercent: l.carried.wastagePercent,
+        ...(l.carried.component ? { component: l.carried.component } : {}),
+        ...(l.carried.notes ? { notes: l.carried.notes } : {}),
+        ...(l.carried.sizes.length > 0 ? { sizes: l.carried.sizes } : {}),
+        sortOrder: index,
+      }))
 
     if (payloadLines.length === 0) {
       setError('Add at least one component with a quantity.')
@@ -456,74 +439,55 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
       return
     }
 
-    const body = {
-      version,
-      notes,
-      isActive,
-      routingId: routingId || null,
-      baseSizeId: baseSizeId || null,
-      lines: payloadLines,
-    }
-
-    try {
-      const res = isEdit
-        ? await api.patch<{ message?: string }>(`/masters/bom/${record!.id}`, body)
-        : await api.post<{ message?: string }>('/masters/bom', {
-            ...body,
-            styleId,
-            color: color || null,
-          })
-      onSaved(res?.message)
-      onClose()
-    } catch (err) {
-      if (err instanceof ApiError) {
-        if (err.fieldErrors) setFieldErrors(err.fieldErrors)
-        setError(err.message)
-      } else {
-        setError('Could not save. Is the API running?')
-      }
-    } finally {
-      setSaving(false)
-    }
+    // Version, routing, base size and whether it is offered are not sent. A new
+    // BOM starts at version 1.0 with none of the others; an edit keeps whatever
+    // it had. Later versions come from Copy on the BOM list.
+    await send(
+      isEdit
+        ? { notes, lines: payloadLines }
+        : { styleId, color: color || null, notes, lines: payloadLines },
+    )
   }
 
   const title = isEdit ? 'Edit Bill of Materials' : 'New Bill of Materials'
-  const summary = [style?.code, color || null, version ? `v${version}` : null]
+  // The version is not edited here, but an open BOM still says which one it is.
+  const summary = [style?.code, color || null, record ? `v${record.version}` : null]
     .filter(Boolean)
     .join(' · ')
   const statusBadge = record ? (STATUS_BADGE[record.status] ?? STATUS_BADGE.DRAFT) : null
-  const baseSizeLabel = groupSizes.find((s) => s.id === baseSizeId)?.label
-
-  // An existing BOM whose routing has since been retired still shows it.
-  const routingOptions =
-    record?.routing && !routings.some((r) => r.id === record.routing!.id)
-      ? [...routings, record.routing]
-      : routings
-  const noRoutings = routingState === 'ready' && routingOptions.length === 0
-  const routingPlaceholder = !styleId
-    ? 'Pick a style first'
-    : routingState === 'loading'
-      ? 'Loading routings...'
-      : routingState === 'failed'
-        ? 'Could not load routings — material cost only'
-        : noRoutings
-          ? `No routing set up for ${style?.code ?? 'this style'} yet — material cost only`
-          : 'No routing — material cost only'
 
   /** Header cells: one style, so every column label sits on the same line. */
-  const th = 'px-2 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground'
+  const th = 'px-2 py-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground'
+  /**
+   * Fields sit on a tinted panel, so they take the card colour to stand out
+   * from it — white on grey in the light theme, an inset well in the dark.
+   */
+  const field = 'form-input bg-card'
+  /** The quiet panel each part of the form sits in. */
+  const panel = 'rounded-xl border border-border bg-secondary/60 p-4'
+  /** Row buttons are icon-only and square; switched off, they fade rather than keep their colour. */
+  const rowBtn = 'p-2 disabled:pointer-events-none disabled:opacity-40'
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div className="glass-card w-full max-w-7xl my-auto" role="dialog" aria-modal="true" aria-label={title}>
+      {/*
+        Solid rather than see-through glass: the form's panels are tinted, and
+        over a dimmed page the glass turned the whole body the same grey.
+      */}
+      <div className="glass-card w-full max-w-6xl my-auto bg-card" role="dialog" aria-modal="true" aria-label={title}>
         <form onSubmit={submit}>
           {/* The header stays in view while a long component list scrolls. */}
           <div className="sticky top-0 z-10 flex items-center justify-between gap-4 rounded-t-xl border-b border-border bg-card px-6 py-4">
-            <div className="min-w-0">
-              <h2 className="text-lg font-semibold text-foreground">{title}</h2>
-              <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                {summary || 'Pick a style and colour, then list what goes into one piece.'}
-              </p>
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <Box size={18} />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+                <p className="mt-0.5 truncate text-sm text-muted-foreground">
+                  {summary || 'Pick a style and colour, then list what goes into one piece.'}
+                </p>
+              </div>
             </div>
             <div className="flex items-center gap-2">
               {statusBadge && <span className={statusBadge.cls}>{statusBadge.label}</span>}
@@ -533,30 +497,26 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             </div>
           </div>
 
-          <div className="space-y-6 px-6 py-5">
+          <div className="space-y-4 px-6 py-5">
             {frozen && (
               <div className="flex items-start gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
                 <AlertCircle size={16} className="mt-0.5 shrink-0 text-accent" />
                 <p className="text-sm text-foreground">
-                  This BOM is approved, so its components cannot be changed. Copy it to a new version,
-                  or to another colour, instead.
+                  This BOM is approved, so its components cannot be changed — only the notes. Copy it
+                  to a new version, or to another colour, from the BOM list instead.
                 </p>
               </div>
             )}
 
-            <section className="space-y-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                BOM details
-              </h3>
-
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <div className="sm:col-span-2">
+            <section className={panel} aria-label="BOM details">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
                   <label className="form-label" htmlFor="bom-style">
                     Style<span className="ml-0.5 text-red-400">*</span>
                   </label>
                   <select
                     id="bom-style"
-                    className="form-input"
+                    className={field}
                     value={styleId}
                     onChange={(e) => {
                       setStyleId(e.target.value)
@@ -586,7 +546,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                   </label>
                   <select
                     id="bom-colour"
-                    className="form-input"
+                    className={field}
                     value={color}
                     onChange={(e) => setColor(e.target.value)}
                     // Like the style, the colour is what this BOM is. Another colour
@@ -608,162 +568,104 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                   </select>
                   {fieldErrors.color && <p className="mt-1 text-xs text-red-400">{fieldErrors.color}</p>}
                 </div>
-
-                <div>
-                  <label className="form-label" htmlFor="bom-version">
-                    Version
-                  </label>
-                  <input
-                    id="bom-version"
-                    className="form-input"
-                    value={version}
-                    onChange={(e) => setVersion(e.target.value)}
-                    disabled={frozen}
-                  />
-                  {fieldErrors.version && (
-                    <p className="mt-1 text-xs text-red-400">{fieldErrors.version}</p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="form-label" htmlFor="bom-base-size">
-                    Sized on
-                  </label>
-                  <select
-                    id="bom-base-size"
-                    className="form-input"
-                    value={baseSizeId}
-                    onChange={(e) => setBaseSizeId(e.target.value)}
-                    disabled={frozen || groupSizes.length === 0}
-                  >
-                    <option value="">
-                      {!styleId
-                        ? 'Pick a style first'
-                        : groupSizes.length === 0
-                          ? 'No size run on this style'
-                          : 'No particular size'}
-                    </option>
-                    {groupSizes.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="sm:col-span-2 lg:col-span-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="form-label" htmlFor="bom-routing">
-                      Routing
-                    </label>
-                    {noRoutings && (
-                      // A new tab, so the half-typed BOM is still here afterwards.
-                      <a
-                        href="/masters/routings"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="mb-1.5 inline-flex items-center gap-1 text-xs text-primary hover:underline"
-                      >
-                        Set up a routing
-                        <ExternalLink size={13} />
-                      </a>
-                    )}
-                  </div>
-                  <select
-                    id="bom-routing"
-                    className="form-input"
-                    value={routingId}
-                    onChange={(e) => setRoutingId(e.target.value)}
-                    disabled={frozen || routingOptions.length === 0}
-                  >
-                    <option value="">{routingPlaceholder}</option>
-                    {routingOptions.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.code} — {r.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
               </div>
 
               {isEdit && (
-                <p className="text-xs text-muted-foreground">
+                <p className="mt-3 text-xs text-muted-foreground">
                   Style and colour are fixed once a BOM is made. To cost another colour, copy this BOM.
                 </p>
               )}
             </section>
 
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Components{filledLines > 0 && ` (${filledLines})`}
-                </h3>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={frozen}
-                  onClick={() => setLines((ls) => [...ls, emptyLine()])}
-                >
-                  <Plus size={15} />
-                  Add component
-                </button>
+            <section className={cn(panel, 'space-y-3')}>
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Layers size={16} />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Components
+                    {filledLines > 0 && (
+                      <span className="ml-1.5 font-normal text-muted-foreground">({filledLines})</span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Everything one piece uses. A blank rate uses the item&apos;s standard rate, shown as
+                    &ldquo;std&rdquo; in the box; an amber outline marks what a line still needs.
+                  </p>
+                </div>
               </div>
 
               {/*
                 Not .data-table: its reading-table padding, sixteen pixels either
-                side of every cell, pushes a ten-column editing grid past the width
-                of the dialog. Same header type and row dividers, tighter cells.
+                side of every cell, is too loose for a grid of inputs. Same header
+                type and row dividers, tighter cells.
               */}
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="w-full min-w-[1100px] table-fixed text-sm">
+              <div className="overflow-x-auto rounded-lg border border-border bg-card">
+                <table className="w-full min-w-[860px] table-fixed text-sm">
                   <colgroup>
-                    <col className="w-10" />
                     <col />
-                    <col className="w-24" />
+                    <col className="w-40" />
+                    {/* Wide enough for 1.7325 beside its unit and the number spinner. */}
                     <col className="w-36" />
-                    <col className="w-24" />
-                    <col className="w-24" />
-                    <col className="w-24" />
-                    <col className="w-24" />
+                    <col className="w-32" />
+                    <col className="w-32" />
                     <col className="w-28" />
-                    <col className="w-20" />
                   </colgroup>
                   <thead className="bg-secondary/60">
                     <tr className="border-b border-border">
-                      <th className={cn(th, 'text-center')}>#</th>
-                      <th className={cn(th, 'text-left')}>Item</th>
-                      <th className={cn(th, 'text-left')}>Part</th>
-                      <th className={cn(th, 'text-left')}>Process</th>
-                      <th className={cn(th, 'text-right')}>Qty / pc</th>
-                      <th className={cn(th, 'text-right')}>Wastage %</th>
-                      <th className={cn(th, 'text-right')}>Effective</th>
-                      <th className={cn(th, 'text-right')}>Rate</th>
-                      <th className={cn(th, 'text-right')}>Cost</th>
-                      <th className={th}>
-                        <span className="sr-only">Actions</span>
+                      <th className={cn(th, 'pl-3 text-left')}>Item</th>
+                      <th className={cn(th, 'text-left')} title="The department that takes this item from the store">
+                        Process
                       </th>
+                      <th className={cn(th, 'text-right')}>Qty / pc</th>
+                      <th className={cn(th, 'text-right')}>
+                        Rate <span className="font-medium normal-case tracking-normal">(₹ / unit)</span>
+                      </th>
+                      <th className={cn(th, 'text-right')}>
+                        Cost <span className="font-medium normal-case tracking-normal">(₹)</span>
+                      </th>
+                      <th className={cn(th, 'pr-3 text-center')}>Actions</th>
                     </tr>
                   </thead>
 
                   <tbody>
                     {lines.map((line, index) => {
                       const p = priced[index]
-                      const itemName = itemsById.get(line.componentItemId)?.name
+                      const item = itemsById.get(line.componentItemId)
+                      const Icon = itemIcon(item)
 
                       return (
-                        <Fragment key={index}>
-                          <tr className="border-b border-border/50">
-                            <td className="px-2 py-2 text-center align-middle font-mono text-xs text-muted-foreground">
-                              {index + 1}
-                            </td>
-                            <td className="px-2 py-2 align-middle">
+                        <tr key={line.rowKey} className="border-b border-border/50">
+                          <td className="py-2 pl-3 pr-2 align-middle">
+                            <div className="flex items-stretch gap-2">
+                              <span
+                                aria-hidden="true"
+                                className={cn(
+                                  'flex w-10 shrink-0 items-center justify-center rounded-lg border',
+                                  item
+                                    ? 'border-primary/20 bg-primary/10 text-primary'
+                                    : 'border-border bg-secondary text-muted-foreground',
+                                )}
+                              >
+                                <Icon size={16} />
+                              </span>
                               <select
-                                className="form-input"
+                                className={cn(field, 'min-w-0')}
                                 value={line.componentItemId}
                                 disabled={frozen}
-                                title={itemName}
+                                title={item?.name}
                                 aria-label={`Line ${index + 1} item`}
-                                onChange={(e) => setLine(index, { componentItemId: e.target.value })}
+                                autoFocus={line.rowKey === addedKey}
+                                onChange={(e) =>
+                                  setLine(index, {
+                                    componentItemId: e.target.value,
+                                    // A different item is a different line: what the old
+                                    // one carried (its part, wastage, sizes) was about
+                                    // that item, not this one.
+                                    carried: nothingCarried,
+                                  })
+                                }
                               >
                                 <option value="">Select item...</option>
                                 {itemOptions.map((i) => (
@@ -772,83 +674,72 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                                   </option>
                                 ))}
                               </select>
-                            </td>
-                            <td className="px-2 py-2 align-middle">
-                              <input
-                                className="form-input"
-                                value={line.component}
-                                disabled={frozen}
-                                placeholder="e.g. Body"
-                                aria-label={`Line ${index + 1} part`}
-                                onChange={(e) => setLine(index, { component: e.target.value })}
-                              />
-                            </td>
-                            <td className="px-2 py-2 align-middle">
-                              <select
-                                className={cn('form-input', p.needsProcess && 'border-accent')}
-                                value={line.departmentId}
-                                disabled={frozen}
-                                aria-label={`Line ${index + 1} process`}
-                                // Not refused — a BOM can be costed before this is
-                                // decided — but an order cannot ask the store for the
-                                // item until it is, so the box is outlined.
-                                title={
-                                  p.needsProcess
-                                    ? 'Which department uses this? An order needs it to ask the store.'
-                                    : undefined
-                                }
-                                onChange={(e) => setLine(index, { departmentId: e.target.value })}
-                              >
-                                <option value="">Select...</option>
-                                {departments.map((d) => (
-                                  <option key={d.id} value={d.id}>
-                                    {d.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                            <td className="px-2 py-2 align-middle">
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 align-middle">
+                            <select
+                              className={cn(field, p.needsProcess && 'border-accent')}
+                              value={line.departmentId}
+                              disabled={frozen}
+                              aria-label={`Line ${index + 1} process`}
+                              // Not refused — a BOM can be costed before this is
+                              // decided — but a production order will not be able to
+                              // ask the store for the item until it is.
+                              title={
+                                p.needsProcess
+                                  ? 'Which department uses this? Production orders will need it to ask the store.'
+                                  : undefined
+                              }
+                              onChange={(e) => setLine(index, { departmentId: e.target.value })}
+                            >
+                              <option value="">Select...</option>
+                              {departments.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                  {d.name}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-2 py-2 align-middle">
+                            {/* The unit sits inside the box, where it reads with the figure. */}
+                            <div className="relative">
                               <input
                                 type="number"
                                 step="any"
                                 min="0"
                                 inputMode="decimal"
                                 className={cn(
-                                  'form-input text-right tabular-nums',
+                                  field,
+                                  'text-right tabular-nums',
+                                  p.unit && 'pr-10',
                                   p.needsQty && 'border-accent',
                                 )}
                                 value={line.qtyPerUnit}
                                 disabled={frozen}
-                                aria-label={`Line ${index + 1} quantity per piece`}
+                                aria-label={`Line ${index + 1} quantity per piece${p.unit ? `, in ${p.unit}` : ''}`}
                                 title={p.needsQty ? 'Enter how much one piece uses' : undefined}
                                 onChange={(e) => setLine(index, { qtyPerUnit: e.target.value })}
                               />
-                            </td>
-                            <td className="px-2 py-2 align-middle">
-                              <input
-                                type="number"
-                                step="any"
-                                min="0"
-                                max="100"
-                                inputMode="decimal"
-                                className="form-input text-right tabular-nums"
-                                value={line.wastagePercent}
-                                disabled={frozen}
-                                aria-label={`Line ${index + 1} wastage percent`}
-                                onChange={(e) => setLine(index, { wastagePercent: e.target.value })}
-                              />
-                            </td>
-                            <td className="whitespace-nowrap px-2 py-2 text-right align-middle font-mono text-xs text-muted-foreground">
-                              {p.hasItem && p.hasQty ? `${p.effective} ${p.unit}` : '—'}
-                            </td>
-                            <td className="px-2 py-2 align-middle">
+                              {p.unit && (
+                                <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">
+                                  {p.unit}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 align-middle">
+                            <div className="relative">
+                              <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-muted-foreground">
+                                ₹
+                              </span>
                               <input
                                 type="number"
                                 step="any"
                                 min="0"
                                 inputMode="decimal"
                                 className={cn(
-                                  'form-input text-right tabular-nums',
+                                  field,
+                                  'pl-7 text-right tabular-nums',
                                   p.needsRate && 'border-accent',
                                 )}
                                 value={line.unitCost}
@@ -856,169 +747,99 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                                 // "std 178", never a bare "178": a figure that looks
                                 // typed is how an empty box got mistaken for a filled one.
                                 placeholder={p.standardRate !== null ? `std ${p.standardRate}` : ''}
-                                aria-label={`Line ${index + 1} rate`}
+                                aria-label={`Line ${index + 1} rate${p.unit ? ` per ${p.unit}` : ''}`}
                                 title={
                                   p.needsRate
                                     ? 'This item has no standard rate. Type one.'
                                     : p.standardRate !== null
-                                      ? `Blank uses the standard rate, ${formatRupees(p.standardRate)}`
+                                      ? `Blank uses the standard rate, ${formatRupees(p.standardRate)}${p.unit ? ` per ${p.unit}` : ''}`
                                       : undefined
                                 }
                                 onChange={(e) => setLine(index, { unitCost: e.target.value })}
                               />
-                            </td>
-                            <td className="whitespace-nowrap px-2 py-2 text-right align-middle font-mono text-sm font-semibold text-foreground">
-                              {p.hasItem && p.hasQty ? formatRupees(p.cost) : '—'}
-                            </td>
-                            <td className="px-2 py-2 align-middle">
-                              <div className="flex items-center justify-end gap-1">
-                                {groupSizes.length > 0 && (
-                                  <button
-                                    type="button"
-                                    className="btn-ghost p-1.5"
-                                    disabled={frozen}
-                                    title={line.sizeWise ? 'Same for every size' : 'Quantities by size'}
-                                    aria-label={line.sizeWise ? 'Same for every size' : 'Quantities by size'}
-                                    onClick={() =>
-                                      setLine(index, {
-                                        sizeWise: !line.sizeWise,
-                                        sizeQty: line.sizeWise ? {} : line.sizeQty,
-                                      })
-                                    }
-                                  >
-                                    <Ruler size={14} className={line.sizeWise ? 'text-primary' : undefined} />
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  className="btn-ghost p-1.5 text-red-400"
-                                  aria-label={`Remove line ${index + 1}`}
-                                  disabled={frozen}
-                                  onClick={() =>
-                                    setLines((ls) =>
-                                      ls.length === 1 ? [emptyLine()] : ls.filter((_, i) => i !== index),
-                                    )
-                                  }
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 align-middle">
+                            {/* Worked out, not typed, so it is a box that cannot take the cursor. */}
+                            <div className="flex items-center justify-end gap-2 rounded-lg border border-border bg-secondary/60 px-3 py-2.5">
+                              {p.wastage > 0 && (
+                                // A line saved when wastage was still typed here keeps it,
+                                // so its cost is more than quantity times rate. Said, not hidden.
+                                <span
+                                  className="mr-auto text-xs text-accent"
+                                  title={`Includes ${p.wastage}% wastage saved on this line earlier`}
                                 >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-
-                          {line.sizeWise && groupSizes.length > 0 && (
-                            <tr className="border-b border-border/50">
-                              <td />
-                              <td colSpan={9} className="px-2 pb-3">
-                                <div className="space-y-2 rounded-lg bg-secondary/60 p-3">
-                                  <p className="text-xs text-muted-foreground">
-                                    Quantity per piece for each size. A size left blank uses{' '}
-                                    {p.hasQty ? `${line.qtyPerUnit} ${p.unit}`.trim() : 'the quantity on the line'}.
-                                  </p>
-                                  <div className="flex flex-wrap items-end gap-3">
-                                    {groupSizes.map((s) => (
-                                      <div key={s.id} className="w-20">
-                                        <label
-                                          className="mb-1 block text-xs font-medium text-muted-foreground"
-                                          htmlFor={`sz-${index}-${s.id}`}
-                                        >
-                                          {s.label}
-                                        </label>
-                                        <input
-                                          id={`sz-${index}-${s.id}`}
-                                          type="number"
-                                          step="any"
-                                          min="0"
-                                          inputMode="decimal"
-                                          className="form-input text-right tabular-nums"
-                                          value={line.sizeQty[s.id] ?? ''}
-                                          disabled={frozen}
-                                          onChange={(e) =>
-                                            setLine(index, {
-                                              sizeQty: { ...line.sizeQty, [s.id]: e.target.value },
-                                            })
-                                          }
-                                        />
-                                      </div>
-                                    ))}
-                                    <div className="w-24">
-                                      <label
-                                        className="mb-1 block text-xs font-medium text-muted-foreground"
-                                        htmlFor={`step-${index}`}
-                                      >
-                                        Step up by
-                                      </label>
-                                      <input
-                                        id={`step-${index}`}
-                                        type="number"
-                                        step="any"
-                                        inputMode="decimal"
-                                        className="form-input text-right tabular-nums"
-                                        value={line.step}
-                                        disabled={frozen}
-                                        onChange={(e) => setLine(index, { step: e.target.value })}
-                                      />
-                                    </div>
-                                    <button
-                                      type="button"
-                                      className="btn-secondary"
-                                      disabled={frozen}
-                                      onClick={() => fillSizes(index)}
-                                    >
-                                      Fill sizes
-                                    </button>
-                                  </div>
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
+                                  +{p.wastage}%
+                                </span>
+                              )}
+                              <span className="whitespace-nowrap font-mono text-sm font-semibold text-foreground">
+                                {p.hasItem && p.hasQty ? formatRupees(p.cost) : '—'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-2 pl-2 pr-3 align-middle">
+                            <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                type="button"
+                                className={cn('btn-secondary text-primary', rowBtn)}
+                                disabled={frozen}
+                                title="Add a component below this one"
+                                aria-label={`Add a component below line ${index + 1}`}
+                                onClick={() => addLineAfter(index)}
+                              >
+                                <Plus size={15} />
+                              </button>
+                              <button
+                                type="button"
+                                className={cn('btn-danger', rowBtn)}
+                                disabled={frozen}
+                                title="Remove this component"
+                                aria-label={`Remove line ${index + 1}`}
+                                onClick={() => removeLine(index)}
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
                       )
                     })}
                   </tbody>
 
                   <tfoot>
-                    <tr className="bg-secondary/40">
-                      <td colSpan={8} className="px-2 py-3 text-right text-sm font-semibold text-foreground">
-                        Material cost per piece
-                        {baseSizeLabel && ` (size ${baseSizeLabel})`}
+                    <tr className="bg-primary/5">
+                      <td colSpan={4} className="py-3 pl-3 pr-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <Layers size={16} className="shrink-0 text-primary" />
+                          <span className="text-right text-sm font-medium text-primary">
+                            Total material cost per piece
+                          </span>
+                        </div>
                       </td>
-                      <td className="whitespace-nowrap px-2 py-3 text-right font-mono text-sm font-bold text-primary">
+                      {/* Right-padded to sit under the figures in the cost boxes above. */}
+                      <td className="whitespace-nowrap py-3 pl-2 pr-5 text-right font-mono text-base font-bold text-primary">
                         {formatRupees(grandTotal)}
                       </td>
                       <td />
                     </tr>
-                    {sizeTotals.length > 0 && (
-                      <tr className="bg-secondary/40">
-                        <td colSpan={10} className="px-2 pb-3 text-right">
-                          <span className="inline-flex flex-wrap justify-end gap-x-4 gap-y-1 font-mono text-xs text-muted-foreground">
-                            {sizeTotals.map((s) => (
-                              <span key={s.label}>
-                                {s.label} {formatRupees(s.cost)}
-                              </span>
-                            ))}
-                          </span>
-                        </td>
-                      </tr>
-                    )}
                   </tfoot>
                 </table>
               </div>
-
-              <p className="text-xs text-muted-foreground">
-                A blank rate uses the item&apos;s standard rate, shown as &ldquo;std&rdquo; in the box. An
-                amber outline marks what a line still needs.
-              </p>
             </section>
 
-            <section>
-              <label className="form-label" htmlFor="bom-notes">
+            <section className={panel}>
+              <label
+                className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground"
+                htmlFor="bom-notes"
+              >
+                <FileText size={16} className="text-primary" />
                 Notes
               </label>
               <textarea
                 id="bom-notes"
                 rows={2}
-                className="form-input"
+                className={field}
+                placeholder="Anything the cutting floor or the store should know about this BOM"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
               />
@@ -1035,29 +856,16 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                <label className="flex cursor-pointer select-none items-center gap-2 text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    className="accent-teal-500"
-                    checked={isActive}
-                    onChange={(e) => setIsActive(e.target.checked)}
-                  />
-                  Offer this BOM on new orders
-                </label>
-                {(missingQty > 0 || missingProcess > 0) && (
-                  <p className="text-xs text-accent">
-                    {[
-                      missingQty > 0 &&
-                        `${missingQty} line${missingQty === 1 ? ' needs' : 's need'} a quantity`,
-                      missingProcess > 0 &&
-                        `${missingProcess} without a process`,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </p>
-                )}
-              </div>
+              <p className="text-xs text-accent">
+                {!frozen &&
+                  [
+                    missingQty > 0 &&
+                      `${missingQty} line${missingQty === 1 ? ' needs' : 's need'} a quantity`,
+                    missingProcess > 0 && `${missingProcess} without a process`,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+              </p>
 
               <div className="flex items-center gap-3">
                 <div className="mr-2 text-right">
@@ -1070,8 +878,8 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                   Cancel
                 </button>
                 <button type="submit" className="btn-primary" disabled={saving}>
-                  {saving && <Loader2 size={15} className="animate-spin" />}
-                  {isEdit ? 'Save changes' : 'Create BOM'}
+                  {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                  {isEdit ? (frozen ? 'Save notes' : 'Save changes') : 'Create BOM'}
                 </button>
               </div>
             </div>
