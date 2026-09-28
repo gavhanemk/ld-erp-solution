@@ -300,6 +300,8 @@ export const bomLineSchema = z.object({
   qtyPerUnit: decimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
+  /** Sent by the customer (cut-make-trim): listed, but left out of the cost. */
+  customerSupplied: z.boolean().optional(),
   notes: optionalText,
   sortOrder: z.number().int().min(0).optional(),
   sizes: z
@@ -309,6 +311,54 @@ export const bomLineSchema = z.object({
       message: 'A size can only be given once on a component',
     }),
 })
+
+/**
+ * One labour or overhead row on a BOM's costing. Labour is always rupees for
+ * one piece — that is how a stitching rate is quoted. An overhead can be either
+ * rupees or a percentage of material and labour together.
+ */
+export const bomCostLineSchema = z
+  .object({
+    kind: z.enum(['LABOUR', 'OVERHEAD']),
+    name: z.string().trim().min(1, 'Name the cost, such as Stitching or Transport').max(60),
+    departmentId: z.string().optional().nullable(),
+    basis: z.enum(['PER_PIECE', 'PERCENT']).default('PER_PIECE'),
+    value: z.number().min(0, 'A cost cannot be negative'),
+  })
+  .superRefine((row, ctx) => {
+    if (row.kind === 'LABOUR' && row.basis !== 'PER_PIECE') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['basis'],
+        message: 'Labour is typed in rupees for one piece',
+      })
+    }
+    if (row.basis === 'PERCENT' && row.value > 100) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['value'],
+        message: 'An overhead percentage cannot be more than 100',
+      })
+    }
+  })
+
+/**
+ * Setting the price takes one of the two: a margin, which works the price out,
+ * or a price typed straight in, which works the margin back from it. Margin is
+ * a share of the selling price, so 100% would mean a cost of nothing.
+ */
+export const bomPriceSchema = z
+  .object({
+    marginPercent: z
+      .number()
+      .min(0, 'A margin cannot be negative. To sell below cost, type the price instead.')
+      .lt(100, 'A margin must be under 100%')
+      .optional(),
+    sellingPrice: z.number().positive('Type a price above zero').optional(),
+  })
+  .refine((v) => (v.marginPercent === undefined) !== (v.sellingPrice === undefined), {
+    message: 'Give either a margin or a selling price',
+  })
 
 export const createBomSchema = z.object({
   styleId: z.string().min(1, 'Style is required'),
@@ -324,6 +374,8 @@ export const createBomSchema = z.object({
   baseSizeId: z.string().optional().nullable(),
   notes: optionalText,
   lines: z.array(bomLineSchema).min(1, 'A BOM needs at least one component'),
+  /** Labour and overhead. Only someone who may approve masters can send these. */
+  costLines: z.array(bomCostLineSchema).max(50).optional(),
   isActive,
 })
 
@@ -333,6 +385,8 @@ export const updateBomSchema = z.object({
   baseSizeId: z.string().optional().nullable(),
   notes: optionalText,
   lines: z.array(bomLineSchema).min(1).optional(),
+  /** Left out, the BOM keeps the rows it has; sent, they replace them. */
+  costLines: z.array(bomCostLineSchema).max(50).optional(),
   isActive,
 })
 

@@ -7,6 +7,38 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 28 Sep 2026 — BOM costing and pricing
+
+**Migration:** `20260928100000_bom_costing_and_pricing`
+**Branch:** `feat/masters-bom-costing`
+**Status: applied to the shared database on 28 Sep.** Nobody needs to apply it.
+It was dry-run first inside a transaction that was rolled back, then applied with
+`prisma migrate deploy`.
+
+### What changed
+
+| Table | Change |
+|---|---|
+| `bom` | New `overheadCost`, `costPerPiece`, `marginPercent`, `sellingPrice`, `pricedById`, `pricedAt` |
+| `bom_lines` | New `customerSupplied` (default false): the buyer sends it, so it is listed but costs nothing |
+| `bom_cost_lines` | New table: a BOM's labour and overhead rows (kind, name, optional department, ₹ per piece or %, the typed value, the worked-out amount) |
+
+Two new enums: `BOMCostKind` (LABOUR, OVERHEAD) and `BOMCostBasis` (PER_PIECE, PERCENT).
+
+### Rows it touched
+
+Labour used to be read off a BOM's linked routing. The migration wrote each rated
+routing step as a labour row, so no BOM's labour changed. On 28 Sep that was one BOM:
+LD-SH-2601 White, 9 rows, ₹70.50. It also set `costPerPiece` to material + labour
+and `overheadCost` to 0 on every BOM with a cost. Nothing was dropped or renamed.
+
+### What you have to do
+
+Nothing, unless your branch has no copy of this folder. Then `prisma migrate dev`
+will offer to drop the new table and columns. Say no; `prisma migrate deploy` is safe.
+
+---
+
 ## 17 Sep 2026 — one bill of materials per colour, and a department on each line
 
 **Migration:** `20260917100000_bom_colour_and_process`

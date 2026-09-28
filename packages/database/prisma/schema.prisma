@@ -247,6 +247,20 @@ enum BOMStatus {
   OBSOLETE
 }
 
+/// What a costing row on a BOM pays for: the people who make the garment, or
+/// everything else it has to carry (power, rent, transport).
+enum BOMCostKind {
+  LABOUR
+  OVERHEAD
+}
+
+/// How a costing row is typed: rupees for one piece, or a percentage of the
+/// material and labour together.
+enum BOMCostBasis {
+  PER_PIECE
+  PERCENT
+}
+
 // ═══════════════════════════════════════════
 // AUTH & RBAC
 // ═══════════════════════════════════════════
@@ -296,6 +310,7 @@ model User {
   gstTreatedNotes      PurchaseNote[]              @relation("NoteGstTreatedBy")
   uploadedNoteFiles    PurchaseNoteAttachment[]    @relation("NoteAttachmentUploadedBy")
   approvedBOMs         BOM[]                       @relation("BOMApprovedBy")
+  pricedBOMs           BOM[]                       @relation("BOMPricedBy")
 
   @@index([email])
   @@index([roleId])
@@ -597,51 +612,67 @@ model Style {
 }
 
 model BOM {
-  id           String    @id @default(cuid())
-  styleId      String
-  style        Style     @relation(fields: [styleId], references: [id])
-  version      String    @default("1.0")
+  id            String    @id @default(cuid())
+  styleId       String
+  style         Style     @relation(fields: [styleId], references: [id])
+  version       String    @default("1.0")
   /// The colourway this BOM is for. A white shirt and a dusty blue one take
   /// different fabric, so the production team makes one BOM per colour — the
   /// same way the old system made one item per colourway. Always one of the
   /// style's own colours. Blank only on BOMs made before colour was recorded.
-  color        String?
+  color         String?
   /// The operations this garment goes through, for the labour half of its
   /// cost. It points at the routing rather than repeating the steps, so a rate
   /// is changed in one place and every BOM built on it moves with it.
-  routingId    String?
-  routing      Routing?  @relation(fields: [routingId], references: [id])
+  routingId     String?
+  routing       Routing?  @relation(fields: [routingId], references: [id])
   /// The size the quantities on the lines are measured against. This used to
   /// live in the notes, as "size 40 basis", where nothing could read it and
   /// anyone opening a BOM somebody else built had to guess.
-  baseSizeId   String?
-  baseSize     Size?     @relation(fields: [baseSizeId], references: [id])
+  baseSizeId    String?
+  baseSize      Size?     @relation(fields: [baseSizeId], references: [id])
   /// Where this costing is in its life. Separate from isActive on purpose:
   /// isActive decides whether it is offered in a dropdown, status decides
   /// whether it may still be edited and whether orders are costed against it.
-  status       BOMStatus @default(DRAFT)
-  approvedById String?
-  approvedBy   User?     @relation("BOMApprovedBy", fields: [approvedById], references: [id])
-  approvedAt   DateTime?
+  status        BOMStatus @default(DRAFT)
+  approvedById  String?
+  approvedBy    User?     @relation("BOMApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
   /// Approving freezes a BOM, so a new version has to start from a copy.
   /// Otherwise the choice is re-typing twelve lines, and what happens instead
   /// is that somebody edits the approved one. This records what it came from.
-  copiedFromId String?
-  copiedFrom   BOM?      @relation("BOMCopy", fields: [copiedFromId], references: [id])
-  isActive     Boolean   @default(true)
+  copiedFromId  String?
+  copiedFrom    BOM?      @relation("BOMCopy", fields: [copiedFromId], references: [id])
+  isActive      Boolean   @default(true)
   /// Material only, for one garment at the base size. Deliberately not an
   /// average across the size run: an order is never an equal split of sizes,
-  /// and the split lives on the order rather than here.
-  totalCost    Decimal?  @db.Decimal(10, 2)
-  /// The sum of rate per piece over the linked routing, kept beside the
-  /// material cost so both halves of what a garment costs come from one row.
-  labourCost   Decimal?  @db.Decimal(10, 2)
-  notes        String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  /// and the split lives on the order rather than here. Lines the customer
+  /// supplies are left out — the mill never pays for that cloth.
+  totalCost     Decimal?  @db.Decimal(10, 2)
+  /// The sum of the LABOUR rows in costLines. It used to be read off the linked
+  /// routing, whose rates were demo figures nobody at the mill had entered.
+  labourCost    Decimal?  @db.Decimal(10, 2)
+  /// The sum of the OVERHEAD rows, each worked out to rupees for one piece.
+  overheadCost  Decimal?  @db.Decimal(10, 2)
+  /// Material + labour + overhead: what one garment costs to make.
+  costPerPiece  Decimal?  @db.Decimal(10, 2)
+  /// Profit as a share of the selling price, not a mark-up on cost: 20% here
+  /// means cost ÷ 0.80. Kept with the price it produced, so either can be read.
+  marginPercent Decimal?  @db.Decimal(5, 2)
+  /// Before GST, rounded up to the rupee. Unlike the costing it stays editable
+  /// after approval: cost is how the garment is made, price is a commercial
+  /// call that moves with the buyer.
+  sellingPrice  Decimal?  @db.Decimal(10, 2)
+  pricedById    String?
+  pricedBy      User?     @relation("BOMPricedBy", fields: [pricedById], references: [id])
+  pricedAt      DateTime?
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  lines  BOMLine[]
-  copies BOM[]    @relation("BOMCopy")
+  lines     BOMLine[]
+  costLines BOMCostLine[]
+  copies    BOM[]         @relation("BOMCopy")
 
   // White v1.0 and Dusty Blue v1.0 of the same style are two different BOMs.
   // Postgres counts two blank colours as different, so two colourless BOMs at
@@ -652,38 +683,64 @@ model BOM {
 }
 
 model BOMLine {
-  id              String   @id @default(cuid())
-  bomId           String
-  bom             BOM      @relation(fields: [bomId], references: [id], onDelete: Cascade)
-  componentItemId String
-  componentItem   Item     @relation("ComponentItem", fields: [componentItemId], references: [id])
+  id               String      @id @default(cuid())
+  bomId            String
+  bom              BOM         @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  componentItemId  String
+  componentItem    Item        @relation("ComponentItem", fields: [componentItemId], references: [id])
   /// Which part of the garment this goes into, such as "Body", "Collar" or
   /// "Cuff". The same self fabric legitimately appears twice on one BOM at two
   /// different wastages, because the parts are cut differently. Without this
   /// the second line reads as a typo, and it is why there is no unique
   /// constraint on bomId plus componentItemId.
-  component       String?
+  component        String?
   /// The department that draws this material from the store: Cutting takes the
   /// fabric, Stitching the thread and labels, Packing the cartons. A material
   /// requisition is always raised by one department, so this is what lets an
   /// order's materials be asked for stage by stage rather than all at once.
-  departmentId    String?
-  department      Department? @relation(fields: [departmentId], references: [id])
+  departmentId     String?
+  department       Department? @relation(fields: [departmentId], references: [id])
   /// Consumption for one garment at the BOM base size. Sizes that differ carry
   /// their own row in BOMLineSize; every other size falls back to this.
-  qtyPerUnit      Decimal  @db.Decimal(10, 4)
-  wastagePercent  Decimal  @default(0) @db.Decimal(5, 2)
-  effectiveQty    Decimal  @db.Decimal(10, 4)
-  unitCost        Decimal? @db.Decimal(10, 4)
-  totalCost       Decimal? @db.Decimal(10, 4)
-  notes           String?
-  sortOrder       Int      @default(0)
+  qtyPerUnit       Decimal     @db.Decimal(10, 4)
+  wastagePercent   Decimal     @default(0) @db.Decimal(5, 2)
+  effectiveQty     Decimal     @db.Decimal(10, 4)
+  unitCost         Decimal?    @db.Decimal(10, 4)
+  totalCost        Decimal?    @db.Decimal(10, 4)
+  /// Cut-make-trim: the customer sends this, usually the fabric. It stays on
+  /// the BOM because an order still has to know it is used, but it costs the
+  /// mill nothing and is left out of the BOM's material cost.
+  customerSupplied Boolean     @default(false)
+  notes            String?
+  sortOrder        Int         @default(0)
 
   sizes BOMLineSize[]
 
   @@index([bomId])
   @@index([componentItemId])
   @@map("bom_lines")
+}
+
+/// One labour or overhead row on a BOM's costing: "Stitching — ₹42 a piece",
+/// "Factory overhead — 10%". Written with the BOM and locked with it on approval.
+model BOMCostLine {
+  id           String       @id @default(cuid())
+  bomId        String
+  bom          BOM          @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  kind         BOMCostKind
+  name         String
+  /// Optional: which department the labour is paid to.
+  departmentId String?
+  department   Department?  @relation(fields: [departmentId], references: [id])
+  basis        BOMCostBasis @default(PER_PIECE)
+  /// What was typed: rupees for PER_PIECE, a percentage for PERCENT.
+  value        Decimal      @db.Decimal(10, 2)
+  /// The row worked out to rupees for one piece.
+  amount       Decimal      @db.Decimal(10, 2)
+  sortOrder    Int          @default(0)
+
+  @@index([bomId])
+  @@map("bom_cost_lines")
 }
 
 /// One size's own consumption, written only for the lines where it actually
@@ -886,6 +943,7 @@ model Department {
   productionEntries ProductionEntry[]
   routingSteps      RoutingStep[]
   bomLines          BOMLine[]
+  bomCostLines      BOMCostLine[]
 
   @@map("departments")
 }
