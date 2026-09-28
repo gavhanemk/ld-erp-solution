@@ -53,11 +53,20 @@ export function FilterMenu({
     }
   }, [open])
 
+  // Which way the panel opens. Hung from the left of its button, the last
+  // dropdown in the row ran past the edge of the window, and the page slid
+  // sideways to show it. Near the right edge it hangs from the right instead.
+  const [alignRight, setAlignRight] = useState(false)
+  const PANEL_WIDTH = 288
+
   useEffect(() => {
     if (open) {
       setQuery('')
-      // After the panel is in the page, so the focus lands.
-      requestAnimationFrame(() => inputRef.current?.focus())
+      const box = rootRef.current?.getBoundingClientRect()
+      setAlignRight(Boolean(box && box.left + PANEL_WIDTH > window.innerWidth - 8))
+      // After the panel is in the page, so the focus lands. `preventScroll`,
+      // or the browser scrolls the page to bring the box into view.
+      requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
     }
   }, [open])
 
@@ -102,7 +111,11 @@ export function FilterMenu({
       </button>
 
       {open && (
-        <div className="bg-card border-border absolute left-0 top-full z-40 mt-1.5 w-72 overflow-hidden rounded-xl border shadow-xl">
+        <div
+          className={`bg-card border-border absolute top-full z-40 mt-1.5 w-72 max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border shadow-xl ${
+            alignRight ? 'right-0' : 'left-0'
+          }`}
+        >
           {searchable && (
             <div className="border-border flex items-center gap-2 border-b px-3 py-2">
               <Search size={14} className="text-muted-foreground shrink-0" />
