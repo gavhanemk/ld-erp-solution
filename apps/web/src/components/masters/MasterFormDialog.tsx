@@ -69,8 +69,21 @@ const SECTION_ICONS: Record<string, LucideIcon> = {
   Construction: Layers,
   'Size & Colour': Palette,
   Capacity: Gauge,
+  'Costing & Stock': IndianRupee,
   Other: FileText,
 }
+
+/** Fields per row by screen width. Written out whole so Tailwind keeps them. */
+const GRID = {
+  3: 'md:grid-cols-2 xl:grid-cols-3',
+  4: 'sm:grid-cols-2 lg:grid-cols-4',
+} as const
+
+/** How far a wide field reaches, for each grid. */
+const SPAN = {
+  3: { 1: '', 2: 'md:col-span-2', 3: 'col-span-full' },
+  4: { 1: '', 2: 'sm:col-span-2', 3: 'sm:col-span-2 lg:col-span-3' },
+} as const
 
 export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags'
 
@@ -92,7 +105,26 @@ export interface FormField {
     valueKey?: string
     /** Record field shown to the user. Defaults to 'name'. */
     labelKey?: string
+    /**
+     * Keeps only the rows this returns true for, given what is on the form
+     * now. How a sub-category list shows only the chosen category's children.
+     */
+    filter?: (row: Record<string, unknown>, values: Record<string, unknown>) => boolean
   }
+  /** Shown in place of "Select..." when a filtered list has nothing in it. */
+  emptyLabel?: string
+  /** Value to open an edit with, when it is not simply the record's own field. */
+  initial?: (record: Record<string, unknown>) => unknown
+  /**
+   * Saved under another name. Two boxes may share one: Category and Sub
+   * Category both save `categoryId`, and a sub-category, when chosen, wins
+   * because it comes later.
+   */
+  sendAs?: string
+  /** Fields emptied when this one changes, as a sub-category is when its category does. */
+  resets?: string[]
+  /** Height of a textarea, in lines. */
+  rows?: number
   /** Short hint rendered under the input. */
   help?: string
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
@@ -114,8 +146,8 @@ export interface FormField {
    * editing — because by then it is on documents and people quote it.
    */
   generated?: boolean
-  /** Fraction of the two-column grid this field occupies. */
-  span?: 1 | 2
+  /** How many grid columns this field takes. */
+  span?: 1 | 2 | 3
   /** Grouping heading this field sits under. */
   section?: string
 }
@@ -130,6 +162,11 @@ interface MasterFormDialogProps<T> {
   /** Present when editing; absent when creating. */
   record?: T | null
   title: string
+  /**
+   * Fields per row on a wide screen. Four suits a master of many short
+   * fields, like an item, and keeps the whole form on one screen.
+   */
+  columns?: 3 | 4
 }
 
 export function MasterFormDialog<T extends { id: string }>({
@@ -140,6 +177,7 @@ export function MasterFormDialog<T extends { id: string }>({
   fields,
   record,
   title,
+  columns = 3,
 }: MasterFormDialogProps<T>) {
   const isEdit = Boolean(record)
   const client = useMemo(() => masterResource<T>(resource), [resource])
@@ -157,7 +195,11 @@ export function MasterFormDialog<T extends { id: string }>({
 
     const seed: Record<string, unknown> = {}
     for (const f of fields) {
-      const existing = record ? (record as Record<string, unknown>)[f.name] : undefined
+      const existing = record
+        ? f.initial
+          ? f.initial(record as Record<string, unknown>)
+          : (record as Record<string, unknown>)[f.name]
+        : undefined
       if (existing !== undefined && existing !== null) {
         seed[f.name] = f.type === 'tags' && Array.isArray(existing) ? existing.join(', ') : existing
       } else if (f.type === 'checkbox') {
@@ -185,9 +227,9 @@ export function MasterFormDialog<T extends { id: string }>({
 
   // Foreign-key selects load their choices from the API the first time the
   // dialog opens, keyed by field name.
-  const [remoteOptions, setRemoteOptions] = useState<
-    Record<string, { value: string; label: string }[]>
-  >({})
+  // The rows themselves, not ready-made options, so a list that depends on
+  // another field can be filtered again each time that field changes.
+  const [remoteRows, setRemoteRows] = useState<Record<string, Record<string, unknown>[]>>({})
 
   useEffect(() => {
     if (!open) return
@@ -199,19 +241,12 @@ export function MasterFormDialog<T extends { id: string }>({
 
     void Promise.all(
       remoteFields.map(async (f) => {
-        const { resource: r, valueKey = 'id', labelKey = 'name' } = f.optionsFrom!
         try {
-          const res = (await masterResource<Record<string, unknown>>(r).list({
+          const res = (await masterResource<Record<string, unknown>>(f.optionsFrom!.resource).list({
             limit: 200,
             active: true,
           })) as Paginated<Record<string, unknown>>
-          return [
-            f.name,
-            res.data.map((row) => ({
-              value: String(row[valueKey] ?? ''),
-              label: String(row[labelKey] ?? row[valueKey] ?? ''),
-            })),
-          ] as const
+          return [f.name, res.data] as const
         } catch {
           // A failed lookup leaves the select empty rather than breaking the
           // whole form; the required-field error still guides the user.
@@ -219,7 +254,7 @@ export function MasterFormDialog<T extends { id: string }>({
         }
       }),
     ).then((entries) => {
-      if (!cancelled) setRemoteOptions(Object.fromEntries(entries))
+      if (!cancelled) setRemoteRows(Object.fromEntries(entries))
     })
 
     return () => {
@@ -244,12 +279,26 @@ export function MasterFormDialog<T extends { id: string }>({
 
   if (!open) return null
 
+  const optionsFor = (f: FormField) => {
+    if (!f.optionsFrom) return f.options
+    const rows = remoteRows[f.name]
+    if (!rows) return undefined
+    const { valueKey = 'id', labelKey = 'name', filter } = f.optionsFrom
+    return rows
+      .filter((row) => !filter || filter(row, values))
+      .map((row) => ({
+        value: String(row[valueKey] ?? ''),
+        label: String(row[labelKey] ?? row[valueKey] ?? ''),
+      }))
+  }
+
   const set = (name: string, value: unknown) => {
     const field = fields.find((f) => f.name === name)
     const next = field?.uppercase && typeof value === 'string' ? value.toUpperCase() : value
 
     setValues((v) => {
       const updated = { ...v, [name]: next }
+      for (const r of field?.resets ?? []) updated[r] = ''
 
       // One field can fill in another — a GSTIN gives the state code away, and
       // nobody should have to know that to get their tax right.
@@ -276,26 +325,27 @@ export function MasterFormDialog<T extends { id: string }>({
       if (f.generated) continue
 
       const raw = values[f.name]
+      const key = f.sendAs ?? f.name
 
       if (f.type === 'checkbox') {
-        payload[f.name] = Boolean(raw)
+        payload[key] = Boolean(raw)
         continue
       }
 
       if (raw === '' || raw === undefined || raw === null) {
-        if (f.required) payload[f.name] = raw
+        if (f.required && payload[key] === undefined) payload[key] = raw
         continue
       }
 
       if (f.type === 'number') {
-        payload[f.name] = Number(raw)
+        payload[key] = Number(raw)
       } else if (f.type === 'tags') {
-        payload[f.name] = String(raw)
+        payload[key] = String(raw)
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean)
       } else {
-        payload[f.name] = raw
+        payload[key] = raw
       }
     }
 
@@ -319,14 +369,23 @@ export function MasterFormDialog<T extends { id: string }>({
       onClose()
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.fieldErrors) setFieldErrors(err.fieldErrors)
+        // The server names what it was sent, so an error on `categoryId` is put
+        // under the first box that saves as it: Category.
+        if (err.fieldErrors) {
+          const onBoxes: Record<string, string> = {}
+          for (const [key, message] of Object.entries(err.fieldErrors)) {
+            const box = fields.find((f) => f.name === key || f.sendAs === key)
+            onBoxes[box?.name ?? key] = message
+          }
+          setFieldErrors(onBoxes)
+        }
 
         // Naming the fields matters. "Please correct the highlighted fields"
         // is useless when the offending one has scrolled out of sight.
         const named = err.fieldErrors
           ? Object.entries(err.fieldErrors)
               .filter(([, m]) => m)
-              .map(([key]) => fields.find((f) => f.name === key)?.label ?? key)
+              .map(([key]) => fields.find((f) => f.name === key || f.sendAs === key)?.label ?? key)
           : []
 
         setFormError(
@@ -346,10 +405,16 @@ export function MasterFormDialog<T extends { id: string }>({
     }
   }
 
-  // A generated field has nothing to show before the record exists.
-  const visibleFields = fields.filter((f) => !f.generated || isEdit)
+  // A generated code is shown in the title bar, next to the name of the form,
+  // rather than as a greyed-out box taking a place in the grid. Before the
+  // record exists there is nothing to show at all.
+  const visibleFields = fields.filter((f) => !f.generated)
 
-  const sections = visibleFields.reduce<Record<string, FormField[]>>((acc, f) => {
+  // The Active tick goes in the footer beside Save rather than in a panel: it
+  // is about the whole record, and in a panel it took a row of its own.
+  const activeField = visibleFields.find((f) => f.name === 'isActive' && f.type === 'checkbox')
+
+  const sections = visibleFields.filter((f) => f !== activeField).reduce<Record<string, FormField[]>>((acc, f) => {
     const key = f.section ?? ''
     ;(acc[key] ??= []).push(f)
     return acc
@@ -357,7 +422,7 @@ export function MasterFormDialog<T extends { id: string }>({
 
   const HeaderIcon = RESOURCE_ICONS[resource] ?? Database
   const heading = isEdit ? `Edit ${title}` : `New ${title}`
-  const code = isEdit ? (visibleFields.find((f) => f.generated) ?? null) : null
+  const code = isEdit ? (fields.find((f) => f.generated) ?? null) : null
   const codeValue = code ? String(values[code.name] ?? '') : ''
 
   const saveButton = (
@@ -386,7 +451,9 @@ export function MasterFormDialog<T extends { id: string }>({
         id="master-form"
         onSubmit={submit}
         noValidate
-        className="glass-card po-form flex h-full max-h-full w-full max-w-5xl flex-col overflow-hidden"
+        // As tall as what it holds, up to the screen. A short master fills a
+        // short card rather than a full-height one with a blank lower half.
+        className="glass-card po-form flex max-h-full w-full max-w-5xl flex-col self-center overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="master-form-title"
@@ -436,14 +503,15 @@ export function MasterFormDialog<T extends { id: string }>({
               icon={SECTION_ICONS[section] ?? FileText}
               title={section || 'Details'}
             >
-              <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-2 xl:grid-cols-3">
+              <div className={`grid grid-cols-1 gap-x-4 gap-y-3 ${GRID[columns]}`}>
                 {sectionFields.map((f) => (
                   <Field
                     key={f.name}
                     field={f}
                     value={values[f.name]}
                     error={fieldErrors[f.name]}
-                    options={f.optionsFrom ? remoteOptions[f.name] : f.options}
+                    options={optionsFor(f)}
+                    columns={columns}
                     onChange={(v) => set(f.name, v)}
                   />
                 ))}
@@ -454,6 +522,22 @@ export function MasterFormDialog<T extends { id: string }>({
 
         {/* Footer: always in reach, however long the form. */}
         <div className="border-border flex shrink-0 items-center justify-end gap-2 border-t px-5 py-3">
+          {activeField && (
+            <label className="text-foreground mr-auto flex cursor-pointer select-none items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="h-4 w-4 shrink-0 accent-teal-500"
+                checked={Boolean(values[activeField.name])}
+                onChange={(e) => set(activeField.name, e.target.checked)}
+              />
+              <span className="font-medium">Active</span>
+              {activeField.placeholder && (
+                <span className="text-muted-foreground hidden sm:inline">
+                  · {activeField.placeholder.toLowerCase()}
+                </span>
+              )}
+            </label>
+          )}
           <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
             Cancel
           </button>
@@ -470,19 +554,22 @@ function Field({
   value,
   error,
   options,
+  columns,
   onChange,
 }: {
   field: FormField
   value: unknown
   error?: string
   options?: { value: string; label: string }[]
+  columns: 3 | 4
   onChange: (v: unknown) => void
 }) {
   const type = field.type ?? 'text'
   // A description or an address is read as a paragraph, so it takes the whole
   // row; a two-wide field takes two of the three columns.
-  const wrapper =
-    type === 'textarea' ? 'min-w-0 col-span-full' : field.span === 2 ? 'min-w-0 md:col-span-2' : 'min-w-0'
+  const wrapper = `min-w-0 ${
+    field.span ? SPAN[columns][field.span] : type === 'textarea' ? 'col-span-full' : ''
+  }`
   const invalid = Boolean(error)
   const inputClass = `form-input placeholder:text-muted-foreground/60 ${invalid ? 'border-red-500/60' : ''}`
   // The screens give a sample value as the hint. Shown bare, "Rajan Traders"
@@ -522,7 +609,7 @@ function Field({
       {type === 'textarea' && (
         <textarea
           id={field.name}
-          rows={3}
+          rows={field.rows ?? 2}
           className={inputClass}
           placeholder={hint}
           value={String(value ?? '')}
@@ -538,7 +625,11 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
         >
           <option value="">
-            {field.optionsFrom && !options ? 'Loading...' : 'Select...'}
+            {field.optionsFrom && !options
+              ? 'Loading...'
+              : options?.length === 0 && field.emptyLabel
+                ? field.emptyLabel
+                : 'Select...'}
           </option>
           {options?.map((o) => (
             <option key={o.value} value={o.value}>

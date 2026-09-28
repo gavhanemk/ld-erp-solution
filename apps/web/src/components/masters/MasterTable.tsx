@@ -43,6 +43,8 @@ interface MasterTableProps<T> {
    * edit and deactivate actions; omitting it leaves the table read-only.
    */
   formFields?: FormField[]
+  /** Fields per row in the form on a wide screen. */
+  formColumns?: 3 | 4
   /** Singular noun used in the dialog heading, e.g. "Customer". */
   entityName?: string
 }
@@ -57,6 +59,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   filters,
   emptyMessage = 'Nothing here yet.',
   formFields,
+  formColumns,
   entityName,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
@@ -369,6 +372,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           fields={formFields}
           record={editing}
           title={singular}
+          columns={formColumns}
         />
       )}
     </div>

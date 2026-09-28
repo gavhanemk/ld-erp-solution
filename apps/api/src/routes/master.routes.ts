@@ -317,7 +317,14 @@ router.use(
     // to type from memory — and a rate typed from memory is the one thing the
     // business rules say must never happen. The alternative source, the tax
     // rate list in Settings, needs a permission a purchase clerk does not have.
-    include: { category: true, uom: true, taxRate: true },
+    // The category's parent too, so the form can show a sub-category under the
+    // main one it belongs to.
+    include: {
+      category: { include: { parent: true } },
+      uom: true,
+      taxRate: true,
+      department: { select: { id: true, name: true, code: true } },
+    },
   }),
 )
 

@@ -228,6 +228,8 @@ export const createItemSchema = z
     type: ItemTypeEnum,
     categoryId: z.string().min(1, 'Choose a category from the list'),
     uomId: z.string().min(1, 'Choose a unit — pieces, metres, kilograms and so on'),
+    // The department that normally uses it. Optional; null clears it.
+    departmentId: z.string().min(1).optional().nullable(),
     hsnCode: z
       .string()
       .regex(/^[0-9]{4,8}$/, 'An HSN code is 4 to 8 digits, nothing else')
