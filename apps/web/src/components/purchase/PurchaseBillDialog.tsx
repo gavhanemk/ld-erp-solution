@@ -671,7 +671,9 @@ export function PurchaseBillDialog({
    * bill — that last one matters most: clearing a filter after ticking
    * something must not take what is on the bill off the screen.
    */
-  const anyReceiptFilter = Boolean(filterPo || filterChallan || filterBill || filterGrn)
+  const anyReceiptFilter = Boolean(
+    supplierId || filterPo || filterChallan || filterBill || filterGrn
+  )
   const receiptsOpen = anyReceiptFilter || showAllReceipts || billedReceipts.length > 0
 
   /**
@@ -745,6 +747,45 @@ export function PurchaseBillDialog({
     if (g.challanNo) setFilterChallan(g.challanNo)
     if (g.supplierInvoiceNo) setFilterBill(g.supplierInvoiceNo)
     void pullMany([g])
+  }
+
+  /**
+   * Picking the supplier — the top of the cascade.
+   *
+   * It is the same field the bill itself carries, not a filter of its own: a
+   * bill is one supplier's demand for money, so "whose deliveries am I
+   * looking at" and "whose bill is this" are one question and have to stay one
+   * piece of state. The box in Bill Details below sets it through here too.
+   *
+   * Refused outright while deliveries are on the bill. Changing it used to be
+   * allowed and did nothing but change the name at the top: the lines stayed,
+   * still tied to the other supplier's receipts, and the bill went off to
+   * somebody who had never sent those goods. Nothing downstream would have
+   * caught it — the receipt link is what the goods are matched on, and it
+   * would still have been perfectly consistent with itself.
+   */
+  const chooseSupplier = (id: string) => {
+    if (id === supplierId) return
+    if (billedReceipts.length > 0) {
+      setError(
+        `${billedReceipts.join(', ')} ${
+          billedReceipts.length === 1 ? 'is' : 'are'
+        } on this bill and ${
+          billedReceipts.length === 1 ? 'belongs' : 'belong'
+        } to the supplier it is already for. Untick ${
+          billedReceipts.length === 1 ? 'it' : 'them'
+        } before changing who the bill is from.`
+      )
+      return
+    }
+    setError(null)
+    setSupplierId(id)
+    // Everything below it was picked out of the other supplier's paperwork.
+    setFilterPo('')
+    setFilterChallan('')
+    setFilterBill('')
+    setFilterGrn('')
+    setShowAllReceipts(false)
   }
 
   /**
@@ -1210,14 +1251,37 @@ export function PurchaseBillDialog({
                       receipt number; each box narrows the others.
                     </p>
 
-                    {/* ── The four ways in ─────────────────────────────────
-                      The clerk is holding the supplier's invoice. It quotes
-                      his challan number, his own bill number and our order
-                      number, and never our receipt number — he has never seen
-                      one. A picker that offered only GRN numbers was asking
-                      them to translate between two documents in their head,
-                      which is how the wrong delivery gets billed. */}
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    {/* ── The ways in ──────────────────────────────────────
+                      The clerk is holding the supplier's invoice. It carries
+                      his name, his challan number, his own bill number and our
+                      order number — and never our receipt number, which he has
+                      never seen. A picker that offered only GRN numbers was
+                      asking them to translate between two documents in their
+                      head, which is how the wrong delivery gets billed.
+
+                      The supplier leads, because it is the one box that is not
+                      only a filter: it is the bill's own supplier, the same
+                      field as the one in Bill Details below, and answering it
+                      here is answering it there. */}
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                      <label className="block">
+                        <span className="form-label">
+                          Supplier<span className="ml-0.5 text-red-400">*</span>
+                        </span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={supplierId}
+                          onChange={(e) => chooseSupplier(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All suppliers</option>
+                          {suppliers.map((sup) => (
+                            <option key={sup.id} value={sup.id}>
+                              {sup.code ? `${sup.code} — ${sup.name}` : sup.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="block">
                         <span className="form-label">PO no.</span>
                         <select
@@ -1306,7 +1370,8 @@ export function PurchaseBillDialog({
                         <span className="text-muted-foreground">
                           {receiptChoices.length === 1
                             ? '1 delivery is waiting to be billed.'
-                            : `${receiptChoices.length} deliveries are waiting to be billed.`}
+                            : `${receiptChoices.length} deliveries are waiting to be billed.`}{' '}
+                          Name the supplier above, or the challan on the invoice in your hand.
                         </span>
                         <button
                           type="button"
@@ -1527,7 +1592,7 @@ export function PurchaseBillDialog({
                     id="bill-supplier"
                     className="form-input"
                     value={supplierId}
-                    onChange={(e) => setSupplierId(e.target.value)}
+                    onChange={(e) => chooseSupplier(e.target.value)}
                   >
                     <option value="">Select...</option>
                     {suppliers.map((s) => (
