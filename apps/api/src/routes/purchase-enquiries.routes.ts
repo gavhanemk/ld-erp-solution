@@ -423,9 +423,87 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
   const ordered = await orderedQtyByEnquiryLine(prisma, enquiry.id)
   const header = await getPrintHeader('ENQ')
 
+  /*
+   * Who each copy goes to, with a full address.
+   *
+   * The requisition is one sheet sent to every supplier asked, each copy
+   * carrying that supplier's own name and address in the Vendor block. The
+   * quote rows only carry a name and a GSTIN, so the address is read here.
+   * The supplier's own address first; where the master keeps it on a separate
+   * address row instead, the default one of those.
+   */
+  const wanted = quoteId ? enquiry.quotes.filter((q) => q.id === quoteId) : enquiry.quotes
+  const suppliers = await prisma.supplier.findMany({
+    where: { id: { in: wanted.map((q) => q.supplierId) } },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      phone: true,
+      email: true,
+      gstin: true,
+      address: true,
+      city: true,
+      state: true,
+      stateCode: true,
+      pincode: true,
+      addresses: {
+        where: { isActive: true },
+        orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+        take: 1,
+        select: { address: true, city: true, state: true, stateCode: true, pincode: true },
+      },
+    },
+  })
+  const supplierById = new Map(suppliers.map((s) => [s.id, s]))
+  const recipients = wanted
+    .map((q) => {
+      const s = supplierById.get(q.supplierId)
+      if (!s) return null
+      const alt = s.address ? null : s.addresses[0]
+      return {
+        quoteId: q.id,
+        code: s.code,
+        name: s.name,
+        phone: s.phone,
+        email: s.email,
+        gstin: s.gstin,
+        address: s.address ?? alt?.address ?? null,
+        city: s.city ?? alt?.city ?? null,
+        state: s.state ?? alt?.state ?? null,
+        stateCode: s.stateCode ?? alt?.stateCode ?? null,
+        pincode: s.pincode ?? alt?.pincode ?? null,
+      }
+    })
+    .filter(Boolean)
+
+  /*
+   * Where the goods are to be delivered — the godown the enquiry names — and
+   * who raised it, for the Prepared By block and the "for queries" line.
+   */
+  const [shipTo, preparedBy] = await Promise.all([
+    enquiry.locationId
+      ? prisma.warehouse.findUnique({
+          where: { id: enquiry.locationId },
+          select: { name: true, address: true },
+        })
+      : null,
+    prisma.user.findUnique({
+      where: { id: enquiry.createdById },
+      select: { name: true, phone: true, email: true },
+    }),
+  ])
+
   res.json({
     success: true,
-    data: { ...header, enquiry: shape(enquiry, ordered), forQuoteId: quoteId },
+    data: {
+      ...header,
+      enquiry: shape(enquiry, ordered),
+      forQuoteId: quoteId,
+      recipients,
+      shipTo,
+      preparedBy,
+    },
   })
 })
 
