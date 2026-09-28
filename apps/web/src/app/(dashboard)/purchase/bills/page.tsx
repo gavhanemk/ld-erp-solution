@@ -18,6 +18,7 @@ import {
   FileText,
   Undo2,
   PackageMinus,
+  Wallet,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
@@ -130,7 +131,11 @@ function PurchaseBillsTable() {
     }
   }, [])
   const [busy, setBusy] = useState(false)
-  const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseBill | null }>({
+  const [dialog, setDialog] = useState<{
+    open: boolean
+    record: PurchaseBill | null
+    expense?: boolean
+  }>({
     open: false,
     record: null,
   })
@@ -454,6 +459,17 @@ function PurchaseBillsTable() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
+          {/* Beside Book Bill, not inside it: a bill with no order and no
+            receipt behind it — electricity, rent, a repair — has nothing for
+            the deliveries half of the ordinary form to find. */}
+          <button
+            className="btn-secondary"
+            onClick={() => setDialog({ open: true, record: null, expense: true })}
+            aria-label="Expense bill (no PO)"
+            title="Electricity, rent, repairs, services — a bill with no order or receipt"
+          >
+            <Wallet size={15} /> <span className="hidden sm:inline">Expense bill</span>
+          </button>
           <button
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}
@@ -690,7 +706,7 @@ function PurchaseBillsTable() {
                         {receiptsOn(bill).length ? (
                           <span className="font-mono">{receiptsOn(bill).join(', ')}</span>
                         ) : (
-                          <span className="text-muted-foreground">Direct</span>
+                          <span className="text-muted-foreground">Expense (no PO)</span>
                         )}
                         {fileCountOn(bill) > 0 && (
                           // Pressable here too. On the card this was a count
@@ -869,9 +885,9 @@ function PurchaseBillsTable() {
                               ) : (
                                 <span
                                   className="text-muted-foreground"
-                                  title="Entered by hand — a service or transport bill with no goods receipt behind it"
+                                  title="Entered by hand — an expense or service bill with no order or receipt behind it"
                                 >
-                                  Direct
+                                  Expense (no PO)
                                 </span>
                               )}
                             </div>
@@ -984,6 +1000,7 @@ function PurchaseBillsTable() {
       <PurchaseBillDialog
         open={dialog.open}
         record={dialog.record}
+        expense={dialog.expense}
         initialGrnIds={fromGrnIds}
         onClose={() => {
           setDialog({ open: false, record: null })

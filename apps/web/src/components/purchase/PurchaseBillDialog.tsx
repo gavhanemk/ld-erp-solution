@@ -21,6 +21,7 @@ import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
+import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 
 export interface BillLine {
   itemId: string
@@ -191,7 +192,25 @@ interface Option {
   isMsme?: boolean
   /** The terms agreed with this supplier — what the due date is counted in. */
   creditDays?: number | null
+  /** An item's category, nested as the master sends it — what marks an expense head. */
+  category?: { id: string; name: string; parentId: string | null } | null
 }
+
+interface Category {
+  id: string
+  name: string
+  parentId: string | null
+}
+
+/** The item-list choice that opens "new expense head" instead of picking one. */
+const ADD_EXPENSE_HEAD = '__new_expense__'
+
+/**
+ * Whether a category is where expense heads live: named for expenses, or
+ * filed under one that is. Read off the name so the mill sets it up in
+ * Masters like any other category — no switch to find, nothing to migrate.
+ */
+const EXPENSE_NAME = /expense/i
 
 interface GrnOption {
   id: string
@@ -292,6 +311,7 @@ export function PurchaseBillDialog({
   onSaved,
   record,
   initialGrnIds,
+  expense,
 }: {
   open: boolean
   onClose: () => void
@@ -312,11 +332,26 @@ export function PurchaseBillDialog({
    * four steps to arrive where the button already was.
    */
   initialGrnIds?: string[] | null
+  /**
+   * A bill with no order and no receipt behind it — electricity, rent, a
+   * repair, a service. The deliveries section goes, the lines are picked from
+   * expense heads rather than stock items, and each line carries its own
+   * description, because "Electricity" alone does not say which month.
+   */
+  expense?: boolean
 }) {
   const isEdit = Boolean(record)
+  // An existing bill with no receipt on any line was booked as an expense,
+  // and opens that way again for editing.
+  const expenseMode =
+    Boolean(expense) ||
+    Boolean(isEdit && record?.lines?.length && record.lines.every((l) => !l.grnLineId))
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<Option[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
+  /** The line a new expense head is being created for, if any. */
+  const [newHeadFor, setNewHeadFor] = useState<number | null>(null)
   const [chargeTypes, setChargeTypes] = useState<Option[]>([])
   const [grns, setGrns] = useState<GrnOption[]>([])
   const [companyState, setCompanyState] = useState<string | null>(null)
@@ -411,7 +446,7 @@ export function PurchaseBillDialog({
             acceptedQty: l.grnLine ? num(l.grnLine.acceptedQty) : undefined,
             grnNumber: l.grnLine?.grn?.grnNumber,
           }))
-        : [emptyLine()]
+        : [freshLine()]
     )
     setCharges(
       record?.charges?.map((c) => ({
@@ -513,6 +548,88 @@ export function PurchaseBillDialog({
       cancelled = true
     }
   }, [open])
+
+  // Categories, for telling expense heads from stock items. Only an expense
+  // bill needs them.
+  useEffect(() => {
+    if (!open || !expenseMode) return
+    let cancelled = false
+    masterResource<Category>('item-categories')
+      .list({ limit: 500, active: true })
+      .then((r) => {
+        if (!cancelled) setCategories(r.data)
+      })
+      .catch(() => {
+        // Without them every item is simply listed together.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, expenseMode])
+
+  const expenseCategoryIds = useMemo(() => {
+    const named = new Set(categories.filter((c) => EXPENSE_NAME.test(c.name)).map((c) => c.id))
+    for (const c of categories) if (c.parentId && named.has(c.parentId)) named.add(c.id)
+    return named
+  }, [categories])
+  /** The top-level "Expenses" category, where a new head is filed by default. */
+  const expenseCategory =
+    categories.find((c) => !c.parentId && EXPENSE_NAME.test(c.name)) ??
+    categories.find((c) => EXPENSE_NAME.test(c.name))
+  const isExpenseHead = (it?: Option | null) =>
+    Boolean(
+      it?.category &&
+      (expenseCategoryIds.has(it.category.id) ||
+        (it.category.parentId != null && expenseCategoryIds.has(it.category.parentId)))
+    )
+  const expenseHeads = useMemo(
+    () => items.filter((it) => isExpenseHead(it)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, expenseCategoryIds]
+  )
+
+  /**
+   * The choices in a line's item picker. On an expense bill the expense heads
+   * come first, with a way to add one; every other item is still listed below
+   * them, so a bill can be booked before the heads have been set up.
+   */
+  const itemChoices = () =>
+    expenseMode ? (
+      <>
+        <option value="">Select...</option>
+        {expenseHeads.length > 0 && (
+          <optgroup label="Expense heads">
+            {expenseHeads.map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.code ? `${it.code} — ${it.name}` : it.name}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        <option value={ADD_EXPENSE_HEAD}>+ Add a new expense head…</option>
+        <optgroup label="Other items">
+          {items
+            .filter((it) => !isExpenseHead(it))
+            .map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.code ? `${it.code} — ${it.name}` : it.name}
+              </option>
+            ))}
+        </optgroup>
+      </>
+    ) : (
+      <>
+        <option value="">Select...</option>
+        {items.map((it) => (
+          <option key={it.id} value={it.id}>
+            {it.code ? `${it.code} — ${it.name}` : it.name}
+          </option>
+        ))}
+      </>
+    )
+
+  /** A fresh line: one of whatever it is, on an expense bill — a month's electricity is one. */
+  const freshLine = (): BillLine => (expenseMode ? { ...emptyLine(), qty: '1' } : emptyLine())
 
   /**
    * The deliveries waiting to be billed, asked for again whenever the
@@ -972,6 +1089,10 @@ export function PurchaseBillDialog({
     setLine(index, { unitPrice, rateAction: null })
 
   const pickItem = (index: number, itemId: string) => {
+    if (itemId === ADD_EXPENSE_HEAD) {
+      setNewHeadFor(index)
+      return
+    }
     const item = itemById.get(itemId)
     setLine(index, {
       itemId,
@@ -1251,6 +1372,38 @@ export function PurchaseBillDialog({
         aria-modal="true"
         aria-labelledby="bill-dialog-title"
       >
+        {newHeadFor !== null && (
+          <NewItemDialog
+            categories={categories}
+            categoryId={expenseCategory?.parentId ?? expenseCategory?.id}
+            subcategoryId={expenseCategory?.parentId ? expenseCategory.id : undefined}
+            onClose={() => setNewHeadFor(null)}
+            onCreated={(created: NewItem) => {
+              const index = newHeadFor
+              setNewHeadFor(null)
+              // Into the list this form holds as well as the master, so the
+              // line that asked for it can pick it straight away.
+              const option: Option = {
+                id: created.id,
+                code: created.code,
+                name: created.name,
+                hsnCode: created.hsnCode,
+                uom: created.uom,
+                category: created.category,
+                standardRate: created.standardRate ?? null,
+              }
+              setItems((p) => [...p, option])
+              setLine(index, {
+                itemId: created.id,
+                grnLineId: null,
+                unitPrice: created.standardRate
+                  ? String(created.standardRate)
+                  : (lines[index]?.unitPrice ?? ''),
+              })
+            }}
+          />
+        )}
+
         {/* Header — stays put while the body scrolls. */}
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -1262,12 +1415,18 @@ export function PurchaseBillDialog({
                 id="bill-dialog-title"
                 className="text-foreground truncate text-xl font-semibold tracking-tight"
               >
-                {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
+                {isEdit
+                  ? `Edit ${record?.billNumber}`
+                  : expenseMode
+                    ? 'Book an Expense Bill'
+                    : 'Book a Supplier Bill'}
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                 {isEdit
                   ? 'A bill can be changed until a payment is made against it'
-                  : 'Our reference number is given when you save. Type the supplier’s own number below.'}
+                  : expenseMode
+                    ? 'Electricity, rent, repairs, services — a bill with no order or receipt behind it.'
+                    : 'Our reference number is given when you save. Type the supplier’s own number below.'}
               </p>
             </div>
           </div>
@@ -1308,7 +1467,7 @@ export function PurchaseBillDialog({
               </div>
             )}
 
-            {!isEdit && (
+            {!isEdit && !expenseMode && (
               <Section icon={Download} title="Deliveries Being Billed">
                 {loadingReceipts && receiptChoices.length === 0 ? (
                   <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
@@ -1911,24 +2070,35 @@ export function PurchaseBillDialog({
             {/* Lines */}
             <Section
               icon={Package}
-              title="Item Details"
+              title={expenseMode ? 'Expense Details' : 'Item Details'}
               actions={
                 <button
                   type="button"
-                  onClick={() => setLines((p) => [...p, emptyLine()])}
+                  onClick={() => setLines((p) => [...p, freshLine()])}
                   className="btn-secondary text-xs"
                 >
                   <Plus size={14} /> Add line
                 </button>
               }
             >
+              {expenseMode && categories.length > 0 && expenseHeads.length === 0 && (
+                <p className="text-muted-foreground mb-2 flex items-start gap-1.5 text-xs">
+                  <Info size={13} className="mt-px shrink-0" />
+                  <span>
+                    No expense heads yet. Add a category called &ldquo;Expenses&rdquo; in Masters →
+                    Item Categories and put heads under it — Electricity, Rent, Repairs &amp;
+                    Maintenance — or use &ldquo;+ Add a new expense head…&rdquo; in the list below.
+                    Until then every item is listed.
+                  </span>
+                </p>
+              )}
               <div className="border-border hidden overflow-x-auto rounded-lg border sm:block">
                 <table className="w-full min-w-[900px] text-sm">
                   <thead>
                     <tr className="border-border bg-secondary/70 border-b">
                       {[
                         'Item',
-                        'Against receipt',
+                        expenseMode ? 'Description' : 'Against receipt',
                         'Qty',
                         'Rate',
                         'Disc %',
@@ -1964,21 +2134,32 @@ export function PurchaseBillDialog({
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
                             >
-                              <option value="">Select...</option>
-                              {items.map((it) => (
-                                <option key={it.id} value={it.id}>
-                                  {it.code ? `${it.code} — ${it.name}` : it.name}
-                                </option>
-                              ))}
+                              {itemChoices()}
                             </select>
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
-                                HSN {item.hsnCode}
+                                {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
                               </p>
                             )}
+                            {expenseMode &&
+                              item &&
+                              categories.length > 0 &&
+                              !isExpenseHead(item) && (
+                                <p className="mt-0.5 text-[10px] text-amber-500">
+                                  Not an expense head — goods should come in on a receipt
+                                </p>
+                              )}
                           </td>
                           <td className="min-w-[130px] px-3 py-1.5">
-                            {line.grnNumber ? (
+                            {expenseMode ? (
+                              <input
+                                className="form-input h-8"
+                                value={line.description ?? ''}
+                                onChange={(e) => setLine(i, { description: e.target.value })}
+                                placeholder="e.g. Sept 2026, meter 40231"
+                                aria-label={`Line ${i + 1} description`}
+                              />
+                            ) : line.grnNumber ? (
                               <>
                                 <span className="badge-info">{line.grnNumber}</span>
                                 {line.pendingQty != null && (
@@ -2121,23 +2302,33 @@ export function PurchaseBillDialog({
                           onChange={(e) => pickItem(i, e.target.value)}
                           aria-label={`Line ${i + 1} item`}
                         >
-                          <option value="">Select...</option>
-                          {items.map((it) => (
-                            <option key={it.id} value={it.id}>
-                              {it.code ? `${it.code} — ${it.name}` : it.name}
-                            </option>
-                          ))}
+                          {itemChoices()}
                         </select>
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
-                            HSN {item.hsnCode}
+                            {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
+                          </p>
+                        )}
+                        {expenseMode && item && categories.length > 0 && !isExpenseHead(item) && (
+                          <p className="text-[10px] text-amber-500">
+                            Not an expense head — goods should come in on a receipt
                           </p>
                         )}
                       </div>
 
                       <div className="mt-2">
-                        <p className={fieldLabel}>Against receipt</p>
-                        {line.grnNumber ? (
+                        <p className={fieldLabel}>
+                          {expenseMode ? 'Description' : 'Against receipt'}
+                        </p>
+                        {expenseMode ? (
+                          <input
+                            className="form-input h-9 w-full"
+                            value={line.description ?? ''}
+                            onChange={(e) => setLine(i, { description: e.target.value })}
+                            placeholder="e.g. Sept 2026, meter 40231"
+                            aria-label={`Line ${i + 1} description`}
+                          />
+                        ) : line.grnNumber ? (
                           <>
                             <span className="badge-info">{line.grnNumber}</span>
                             {line.pendingQty != null && (
@@ -2243,7 +2434,7 @@ export function PurchaseBillDialog({
               one. */}
             <Section icon={Calculator} title="Totals">
               <div className="border-border bg-secondary/40 h-fit space-y-1.5 rounded-lg border p-2.5 text-sm">
-                <Row label="Goods subtotal" value={totals.subtotal} />
+                <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
                 <div className="flex items-center justify-between gap-4">
                   <label htmlFor="bill-discount" className="text-muted-foreground">
                     Discount on the whole bill
