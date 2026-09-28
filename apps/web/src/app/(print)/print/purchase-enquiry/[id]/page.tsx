@@ -30,11 +30,22 @@ import { money, qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/
  */
 
 const NAVY = '#173a6c'
+/**
+ * The navy stepped back, for the second thing in a cell.
+ *
+ * An item code beside an item name, an HSN beside a quantity, "lowest" beside
+ * a supplier — each is a qualifier on the thing before it, and in grey they
+ * read as disabled rather than secondary. A lighter tone of the same blue
+ * keeps them part of the same sentence.
+ */
+const SOFT = '#4f7ba8'
 const TINT = '#e9eff8'
 const TINT_SOFT = '#f4f7fc'
 const INK = '#1f2b3d'
 const GREY = '#44536b'
 const RULE = '#b9c4d4'
+/** The hairline inside a tinted panel, where the full rule is too dark. */
+const RULE_SOFT = '#dbe4ef'
 
 const SANS = 'var(--font-inter), Inter, system-ui, sans-serif'
 
@@ -49,25 +60,47 @@ const shortDate = (iso: string) =>
 /*
  * Screen and paper are not the same sheet.
  *
- * On screen this is a card: rounded, shadowed, floating on the app's ground,
- * because that is what tells somebody they are looking at a document rather
- * than a page. On paper all three of those are wrong — a shadow prints as grey
- * mud, a rounded corner as a cut corner — so print flattens them and lets the
- * margin box do the framing instead.
+ * On screen this is a card: rounded, shadowed, floating on a ground that is
+ * lit from the left, because that is what tells somebody they are looking at a
+ * document rather than a page. On paper all of it is wrong — a shadow prints
+ * as grey mud, a rounded corner as a cut corner, a tinted ground as a wash
+ * over the whole sheet — so print flattens them and lets the margin box do the
+ * framing instead.
  */
 const SHEET_CSS = `
-  .enq-page { background: #eef2f7; padding: 28px 16px; }
+  .enq-page {
+    background: #e9eef6;
+    background-image:
+      radial-gradient(1100px 420px at -8% 26%, rgba(255, 255, 255, 0.8), transparent 62%),
+      radial-gradient(900px 520px at 108% 6%, rgba(255, 255, 255, 0.55), transparent 58%);
+    padding: 32px 16px 44px;
+  }
   .enq-sheet {
     background: #fff;
-    max-width: 860px;
+    max-width: 900px;
     margin: 0 auto;
-    border-radius: 14px;
-    box-shadow: 0 10px 40px rgba(23, 58, 108, 0.12);
-    padding: 30px 32px 26px;
+    border-radius: 16px;
+    box-shadow: 0 18px 50px rgba(23, 58, 108, 0.14);
+    padding: 34px 36px 30px;
   }
   @media print {
-    .enq-page { background: #fff; padding: 0; }
+    .enq-page { background: #fff; background-image: none; padding: 0; }
     .enq-sheet { box-shadow: none; border-radius: 0; max-width: none; padding: 0; }
+    /*
+     * Keep the filled bands filled.
+     *
+     * A browser drops every background when it prints unless it is told not
+     * to, and this sheet is built out of them: the navy table head carries
+     * white column names, and the contact tiles carry white glyphs. Dropped,
+     * both print as white on white — the headings simply are not there, and
+     * nobody notices until the sheet is in a supplier's hand. It is stated
+     * here rather than left to whoever remembers to tick "Background
+     * graphics" in the print box.
+     */
+    .enq-sheet, .enq-sheet * {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
     @page { margin: 14mm; }
   }
 `
@@ -111,6 +144,21 @@ export default function PurchaseEnquiryPrintPage() {
   const forQuote = quoteId ? (e.quotes.find((q) => q.id === quoteId) ?? null) : null
   const co = data.company
 
+  /*
+   * The three ways to reach us, gathered before they are drawn so the dots
+   * between them can be. A separator rendered inside each item leaves a
+   * trailing one on the last, and a company with no GSTIN on file would have
+   * opened the line with one.
+   */
+  const contacts = [
+    co.gstin ? { icon: ReceiptText, text: 'GSTIN ' + co.gstin } : null,
+    co.phone ? { icon: Phone, text: co.phone } : null,
+    co.email ? { icon: Mail, text: co.email } : null,
+  ].filter(Boolean) as Array<{ icon: React.ElementType; text: string }>
+
+  const showSignature = data.template?.showSignature !== false
+  const hasNotes = Boolean(e.notes || e.terms)
+
   return (
     <>
       <style>{SHEET_CSS}</style>
@@ -124,29 +172,34 @@ export default function PurchaseEnquiryPrintPage() {
       <div className="enq-page">
         <div className="enq-sheet" style={{ fontFamily: SANS, color: INK }}>
           {/* ── Letterhead ─────────────────────────────────────────────────
-            The name at 28px beside the mark, the address under it, and the
+            The name at 30px beside the mark, the address under it, and the
             three ways to reach us on one line with an icon each. Icons rather
             than the words "Phone" and "Email": they are read at a glance by
-            somebody scanning a sheet for a number, and they cost no width. */}
-          <div style={{ display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+            somebody scanning a sheet for a number, and they cost no width.
+
+            Each icon sits in a filled navy tile rather than standing as a
+            hairline glyph. At 13px an outlined phone and an outlined envelope
+            are the same smudge on a fax, and this line is the one somebody
+            squints at. A filled tile survives the second photocopy. */}
+          <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 {co.logoUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={co.logoUrl}
                     alt=""
-                    style={{ height: 34, width: 'auto', objectFit: 'contain' }}
+                    style={{ height: 38, width: 'auto', objectFit: 'contain' }}
                   />
                 ) : (
-                  <Sprout size={30} style={{ color: '#2f9e7e' }} strokeWidth={1.8} />
+                  <Sprout size={34} style={{ color: '#2f9e7e' }} strokeWidth={1.8} />
                 )}
                 <h1
                   style={{
                     margin: 0,
-                    fontSize: 26,
+                    fontSize: 30,
                     fontWeight: 700,
-                    letterSpacing: -0.4,
+                    letterSpacing: -0.6,
                     color: NAVY,
                   }}
                 >
@@ -154,57 +207,67 @@ export default function PurchaseEnquiryPrintPage() {
                 </h1>
               </div>
               {co.address && (
-                <p style={{ margin: '8px 0 0', fontSize: 11.5, color: GREY, lineHeight: 1.5 }}>
+                <p style={{ margin: '11px 0 0', fontSize: 12.5, color: GREY, lineHeight: 1.55 }}>
                   {[co.address, co.city, co.state, co.pincode].filter(Boolean).join(', ')}
                 </p>
               )}
               <div
                 style={{
-                  margin: '7px 0 0',
+                  margin: '11px 0 0',
                   display: 'flex',
                   flexWrap: 'wrap',
                   alignItems: 'center',
-                  gap: '4px 16px',
-                  fontSize: 11.5,
+                  gap: '6px 12px',
+                  fontSize: 12,
                   color: GREY,
                 }}
               >
-                {co.gstin && <Contact icon={ReceiptText}>GSTIN {co.gstin}</Contact>}
-                {co.phone && <Contact icon={Phone}>{co.phone}</Contact>}
-                {co.email && <Contact icon={Mail}>{co.email}</Contact>}
+                {contacts.map((c, i) => (
+                  <span
+                    key={c.text}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}
+                  >
+                    {i > 0 && <span style={{ color: RULE }}>·</span>}
+                    <Contact icon={c.icon}>{c.text}</Contact>
+                  </span>
+                ))}
               </div>
             </div>
 
             {/* ── The document block ───────────────────────────────────────
               Which paper this is, and its five identifying facts. Alternating
               tints rather than rules between them: at five rows a ruled grid
-              reads as a second table competing with the real one below. */}
+              reads as a second table competing with the real one below.
+
+              It floats on its own shadow rather than sitting in a box. The
+              hairline border put a second frame a few pixels inside the card's
+              own, which at the top corner of the sheet read as a misprint. */}
             <div
               style={{
-                border: '1px solid ' + RULE,
-                borderRadius: 6,
-                minWidth: 280,
+                borderRadius: 9,
+                minWidth: 300,
                 overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(23, 58, 108, 0.13)',
               }}
             >
               <div
                 style={{
                   background: NAVY,
                   color: '#fff',
-                  padding: '7px 12px',
+                  padding: '9px 14px',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 7,
-                  fontSize: 11.5,
+                  gap: 8,
+                  fontSize: 12,
                   fontWeight: 700,
                   letterSpacing: 0.4,
                   textTransform: 'uppercase',
                 }}
               >
-                <FileText size={14} />
+                <FileText size={15} />
                 Purchase Enquiry{forQuote ? '' : ' — Office Copy'}
               </div>
-              <table style={{ width: '100%', fontSize: 11.5, borderCollapse: 'collapse' }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <tbody>
                   <MetaRow i={0} label="Enquiry No" value={e.enquiryNumber} mono />
                   <MetaRow i={1} label="Date" value={shortDate(e.enquiryDate)} mono />
@@ -222,16 +285,16 @@ export default function PurchaseEnquiryPrintPage() {
           </div>
 
           {/* The rule that separates who we are from what we are asking. */}
-          <div style={{ height: 2.5, background: NAVY, margin: '18px 0 0', borderRadius: 2 }} />
+          <div style={{ height: 2, background: NAVY, margin: '22px 0 0', borderRadius: 2 }} />
 
           {/* ── Who it is to ─────────────────────────────────────────────── */}
           <Panel icon={Users} title={forQuote ? 'To' : 'Suppliers asked'}>
             {forQuote ? (
-              <div style={{ padding: '10px 14px' }}>
-                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: NAVY }}>
+              <div style={{ padding: '13px 16px' }}>
+                <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: NAVY }}>
                   {forQuote.supplier.name}
                 </p>
-                <p style={{ margin: '3px 0 0', fontSize: 11.5, color: GREY }}>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: SOFT }}>
                   {forQuote.supplier.code}
                   {forQuote.supplier.gstin && ' · GSTIN ' + forQuote.supplier.gstin}
                 </p>
@@ -240,17 +303,17 @@ export default function PurchaseEnquiryPrintPage() {
               /* The office copy names everybody and what each of them said.
                  This is the sheet the buyer defends the choice with months
                  later, so the losing quotes belong on it. */
-              <table style={{ width: '100%', fontSize: 11.5, borderCollapse: 'collapse' }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <thead>
-                  <tr style={{ color: GREY, borderBottom: '1px solid ' + RULE }}>
-                    <th style={{ textAlign: 'left', padding: '6px 14px', fontWeight: 600 }}>
+                  <tr style={{ color: GREY, borderBottom: '1px solid ' + RULE_SOFT }}>
+                    <th style={{ textAlign: 'left', padding: '9px 16px', fontWeight: 500 }}>
                       Supplier
                     </th>
-                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 600 }}>PI</th>
-                    <th style={{ textAlign: 'right', padding: '6px 8px', fontWeight: 600 }}>
+                    <th style={{ textAlign: 'left', padding: '9px 8px', fontWeight: 500 }}>PI</th>
+                    <th style={{ textAlign: 'right', padding: '9px 8px', fontWeight: 500 }}>
                       Total
                     </th>
-                    <th style={{ textAlign: 'left', padding: '6px 14px', fontWeight: 600 }}>
+                    <th style={{ textAlign: 'left', padding: '9px 16px', fontWeight: 500 }}>
                       Holds to
                     </th>
                   </tr>
@@ -259,21 +322,28 @@ export default function PurchaseEnquiryPrintPage() {
                   {e.quotes.map((q, i) => {
                     const won = e.best?.quoteId === q.id && !q.declinedAt
                     return (
-                      <tr key={q.id} style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
-                        <td style={{ padding: '6px 14px', fontWeight: 600, color: NAVY }}>
+                      <tr
+                        key={q.id}
+                        style={{
+                          background: i % 2 ? 'rgba(255,255,255,0.45)' : '#fff',
+                          borderBottom:
+                            i === e.quotes.length - 1 ? 'none' : '1px solid ' + RULE_SOFT,
+                        }}
+                      >
+                        <td style={{ padding: '9px 16px', fontWeight: 700, color: NAVY }}>
                           {q.supplier.name}
-                          {won && <span style={{ fontWeight: 400, color: GREY }}> · lowest</span>}
+                          {won && <span style={{ fontWeight: 400, color: SOFT }}> - lowest</span>}
                           {q.declinedAt && (
-                            <span style={{ fontWeight: 400, color: GREY }}> · passed over</span>
+                            <span style={{ fontWeight: 400, color: SOFT }}> - passed over</span>
                           )}
                         </td>
-                        <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>
+                        <td style={{ padding: '9px 8px', fontFamily: 'monospace', color: INK }}>
                           {q.piNumber ?? '—'}
                         </td>
-                        <td style={{ padding: '6px 8px', textAlign: 'right', ...NUM }}>
+                        <td style={{ padding: '9px 8px', textAlign: 'right', ...NUM }}>
                           {q.answered ? '₹' + money(q.piAmount ?? q.value) : '—'}
                         </td>
-                        <td style={{ padding: '6px 14px', ...NUM }}>
+                        <td style={{ padding: '9px 16px', ...NUM }}>
                           {q.piValidUntil ? shortDate(q.piValidUntil) : '—'}
                         </td>
                       </tr>
@@ -287,36 +357,38 @@ export default function PurchaseEnquiryPrintPage() {
           {/* ── The line grid ────────────────────────────────────────────── */}
           <div
             style={{
-              marginTop: 16,
-              border: '1px solid ' + RULE,
-              borderRadius: 6,
+              marginTop: 18,
+              borderRadius: 10,
               overflow: 'hidden',
+              border: '1px solid ' + RULE_SOFT,
             }}
           >
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ background: NAVY, color: '#fff' }}>
-                  <th style={{ padding: '8px 10px', textAlign: 'left', width: 40 }}>
-                    <Rows3 size={14} style={{ display: 'block' }} />
+                  <th style={{ padding: '11px 14px', textAlign: 'left', width: 46 }}>
+                    <Rows3 size={15} style={{ display: 'block' }} />
                   </th>
-                  <th style={{ padding: '8px 8px', textAlign: 'left', fontWeight: 600 }}>
+                  <th style={{ padding: '11px 8px', textAlign: 'left', fontWeight: 600 }}>
                     Item &amp; Description
                   </th>
-                  <th style={{ padding: '8px 8px', textAlign: 'left', width: 78, fontWeight: 600 }}>
+                  <th
+                    style={{ padding: '11px 8px', textAlign: 'left', width: 82, fontWeight: 600 }}
+                  >
                     HSN
                   </th>
                   <th
-                    style={{ padding: '8px 8px', textAlign: 'right', width: 100, fontWeight: 600 }}
+                    style={{ padding: '11px 8px', textAlign: 'right', width: 104, fontWeight: 600 }}
                   >
                     Quantity
                   </th>
                   <th
-                    style={{ padding: '8px 8px', textAlign: 'right', width: 90, fontWeight: 600 }}
+                    style={{ padding: '11px 8px', textAlign: 'right', width: 92, fontWeight: 600 }}
                   >
                     Rate
                   </th>
                   <th
-                    style={{ padding: '8px 12px', textAlign: 'right', width: 70, fontWeight: 600 }}
+                    style={{ padding: '11px 16px', textAlign: 'right', width: 74, fontWeight: 600 }}
                   >
                     GST %
                   </th>
@@ -326,21 +398,27 @@ export default function PurchaseEnquiryPrintPage() {
                 {e.lines.map((l, i) => {
                   const ql = forQuote?.lines.find((x) => x.enquiryLineId === l.id) ?? null
                   return (
-                    <tr key={l.id} style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
-                      <td style={{ padding: '7px 10px', color: GREY, ...NUM }}>{i + 1}</td>
-                      <td style={{ padding: '7px 8px' }}>
-                        <span style={{ fontWeight: 600, color: NAVY }}>{l.item.name}</span>
-                        <span style={{ color: GREY }}> · {l.item.code}</span>
+                    <tr
+                      key={l.id}
+                      style={{
+                        background: i % 2 ? TINT_SOFT : '#fff',
+                        borderBottom: '1px solid ' + RULE_SOFT,
+                      }}
+                    >
+                      <td style={{ padding: '10px 14px', color: SOFT, ...NUM }}>{i + 1}</td>
+                      <td style={{ padding: '10px 8px' }}>
+                        <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
+                        <span style={{ color: SOFT }}> · {l.item.code}</span>
                         {l.description && (
-                          <div style={{ color: GREY, fontSize: 10.5, marginTop: 1 }}>
+                          <div style={{ color: GREY, fontSize: 11, marginTop: 2 }}>
                             {l.description}
                           </div>
                         )}
                       </td>
-                      <td style={{ padding: '7px 8px', color: GREY, ...NUM }}>
+                      <td style={{ padding: '10px 8px', color: SOFT, ...NUM }}>
                         {l.hsnCode ?? '—'}
                       </td>
-                      <td style={{ padding: '7px 8px', textAlign: 'right', ...NUM }}>
+                      <td style={{ padding: '10px 8px', textAlign: 'right', ...NUM }}>
                         {qtyFmt(l.qty)}{' '}
                         <span style={{ color: GREY }}>{l.item.uom?.symbol ?? ''}</span>
                       </td>
@@ -348,38 +426,45 @@ export default function PurchaseEnquiryPrintPage() {
                         column is what he is being asked to fill in. Once his PI
                         is recorded the sheet reprints with his own figures, and
                         that is the version filed beside the order. */}
-                      <td style={{ padding: '7px 8px', textAlign: 'right', ...NUM }}>
+                      <td style={{ padding: '10px 8px', textAlign: 'right', color: GREY, ...NUM }}>
                         {ql?.quotedRate != null ? money(ql.quotedRate) : '—'}
                       </td>
-                      <td style={{ padding: '7px 12px', textAlign: 'right', ...NUM }}>
+                      <td style={{ padding: '10px 16px', textAlign: 'right', color: GREY, ...NUM }}>
                         {ql?.gstRate != null ? Number(ql.gstRate) : '—'}
                       </td>
                     </tr>
                   )
                 })}
-                {/* Ruled blank rows to a minimum depth. A two-line enquiry
-                  printed as a two-line table reads as a torn-off stub, and a
-                  supplier being asked to write rates into it needs the room. */}
-                {Array.from({ length: Math.max(0, 6 - e.lines.length) }).map((_, i) => (
-                  <tr
-                    key={'pad' + i}
-                    style={{ background: (e.lines.length + i) % 2 ? TINT_SOFT : '#fff' }}
-                  >
-                    <td style={{ padding: '7px 10px', color: GREY, ...NUM }}>
-                      {e.lines.length + i + 1}
-                    </td>
-                    <td colSpan={5} style={{ padding: '7px 8px' }}>
-                      &nbsp;
-                    </td>
-                  </tr>
-                ))}
+                {/* Ruled blank rows, on the supplier's copy only.
+                  A two-line enquiry printed as a two-line table reads as a
+                  torn-off stub, and a supplier being asked to write rates into
+                  it needs the room to write them. The office copy is read, not
+                  written on: four empty numbered rows under the two real ones
+                  said the enquiry was unfinished when it was complete. */}
+                {forQuote &&
+                  Array.from({ length: Math.max(0, 6 - e.lines.length) }).map((_, i) => (
+                    <tr
+                      key={'pad' + i}
+                      style={{
+                        background: (e.lines.length + i) % 2 ? TINT_SOFT : '#fff',
+                        borderBottom: '1px solid ' + RULE_SOFT,
+                      }}
+                    >
+                      <td style={{ padding: '10px 14px', color: SOFT, ...NUM }}>
+                        {e.lines.length + i + 1}
+                      </td>
+                      <td colSpan={5} style={{ padding: '10px 8px' }}>
+                        &nbsp;
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
               <tfoot>
-                <tr style={{ background: TINT, fontWeight: 700, color: NAVY }}>
-                  <td colSpan={4} style={{ padding: '8px 10px', textAlign: 'right' }}>
+                <tr style={{ background: TINT_SOFT, fontWeight: 700, color: NAVY }}>
+                  <td colSpan={4} style={{ padding: '12px 10px', textAlign: 'right' }}>
                     {forQuote?.answered ? 'Total on PI ' + forQuote.piNumber : 'Your total'}
                   </td>
-                  <td colSpan={2} style={{ padding: '8px 12px', textAlign: 'right', ...NUM }}>
+                  <td colSpan={2} style={{ padding: '12px 16px', textAlign: 'right', ...NUM }}>
                     {forQuote?.answered ? '₹' + money(forQuote.piAmount ?? forQuote.value) : '—'}
                   </td>
                 </tr>
@@ -395,7 +480,7 @@ export default function PurchaseEnquiryPrintPage() {
             itself. */}
           {forQuote && (
             <Panel icon={Pencil} title="Your quotation">
-              <table style={{ width: '100%', fontSize: 11.5, borderCollapse: 'collapse' }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <tbody>
                   <ReplyRow i={0} label="Your PI / quotation no." />
                   <ReplyRow i={1} label="Price held until" />
@@ -411,19 +496,19 @@ export default function PurchaseEnquiryPrintPage() {
             sheet that looks like an order will treat it as one. */}
           <div
             style={{
-              marginTop: 14,
-              padding: '9px 14px',
+              marginTop: 16,
+              padding: '11px 16px',
               background: TINT_SOFT,
-              border: '1px solid ' + RULE,
-              borderRadius: 6,
+              border: '1px solid ' + RULE_SOFT,
+              borderRadius: 10,
               display: 'flex',
-              gap: 9,
+              gap: 10,
               alignItems: 'flex-start',
-              fontSize: 11,
+              fontSize: 11.5,
               color: GREY,
             }}
           >
-            <FileText size={14} style={{ marginTop: 1, flexShrink: 0, color: NAVY }} />
+            <FileText size={15} style={{ marginTop: 1, flexShrink: 0, color: SOFT }} />
             <span>
               {forQuote
                 ? 'This is an enquiry, not a purchase order. It places no order and commits neither party. Please quote your rate, your GST and how long you will hold the price.'
@@ -431,43 +516,40 @@ export default function PurchaseEnquiryPrintPage() {
             </span>
           </div>
 
-          {(e.notes || e.terms) && (
-            <div style={{ marginTop: 16, display: 'flex', gap: 24 }}>
-              {e.notes && <Note icon={Pencil} title="Notes" body={e.notes} />}
-              {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
-            </div>
-          )}
-
-          {/* Both sides sign a sheet that is going out, because what comes back
-            is his quotation and needs his name on it. The office copy signs
-            once — there is nobody else in the room. */}
-          {data.template?.showSignature !== false && (
+          {/* ── The foot ────────────────────────────────────────────────────
+            What we said, and who signs it, on one row.
+            They were stacked, which put 30px of nothing between a two-line
+            note and the signature and left the sheet ending in a column of
+            air. Side by side the note fills the width it has and the
+            signature takes the corner it is going to be signed in. */}
+          {(hasNotes || showSignature) && (
             <div
               style={{
-                marginTop: 30,
+                marginTop: 20,
                 display: 'flex',
-                justifyContent: 'space-between',
-                gap: 28,
-                fontSize: 11.5,
-                color: GREY,
+                gap: 32,
+                alignItems: 'flex-start',
               }}
             >
-              {forQuote && (
-                <div style={{ flex: 1 }}>
-                  <p style={{ margin: 0 }}>For {forQuote.supplier.name}</p>
-                  <div style={{ height: 36 }} />
-                  <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 4 }}>
-                    Signature &amp; seal · Date
-                  </p>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', gap: 24 }}>
+                {e.notes && <Note icon={Pencil} title="Notes" body={e.notes} />}
+                {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
+              </div>
+
+              {/* Both sides sign a sheet that is going out, because what comes
+                back is his quotation and needs his name on it. The office copy
+                signs once — there is nobody else in the room. */}
+              {showSignature && (
+                <div style={{ display: 'flex', gap: 28, flexShrink: 0 }}>
+                  {forQuote && (
+                    <Sign
+                      name={'For ' + forQuote.supplier.name}
+                      caption={'Signature & seal · Date'}
+                    />
+                  )}
+                  <Sign name={'For ' + co.name} caption="Authorised signatory" />
                 </div>
               )}
-              <div style={{ flex: 1, textAlign: 'right' }}>
-                <p style={{ margin: 0 }}>For {co.name}</p>
-                <div style={{ height: 36 }} />
-                <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 4 }}>
-                  Authorised signatory
-                </p>
-              </div>
             </div>
           )}
 
@@ -476,14 +558,14 @@ export default function PurchaseEnquiryPrintPage() {
             enquiry it answers. */}
           <div
             style={{
-              marginTop: 20,
-              borderTop: '1px solid ' + RULE,
-              paddingTop: 7,
+              marginTop: 22,
+              borderTop: '1px solid ' + RULE_SOFT,
+              paddingTop: 8,
               display: 'flex',
               justifyContent: 'space-between',
               gap: 12,
               fontSize: 10,
-              color: GREY,
+              color: SOFT,
             }}
           >
             <span>
@@ -498,22 +580,46 @@ export default function PurchaseEnquiryPrintPage() {
   )
 }
 
-/** One of the three ways to reach us, with its icon. */
+/**
+ * One of the three ways to reach us, with its icon on a filled tile.
+ *
+ * Filled, not outlined: this line is the one somebody squints at on a faxed
+ * or twice-photocopied sheet, and at 13px an outlined phone and an outlined
+ * envelope are the same smudge. A solid tile keeps its shape.
+ */
 function Contact({ icon: Icon, children }: { icon: React.ElementType; children: React.ReactNode }) {
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-      <Icon size={13} style={{ color: NAVY, flexShrink: 0 }} />
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      <span
+        style={{
+          width: 21,
+          height: 21,
+          borderRadius: 6,
+          background: NAVY,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}
+      >
+        <Icon size={12} color="#fff" strokeWidth={2.2} />
+      </span>
       {children}
     </span>
   )
 }
 
 /**
- * A titled band with a rule round it.
+ * A titled band, tinted through rather than ruled round.
  *
  * The tinted bar is what makes a section findable on a sheet that has four of
  * them. The icon is not decoration: at a glance it separates the people band
  * from the paperwork band without the reader having to start reading.
+ *
+ * The body carries the same tint at a quarter of the strength with white rows
+ * floating on it, so the band and what it holds read as one panel. A white
+ * body under a tinted bar read as a table that happened to have a coloured
+ * strip above it.
  */
 function Panel({
   icon: Icon,
@@ -527,27 +633,28 @@ function Panel({
   return (
     <div
       style={{
-        marginTop: 16,
-        border: '1px solid ' + RULE,
-        borderRadius: 6,
+        marginTop: 18,
+        borderRadius: 10,
         overflow: 'hidden',
+        background: TINT_SOFT,
+        border: '1px solid ' + RULE_SOFT,
       }}
     >
       <div
         style={{
           background: TINT,
-          padding: '7px 14px',
+          padding: '10px 16px',
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          fontSize: 11,
+          gap: 9,
+          fontSize: 12,
           fontWeight: 700,
-          letterSpacing: 0.5,
+          letterSpacing: 0.6,
           textTransform: 'uppercase',
           color: NAVY,
         }}
       >
-        <Icon size={15} />
+        <Icon size={16} />
         {title}
       </div>
       {children}
@@ -570,10 +677,10 @@ function MetaRow({
 }) {
   return (
     <tr style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
-      <td style={{ padding: '5px 12px', color: GREY, whiteSpace: 'nowrap' }}>{label}</td>
+      <td style={{ padding: '7px 14px', color: GREY, whiteSpace: 'nowrap' }}>{label}</td>
       <td
         style={{
-          padding: '5px 12px',
+          padding: '7px 14px',
           textAlign: 'right',
           fontWeight: 700,
           color: NAVY,
@@ -591,19 +698,19 @@ function MetaRow({
 /** A ruled line for the supplier to write on. */
 function ReplyRow({ i, label }: { i: number; label: string }) {
   return (
-    <tr style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
+    <tr style={{ background: i % 2 ? 'rgba(255,255,255,0.45)' : '#fff' }}>
       <td
         style={{
-          padding: '9px 14px',
+          padding: '11px 16px',
           color: GREY,
           whiteSpace: 'nowrap',
           width: '38%',
-          fontSize: 11.5,
+          fontSize: 12,
         }}
       >
         {label}
       </td>
-      <td style={{ padding: '9px 14px', borderBottom: '1px solid ' + RULE }}>&nbsp;</td>
+      <td style={{ padding: '11px 16px', borderBottom: '1px solid ' + RULE }}>&nbsp;</td>
     </tr>
   )
 }
@@ -619,26 +726,39 @@ function Note({
   body: string
 }) {
   return (
-    <div style={{ flex: 1 }}>
+    <div style={{ flex: 1, minWidth: 0 }}>
       <p
         style={{
           margin: 0,
           display: 'flex',
           alignItems: 'center',
-          gap: 7,
-          fontSize: 11,
+          gap: 8,
+          fontSize: 12,
           fontWeight: 700,
-          letterSpacing: 0.5,
+          letterSpacing: 0.6,
           textTransform: 'uppercase',
           color: NAVY,
         }}
       >
-        <Icon size={14} />
+        <Icon size={16} />
         {title}
       </p>
-      <p style={{ margin: '5px 0 0 21px', fontSize: 11.5, color: GREY, whiteSpace: 'pre-line' }}>
+      <p style={{ margin: '7px 0 0 24px', fontSize: 12, color: GREY, whiteSpace: 'pre-line' }}>
         {body}
       </p>
+    </div>
+  )
+}
+
+/** Somebody's name over the line they sign on. */
+function Sign({ name, caption }: { name: string; caption: string }) {
+  return (
+    <div style={{ minWidth: 196, textAlign: 'right', fontSize: 11.5, color: GREY }}>
+      <p style={{ margin: 0 }}>{name}</p>
+      {/* The room to actually sign in. Any less and a signature runs over the
+        line it is meant to sit on. */}
+      <div style={{ height: 38 }} />
+      <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 6 }}>{caption}</p>
     </div>
   )
 }
