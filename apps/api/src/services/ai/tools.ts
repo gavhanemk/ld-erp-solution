@@ -892,8 +892,13 @@ export async function executeTool(
           where: styleWhere,
           include: {
             sizeGroup: { select: { name: true } },
+            // Every approved BOM: there is one per colour, and only one per
+            // colour can be approved, so each is a definite answer for its
+            // colour. Taking just the first would quote one colour's cost as if
+            // it were the whole style's — the white shirt's fabric for the blue.
             boms: {
-              where: { isActive: true },
+              where: { status: 'APPROVED' },
+              orderBy: { color: 'asc' },
               include: {
                 lines: { include: { componentItem: { select: { name: true, code: true } } } },
               },
@@ -913,10 +918,14 @@ export async function executeTool(
             fit: s.fit,
             sizes: s.sizeGroup?.name,
             colours: s.colors,
-            materialCost: s.boms[0]?.totalCost ? `₹${s.boms[0].totalCost}` : null,
-            goesInto: s.boms[0]?.lines.map(
-              (l) => `${l.componentItem.name} × ${qty(Number(l.effectiveQty))}`,
-            ),
+            bomsByColour: s.boms.map((b) => ({
+              colour: b.color ?? 'colour not recorded',
+              version: b.version,
+              materialCost: b.totalCost ? `₹${b.totalCost}` : null,
+              goesInto: b.lines.map(
+                (l) => `${l.componentItem.name} × ${qty(Number(l.effectiveQty))}`,
+              ),
+            })),
           })),
         }
       }

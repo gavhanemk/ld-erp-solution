@@ -6,6 +6,7 @@ import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import {
+  copyBomSchema,
   createBomSchema,
   createBrandSchema,
   createBrokerSchema,
@@ -759,41 +760,94 @@ router.patch('/company/:id', requirePermission(MODULE, 'edit'), async (req: Auth
 })
 
 // ─────────────────────────────────────────────────────────────
-// BOM — header and component lines are written together, and every write
-// recomputes line costs and the header roll-up.
+// BOM — header, component lines and their per-size overrides are written
+// together, and every write recomputes line costs and the header roll-up.
 // ─────────────────────────────────────────────────────────────
 
 const bomInclude = {
-  style: { select: { id: true, code: true, name: true, brandType: true } },
+  style: {
+    select: { id: true, code: true, name: true, brandType: true, sizeGroupId: true, colors: true },
+  },
+  baseSize: { select: { id: true, code: true, label: true } },
+  approvedBy: { select: { id: true, name: true } },
+  routing: {
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      steps: {
+        orderBy: { sequence: 'asc' as const },
+        select: {
+          id: true,
+          sequence: true,
+          smv: true,
+          ratePerPiece: true,
+          isQcStep: true,
+          operation: { select: { id: true, name: true, code: true } },
+          department: { select: { id: true, name: true } },
+          // Who is paid the step's rate — an in-house line, or a job worker.
+          workstation: { select: { id: true, name: true, type: true } },
+        },
+      },
+    },
+  },
   lines: {
     orderBy: { sortOrder: 'asc' as const },
     include: {
       componentItem: {
         select: { id: true, code: true, name: true, standardRate: true, uom: true },
       },
+      department: { select: { id: true, code: true, name: true } },
+      sizes: {
+        orderBy: { size: { sequence: 'asc' as const } },
+        include: { size: { select: { id: true, code: true, label: true, sequence: true } } },
+      },
     },
   },
 }
 
+const BOM_SORT_FIELDS = ['createdAt', 'version', 'color', 'totalCost', 'status']
+const BOM_STATUSES = ['DRAFT', 'APPROVED', 'OBSOLETE']
+
+/**
+ * Money is rounded at every step rather than only at the end, so that a clerk
+ * checking the screen against a calculator gets the same answer. Quantities
+ * keep four places — cloth per garment is measured that finely.
+ */
+const round = (value: number, places: number) => Number(value.toFixed(places))
+
+type IncomingBomLineSize = { sizeId: string; qtyPerUnit: number | string }
+
 type IncomingBomLine = {
   componentItemId: string
+  component?: string | null
+  departmentId?: string | null
   qtyPerUnit: number | string
   wastagePercent?: number
   unitCost?: number | string | null
   notes?: string | null
   sortOrder?: number
+  sizes?: IncomingBomLineSize[]
 }
 
 /**
  * Wastage inflates the quantity actually consumed: cutting 1.65 m of fabric per
  * shirt at 5% wastage really draws 1.7325 m. Rates fall back to the item's
  * standard rate so a BOM can be costed before anyone types a price.
+ *
+ * An item with no rate anywhere now raises a warning instead of costing at
+ * zero. A total that quietly leaves a component out looks exactly like a total
+ * that is right, which is the worse of the two failures.
+ *
+ * Sizes are a sparse override: a size with no row of its own consumes what the
+ * line consumes. That fallback is what keeps a BOM with no size run behaving
+ * exactly as it did before sizes existed.
  */
-async function priceBomLines(lines: IncomingBomLine[]) {
+async function priceBomLines(lines: IncomingBomLine[], routingId?: string | null) {
   const itemIds = [...new Set(lines.map((l) => l.componentItemId))]
   const items = await prisma.item.findMany({
     where: { id: { in: itemIds } },
-    select: { id: true, standardRate: true },
+    select: { id: true, code: true, name: true, standardRate: true },
   })
 
   const missing = itemIds.filter((id) => !items.some((i) => i.id === id))
@@ -801,40 +855,347 @@ async function priceBomLines(lines: IncomingBomLine[]) {
     throw new AppError(`Unknown component item(s): ${missing.join(', ')}`, 400, 'INVALID_ITEM')
   }
 
-  const rateById = new Map(items.map((i) => [i.id, Number(i.standardRate ?? 0)]))
+  const byId = new Map(items.map((i) => [i.id, i]))
+  const warnings: Array<{ itemId: string; code: string; name: string }> = []
 
   const priced = lines.map((line, index) => {
+    const item = byId.get(line.componentItemId)!
     const qty = Number(line.qtyPerUnit)
     const wastage = Number(line.wastagePercent ?? 0)
-    const effectiveQty = qty * (1 + wastage / 100)
-    const unitCost = line.unitCost != null ? Number(line.unitCost) : rateById.get(line.componentItemId)!
+    const factor = 1 + wastage / 100
+
+    const typed =
+      line.unitCost !== null && line.unitCost !== undefined && line.unitCost !== ''
+        ? Number(line.unitCost)
+        : null
+    const standard = item.standardRate !== null ? Number(item.standardRate) : null
+    const rate = typed ?? standard
+
+    if (rate === null) {
+      warnings.push({ itemId: item.id, code: item.code, name: item.name })
+    }
+
+    const unitCost = round(rate ?? 0, 4)
+    const effectiveQty = round(qty * factor, 4)
+
+    // The line's wastage, not a per-size one: size changes how much cloth a
+    // garment takes, it does not change how badly the cutter wastes it.
+    const sizes = (line.sizes ?? []).map((s) => {
+      const sizeQty = Number(s.qtyPerUnit)
+      const sizeEffective = round(sizeQty * factor, 4)
+      return {
+        sizeId: s.sizeId,
+        qtyPerUnit: sizeQty,
+        effectiveQty: sizeEffective,
+        totalCost: round(sizeEffective * unitCost, 2),
+      }
+    })
 
     return {
       componentItemId: line.componentItemId,
+      component: line.component ?? null,
+      departmentId: line.departmentId || null,
       qtyPerUnit: qty,
       wastagePercent: wastage,
-      effectiveQty: Number(effectiveQty.toFixed(4)),
-      unitCost: Number(unitCost.toFixed(4)),
-      totalCost: Number((effectiveQty * unitCost).toFixed(4)),
+      effectiveQty,
+      unitCost,
+      // Worked out from the rounded quantity and the rounded rate, so that
+      // Effective x Rate really does come to Cost on the screen.
+      totalCost: round(effectiveQty * unitCost, 2),
       notes: line.notes ?? null,
       sortOrder: line.sortOrder ?? index,
+      sizes,
     }
   })
 
-  const totalCost = Number(priced.reduce((sum, l) => sum + l.totalCost, 0).toFixed(2))
-  return { priced, totalCost }
+  const totalCost = round(
+    priced.reduce((sum, l) => sum + l.totalCost, 0),
+    2,
+  )
+
+  // Labour comes from the routing's own rates. SMV is carried as minutes and
+  // never turned into money — an hourly rate is a setting nobody has decided.
+  let labourCost: number | null = null
+  let totalSmv: number | null = null
+
+  if (routingId) {
+    const steps = await prisma.routingStep.findMany({
+      where: { routingId },
+      select: { smv: true, ratePerPiece: true },
+    })
+    if (steps.length > 0) {
+      labourCost = round(
+        steps.reduce((sum, s) => sum + Number(s.ratePerPiece ?? 0), 0),
+        2,
+      )
+      totalSmv = round(
+        steps.reduce((sum, s) => sum + Number(s.smv ?? 0), 0),
+        3,
+      )
+    }
+  }
+
+  return { priced, totalCost, labourCost, totalSmv, warnings }
+}
+
+type PricedLine = Awaited<ReturnType<typeof priceBomLines>>['priced'][number]
+
+type RateWarning = { itemId: string; code: string; name: string }
+
+/**
+ * Saving with a rate missing is allowed — a BOM is often costed before anyone
+ * has quoted a price. Saying so is not optional though, because a total that
+ * quietly leaves a component out looks exactly like a total that is right.
+ *
+ * The components are named rather than counted: "3 have no rate" sends
+ * somebody hunting down twelve lines to work out which three.
+ */
+const rateWarning = (warnings: RateWarning[]): string => {
+  const names = warnings.map((w) => w.name).join(', ')
+  const subject =
+    warnings.length === 1 ? 'One component has' : `${warnings.length} components have`
+  const them = warnings.length === 1 ? 'it' : 'them'
+  return `Saved. ${subject} no rate yet — ${names}. The total leaves ${them} out until a rate is set.`
+}
+
+/** Nests the size rows under their line so both are written in one statement. */
+function toLineCreate(line: PricedLine) {
+  const { sizes, ...rest } = line
+  return { ...rest, ...(sizes.length > 0 ? { sizes: { create: sizes } } : {}) }
+}
+
+/**
+ * Checks the things a foreign key cannot: that the colour, the routing and the
+ * sizes named on the lines all belong to the same style as the BOM. Postgres
+ * would accept a trouser routing on a shirt BOM quite happily, and nobody would
+ * find out until the floor did.
+ *
+ * `colour.required` is set when a BOM is being made: every new BOM for a style
+ * that has colours must say which one. Edits leave it off, so a BOM made before
+ * colour was recorded can still be corrected instead of being locked out.
+ */
+async function assertBomRefsExist(
+  styleId: string,
+  routingId: string | null | undefined,
+  lines: IncomingBomLine[] | undefined,
+  baseSizeId: string | null | undefined,
+  colour?: { value: string | null | undefined; required: boolean },
+): Promise<{ code: string }> {
+  const style = await prisma.style.findUnique({
+    where: { id: styleId },
+    select: { id: true, code: true, sizeGroupId: true, colors: true },
+  })
+  if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+
+  if (colour) {
+    const value = colour.value?.trim() || null
+    const offered = style.colors.join(', ')
+    if (style.colors.length > 0) {
+      if (!value && colour.required) {
+        throw new AppError(
+          `${style.code} comes in ${offered}. Pick the colour this BOM is for — each colour has its own BOM.`,
+          400,
+          'BOM_COLOUR_REQUIRED',
+        )
+      }
+      if (value && !style.colors.includes(value)) {
+        throw new AppError(
+          `${style.code} does not come in ${value}. Pick one of ${offered}, or add the colour on the style first.`,
+          400,
+          'BOM_COLOUR_NOT_ON_STYLE',
+        )
+      }
+    } else if (value) {
+      throw new AppError(
+        `${style.code} has no colours listed yet, so a BOM cannot be made for ${value}. Add the colour on the style first.`,
+        400,
+        'BOM_COLOUR_NOT_ON_STYLE',
+      )
+    }
+  }
+
+  const departmentIds = [
+    ...new Set((lines ?? []).map((l) => l.departmentId).filter((d): d is string => Boolean(d))),
+  ]
+  if (departmentIds.length > 0) {
+    const found = await prisma.department.findMany({
+      where: { id: { in: departmentIds } },
+      select: { id: true },
+    })
+    if (found.length !== departmentIds.length) {
+      throw new AppError('One of those departments no longer exists', 400, 'INVALID_DEPARTMENT')
+    }
+  }
+
+  if (routingId) {
+    const routing = await prisma.routing.findUnique({
+      where: { id: routingId },
+      select: { id: true, styleId: true },
+    })
+    if (!routing) throw new AppError('That routing no longer exists', 400, 'INVALID_ROUTING')
+    if (routing.styleId !== styleId) {
+      throw new AppError(
+        `That routing is for a different style. Pick one made for ${style.code}, or leave it blank.`,
+        400,
+        'BOM_ROUTING_STYLE_MISMATCH',
+      )
+    }
+  }
+
+  const sizeIds = [
+    ...new Set([
+      ...(lines ?? []).flatMap((l) => (l.sizes ?? []).map((s) => s.sizeId)),
+      ...(baseSizeId ? [baseSizeId] : []),
+    ]),
+  ]
+  if (sizeIds.length === 0) return { code: style.code }
+
+  if (!style.sizeGroupId) {
+    throw new AppError(
+      `${style.code} has no size run yet, so quantities cannot be set per size. Add one on the style first.`,
+      400,
+      'BOM_NO_SIZE_GROUP',
+    )
+  }
+
+  const sizes = await prisma.size.findMany({
+    where: { id: { in: sizeIds } },
+    select: { id: true, code: true, sizeGroupId: true },
+  })
+  if (sizes.length !== sizeIds.length) {
+    throw new AppError('One of those sizes no longer exists', 400, 'INVALID_SIZE')
+  }
+
+  const stray = sizes.find((s) => s.sizeGroupId !== style.sizeGroupId)
+  if (stray) {
+    throw new AppError(
+      `Size ${stray.code} is not in the size run for ${style.code}. Check the size run on the style.`,
+      400,
+      'BOM_SIZE_NOT_IN_GROUP',
+    )
+  }
+
+  return { code: style.code }
+}
+
+/** "LD-SH-2601 in Dusty Blue", or just the code for a BOM with no colour. */
+const bomName = (styleCode: string, color: string | null | undefined) =>
+  color ? `${styleCode} in ${color}` : styleCode
+
+/**
+ * `typed` is false when no version was sent and 1.0 was assumed. The BOM form
+ * no longer asks for a version, so "give this one a different version" would be
+ * advice with nowhere to act on it — and a second BOM for one colour is meant
+ * to start as a copy anyway.
+ */
+const versionClash = (
+  styleCode: string,
+  color: string | null | undefined,
+  version: string,
+  typed = true,
+) =>
+  new AppError(
+    typed
+      ? `${bomName(styleCode, color)} already has a BOM at version ${version}. Give this one a different version, or copy the existing one.`
+      : `${bomName(styleCode, color)} already has a BOM. To start a new version, copy that one from the BOM list.`,
+    409,
+    'BOM_VERSION_EXISTS',
+  )
+
+/**
+ * Prisma's own message for a repeated version is "styleId,color,version already
+ * exists", which is the database talking to itself. This says what to do.
+ */
+function rethrowVersionClash(
+  err: unknown,
+  styleCode: string,
+  color: string | null | undefined,
+  version: string,
+  typed = true,
+): never {
+  const code = (err as { code?: string }).code
+  const target = (err as { meta?: { target?: unknown } }).meta?.target
+  const hitVersion = Array.isArray(target)
+    ? target.includes('version')
+    : String(target ?? '').includes('version')
+
+  if (code === 'P2002' && hitVersion) throw versionClash(styleCode, color, version, typed)
+  throw err
+}
+
+/**
+ * The unique constraint catches a repeated colour and version, but Postgres
+ * counts two blank colours as different, so two colourless BOMs at one version
+ * would both save. Checking first closes that gap, and gives the plain message
+ * every time rather than only when the database happens to be the one to catch it.
+ */
+async function assertVersionFree(
+  styleId: string,
+  color: string | null | undefined,
+  version: string,
+  styleCode: string,
+  excludeId?: string,
+  typed = true,
+): Promise<void> {
+  const clash = await prisma.bOM.findFirst({
+    where: {
+      styleId,
+      color: color || null,
+      version,
+      ...(excludeId ? { id: { not: excludeId } } : {}),
+    },
+    select: { id: true },
+  })
+  if (clash) throw versionClash(styleCode, color, version, typed)
 }
 
 router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
-  const where = req.query.styleId ? { styleId: String(req.query.styleId) } : {}
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+
+  const sortField = typeof req.query.sort === 'string' ? req.query.sort : 'createdAt'
+  if (!BOM_SORT_FIELDS.includes(sortField)) {
+    throw new AppError(
+      `Cannot sort by '${sortField}'. Allowed: ${BOM_SORT_FIELDS.join(', ')}`,
+      400,
+      'INVALID_SORT',
+    )
+  }
+  const sortOrder = req.query.order === 'asc' ? 'asc' : 'desc'
+
+  const where: Record<string, unknown> = {}
+  if (req.query.active === 'true') where.isActive = true
+  else if (req.query.active === 'false') where.isActive = false
+  if (typeof req.query.styleId === 'string' && req.query.styleId) where.styleId = req.query.styleId
+  if (typeof req.query.color === 'string' && req.query.color) where.color = req.query.color
+
+  if (typeof req.query.status === 'string' && req.query.status) {
+    const status = req.query.status.toUpperCase()
+    if (!BOM_STATUSES.includes(status)) {
+      throw new AppError(
+        `'${req.query.status}' is not a BOM status. Use one of: ${BOM_STATUSES.join(', ')}.`,
+        400,
+        'INVALID_STATUS',
+      )
+    }
+    where.status = status
+  }
+
+  if (q) {
+    where.OR = [
+      { version: { contains: q, mode: 'insensitive' } },
+      { color: { contains: q, mode: 'insensitive' } },
+      { style: { name: { contains: q, mode: 'insensitive' } } },
+      { style: { code: { contains: q, mode: 'insensitive' } } },
+    ]
+  }
 
   const [rows, total] = await Promise.all([
     prisma.bOM.findMany({
       where,
       include: bomInclude,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { [sortField]: sortOrder },
       skip: (page - 1) * limit,
       take: limit,
     }),
@@ -855,63 +1216,140 @@ router.get('/bom/:id', requirePermission(MODULE, 'view'), async (req, res) => {
 })
 
 router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { lines, styleId, version, notes, isActive } = createBomSchema.parse(req.body)
+  const { lines, styleId, color, version, notes, isActive, routingId, baseSizeId } =
+    createBomSchema.parse(req.body)
 
-  const style = await prisma.style.findUnique({ where: { id: styleId } })
-  if (!style) throw new AppError('Style not found', 404, 'NOT_FOUND')
-
-  const { priced, totalCost } = await priceBomLines(lines)
-
-  const created = await prisma.bOM.create({
-    data: {
-      styleId,
-      version: version ?? '1.0',
-      notes: notes ?? null,
-      isActive: isActive ?? true,
-      totalCost,
-      lines: { create: priced },
-    },
-    include: bomInclude,
+  const colour = color?.trim() || null
+  const style = await assertBomRefsExist(styleId, routingId, lines, baseSizeId, {
+    value: colour,
+    required: true,
   })
+
+  const useVersion = version ?? '1.0'
+  const typedVersion = version !== undefined
+  await assertVersionFree(styleId, colour, useVersion, style.code, undefined, typedVersion)
+
+  const { priced, totalCost, labourCost, warnings } = await priceBomLines(lines, routingId)
+
+  let created
+  try {
+    created = await prisma.bOM.create({
+      data: {
+        styleId,
+        color: colour,
+        version: useVersion,
+        routingId: routingId ?? null,
+        baseSizeId: baseSizeId ?? null,
+        notes: notes ?? null,
+        isActive: isActive ?? true,
+        totalCost,
+        labourCost,
+        lines: { create: priced.map(toLineCreate) },
+      },
+      include: bomInclude,
+    })
+  } catch (err) {
+    rethrowVersionClash(err, style.code, colour, useVersion, typedVersion)
+  }
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
     entityType: 'BOM',
-    entityId: created.id,
+    entityId: created!.id,
     after: created,
   })
 
-  res.status(201).json({ success: true, data: created })
+  res.status(201).json({
+    success: true,
+    ...(warnings.length > 0 ? { message: rateWarning(warnings) } : {}),
+    data: created,
+  })
 })
 
 router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { lines, version, notes, isActive } = updateBomSchema.parse(req.body)
+  const { lines, version, notes, isActive, routingId, baseSizeId } = updateBomSchema.parse(req.body)
 
   const before = await prisma.bOM.findUnique({ where: { id: req.params.id }, include: bomInclude })
   if (!before) throw new AppError('BOM not found', 404, 'NOT_FOUND')
 
+  // An approved BOM is what running orders are costed against. Changing its
+  // components underneath them is the whole thing the approval exists to stop;
+  // a new version starts from a copy instead. Deactivating it is still allowed,
+  // because that is how a master is retired.
+  const changesCosting =
+    lines !== undefined ||
+    routingId !== undefined ||
+    baseSizeId !== undefined ||
+    version !== undefined
+  if (before.status !== 'DRAFT' && changesCosting) {
+    throw new AppError(
+      'This BOM is approved and orders may be costed against it. Copy it to a new version to change the components.',
+      409,
+      'BOM_NOT_DRAFT',
+    )
+  }
+
+  const nextRoutingId = routingId !== undefined ? routingId : before.routingId
+  const nextBaseSizeId = baseSizeId !== undefined ? baseSizeId : before.baseSizeId
+  if (changesCosting) {
+    await assertBomRefsExist(before.styleId, nextRoutingId, lines, nextBaseSizeId)
+  }
+  // A draft renamed to a version its colour already has. Colour itself cannot be
+  // changed here — that is what copying to another colour is for — so the check
+  // is against the colour the BOM was made for.
+  if (version !== undefined && version !== before.version) {
+    await assertVersionFree(before.styleId, before.color, version, before.style.code, before.id)
+  }
+
   // Lines are replaced wholesale rather than diffed: the header total must stay
   // consistent with its lines, and both must move in one transaction.
+  let warnings: RateWarning[] = []
+
   const updated = await prisma.$transaction(async (tx) => {
-    let totalCost = before.totalCost
+    // Collected rather than pre-typed from the existing row, so the costs are
+    // only sent when something actually recomputed them.
+    const costs: { totalCost?: number; labourCost?: number | null } = {}
 
     if (lines) {
-      const priced = await priceBomLines(lines)
-      totalCost = priced.totalCost as unknown as typeof before.totalCost
-      await tx.bOMLine.deleteMany({ where: { bomId: req.params.id } })
-      await tx.bOMLine.createMany({
-        data: priced.priced.map((l) => ({ ...l, bomId: req.params.id })),
-      })
+      const repriced = await priceBomLines(lines, nextRoutingId)
+      costs.totalCost = repriced.totalCost
+      costs.labourCost = repriced.labourCost
+      warnings = repriced.warnings
+
+      await tx.bOMLine.deleteMany({ where: { bomId: before.id } })
+      // Written one at a time on purpose: createMany cannot write the nested
+      // size rows, and it fails silently rather than loudly — the lines save
+      // and every size quietly disappears.
+      for (const line of repriced.priced) {
+        await tx.bOMLine.create({ data: { ...toLineCreate(line), bomId: before.id } })
+      }
+    } else if (routingId !== undefined) {
+      // The components did not move but the routing did, so labour is restated.
+      const steps = nextRoutingId
+        ? await tx.routingStep.findMany({
+            where: { routingId: nextRoutingId },
+            select: { ratePerPiece: true },
+          })
+        : []
+      costs.labourCost =
+        steps.length > 0
+          ? round(
+              steps.reduce((sum, s) => sum + Number(s.ratePerPiece ?? 0), 0),
+              2,
+            )
+          : null
     }
 
     return tx.bOM.update({
-      where: { id: req.params.id },
+      where: { id: before.id },
       data: {
         ...(version !== undefined ? { version } : {}),
         ...(notes !== undefined ? { notes } : {}),
         ...(isActive !== undefined ? { isActive } : {}),
-        ...(lines ? { totalCost } : {}),
+        ...(routingId !== undefined ? { routingId: routingId ?? null } : {}),
+        ...(baseSizeId !== undefined ? { baseSizeId: baseSizeId ?? null } : {}),
+        ...costs,
       },
       include: bomInclude,
     })
@@ -926,28 +1364,227 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     after: updated,
   })
 
-  res.json({ success: true, data: updated })
+  res.json({
+    success: true,
+    ...(warnings.length > 0 ? { message: rateWarning(warnings) } : {}),
+    data: updated,
+  })
+})
+
+/**
+ * Approving is what makes a BOM the one an order is costed against. Only one
+ * per style and colour holds that place, so approving a new version retires the
+ * old one of the same colour in the same transaction — otherwise two approved
+ * versions sit side by side with nothing choosing between them.
+ *
+ * Per colour, not per style: approving the white shirt's BOM must leave the
+ * dusty blue one alone. Each colour is its own costing.
+ *
+ * No self-approval bar here, unlike a requisition. Business rule 7 scopes that
+ * to documents that need a second person; a BOM is a master, and in a mill this
+ * size the person who typed it is often the only one who can judge it.
+ */
+router.patch(
+  '/bom/:id/approve',
+  requirePermission(MODULE, 'approve'),
+  async (req: AuthRequest, res) => {
+    const before = await prisma.bOM.findUnique({
+      where: { id: req.params.id },
+      include: bomInclude,
+    })
+    if (!before) throw new AppError('BOM not found', 404, 'NOT_FOUND')
+
+    if (before.status === 'APPROVED') {
+      throw new AppError('This BOM is already approved.', 409, 'BOM_ALREADY_APPROVED')
+    }
+    if (before.status === 'OBSOLETE') {
+      throw new AppError(
+        'This BOM has been retired. Copy it to a new version if you want to use it again.',
+        409,
+        'BOM_OBSOLETE',
+      )
+    }
+    if (before.lines.length === 0) {
+      throw new AppError('Add at least one component before approving this BOM.', 409, 'BOM_EMPTY')
+    }
+
+    // A rate of zero prints as confidently as a real one, so an approval is
+    // refused rather than freezing a total that quietly leaves components out.
+    const rateless = before.lines.filter((l) => l.unitCost === null || Number(l.unitCost) === 0)
+    if (rateless.length > 0) {
+      const names = rateless.map((l) => l.componentItem.name).join(', ')
+      throw new AppError(
+        `${rateless.length} component${rateless.length === 1 ? ' has' : 's have'} no rate yet — ${names}. Set a rate on the item, or type one on the line, before approving.`,
+        409,
+        'BOM_NO_RATE',
+      )
+    }
+
+    const after = await prisma.$transaction(async (tx) => {
+      await tx.bOM.updateMany({
+        where: {
+          styleId: before.styleId,
+          // null matches null, so BOMs made before colour was recorded form
+          // their own group and are not swept up by approving a coloured one.
+          color: before.color,
+          status: 'APPROVED',
+          id: { not: before.id },
+        },
+        data: { status: 'OBSOLETE' },
+      })
+      return tx.bOM.update({
+        where: { id: before.id },
+        data: { status: 'APPROVED', approvedById: req.user!.id, approvedAt: new Date() },
+        include: bomInclude,
+      })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'APPROVE',
+      entityType: 'BOM',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({
+      success: true,
+      message: `${bomName(after.style.code, after.color)} v${after.version} is now the approved BOM.`,
+      data: after,
+    })
+  },
+)
+
+/**
+ * A new version always starts as a copy of an old one. Without this, changing
+ * an approved costing would mean re-typing a dozen component lines, and what
+ * would happen instead is that somebody edits the approved one.
+ *
+ * It is also how a new colour's BOM is made. The buttons, labels, thread and
+ * packing carry over from the white shirt to the dusty blue one; only the
+ * fabric line needs changing, so nobody types the other eleven again.
+ *
+ * Rates are copied, not re-read from the item master: a copy is a starting
+ * point, not a re-quote.
+ */
+router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { version, color } = copyBomSchema.parse(req.body)
+
+  const source = await prisma.bOM.findUnique({ where: { id: req.params.id }, include: bomInclude })
+  if (!source) throw new AppError('BOM not found', 404, 'NOT_FOUND')
+
+  // The same colour unless another is given, and the same version when only the
+  // colour changes — White v1.0 copied to Dusty Blue is naturally Dusty Blue v1.0.
+  const targetColour = color !== undefined ? color?.trim() || null : source.color
+  const targetVersion = version ?? source.version
+
+  if (targetColour === source.color && targetVersion === source.version) {
+    throw new AppError(
+      'A copy needs a new version or a different colour, otherwise it is the same BOM twice.',
+      400,
+      'BOM_COPY_UNCHANGED',
+    )
+  }
+
+  // The copy is a new BOM, so a style with colours must have one named. This is
+  // also the way a BOM made before colour was recorded gets its colours.
+  await assertBomRefsExist(source.styleId, null, undefined, null, {
+    value: targetColour,
+    required: true,
+  })
+  await assertVersionFree(source.styleId, targetColour, targetVersion, source.style.code)
+
+  let created
+  try {
+    created = await prisma.bOM.create({
+      data: {
+        styleId: source.styleId,
+        color: targetColour,
+        version: targetVersion,
+        routingId: source.routingId,
+        baseSizeId: source.baseSizeId,
+        notes: source.notes,
+        isActive: true,
+        status: 'DRAFT',
+        copiedFromId: source.id,
+        totalCost: source.totalCost,
+        labourCost: source.labourCost,
+        lines: {
+          create: source.lines.map((l) => ({
+            componentItemId: l.componentItemId,
+            component: l.component,
+            departmentId: l.departmentId,
+            qtyPerUnit: l.qtyPerUnit,
+            wastagePercent: l.wastagePercent,
+            effectiveQty: l.effectiveQty,
+            unitCost: l.unitCost,
+            totalCost: l.totalCost,
+            notes: l.notes,
+            sortOrder: l.sortOrder,
+            ...(l.sizes.length > 0
+              ? {
+                  sizes: {
+                    create: l.sizes.map((s) => ({
+                      sizeId: s.sizeId,
+                      qtyPerUnit: s.qtyPerUnit,
+                      effectiveQty: s.effectiveQty,
+                      totalCost: s.totalCost,
+                    })),
+                  },
+                }
+              : {}),
+          })),
+        },
+      },
+      include: bomInclude,
+    })
+  } catch (err) {
+    rethrowVersionClash(err, source.style.code, targetColour, targetVersion)
+  }
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'BOM',
+    entityId: created!.id,
+    after: created,
+  })
+
+  res.status(201).json({
+    success: true,
+    message: `Copied to ${bomName(created!.style.code, targetColour)} v${targetVersion}. It is a draft until you approve it.`,
+    data: created,
+  })
 })
 
 router.delete('/bom/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
-  const before = await prisma.bOM.findUnique({ where: { id: req.params.id } })
+  const before = await prisma.bOM.findUnique({
+    where: { id: req.params.id },
+    include: { style: { select: { code: true } } },
+  })
   if (!before) throw new AppError('BOM not found', 404, 'NOT_FOUND')
 
-  const updated = await prisma.bOM.update({
-    where: { id: req.params.id },
-    data: { isActive: false },
+  // Retiring is both halves at once: it stops being offered, and it stops being
+  // the version an order is costed against.
+  const after = await prisma.bOM.update({
+    where: { id: before.id },
+    data: { isActive: false, status: 'OBSOLETE' },
   })
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'DELETE',
     entityType: 'BOM',
-    entityId: req.params.id,
+    entityId: before.id,
     before,
-    after: updated,
+    after,
   })
 
-  res.json({ success: true, message: 'BOM deactivated' })
+  res.json({
+    success: true,
+    message: `${bomName(before.style.code, before.color)} v${before.version} is no longer offered.`,
+  })
 })
 
 export default router
