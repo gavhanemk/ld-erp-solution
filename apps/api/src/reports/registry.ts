@@ -9,6 +9,7 @@ import { indentAgainstPo } from './definitions/indent-against-po'
 import { grnAgainstBill } from './definitions/grn-against-bill'
 import { purchasesByItem } from './definitions/purchases-by-item'
 import { expenseRegister } from './definitions/expense-register'
+import { grnQcRegister, qcRejections } from './definitions/grn-qc'
 
 /**
  * Every report the ERP knows about.
@@ -22,6 +23,8 @@ export const REPORTS: ReportDefinition[] = [
   expenseRegister,
   goodsReceiptRegister,
   grnAgainstBill,
+  grnQcRegister,
+  qcRejections,
   purchaseOrderStatus,
   pendingPoItems,
   indentAgainstPo,

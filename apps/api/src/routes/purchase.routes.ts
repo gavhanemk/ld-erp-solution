@@ -19,6 +19,7 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
+import { qcSummaryOf, refuseIfInspected } from '../services/grnQc.service'
 import {
   cancelGrnSchema,
   createGrnSchema,
@@ -2510,7 +2511,14 @@ router.get('/grn', requirePermission(MODULE, 'view'), async (req, res) => {
   const [rows, total] = await Promise.all([
     prisma.gRN.findMany({
       where,
-      include: grnInclude,
+      include: {
+        ...grnInclude,
+        // For the QC badge and action on each row — the list only needs to
+        // know whether a check stands and what it rejected.
+        qcRecords: {
+          select: { id: true, result: true, inspectionDate: true, checklistData: true },
+        },
+      },
       orderBy: [{ grnDate: 'desc' }, { createdAt: 'desc' }],
       skip: (page - 1) * limit,
       take: limit,
@@ -2523,8 +2531,9 @@ router.get('/grn', requirePermission(MODULE, 'view'), async (req, res) => {
     // Billing state is worked out here rather than on the screen, so the list
     // and the bill form cannot come to different conclusions about what is
     // still owed against a receipt.
-    data: rows.map((grn) => ({
+    data: rows.map(({ qcRecords, ...grn }) => ({
       ...grn,
+      qc: qcSummaryOf(qcRecords),
       billing: billingStateOf(grn),
       bills: [
         ...new Map(
@@ -2968,7 +2977,12 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
      * cancelling a bill that was perfectly correct, and reversing any payment
      * against it. Correcting is allowed as long as every posted document is
      * still true afterwards, which is exactly what those guards test.
+     *
+     * A quality check is the exception: it moved rejected goods out of this
+     * receipt's godowns on the strength of these quantities, so the check
+     * comes off before the receipt changes under it.
      */
+    await refuseIfInspected(tx, before, 'corrected')
     const po = await tx.purchaseOrder.findUnique({
       where: { id: before.poId },
       include: {
@@ -3249,6 +3263,7 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
     // recognised and translated. Asking first means the receipt is never
     // unwound in the first place, and the refusal can name the bill.
     await refuseIfClaimed(tx, grn, 'deleted')
+    await refuseIfInspected(tx, grn, 'deleted')
 
     if (grn.status !== 'CANCELLED') {
       for (const line of grn.lines) {
@@ -3473,6 +3488,7 @@ router.patch(
       // the stock taken back out from under an invoice the supplier had
       // already been paid for.
       await refuseIfClaimed(tx, before, 'cancelled')
+      await refuseIfInspected(tx, before, 'cancelled')
 
       for (const line of before.lines) {
         const accepted = Number(line.acceptedQty)

@@ -46,6 +46,11 @@ interface ReturnableLine {
   adjustedQty: number
   warehouseId: string | null
   onHand: number | null
+  /** Rejected on a quality check, and the reject godown it was moved to. */
+  qcRejectedQty: number
+  qcWarehouseId: string | null
+  qcWarehouseName: string | null
+  qcOnHand: number | null
 }
 
 interface Returnable {
@@ -135,7 +140,13 @@ export function ReturnChallanDialog({
             .map((l) => ({
               key: nextKey(),
               billLineId: l.billLineId,
-              warehouseId: l.warehouseId ?? w.data[0]?.id ?? '',
+              // Goods rejected on QC are in the reject godown now, and they
+              // are what is most often going back — so start there.
+              warehouseId:
+                (l.qcRejectedQty > 0 ? l.qcWarehouseId : null) ??
+                l.warehouseId ??
+                w.data[0]?.id ??
+                '',
               qty: '',
               remarks: '',
             }))
@@ -143,7 +154,8 @@ export function ReturnChallanDialog({
         // Rejected at the gate is the commonest reason a return is written,
         // and when the bill carries a rejection it is almost always the
         // reason for this one. Suggested, never forced.
-        if (r.data.lines.some((l) => l.rejectedQty > l.adjustedQty)) setReason('QUALITY_REJECTION')
+        if (r.data.lines.some((l) => l.rejectedQty > l.adjustedQty || l.qcRejectedQty > 0))
+          setReason('QUALITY_REJECTION')
       })
       .catch((err) => {
         if (alive) setError(apiErrorMessage(err, 'Could not read that bill.'))
@@ -396,7 +408,12 @@ export function ReturnChallanDialog({
                     if (!l) return null
                     const first = rows.findIndex((x) => x.billLineId === r.billLineId) === i
                     const over = (goingByLine.get(r.billLineId) ?? 0) > l.remainingQty + 0.0005
-                    const onHand = r.warehouseId === l.warehouseId ? l.onHand : null
+                    const onHand =
+                      r.warehouseId === l.warehouseId
+                        ? l.onHand
+                        : r.warehouseId === l.qcWarehouseId
+                          ? l.qcOnHand
+                          : null
                     const short = onHand != null && num(r.qty) > onHand + 0.0005
                     const fieldLabel =
                       'text-muted-foreground text-[10px] font-semibold uppercase tracking-wider'
@@ -420,6 +437,12 @@ export function ReturnChallanDialog({
                             {first && l.rejectedQty > 0 && (
                               <p className="text-[10px] text-amber-500">
                                 {l.rejectedQty} rejected at the gate
+                              </p>
+                            )}
+                            {first && l.qcRejectedQty > 0 && (
+                              <p className="text-[10px] text-amber-500">
+                                {l.qcRejectedQty} {l.uom ?? ''} rejected on QC
+                                {l.qcWarehouseName ? ` — in ${l.qcWarehouseName}` : ''}
                               </p>
                             )}
                           </div>
@@ -553,7 +576,12 @@ export function ReturnChallanDialog({
                         // The stock figure is only known for the godown the
                         // receipt named; for any other the server says so on
                         // save, in words, if the rack is short.
-                        const onHand = r.warehouseId === l.warehouseId ? l.onHand : null
+                        const onHand =
+                          r.warehouseId === l.warehouseId
+                            ? l.onHand
+                            : r.warehouseId === l.qcWarehouseId
+                              ? l.qcOnHand
+                              : null
                         const short = onHand != null && num(r.qty) > onHand + 0.0005
                         return (
                           <tr
@@ -575,6 +603,13 @@ export function ReturnChallanDialog({
                                       <span className="text-amber-500">
                                         {' '}
                                         · {l.rejectedQty} rejected at the gate
+                                      </span>
+                                    )}
+                                    {l.qcRejectedQty > 0 && (
+                                      <span className="text-amber-500">
+                                        {' '}
+                                        · {l.qcRejectedQty} rejected on QC
+                                        {l.qcWarehouseName ? ` (in ${l.qcWarehouseName})` : ''}
                                       </span>
                                     )}
                                   </p>

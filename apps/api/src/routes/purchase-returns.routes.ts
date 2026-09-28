@@ -7,6 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
+import { qcRejectedByGrnLine } from '../services/grnQc.service'
 import {
   adjustableOn,
   DOC_RULES,
@@ -218,14 +219,56 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
 
   const lines = await prisma.$transaction((tx) => adjustableOn(tx, bill.id))
 
+  /*
+   * What a quality check rejected on each line, and the godown it was moved
+   * to. Those goods are the commonest thing sent back, and they are no longer
+   * in the godown the receipt named — so the form starts those lines on the
+   * reject godown, with its stock beside it.
+   */
+  const grnLineOf = new Map(
+    (
+      await prisma.purchaseInvoiceLine.findMany({
+        where: { billId: bill.id },
+        select: { id: true, grnLineId: true },
+      })
+    ).map((l) => [l.id, l.grnLineId])
+  )
+  const qcRejected = await prisma.$transaction((tx) =>
+    qcRejectedByGrnLine(
+      tx,
+      [...grnLineOf.values()].filter((v): v is string => Boolean(v))
+    )
+  )
+  const qcGodownIds = [...qcRejected.values()]
+    .map((q) => q.warehouseId)
+    .filter((v): v is string => Boolean(v))
+  const qcGodowns = new Map(
+    (
+      await prisma.warehouse.findMany({
+        where: { id: { in: qcGodownIds } },
+        select: { id: true, name: true },
+      })
+    ).map((w) => [w.id, w.name])
+  )
+
   const withStock = await prisma.$transaction(async (tx) =>
     Promise.all(
-      lines.map(async (l) => ({
-        ...l,
-        onHand: l.warehouseId
-          ? (await balanceOf(tx, { itemId: l.itemId, warehouseId: l.warehouseId })).qty
-          : null,
-      }))
+      lines.map(async (l) => {
+        const grnLineId = grnLineOf.get(l.billLineId)
+        const qc = grnLineId ? qcRejected.get(grnLineId) : undefined
+        return {
+          ...l,
+          onHand: l.warehouseId
+            ? (await balanceOf(tx, { itemId: l.itemId, warehouseId: l.warehouseId })).qty
+            : null,
+          qcRejectedQty: qc?.qty ?? 0,
+          qcWarehouseId: qc?.warehouseId ?? null,
+          qcWarehouseName: qc?.warehouseId ? (qcGodowns.get(qc.warehouseId) ?? null) : null,
+          qcOnHand: qc?.warehouseId
+            ? (await balanceOf(tx, { itemId: l.itemId, warehouseId: qc.warehouseId })).qty
+            : null,
+        }
+      })
     )
   )
 
