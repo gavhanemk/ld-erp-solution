@@ -14,11 +14,9 @@ import {
   Info,
   FileText,
   Package,
-  MessageSquare,
   Calculator,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
-import { settingsApi, type TdsSection } from '@/lib/settingsApi'
 // The same panel the order and receipt forms are built from, so all three
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
@@ -225,6 +223,14 @@ interface GrnOption {
    */
   challanNo?: string | null
   challanDate?: string | null
+  /**
+   * The supplier's invoice number as the gate wrote it down.
+   *
+   * Caught on the receipt long before accounts book anything, which is what
+   * makes it worth filtering on: the clerk is holding that invoice, and this
+   * is the mill's own record of having seen it arrive.
+   */
+  supplierInvoiceNo?: string | null
   /** What is still unbilled on this receipt. Sent by `/purchase/grn`. */
   billing?: {
     acceptedQty: number | string
@@ -287,7 +293,6 @@ export function PurchaseBillDialog({
   const [chargeTypes, setChargeTypes] = useState<Option[]>([])
   const [grns, setGrns] = useState<GrnOption[]>([])
   const [companyState, setCompanyState] = useState<string | null>(null)
-  const [tdsSections, setTdsSections] = useState<TdsSection[]>([])
 
   const [supplierId, setSupplierId] = useState('')
   const [poId, setPoId] = useState<string | null>(null)
@@ -297,10 +302,17 @@ export function PurchaseBillDialog({
   const [dueDate, setDueDate] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [isReverseCharge, setIsReverseCharge] = useState(false)
+  /*
+   * TDS and the notes box have no controls on the form any more.
+   *
+   * The state stays, and so does the round trip: a bill already carrying a
+   * section, a rate or a note is opened with them, sends them back unchanged
+   * and keeps them. Dropping the state would have made editing any older bill
+   * silently strip its TDS — a tax figure quietly deleted by opening a form
+   * and pressing save is about the worst thing a form can do.
+   */
   const [tdsSection, setTdsSection] = useState('')
   const [tdsRate, setTdsRate] = useState('')
-  /** Forces the manual section/rate inputs even when they'd otherwise match a master row. */
-  const [tdsCustomMode, setTdsCustomMode] = useState(false)
   const [notes, setNotes] = useState('')
   /** Why a rate above the order was agreed. Asked for once, not per line. */
   const [rateVarianceReason, setRateVarianceReason] = useState('')
@@ -318,7 +330,17 @@ export function PurchaseBillDialog({
    */
   const [filterPo, setFilterPo] = useState('')
   const [filterChallan, setFilterChallan] = useState('')
+  const [filterBill, setFilterBill] = useState('')
   const [filterGrn, setFilterGrn] = useState('')
+  /*
+   * Whether the list is open with no filter on it.
+   *
+   * The table starts folded: a bill is raised against a delivery somebody is
+   * holding the paperwork for, so the question is always "which one is this",
+   * never "what is there". One press opens it anyway, because a clerk who has
+   * lost the challan number still has to be able to look.
+   */
+  const [showAllReceipts, setShowAllReceipts] = useState(false)
 
   const [loadingReceipts, setLoadingReceipts] = useState(false)
   /** How many receipts the server holds for this supplier, page or no page. */
@@ -344,7 +366,9 @@ export function PurchaseBillDialog({
     setRateVarianceReason('')
     setFilterPo('')
     setFilterChallan('')
+    setFilterBill('')
     setFilterGrn('')
+    setShowAllReceipts(false)
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
@@ -432,8 +456,7 @@ export function PurchaseBillDialog({
       api
         .get<{ success: boolean; data: { stateCode: string | null } }>('/settings/company')
         .catch(() => null),
-      settingsApi.tdsSections.list().catch(() => null),
-    ]).then(([s, i, c, co, t]) => {
+    ]).then(([s, i, c, co]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -443,7 +466,6 @@ export function PurchaseBillDialog({
         c ? (c as Paginated<Option>).data.filter((x) => x.applyOnPurchase !== false) : []
       )
       setCompanyState(co?.data?.stateCode ?? null)
-      setTdsSections(t?.data.filter((x) => x.isActive) ?? [])
     })
 
     return () => {
@@ -508,8 +530,11 @@ export function PurchaseBillDialog({
     if (filterChallan && !grns.some((g) => (g.challanNo ?? '') === filterChallan)) {
       setFilterChallan('')
     }
+    if (filterBill && !grns.some((g) => (g.supplierInvoiceNo ?? '') === filterBill)) {
+      setFilterBill('')
+    }
     if (filterGrn && !grns.some((g) => g.id === filterGrn)) setFilterGrn('')
-  }, [grns, filterPo, filterChallan, filterGrn])
+  }, [grns, filterPo, filterChallan, filterBill, filterGrn])
 
   useEffect(() => {
     if (!open) return
@@ -585,44 +610,69 @@ export function PurchaseBillDialog({
    */
   const matchesPo = (g: GrnOption) => !filterPo || g.po?.id === filterPo
   const matchesChallan = (g: GrnOption) => !filterChallan || (g.challanNo ?? '') === filterChallan
+  const matchesBill = (g: GrnOption) => !filterBill || (g.supplierInvoiceNo ?? '') === filterBill
   const matchesGrn = (g: GrnOption) => !filterGrn || g.id === filterGrn
 
   const poChoices = useMemo(() => {
     const seen = new Map<string, string>()
     for (const g of receiptChoices) {
-      if (!g.po || !matchesChallan(g) || !matchesGrn(g)) continue
+      if (!g.po || !matchesChallan(g) || !matchesBill(g) || !matchesGrn(g)) continue
       seen.set(g.po.id, g.po.poNumber)
     }
     return [...seen]
       .map(([id, poNumber]) => ({ id, poNumber }))
       .sort((a, b) => a.poNumber.localeCompare(b.poNumber))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receiptChoices, filterChallan, filterGrn])
+  }, [receiptChoices, filterChallan, filterBill, filterGrn])
 
   const challanChoices = useMemo(() => {
     const seen = new Set<string>()
     for (const g of receiptChoices) {
       // A receipt with no challan recorded has nothing to offer this box. It
       // is still in the table below, wearing a dash, so it can be reached.
-      if (!g.challanNo || !matchesPo(g) || !matchesGrn(g)) continue
+      if (!g.challanNo || !matchesPo(g) || !matchesBill(g) || !matchesGrn(g)) continue
       seen.add(g.challanNo)
     }
     return [...seen].sort((a, b) => a.localeCompare(b))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [receiptChoices, filterPo, filterGrn])
+  }, [receiptChoices, filterPo, filterBill, filterGrn])
+
+  /** The supplier invoice numbers the gate caught, narrowed like the rest. */
+  const billChoices = useMemo(() => {
+    const seen = new Set<string>()
+    for (const g of receiptChoices) {
+      if (!g.supplierInvoiceNo || !matchesPo(g) || !matchesChallan(g) || !matchesGrn(g)) continue
+      seen.add(g.supplierInvoiceNo)
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, filterPo, filterChallan, filterGrn])
 
   const grnChoices = useMemo(
-    () => receiptChoices.filter((g) => matchesPo(g) && matchesChallan(g)),
+    () => receiptChoices.filter((g) => matchesPo(g) && matchesChallan(g) && matchesBill(g)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [receiptChoices, filterPo, filterChallan]
+    [receiptChoices, filterPo, filterChallan, filterBill]
   )
 
-  /** The rows the table actually shows — everything all three boxes allow. */
+  /** The rows the table actually shows — everything all four boxes allow. */
   const visibleReceipts = useMemo(
-    () => receiptChoices.filter((g) => matchesPo(g) && matchesChallan(g) && matchesGrn(g)),
+    () =>
+      receiptChoices.filter(
+        (g) => matchesPo(g) && matchesChallan(g) && matchesBill(g) && matchesGrn(g)
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [receiptChoices, filterPo, filterChallan, filterGrn]
+    [receiptChoices, filterPo, filterChallan, filterBill, filterGrn]
   )
+
+  /*
+   * Whether there is anything to show the table for.
+   *
+   * A filter, an explicit "show all", or receipts already gathered onto the
+   * bill — that last one matters most: clearing a filter after ticking
+   * something must not take what is on the bill off the screen.
+   */
+  const anyReceiptFilter = Boolean(filterPo || filterChallan || filterBill || filterGrn)
+  const receiptsOpen = anyReceiptFilter || showAllReceipts || billedReceipts.length > 0
 
   /**
    * Gathers several receipts one after the other, never at once.
@@ -664,6 +714,25 @@ export function PurchaseBillDialog({
   }
 
   /**
+   * Picking the supplier's own invoice number.
+   *
+   * The same move as the challan, from the other number printed on the same
+   * sheet. Whichever of the two the clerk reads first, they end up on the
+   * same deliveries.
+   */
+  const chooseBill = (no: string) => {
+    setFilterBill(no)
+    setFilterGrn('')
+    if (!no) return
+    const under = receiptChoices.filter((g) => (g.supplierInvoiceNo ?? '') === no)
+    const orders = new Set(under.map((g) => g.po?.id).filter(Boolean) as string[])
+    if (orders.size === 1) setFilterPo([...orders][0])
+    const challans = new Set(under.map((g) => g.challanNo).filter(Boolean) as string[])
+    if (challans.size === 1) setFilterChallan([...challans][0])
+    void pullMany(under)
+  }
+
+  /**
    * Picking a receipt number, for whoever is working from our side of the
    * paperwork. Its challan and its order fill themselves in behind it.
    */
@@ -674,6 +743,7 @@ export function PurchaseBillDialog({
     if (!g) return
     if (g.po?.id) setFilterPo(g.po.id)
     if (g.challanNo) setFilterChallan(g.challanNo)
+    if (g.supplierInvoiceNo) setFilterBill(g.supplierInvoiceNo)
     void pullMany([g])
   }
 
@@ -688,6 +758,11 @@ export function PurchaseBillDialog({
     // Whatever was chosen below it may not belong to this order any more.
     setFilterChallan((prev) =>
       prev && receiptChoices.some((g) => g.po?.id === id && (g.challanNo ?? '') === prev)
+        ? prev
+        : ''
+    )
+    setFilterBill((prev) =>
+      prev && receiptChoices.some((g) => g.po?.id === id && (g.supplierInvoiceNo ?? '') === prev)
         ? prev
         : ''
     )
@@ -1131,20 +1206,20 @@ export function PurchaseBillDialog({
                   <>
                     <p className="text-muted-foreground mb-2 text-[11px] leading-snug">
                       Tick every delivery this invoice covers — one bill can settle several. Find it
-                      by the supplier&rsquo;s challan number, by the order, or by our own receipt
-                      number; each box narrows the other two.
+                      by the supplier&rsquo;s challan or bill number, by the order, or by our own
+                      receipt number; each box narrows the others.
                     </p>
 
-                    {/* ── The three ways in ────────────────────────────────
+                    {/* ── The four ways in ─────────────────────────────────
                       The clerk is holding the supplier's invoice. It quotes
-                      his challan numbers and our order numbers, and never our
-                      receipt numbers — he has never seen one. A picker that
-                      offered only GRN numbers was asking them to translate
-                      between two documents in their head, which is how the
-                      wrong delivery gets billed. */}
-                    <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      his challan number, his own bill number and our order
+                      number, and never our receipt number — he has never seen
+                      one. A picker that offered only GRN numbers was asking
+                      them to translate between two documents in their head,
+                      which is how the wrong delivery gets billed. */}
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
                       <label className="block">
-                        <span className="form-label">Order no.</span>
+                        <span className="form-label">PO no.</span>
                         <select
                           className="form-input h-8 text-xs"
                           value={filterPo}
@@ -1176,6 +1251,29 @@ export function PurchaseBillDialog({
                         </select>
                       </label>
                       <label className="block">
+                        <span className="form-label">Supplier bill no.</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterBill}
+                          onChange={(e) => chooseBill(e.target.value)}
+                          disabled={pulling || billChoices.length === 0}
+                          title={
+                            billChoices.length === 0
+                              ? 'None of these deliveries had a supplier bill number written down at the gate'
+                              : undefined
+                          }
+                        >
+                          <option value="">
+                            {billChoices.length === 0 ? 'None recorded' : 'All bill numbers'}
+                          </option>
+                          {billChoices.map((b) => (
+                            <option key={b} value={b}>
+                              {b}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
                         <span className="form-label">Receipt no. (ours)</span>
                         <select
                           className="form-input h-8 text-xs"
@@ -1194,147 +1292,186 @@ export function PurchaseBillDialog({
                       </label>
                     </div>
 
-                    {/* ── What is waiting ───────────────────────────────────
-                      A table, not a strip of chips. "GRN-0009 PO-0006 650"
-                      read as a receipt, an order and six hundred and fifty
-                      rupees; it was six hundred and fifty pieces, and there
-                      was nowhere in it for the one number the clerk actually
-                      has in front of them. Every figure gets a column with a
-                      heading over it, and the money is named as an estimate
-                      because that is what it is — the supplier's own invoice
-                      is what gets booked. */}
-                    <div className="border-border bg-card max-h-60 overflow-auto rounded-lg border">
-                      <table className="w-full min-w-[700px] border-collapse text-xs">
-                        <thead className="sticky top-0 z-10">
-                          <tr className="bg-secondary">
-                            {[
-                              ['', 'w-8', 'left'],
-                              ['Receipt', 'w-24', 'left'],
-                              ['Order', 'w-24', 'left'],
-                              ['Challan', 'w-28', 'left'],
-                              ['Received', 'w-24', 'left'],
-                              ['Unbilled', 'w-24', 'right'],
-                              ['Est. value', 'w-28', 'right'],
-                              ['', 'w-24', 'left'],
-                            ].map(([label, width, align], n) => (
-                              <th
-                                key={`${label}-${n}`}
-                                className={`${width} bg-secondary border-border text-muted-foreground border-b px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
-                                  align === 'right' ? 'text-right' : 'text-left'
-                                }`}
-                              >
-                                {label}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {visibleReceipts.length === 0 ? (
-                            <tr>
-                              <td
-                                colSpan={8}
-                                className="text-muted-foreground px-2 py-6 text-center text-xs"
-                              >
-                                Nothing matches those filters. Clear one to widen the list.
-                              </td>
-                            </tr>
-                          ) : (
-                            visibleReceipts.map((g, n) => {
-                              const on = billedSet.has(g.grnNumber)
-                              const left = Number(g.billing?.pendingQty ?? 0)
-                              const worth = Number(g.billing?.pendingValue ?? 0)
-                              const part = Number(g.billing?.billedQty ?? 0) > 0
-                              const flip = () => {
-                                if (pulling) return
-                                if (on) dropReceipt(g.grnNumber)
-                                else void pullFromGrn(g.id)
-                              }
-                              return (
-                                <tr
-                                  key={g.id}
-                                  onClick={flip}
-                                  className={`border-border/50 cursor-pointer border-b last:border-0 ${
-                                    on ? 'bg-primary/5' : n % 2 === 1 ? 'zebra-row' : ''
-                                  }`}
-                                >
-                                  <td className="px-2 py-1.5">
-                                    <input
-                                      type="checkbox"
-                                      className="accent-primary size-3.5 align-middle"
-                                      checked={on}
-                                      disabled={pulling}
-                                      onChange={flip}
-                                      /* The whole row is the hit target. Without
-                                        this the click lands twice — once on the
-                                        box, once on the row — and the receipt
-                                        goes on and straight back off again. */
-                                      onClick={(e) => e.stopPropagation()}
-                                      aria-label={`Bill ${g.grnNumber}${
-                                        g.challanNo ? `, challan ${g.challanNo}` : ''
-                                      }`}
-                                    />
-                                  </td>
-                                  <td className="text-foreground px-2 py-1.5 font-mono">
-                                    {g.grnNumber}
-                                  </td>
-                                  <td className="text-muted-foreground px-2 py-1.5 font-mono">
-                                    {g.po?.poNumber ?? '—'}
-                                    {/* Only while the bill has no supplier —
-                                      until then the list spans all of them and
-                                      a receipt number says nothing about whose
-                                      delivery it was. */}
-                                    {!supplierId && g.po?.supplier?.name && (
-                                      <span className="text-muted-foreground block max-w-[10rem] truncate font-sans text-[10px]">
-                                        {g.po.supplier.name}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td
-                                    className={`px-2 py-1.5 font-mono ${
-                                      g.challanNo ? 'text-foreground' : 'text-muted-foreground'
+                    {/* Folded until one of the boxes above is answered.
+
+                      A bill is raised against a delivery somebody is holding
+                      the paperwork for, so the question is always "which one
+                      is this" and never "what is there" — and a list of every
+                      unbilled delivery in the mill, open by default, is a wall
+                      of numbers to scroll past on the way to the form. The
+                      press below opens it anyway, because a clerk who has lost
+                      the challan number still has to be able to look. */}
+                    {!receiptsOpen ? (
+                      <div className="border-border/70 mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-dashed px-3 py-2.5 text-xs">
+                        <span className="text-muted-foreground">
+                          {receiptChoices.length === 1
+                            ? '1 delivery is waiting to be billed.'
+                            : `${receiptChoices.length} deliveries are waiting to be billed.`}
+                        </span>
+                        <button
+                          type="button"
+                          className="text-primary font-medium hover:underline"
+                          onClick={() => setShowAllReceipts(true)}
+                        >
+                          Show them all
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        {/* ── What is waiting ──────────────────────────────
+                          A table, not a strip of chips. "GRN-0009 PO-0006
+                          650" read as a receipt, an order and six hundred and
+                          fifty rupees; it was six hundred and fifty pieces,
+                          and there was nowhere in it for the numbers the clerk
+                          actually has in front of them. The order, the
+                          challan, our receipt and their bill number come
+                          first, in that order — the three the supplier quotes,
+                          then ours — and every figure after them gets a column
+                          with a heading over it. The money is named an
+                          estimate because that is what it is: the supplier's
+                          own invoice is what gets booked. */}
+                        <div className="border-border bg-card mt-2 max-h-60 overflow-auto rounded-lg border">
+                          <table className="w-full min-w-[760px] border-collapse text-xs">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="bg-secondary">
+                                {[
+                                  ['', 'w-8', 'left'],
+                                  ['PO no.', 'w-24', 'left'],
+                                  ['Challan', 'w-28', 'left'],
+                                  ['Receipt', 'w-24', 'left'],
+                                  ['Supplier bill', 'w-28', 'left'],
+                                  ['Received', 'w-24', 'left'],
+                                  ['Unbilled', 'w-24', 'right'],
+                                  ['Est. value', 'w-28', 'right'],
+                                ].map(([label, width, align], n) => (
+                                  <th
+                                    key={`${label}-${n}`}
+                                    className={`${width} bg-secondary border-border text-muted-foreground border-b px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                      align === 'right' ? 'text-right' : 'text-left'
                                     }`}
                                   >
-                                    {g.challanNo || '—'}
-                                  </td>
-                                  <td className="text-muted-foreground whitespace-nowrap px-2 py-1.5">
-                                    {g.grnDate
-                                      ? new Date(g.grnDate).toLocaleDateString('en-IN', {
-                                          day: '2-digit',
-                                          month: 'short',
-                                          year: 'numeric',
-                                        })
-                                      : '—'}
-                                  </td>
-                                  <td className="text-foreground px-2 py-1.5 text-right tabular-nums">
-                                    {left.toLocaleString('en-IN')}
-                                  </td>
-                                  <td className="text-muted-foreground px-2 py-1.5 text-right tabular-nums">
-                                    {worth > 0 ? `₹${inr(worth)}` : '—'}
-                                  </td>
-                                  <td className="px-2 py-1.5">
-                                    {/* Part-billed is the one that has caught
-                                      people out: the receipt is on this list
-                                      because something is still owed on it,
-                                      not because nothing has been billed. */}
-                                    {part && (
-                                      <span className="whitespace-nowrap rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
-                                        Part billed
-                                      </span>
-                                    )}
+                                    {label}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {visibleReceipts.length === 0 ? (
+                                <tr>
+                                  <td
+                                    colSpan={8}
+                                    className="text-muted-foreground px-2 py-6 text-center text-xs"
+                                  >
+                                    Nothing matches those filters. Clear one to widen the list.
                                   </td>
                                 </tr>
-                              )
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
+                              ) : (
+                                visibleReceipts.map((g, n) => {
+                                  const on = billedSet.has(g.grnNumber)
+                                  const left = Number(g.billing?.pendingQty ?? 0)
+                                  const worth = Number(g.billing?.pendingValue ?? 0)
+                                  const part = Number(g.billing?.billedQty ?? 0) > 0
+                                  const flip = () => {
+                                    if (pulling) return
+                                    if (on) dropReceipt(g.grnNumber)
+                                    else void pullFromGrn(g.id)
+                                  }
+                                  return (
+                                    <tr
+                                      key={g.id}
+                                      onClick={flip}
+                                      className={`border-border/50 cursor-pointer border-b last:border-0 ${
+                                        on ? 'bg-primary/5' : n % 2 === 1 ? 'zebra-row' : ''
+                                      }`}
+                                    >
+                                      <td className="px-2 py-1.5">
+                                        <input
+                                          type="checkbox"
+                                          className="accent-primary size-3.5 align-middle"
+                                          checked={on}
+                                          disabled={pulling}
+                                          onChange={flip}
+                                          /* The whole row is the hit target.
+                                            Without this the click lands twice
+                                            — once on the box, once on the row
+                                            — and the receipt goes on and
+                                            straight back off again. */
+                                          onClick={(e) => e.stopPropagation()}
+                                          aria-label={`Bill ${g.grnNumber}${
+                                            g.challanNo ? `, challan ${g.challanNo}` : ''
+                                          }`}
+                                        />
+                                      </td>
+                                      <td className="text-foreground px-2 py-1.5 font-mono">
+                                        {g.po?.poNumber ?? '—'}
+                                        {/* Only while the bill has no supplier
+                                          — until then the list spans all of
+                                          them and a receipt number says
+                                          nothing about whose delivery it was. */}
+                                        {!supplierId && g.po?.supplier?.name && (
+                                          <span className="text-muted-foreground block max-w-[10rem] truncate font-sans text-[10px]">
+                                            {g.po.supplier.name}
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td
+                                        className={`px-2 py-1.5 font-mono ${
+                                          g.challanNo ? 'text-foreground' : 'text-muted-foreground'
+                                        }`}
+                                      >
+                                        {g.challanNo || '—'}
+                                      </td>
+                                      <td className="text-muted-foreground px-2 py-1.5 font-mono">
+                                        {g.grnNumber}
+                                      </td>
+                                      <td
+                                        className={`px-2 py-1.5 font-mono ${
+                                          g.supplierInvoiceNo
+                                            ? 'text-foreground'
+                                            : 'text-muted-foreground'
+                                        }`}
+                                      >
+                                        {g.supplierInvoiceNo || '—'}
+                                      </td>
+                                      <td className="text-muted-foreground whitespace-nowrap px-2 py-1.5">
+                                        {g.grnDate
+                                          ? new Date(g.grnDate).toLocaleDateString('en-IN', {
+                                              day: '2-digit',
+                                              month: 'short',
+                                              year: 'numeric',
+                                            })
+                                          : '—'}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right">
+                                        <span className="text-foreground tabular-nums">
+                                          {left.toLocaleString('en-IN')}
+                                        </span>
+                                        {/* Part-billed is the one that has
+                                          caught people out: the receipt is on
+                                          this list because something is still
+                                          owed on it, not because nothing has
+                                          been billed. Under the figure it
+                                          qualifies, rather than in a column of
+                                          its own that is empty on most rows. */}
+                                        {part && (
+                                          <span className="block text-[10px] text-amber-500">
+                                            part billed
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="text-muted-foreground px-2 py-1.5 text-right tabular-nums">
+                                        {worth > 0 ? `₹${inr(worth)}` : '—'}
+                                      </td>
+                                    </tr>
+                                  )
+                                })
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
 
-                    {/* Which receipts are on the bill is said by the ticks above
-                    and again by the "Against receipt" tag on every line below.
-                    Saying it a third time in prose cost two lines and told
-                    nobody anything. Only the warning about the figures is
-                    left, because that one is not written anywhere else. */}
                     <div className="text-muted-foreground mt-1.5 space-y-1 text-[11px]">
                       <p className="flex items-center gap-1.5">
                         {pulling ? (
@@ -1951,262 +2088,168 @@ export function PurchaseBillDialog({
               </div>
             </Section>
 
-            {/* What is typed on the left, what it comes to on the right. */}
-            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
-              <Section icon={MessageSquare} title="TDS &amp; Notes">
-                {(() => {
-                  const matched = tdsSections.find(
-                    (t) => t.section === tdsSection && Number(t.rate) === num(tdsRate)
-                  )
-                  const showManual = tdsCustomMode || (!!tdsSection && !matched)
-                  const selectValue = !tdsSection ? '' : matched ? matched.id : 'custom'
-                  return (
-                    <>
-                      <div>
-                        <label className="form-label" htmlFor="bill-tds-select">
-                          TDS section
-                        </label>
-                        <select
-                          id="bill-tds-select"
-                          className="form-input"
-                          value={selectValue}
-                          onChange={(e) => {
-                            const v = e.target.value
-                            if (v === '') {
-                              setTdsSection('')
-                              setTdsRate('')
-                              setTdsCustomMode(false)
-                            } else if (v === 'custom') {
-                              setTdsCustomMode(true)
-                            } else {
-                              const row = tdsSections.find((t) => t.id === v)
-                              if (row) {
-                                setTdsSection(row.section)
-                                setTdsRate(String(row.rate))
-                              }
-                              setTdsCustomMode(false)
-                            }
-                          }}
-                        >
-                          <option value="">No TDS</option>
-                          {tdsSections.map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {t.section} — {t.label} ({t.rate}%)
-                            </option>
-                          ))}
-                          <option value="custom">Other / not listed…</option>
-                        </select>
-                      </div>
-
-                      {showManual && (
-                        <div className="mt-2.5 grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5">
-                          <div>
-                            <label className="form-label" htmlFor="bill-tds-section">
-                              Section
-                            </label>
-                            <input
-                              id="bill-tds-section"
-                              className="form-input"
-                              placeholder="e.g. 194C"
-                              value={tdsSection}
-                              onChange={(e) => setTdsSection(e.target.value)}
-                            />
-                          </div>
-                          <div>
-                            <label className="form-label" htmlFor="bill-tds-rate">
-                              Rate %
-                            </label>
-                            <input
-                              id="bill-tds-rate"
-                              type="number"
-                              step="0.01"
-                              min={0}
-                              max={100}
-                              className="form-input"
-                              value={tdsRate}
-                              onChange={(e) => setTdsRate(e.target.value)}
-                            />
-                          </div>
-                        </div>
-                      )}
-                      <p className="text-muted-foreground mt-1 text-[11px]">
-                        Manage the list in Settings → Company → TDS sections.
-                      </p>
-                    </>
-                  )
-                })()}
-                <div>
-                  <label className="form-label" htmlFor="bill-notes">
-                    Notes
+            {/* TDS and the notes box used to sit to the left of this.
+              Taken off the form on request. Nothing was dropped from the
+              document: a bill already carrying a TDS section or a note keeps
+              both — the form still holds them and still sends them back
+              untouched — there is simply no longer anywhere to type a new
+              one. */}
+            <Section icon={Calculator} title="Totals">
+              <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
+                <Row label="Goods subtotal" value={totals.subtotal} />
+                <div className="flex items-center justify-between gap-4">
+                  <label htmlFor="bill-discount" className="text-muted-foreground">
+                    Discount on the whole bill
                   </label>
-                  <textarea
-                    id="bill-notes"
-                    rows={3}
-                    className="form-input"
-                    placeholder="Add any notes or remarks about this bill..."
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
+                  <input
+                    id="bill-discount"
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    className="form-input h-8 w-32 text-right"
+                    value={discountAmount}
+                    onChange={(e) => setDiscountAmount(e.target.value)}
                   />
                 </div>
-              </Section>
-
-              <Section icon={Calculator} title="Totals">
-                <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
-                  <Row label="Goods subtotal" value={totals.subtotal} />
-                  <div className="flex items-center justify-between gap-4">
-                    <label htmlFor="bill-discount" className="text-muted-foreground">
-                      Discount on the whole bill
-                    </label>
-                    <input
-                      id="bill-discount"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      className="form-input h-8 w-32 text-right"
-                      value={discountAmount}
-                      onChange={(e) => setDiscountAmount(e.target.value)}
-                    />
-                  </div>
-                  {chargeTypes.length > 0 && (
-                    <div className="space-y-1.5 py-0.5">
-                      {charges.map((c, i) => (
-                        <div key={i} className="flex items-center gap-1.5">
-                          <select
-                            className="form-input h-8 min-w-0 flex-1 text-xs"
-                            value={c.chargeTypeId}
-                            onChange={(e) => {
-                              const ct = chargeById.get(e.target.value)
-                              setCharges((p) =>
-                                p.map((x, y) =>
-                                  y === i
-                                    ? {
-                                        ...x,
-                                        chargeTypeId: e.target.value,
-                                        gstRate:
-                                          x.gstRate ||
-                                          (ct?.defaultGstRate != null
-                                            ? String(ct.defaultGstRate)
-                                            : ''),
-                                      }
-                                    : x
-                                )
+                {chargeTypes.length > 0 && (
+                  <div className="space-y-1.5 py-0.5">
+                    {charges.map((c, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <select
+                          className="form-input h-8 min-w-0 flex-1 text-xs"
+                          value={c.chargeTypeId}
+                          onChange={(e) => {
+                            const ct = chargeById.get(e.target.value)
+                            setCharges((p) =>
+                              p.map((x, y) =>
+                                y === i
+                                  ? {
+                                      ...x,
+                                      chargeTypeId: e.target.value,
+                                      gstRate:
+                                        x.gstRate ||
+                                        (ct?.defaultGstRate != null
+                                          ? String(ct.defaultGstRate)
+                                          : ''),
+                                    }
+                                  : x
                               )
-                            }}
-                            aria-label={`Charge ${i + 1} type`}
-                          >
-                            <option value="">Charge type…</option>
-                            {chargeTypes.map((ct) => (
-                              <option key={ct.id} value={ct.id}>
-                                {ct.name}
-                              </option>
-                            ))}
-                          </select>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            className="form-input h-8 w-24 shrink-0 text-right text-xs"
-                            placeholder="Amount"
-                            value={String(c.amount)}
-                            onChange={(e) =>
-                              setCharges((p) =>
-                                p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
-                              )
-                            }
-                            aria-label={`Charge ${i + 1} amount`}
-                          />
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            max={100}
-                            className="form-input h-8 w-16 shrink-0 text-right text-xs"
-                            placeholder="GST%"
-                            disabled={taxMode === 'NONE'}
-                            value={taxMode === 'NONE' ? '' : String(c.gstRate)}
-                            onChange={(e) =>
-                              setCharges((p) =>
-                                p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
-                              )
-                            }
-                            aria-label={`Charge ${i + 1} GST rate`}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
-                            className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
-                            aria-label={`Remove charge ${i + 1}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
-                        }
-                        className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
-                      >
-                        <Plus size={12} /> Add charge
-                      </button>
-                    </div>
-                  )}
-                  <Row label="Taxable value" value={totals.taxable} />
-                  {taxMode === 'CGST_SGST' && (
-                    <>
-                      <Row label="CGST" value={totals.tax / 2} />
-                      <Row label="SGST" value={totals.tax / 2} />
-                    </>
-                  )}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                  {taxMode === 'NONE' && (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No GST — this supplier is not registered.
-                    </p>
-                  )}
-                  {taxMode === null && (
-                    <>
-                      <Row label="GST" value={totals.tax} />
-                      <p className="text-muted-foreground py-1 text-xs">
-                        Choose a supplier to see whether this splits into CGST + SGST or is IGST.
-                      </p>
-                    </>
-                  )}
-                  {isReverseCharge && totals.tax > 0 && (
-                    <p className="py-1 text-xs text-amber-400">
-                      Reverse charge — the ₹{inr(totals.tax)} of GST above is payable by us to the
-                      government and is not part of what the supplier is paid.
-                    </p>
-                  )}
-                  <Row label="Rounding" value={totals.roundOff} />
-                  <div className="border-border flex items-center justify-between border-t pt-2">
-                    <span className="text-foreground font-semibold">Bill total</span>
-                    <span className="text-foreground text-lg font-semibold tabular-nums">
-                      ₹{inr(totals.total)}
-                    </span>
-                  </div>
-                  {totals.tds > 0 && (
-                    <>
-                      <Row
-                        label={`TDS withheld${tdsSection ? ` (${tdsSection})` : ''}`}
-                        value={-totals.tds}
-                      />
-                      <div className="border-border flex items-center justify-between border-t pt-2">
-                        <span className="text-foreground font-medium">Payable to supplier</span>
-                        <span className="text-foreground font-semibold tabular-nums">
-                          ₹{inr(totals.balance)}
-                        </span>
+                            )
+                          }}
+                          aria-label={`Charge ${i + 1} type`}
+                        >
+                          <option value="">Charge type…</option>
+                          {chargeTypes.map((ct) => (
+                            <option key={ct.id} value={ct.id}>
+                              {ct.name}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          className="form-input h-8 w-24 shrink-0 text-right text-xs"
+                          placeholder="Amount"
+                          value={String(c.amount)}
+                          onChange={(e) =>
+                            setCharges((p) =>
+                              p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
+                            )
+                          }
+                          aria-label={`Charge ${i + 1} amount`}
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          max={100}
+                          className="form-input h-8 w-16 shrink-0 text-right text-xs"
+                          placeholder="GST%"
+                          disabled={taxMode === 'NONE'}
+                          value={taxMode === 'NONE' ? '' : String(c.gstRate)}
+                          onChange={(e) =>
+                            setCharges((p) =>
+                              p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
+                            )
+                          }
+                          aria-label={`Charge ${i + 1} GST rate`}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
+                          className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
+                          aria-label={`Remove charge ${i + 1}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
                       </div>
-                      <p className="text-muted-foreground text-xs">
-                        Paying this smaller amount settles the bill in full — the TDS is accounted
-                        for rather than left outstanding against them.
-                      </p>
-                    </>
-                  )}
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
+                      }
+                      className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
+                    >
+                      <Plus size={12} /> Add charge
+                    </button>
+                  </div>
+                )}
+                <Row label="Taxable value" value={totals.taxable} />
+                {taxMode === 'CGST_SGST' && (
+                  <>
+                    <Row label="CGST" value={totals.tax / 2} />
+                    <Row label="SGST" value={totals.tax / 2} />
+                  </>
+                )}
+                {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                {taxMode === 'NONE' && (
+                  <p className="text-muted-foreground py-1 text-xs">
+                    No GST — this supplier is not registered.
+                  </p>
+                )}
+                {taxMode === null && (
+                  <>
+                    <Row label="GST" value={totals.tax} />
+                    <p className="text-muted-foreground py-1 text-xs">
+                      Choose a supplier to see whether this splits into CGST + SGST or is IGST.
+                    </p>
+                  </>
+                )}
+                {isReverseCharge && totals.tax > 0 && (
+                  <p className="py-1 text-xs text-amber-400">
+                    Reverse charge — the ₹{inr(totals.tax)} of GST above is payable by us to the
+                    government and is not part of what the supplier is paid.
+                  </p>
+                )}
+                <Row label="Rounding" value={totals.roundOff} />
+                <div className="border-border flex items-center justify-between border-t pt-2">
+                  <span className="text-foreground font-semibold">Bill total</span>
+                  <span className="text-foreground text-lg font-semibold tabular-nums">
+                    ₹{inr(totals.total)}
+                  </span>
                 </div>
-              </Section>
-            </div>
+                {totals.tds > 0 && (
+                  <>
+                    <Row
+                      label={`TDS withheld${tdsSection ? ` (${tdsSection})` : ''}`}
+                      value={-totals.tds}
+                    />
+                    <div className="border-border flex items-center justify-between border-t pt-2">
+                      <span className="text-foreground font-medium">Payable to supplier</span>
+                      <span className="text-foreground font-semibold tabular-nums">
+                        ₹{inr(totals.balance)}
+                      </span>
+                    </div>
+                    <p className="text-muted-foreground text-xs">
+                      Paying this smaller amount settles the bill in full — the TDS is accounted for
+                      rather than left outstanding against them.
+                    </p>
+                  </>
+                )}
+              </div>
+            </Section>
           </div>
 
           {/* Footer — stays put, so Save is always one press away. */}
