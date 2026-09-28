@@ -81,7 +81,7 @@ const SHEET_CSS = `
     display: flex;
     align-items: center;
     gap: 14px;
-    max-width: 900px;
+    max-width: 210mm;
     margin: 0 auto 10px;
     padding: 8px 12px;
     background: #fff;
@@ -115,8 +115,8 @@ const SHEET_CSS = `
     padding: 20px 16px 44px;
   }
   .req-picker {
-    max-width: 900px;
-    margin: 0 auto 14px;
+    max-width: 210mm;
+    margin: 0 auto 12px;
     padding: 10px 14px;
     background: #fff;
     border: 1px solid #c9d6e8;
@@ -141,22 +141,25 @@ const SHEET_CSS = `
   .req-picker .hint { color: #5a6880; font-size: 12px; }
   .req-sheet {
     background: #fff;
-    max-width: 900px;
+    width: 210mm;
+    min-height: 297mm;
+    box-sizing: border-box;
     margin: 0 auto;
-    border-radius: 16px;
     box-shadow: 0 18px 50px rgba(23, 58, 108, 0.14);
-    padding: 34px 36px 30px;
+    padding: 9mm 12mm 0;
+    display: flex;
+    flex-direction: column;
   }
   .req-sheet, .req-sheet * {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
+  @page { size: A4; margin: 0; }
   @media print {
     .no-print { display: none !important; }
     html, body { background: #fff !important; }
     .req-page { background: #fff; background-image: none; padding: 0; min-height: 0; }
-    .req-sheet { box-shadow: none; border-radius: 0; max-width: none; padding: 0; }
-    @page { margin: 12mm; }
+    .req-sheet { box-shadow: none; margin: 0; min-height: 296mm; }
   }
 `
 
@@ -301,17 +304,17 @@ export default function PurchaseRequisitionPrintPage() {
                   <img
                     src={co.logoUrl}
                     alt=""
-                    style={{ height: 38, width: 'auto', objectFit: 'contain' }}
+                    style={{ height: 32, width: 'auto', objectFit: 'contain' }}
                   />
                 ) : (
-                  <Sprout size={34} style={{ color: '#2f9e7e' }} strokeWidth={1.8} />
+                  <Sprout size={28} style={{ color: '#2f9e7e' }} strokeWidth={1.8} />
                 )}
                 <h1
                   style={{
                     margin: 0,
-                    fontSize: 30,
+                    fontSize: 24,
                     fontWeight: 700,
-                    letterSpacing: -0.6,
+                    letterSpacing: -0.5,
                     color: NAVY,
                   }}
                 >
@@ -319,18 +322,18 @@ export default function PurchaseRequisitionPrintPage() {
                 </h1>
               </div>
               {co.address && (
-                <p style={{ margin: '11px 0 0', fontSize: 12.5, color: GREY, lineHeight: 1.55 }}>
+                <p style={{ margin: '6px 0 0', fontSize: 11.5, color: GREY, lineHeight: 1.45 }}>
                   {[co.address, co.city, co.state, co.pincode].filter(Boolean).join(', ')}
                 </p>
               )}
               <div
                 style={{
-                  margin: '11px 0 0',
+                  margin: '7px 0 0',
                   display: 'flex',
                   flexWrap: 'wrap',
                   alignItems: 'center',
                   gap: '6px 9px',
-                  fontSize: 11.5,
+                  fontSize: 11,
                   color: GREY,
                 }}
               >
@@ -354,7 +357,7 @@ export default function PurchaseRequisitionPrintPage() {
             <div
               style={{
                 borderRadius: 9,
-                minWidth: 272,
+                minWidth: 250,
                 overflow: 'hidden',
                 boxShadow: '0 4px 14px rgba(23, 58, 108, 0.13)',
               }}
@@ -363,20 +366,20 @@ export default function PurchaseRequisitionPrintPage() {
                 style={{
                   background: NAVY,
                   color: '#fff',
-                  padding: '9px 14px',
+                  padding: '6px 12px',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8,
-                  fontSize: 12,
+                  fontSize: 11.5,
                   fontWeight: 700,
                   letterSpacing: 0.4,
                   textTransform: 'uppercase',
                 }}
               >
-                <FileText size={15} />
+                <FileText size={14} />
                 Purchase Requisition
               </div>
-              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+              <table style={{ width: '100%', fontSize: 11.5, borderCollapse: 'collapse' }}>
                 <tbody>
                   <MetaRow i={0} label="Requisition No" value={e.enquiryNumber} mono />
                   <MetaRow i={1} label="Date" value={shortDate(e.enquiryDate)} mono />
@@ -392,15 +395,17 @@ export default function PurchaseRequisitionPrintPage() {
             </div>
           </div>
 
-          <div style={{ height: 2, background: NAVY, margin: '22px 0 0', borderRadius: 2 }} />
+          <div style={{ height: 2, background: NAVY, margin: '12px 0 0', borderRadius: 2 }} />
 
           {/* ── Vendor ─────────────────────────────────────────────────────── */}
           <Panel icon={Users} title="Vendor">
-            <div style={{ padding: '12px 16px 14px', fontSize: 12, lineHeight: 1.6 }}>
+            <div style={{ padding: '7px 14px 8px', fontSize: 11.5, lineHeight: 1.45 }}>
               {to ? (
                 <>
-                  <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: NAVY }}>{to.name}</p>
-                  {to.address && <p style={{ margin: '3px 0 0', color: GREY }}>{to.address}</p>}
+                  <p style={{ margin: 0, fontSize: 13.5, fontWeight: 700, color: NAVY }}>
+                    {to.name}
+                  </p>
+                  {to.address && <p style={{ margin: '2px 0 0', color: GREY }}>{to.address}</p>}
                   {(to.city || to.state || to.pincode) && (
                     <p style={{ margin: 0, color: GREY }}>
                       {[[to.city, to.state].filter(Boolean).join(', '), to.pincode]
@@ -408,7 +413,7 @@ export default function PurchaseRequisitionPrintPage() {
                         .join(' - ')}
                     </p>
                   )}
-                  <p style={{ margin: '3px 0 0', color: SOFT }}>
+                  <p style={{ margin: '2px 0 0', color: SOFT }}>
                     {[
                       to.phone,
                       to.email,
@@ -432,32 +437,32 @@ export default function PurchaseRequisitionPrintPage() {
             style={{
               display: 'grid',
               gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-              gap: 14,
+              gap: 10,
             }}
           >
             <Panel icon={Building2} title="Bill to">
-              <div style={{ padding: '12px 16px 14px', fontSize: 12, lineHeight: 1.6 }}>
-                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: NAVY }}>
+              <div style={{ padding: '7px 14px 8px', fontSize: 11.5, lineHeight: 1.45 }}>
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: NAVY }}>
                   {co.legalName || co.name}
                 </p>
-                {co.address && <p style={{ margin: '3px 0 0', color: GREY }}>{co.address}</p>}
+                {co.address && <p style={{ margin: '2px 0 0', color: GREY }}>{co.address}</p>}
                 {companyPlace && <p style={{ margin: 0, color: GREY }}>{companyPlace}</p>}
-                {companyTax && <p style={{ margin: '3px 0 0', color: SOFT }}>{companyTax}</p>}
+                {companyTax && <p style={{ margin: '2px 0 0', color: SOFT }}>{companyTax}</p>}
               </div>
             </Panel>
             <Panel icon={Truck} title="Ship to">
-              <div style={{ padding: '12px 16px 14px', fontSize: 12, lineHeight: 1.6 }}>
-                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: NAVY }}>
+              <div style={{ padding: '7px 14px 8px', fontSize: 11.5, lineHeight: 1.45 }}>
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: NAVY }}>
                   {co.name}
                   {data.shipTo ? ' (' + data.shipTo.name + ')' : ''}
                 </p>
                 {data.shipTo?.address && (
-                  <p style={{ margin: '3px 0 0', color: GREY }}>{data.shipTo.address}</p>
+                  <p style={{ margin: '2px 0 0', color: GREY }}>{data.shipTo.address}</p>
                 )}
                 {co.address && <p style={{ margin: 0, color: GREY }}>{co.address}</p>}
                 {companyPlace && <p style={{ margin: 0, color: GREY }}>{companyPlace}</p>}
                 {(prep || co.phone) && (
-                  <p style={{ margin: '3px 0 0', color: SOFT }}>
+                  <p style={{ margin: '2px 0 0', color: SOFT }}>
                     {[prep?.name, prep?.phone || co.phone].filter(Boolean).join(' · ')}
                   </p>
                 )}
@@ -469,7 +474,7 @@ export default function PurchaseRequisitionPrintPage() {
             By SKU, as the group's sheets list them. No rate or amount — those
             come back on his PI. */}
           <Panel icon={Rows3} title="Items required" flush>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
               <thead>
                 <tr style={{ background: NAVY, color: '#fff' }}>
                   <th style={{ ...TH, width: 54, paddingLeft: 16 }}>S.No</th>
@@ -494,7 +499,7 @@ export default function PurchaseRequisitionPrintPage() {
                     <td style={TD}>
                       <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
                       {l.description && (
-                        <div style={{ color: GREY, fontSize: 11, marginTop: 2 }}>
+                        <div style={{ color: GREY, fontSize: 10.5, marginTop: 1 }}>
                           {l.description}
                         </div>
                       )}
@@ -514,7 +519,7 @@ export default function PurchaseRequisitionPrintPage() {
 
           {/* ── What we need back ──────────────────────────────────────────── */}
           <Panel icon={ClipboardList} title="Please send your proforma invoice (PI)">
-            <div style={{ padding: '12px 16px 14px', fontSize: 12, color: INK }}>
+            <div style={{ padding: '7px 14px 8px', fontSize: 11.5, color: INK }}>
               <p style={{ margin: 0 }}>
                 Please send your proforma invoice for the items above, quoting our requisition no.{' '}
                 <strong style={{ color: NAVY, fontFamily: 'monospace' }}>{e.enquiryNumber}</strong>.
@@ -522,11 +527,11 @@ export default function PurchaseRequisitionPrintPage() {
               </p>
               <ul
                 style={{
-                  margin: '9px 0 0',
+                  margin: '5px 0 0',
                   padding: '0 0 0 18px',
                   display: 'grid',
                   gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-                  gap: '5px 20px',
+                  gap: '2px 20px',
                   color: GREY,
                 }}
               >
@@ -538,7 +543,7 @@ export default function PurchaseRequisitionPrintPage() {
           </Panel>
 
           {(e.notes || e.terms) && (
-            <div style={{ marginTop: 16, display: 'grid', gap: 12 }}>
+            <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
               {e.notes && <Note icon={Pencil} title="Notes" body={e.notes} />}
               {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
             </div>
@@ -547,7 +552,7 @@ export default function PurchaseRequisitionPrintPage() {
           {/* ── Who prepared it, who signs ─────────────────────────────────── */}
           <div
             style={{
-              marginTop: 24,
+              marginTop: 14,
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'flex-end',
@@ -569,7 +574,7 @@ export default function PurchaseRequisitionPrintPage() {
               </p>
               {prep && (
                 <>
-                  <p style={{ margin: '8px 0 0', fontSize: 15, fontWeight: 700, color: NAVY }}>
+                  <p style={{ margin: '4px 0 0', fontSize: 13.5, fontWeight: 700, color: NAVY }}>
                     {prep.name}
                   </p>
                   <p style={{ margin: '2px 0 0', color: SOFT }}>
@@ -581,7 +586,7 @@ export default function PurchaseRequisitionPrintPage() {
             {showSignature && (
               <div style={{ width: 230, textAlign: 'right', fontSize: 11.5, color: GREY }}>
                 <p style={{ margin: 0 }}>For {co.name}</p>
-                <div style={{ height: 38 }} />
+                <div style={{ height: 30 }} />
                 <p style={{ margin: 0, borderTop: '1px solid ' + RULE, paddingTop: 6 }}>
                   Authorised signatory
                 </p>
@@ -590,19 +595,20 @@ export default function PurchaseRequisitionPrintPage() {
           </div>
 
           {/* ── The foot ───────────────────────────────────────────────────── */}
+          <div style={{ flex: 1 }} />
           <div
             style={{
-              marginTop: 22,
-              padding: '10px 14px',
+              marginTop: 12,
+              padding: '7px 12px',
               background: TINT_SOFT,
               border: '1px solid ' + RULE_SOFT,
               borderRadius: 10,
               display: 'grid',
               gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
               gap: 18,
-              fontSize: 10.5,
+              fontSize: 10,
               color: GREY,
-              lineHeight: 1.5,
+              lineHeight: 1.45,
             }}
           >
             <span>
@@ -617,14 +623,34 @@ export default function PurchaseRequisitionPrintPage() {
                 .join('')}
             </span>
           </div>
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 12,
+              margin: '6px 0 4mm',
+              padding: '6px 11px',
+              background: NAVY,
+              color: '#fff',
+              fontSize: 9,
+              fontWeight: 600,
+              letterSpacing: '.07em',
+              textTransform: 'uppercase',
+            }}
+          >
+            <span>
+              {co.name} — Purchase Requisition {e.enquiryNumber}
+            </span>
+            <span style={{ opacity: 0.85 }}>Page 1 of 1</span>
+          </div>
         </div>
       </div>
     </>
   )
 }
 
-const TH: React.CSSProperties = { padding: '10px 8px', textAlign: 'left', fontWeight: 600 }
-const TD: React.CSSProperties = { padding: '10px 8px', verticalAlign: 'top' }
+const TH: React.CSSProperties = { padding: '6px 8px', textAlign: 'left', fontWeight: 600 }
+const TD: React.CSSProperties = { padding: '6px 8px', verticalAlign: 'top' }
 
 /** One of the three ways to reach us, its icon on a filled tile. */
 function Contact({ icon: Icon, children }: { icon: React.ElementType; children: React.ReactNode }) {
@@ -667,8 +693,8 @@ function Panel({
   return (
     <div
       style={{
-        marginTop: 14,
-        borderRadius: 10,
+        marginTop: 10,
+        borderRadius: 8,
         overflow: 'hidden',
         background: flush ? '#fff' : TINT_SOFT,
         border: '1px solid ' + RULE_SOFT,
@@ -677,18 +703,18 @@ function Panel({
       <div
         style={{
           background: TINT,
-          padding: '9px 16px',
+          padding: '5px 14px',
           display: 'flex',
           alignItems: 'center',
-          gap: 9,
-          fontSize: 11.5,
+          gap: 8,
+          fontSize: 10.5,
           fontWeight: 700,
           letterSpacing: 0.6,
           textTransform: 'uppercase',
           color: NAVY,
         }}
       >
-        <Icon size={15} />
+        <Icon size={13} />
         {title}
       </div>
       {children}
@@ -710,10 +736,10 @@ function MetaRow({
 }) {
   return (
     <tr style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
-      <td style={{ padding: '7px 14px', color: GREY, whiteSpace: 'nowrap' }}>{label}</td>
+      <td style={{ padding: '4px 12px', color: GREY, whiteSpace: 'nowrap' }}>{label}</td>
       <td
         style={{
-          padding: '7px 14px',
+          padding: '4px 12px',
           textAlign: 'right',
           fontWeight: 700,
           color: NAVY,
@@ -746,17 +772,17 @@ function Note({
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          fontSize: 11.5,
+          fontSize: 10.5,
           fontWeight: 700,
           letterSpacing: 0.6,
           textTransform: 'uppercase',
           color: NAVY,
         }}
       >
-        <Icon size={15} />
+        <Icon size={13} />
         {title}
       </p>
-      <p style={{ margin: '6px 0 0 23px', fontSize: 12, color: GREY, whiteSpace: 'pre-line' }}>
+      <p style={{ margin: '3px 0 0 21px', fontSize: 11.5, color: GREY, whiteSpace: 'pre-line' }}>
         {body}
       </p>
     </div>
