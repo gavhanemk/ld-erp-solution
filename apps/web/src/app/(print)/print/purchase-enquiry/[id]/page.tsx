@@ -6,37 +6,37 @@ import {
   ClipboardList,
   FileText,
   Mail,
-  MessageSquareReply,
   Pencil,
   Phone,
   ReceiptText,
   Rows3,
   Sprout,
-  Truck,
-  Users,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
-import { money, qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
+import { qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
 
 /**
- * The printed purchase enquiry — a request for quotation.
+ * The printed purchase requisition — what the mill sends a supplier.
  *
- * One document, and it goes out. Laid out the way an RFQ is read by the man
- * who receives it: who is asking, who it is to, what is wanted, when and
- * where it is wanted, what to put in the reply, and a ruled block to put it
- * in. Print it once and send the same sheet to four suppliers.
+ * The flow it serves: we send this, the supplier answers with a proforma
+ * invoice on his own letterhead, and we record that PI in the app against the
+ * requisition ("Record PI" on What Came Back). The purchase order is then
+ * raised against his PI number.
  *
- * `?quote=<id>` only addresses it. With one, the Supplier block carries that
- * supplier's name and, once his proforma is recorded, the Supplier Rate column
- * carries his own rates — which is the copy filed beside the order. Without
- * one the block is ruled lines to write a name on, the way an enquiry pad has
- * always worked.
+ * So this is a document to be READ, not filled in. It says who is asking,
+ * what is wanted and how much, when it is needed, and exactly what his PI
+ * should carry — and it asks him to quote our number on it, which is what
+ * lets his reply be matched back to this sheet. It used to carry ruled blanks
+ * for his name, his rates and his answers; nobody wrote on them, because the
+ * answer always came back as his own PI, and a sheet of empty lines read as
+ * a form somebody had forgotten to finish.
  *
- * What it deliberately does **not** carry is who else was asked or what they
- * said. That comparison is the buyer's, it lives on the Compare panel in the
- * app, and a sheet that goes to a supplier with his competitors' names and
- * totals on it is not a way to get a keen price out of him.
+ * One sheet for every supplier asked. `?quote=<id>` only adds a "To" line
+ * naming the one it is printed for.
+ *
+ * What it never carries is who else was asked or what they said. That
+ * comparison is the buyer's and lives in the app.
  *
  * The palette is the one the purchase order and the bill already print in —
  * navy masthead, tinted section bars, a filled navy line-grid head. They share
@@ -121,20 +121,21 @@ const SHEET_CSS = `
 `
 
 /*
- * What the supplier is asked to put in his reply.
+ * What his proforma invoice should carry.
  *
- * Listed before the ruled block rather than only as its labels, because a
- * supplier who quotes on his own letterhead — which is most of them — reads
- * the list and answers it in his own layout. Without it the reply comes back
- * as a rate and nothing else, and the freight turns up on the bill.
+ * Spelled out because a PI that comes back with a rate and nothing else is
+ * the commonest reason two suppliers cannot be compared: one is ex-works, one
+ * is delivered, one has buried the freight, and the difference only surfaces
+ * on the bill. Asking for each of these by name is what makes the replies
+ * line up when they are recorded.
  */
-const PLEASE_QUOTE = [
-  'Unit price / rate',
+const PI_MUST_SHOW = [
+  'Rate per unit, for each item',
   'GST %',
-  'Freight / packing charges',
+  'Freight and packing, if extra',
   'Delivery time',
   'Payment terms',
-  'Quote validity',
+  'How long the price holds',
 ]
 
 interface PrintData {
@@ -198,7 +199,7 @@ export default function PurchaseEnquiryPrintPage() {
         backHref="/purchase/enquiries"
         backLabel="Enquiries"
         copies={1}
-        fileName={'RFQ ' + e.enquiryNumber + (forQuote ? ' ' + forQuote.supplier.name : '')}
+        fileName={'Requisition ' + e.enquiryNumber + (forQuote ? ' ' + forQuote.supplier.name : '')}
       />
 
       <div className="enq-page">
@@ -266,13 +267,9 @@ export default function PurchaseEnquiryPrintPage() {
             </div>
 
             {/* ── The document block ───────────────────────────────────────
-              What this paper is, named the way the trade names it: a request
-              for quotation. "Purchase enquiry" is our word for the record in
-              the app; the supplier's clerk files it under RFQ.
-
-              "Quote by" is the date the goods are needed for, which is also
-              the latest a quotation is any use — the same date the delivery
-              requirement below repeats, as it is asked. */}
+              Which paper this is, and the facts his PI has to quote back.
+              "To" appears only on a copy printed for one supplier; the
+              ordinary sheet goes to all of them unaddressed. */}
             <div
               style={{
                 borderRadius: 9,
@@ -296,13 +293,14 @@ export default function PurchaseEnquiryPrintPage() {
                 }}
               >
                 <FileText size={15} />
-                Request for Quotation
+                Purchase Requisition
               </div>
               <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                 <tbody>
-                  <MetaRow i={0} label="RFQ No" value={e.enquiryNumber} mono />
+                  <MetaRow i={0} label="Requisition No" value={e.enquiryNumber} mono />
                   <MetaRow i={1} label="Date" value={shortDate(e.enquiryDate)} mono />
-                  <MetaRow i={2} label="Quote by" value={neededBy ?? '—'} mono />
+                  <MetaRow i={2} label="Required by" value={neededBy ?? '—'} mono />
+                  {forQuote && <MetaRow i={3} label="To" value={forQuote.supplier.name} />}
                 </tbody>
               </table>
             </div>
@@ -311,176 +309,93 @@ export default function PurchaseEnquiryPrintPage() {
           {/* The rule that separates who we are from what we are asking. */}
           <div style={{ height: 2, background: NAVY, margin: '22px 0 0', borderRadius: 2 }} />
 
-          {/* ── Supplier ───────────────────────────────────────────────────
-            Filled where we are printing one supplier's copy, ruled lines to
-            write on where we are not. The enquiry goes to three or four of
-            them and is printed once; whoever it is handed to writes their own
-            name on it, which is what an enquiry pad has always done. */}
-          <Panel icon={Users} title="Supplier">
-            <div style={{ padding: '12px 16px 14px', display: 'grid', gap: 10 }}>
-              <FillLine label="M/s" value={forQuote?.supplier.name} strong />
-              <FillLine
-                label="Contact"
-                value={
-                  forQuote
-                    ? [
-                        forQuote.supplier.email,
-                        forQuote.supplier.gstin && 'GSTIN ' + forQuote.supplier.gstin,
-                      ]
-                        .filter(Boolean)
-                        .join(' · ') || undefined
-                    : undefined
-                }
-              />
-            </div>
-          </Panel>
-
-          {/* ── Requested items ─────────────────────────────────────────────
-            The unit in a column of its own rather than tacked onto the
-            quantity. A supplier pricing per metre against a quantity in rolls
-            quotes the wrong unit, and a column headed UOM is the one thing on
-            the sheet he cannot read past.
-
-            No GST column and no total. GST is one of the things he is asked
-            to quote below; a column for it beside every line invited six
-            copies of "18" and a total nobody on either side could check. The
-            Supplier Rate column is empty for him to fill in — on a copy
-            printed after his proforma is recorded it carries his own figures,
-            and that is the version filed beside the order. */}
-          <Panel icon={Rows3} title="Requested items" flush>
+          {/* ── Items required ──────────────────────────────────────────────
+            What we want and how much, in the unit we count it in — the unit
+            in a column of its own, because a supplier pricing per metre
+            against a quantity in rolls quotes the wrong unit. No rate column:
+            his rates come back on his PI, not written into ours. */}
+          <Panel icon={Rows3} title="Items required" flush>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
                 <tr style={{ background: NAVY, color: '#fff' }}>
                   <th style={{ ...TH, width: 42, paddingLeft: 16 }}>#</th>
                   <th style={TH}>Item / Description</th>
-                  <th style={{ ...TH, width: 78 }}>HSN</th>
-                  <th style={{ ...TH, width: 88, textAlign: 'right' }}>Qty</th>
-                  <th style={{ ...TH, width: 64 }}>UOM</th>
-                  <th style={{ ...TH, width: 150, textAlign: 'right', paddingRight: 16 }}>
-                    Supplier Rate
-                  </th>
+                  <th style={{ ...TH, width: 90 }}>HSN</th>
+                  <th style={{ ...TH, width: 110, textAlign: 'right' }}>Qty</th>
+                  <th style={{ ...TH, width: 80, paddingRight: 16 }}>UOM</th>
                 </tr>
               </thead>
               <tbody>
-                {e.lines.map((l, i) => {
-                  const ql = forQuote?.lines.find((x) => x.enquiryLineId === l.id) ?? null
-                  return (
-                    <tr
-                      key={l.id}
-                      style={{
-                        background: i % 2 ? TINT_SOFT : '#fff',
-                        borderTop: '1px solid ' + RULE_SOFT,
-                      }}
-                    >
-                      <td style={{ ...TD, paddingLeft: 16, color: SOFT, ...NUM }}>{i + 1}</td>
-                      <td style={TD}>
-                        <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
-                        <span style={{ color: SOFT }}> · {l.item.code}</span>
-                        {l.description && (
-                          <div style={{ color: GREY, fontSize: 11, marginTop: 2 }}>
-                            {l.description}
-                          </div>
-                        )}
-                      </td>
-                      <td style={{ ...TD, color: SOFT, ...NUM }}>{l.hsnCode ?? '—'}</td>
-                      <td style={{ ...TD, textAlign: 'right', ...NUM }}>{qtyFmt(l.qty)}</td>
-                      <td style={{ ...TD, color: GREY }}>{l.item.uom?.symbol ?? '—'}</td>
-                      {/* A ruled space to write in, not a dash. A dash says
-                        "nothing here"; this column is the one he is being
-                        asked to fill. */}
-                      <td style={{ ...TD, paddingRight: 16, textAlign: 'right', ...NUM }}>
-                        {ql?.quotedRate != null ? (
-                          <span style={{ fontWeight: 700, color: NAVY }}>
-                            ₹{money(ql.quotedRate)}
-                          </span>
-                        ) : (
-                          <span
-                            aria-hidden
-                            style={{
-                              display: 'inline-block',
-                              width: 110,
-                              borderBottom: '1px solid ' + RULE,
-                              height: 14,
-                            }}
-                          />
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
+                {e.lines.map((l, i) => (
+                  <tr
+                    key={l.id}
+                    style={{
+                      background: i % 2 ? TINT_SOFT : '#fff',
+                      borderTop: '1px solid ' + RULE_SOFT,
+                    }}
+                  >
+                    <td style={{ ...TD, paddingLeft: 16, color: SOFT, ...NUM }}>{i + 1}</td>
+                    <td style={TD}>
+                      <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
+                      <span style={{ color: SOFT }}> · {l.item.code}</span>
+                      {l.description && (
+                        <div style={{ color: GREY, fontSize: 11, marginTop: 2 }}>
+                          {l.description}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ ...TD, color: SOFT, ...NUM }}>{l.hsnCode ?? '—'}</td>
+                    <td style={{ ...TD, textAlign: 'right', fontWeight: 600, ...NUM }}>
+                      {qtyFmt(l.qty)}
+                    </td>
+                    <td style={{ ...TD, paddingRight: 16, color: GREY }}>
+                      {l.item.uom?.symbol ?? '—'}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </Panel>
 
-          {/* ── Delivery requirement ────────────────────────────────────────
-            When, and where. Where is a line to write on: which of the mill's
-            stores takes it is settled on the purchase order, not here, and
-            printing a godown name on a sheet that goes to four suppliers told
-            each of them something about the mill they had no use for. The
-            buyer writes it in when it matters to the price — delivered to
-            Bhiwandi is not the same quote as ex-works Surat. */}
-          <Panel icon={Truck} title="Delivery requirement">
-            <div style={{ padding: '12px 16px 14px', display: 'grid', gap: 10 }}>
-              <FillLine label="Required delivery by" value={neededBy ?? undefined} strong />
-              <FillLine label="Delivery location" />
-            </div>
-          </Panel>
-
-          {/* ── What to put in the reply ─────────────────────────────────── */}
-          <Panel icon={ClipboardList} title="Please quote">
-            <ul
-              style={{
-                margin: 0,
-                padding: '12px 16px 14px 34px',
-                display: 'grid',
-                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-                gap: '6px 20px',
-                fontSize: 12,
-                color: INK,
-              }}
-            >
-              {PLEASE_QUOTE.map((q) => (
-                <li key={q} style={{ paddingLeft: 2 }}>
-                  {q}
-                </li>
-              ))}
-            </ul>
-          </Panel>
-
-          {/* ── The ruled reply ─────────────────────────────────────────────
-            In pairs, as they are answered: his number beside its date, how
-            long the price holds beside how long delivery takes, the terms
-            beside the freight. A supplier who writes back on this sheet
-            answers every question in the same place, which is the only way
-            four replies line up for comparison. */}
-          <Panel icon={MessageSquareReply} title="Supplier response">
-            <div
-              style={{
-                padding: '12px 16px 16px',
-                display: 'grid',
-                gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
-                gap: '14px 28px',
-              }}
-            >
-              <FillLine label="Supplier quotation no." value={forQuote?.piNumber ?? undefined} />
-              <FillLine
-                label="Date"
-                value={forQuote?.piDate ? shortDate(forQuote.piDate) : undefined}
-              />
-              <FillLine
-                label="Price validity"
-                value={forQuote?.piValidUntil ? shortDate(forQuote.piValidUntil) : undefined}
-              />
-              <FillLine label="Delivery" />
-              <FillLine label="Payment terms" />
-              <FillLine label="Freight" />
+          {/* ── What we need back ───────────────────────────────────────────
+            The whole reason the sheet exists, said plainly: send a PI, quote
+            our number on it, and put these on it. Quoting our number is what
+            lets his PI be recorded against this requisition and the order be
+            raised against his PI. */}
+          <Panel icon={ClipboardList} title="Please send your proforma invoice (PI)">
+            <div style={{ padding: '12px 16px 14px', fontSize: 12, color: INK }}>
+              <p style={{ margin: 0 }}>
+                Please send your proforma invoice for the items above, quoting our requisition no.{' '}
+                <strong style={{ color: NAVY, fontFamily: 'monospace' }}>{e.enquiryNumber}</strong>
+                {neededBy ? (
+                  <>
+                    {' '}
+                    — the goods are required by <strong style={{ color: NAVY }}>{neededBy}</strong>
+                  </>
+                ) : null}
+                . Your PI should show:
+              </p>
+              <ul
+                style={{
+                  margin: '9px 0 0',
+                  padding: '0 0 0 18px',
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                  gap: '5px 20px',
+                  color: GREY,
+                }}
+              >
+                {PI_MUST_SHOW.map((q) => (
+                  <li key={q}>{q}</li>
+                ))}
+              </ul>
             </div>
           </Panel>
 
           {/* ── Notes, and who signs ────────────────────────────────────────
-            What we said, and both signatures, on one row. Both sides sign
-            because what comes back is his quotation and needs his name on
-            it. */}
+            Our notes and terms on the left, our signature on the right, on
+            one row. One signature: this is our request, and his answer
+            comes back signed on his own PI. */}
           <div
             style={{
               marginTop: 18,
@@ -500,25 +415,10 @@ export default function PurchaseEnquiryPrintPage() {
               />
               {e.terms && <Note icon={ReceiptText} title="Terms" body={e.terms} />}
             </div>
-          </div>
-
-          {showSignature && (
-            <div
-              style={{
-                marginTop: 26,
-                display: 'flex',
-                justifyContent: 'space-between',
-                gap: 40,
-              }}
-            >
-              <Sign
-                name={forQuote ? 'For ' + forQuote.supplier.name : 'Supplier signature'}
-                caption={'Signature & seal · Date'}
-                align="left"
-              />
+            {showSignature && (
               <Sign name={'For ' + co.name} caption="Authorised signatory" align="right" />
-            </div>
-          )}
+            )}
+          </div>
 
           {/* The number on the foot as well as the head, and what the paper
             is not. A sheet that comes back as a photograph of one page has to
@@ -538,7 +438,7 @@ export default function PurchaseEnquiryPrintPage() {
           >
             <span>
               {e.enquiryNumber}
-              {forQuote ? ' · ' + forQuote.supplier.name : ''} · A request for quotation, not a
+              {forQuote ? ' · ' + forQuote.supplier.name : ''} · A purchase requisition, not a
               purchase order
             </span>
             <span>{data.template?.footerNote || co.name}</span>
@@ -636,43 +536,6 @@ function Panel({
         {title}
       </div>
       {children}
-    </div>
-  )
-}
-
-/**
- * A label and the line it is answered on.
- *
- * Printed with its value where we already know it — the supplier we are
- * addressing, his PI number once recorded — and ruled empty where we do not,
- * so the same sheet works as a form to fill in and as the filled-in copy.
- */
-function FillLine({
-  label,
-  value,
-  strong = false,
-}: {
-  label: string
-  value?: string | null
-  strong?: boolean
-}) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, fontSize: 12 }}>
-      <span style={{ color: GREY, flexShrink: 0, whiteSpace: 'nowrap' }}>{label}:</span>
-      <span
-        style={{
-          flex: 1,
-          minWidth: 0,
-          borderBottom: '1px solid ' + RULE,
-          minHeight: 18,
-          paddingBottom: 2,
-          fontWeight: strong ? 700 : 500,
-          color: NAVY,
-          ...NUM,
-        }}
-      >
-        {value || ' '}
-      </span>
     </div>
   )
 }
