@@ -211,11 +211,28 @@ interface GrnOption {
     poNumber: string
     supplier?: { id: string; name: string; code?: string } | null
   } | null
+  /** When the lorry arrived. */
+  grnDate?: string | null
+  /*
+   * The supplier's own delivery challan — the number printed on the note that
+   * travelled with the goods.
+   *
+   * This is what the accounts clerk has in front of them. The supplier's
+   * invoice quotes his challan numbers, never our receipt numbers, so a
+   * picker that offers only GRN numbers is asking them to translate between
+   * two documents in their head — which is how the wrong delivery gets
+   * billed.
+   */
+  challanNo?: string | null
+  challanDate?: string | null
   /** What is still unbilled on this receipt. Sent by `/purchase/grn`. */
   billing?: {
     acceptedQty: number | string
     billedQty: number | string
     pendingQty: number | string
+    /** The unbilled part priced at the rate it came in at. An estimate. */
+    pendingValue?: number | string
+    status?: string
   } | null
 }
 
@@ -290,6 +307,23 @@ export function PurchaseBillDialog({
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
 
+  /*
+   * The three boxes over the delivery list, and the only state they keep.
+   *
+   * They narrow what the list shows; they are not part of the bill and none
+   * of them is sent anywhere. Kept as plain values rather than derived,
+   * because "no filter" and "filtered to the only option there is" have to
+   * stay tellable apart — deriving them would silently re-pick a filter the
+   * clerk had just cleared.
+   */
+  const [filterPo, setFilterPo] = useState('')
+  const [filterChallan, setFilterChallan] = useState('')
+  const [filterGrn, setFilterGrn] = useState('')
+
+  const [loadingReceipts, setLoadingReceipts] = useState(false)
+  /** How many receipts the server holds for this supplier, page or no page. */
+  const [receiptTotal, setReceiptTotal] = useState(0)
+
   const [pulling, setPulling] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -308,6 +342,9 @@ export function PurchaseBillDialog({
     setTdsRate(num(record?.tdsRate) > 0 ? String(record?.tdsRate) : '')
     setNotes(record?.notes ?? '')
     setRateVarianceReason('')
+    setFilterPo('')
+    setFilterChallan('')
+    setFilterGrn('')
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
@@ -395,9 +432,8 @@ export function PurchaseBillDialog({
       api
         .get<{ success: boolean; data: { stateCode: string | null } }>('/settings/company')
         .catch(() => null),
-      api.get<Paginated<GrnOption>>('/purchase/grn?limit=200').catch(() => null),
       settingsApi.tdsSections.list().catch(() => null),
-    ]).then(([s, i, c, co, g, t]) => {
+    ]).then(([s, i, c, co, t]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -407,7 +443,6 @@ export function PurchaseBillDialog({
         c ? (c as Paginated<Option>).data.filter((x) => x.applyOnPurchase !== false) : []
       )
       setCompanyState(co?.data?.stateCode ?? null)
-      setGrns(g?.data ?? [])
       setTdsSections(t?.data.filter((x) => x.isActive) ?? [])
     })
 
@@ -415,6 +450,66 @@ export function PurchaseBillDialog({
       cancelled = true
     }
   }, [open])
+
+  /**
+   * The deliveries waiting to be billed, asked for again whenever the
+   * supplier changes.
+   *
+   * It used to be one call on open, for the hundred most recent receipts in
+   * the mill, filtered down to this supplier's on the screen. That is fine
+   * while the mill has seven and quietly wrong once it has thousands: the
+   * supplier's oldest unbilled delivery — which is precisely the one nobody
+   * has got round to and the one he is chasing — falls off the end of the
+   * page and the picker shows no sign that anything is missing. Asking the
+   * server for his receipts bounds the list by the only thing that matters.
+   *
+   * `total` is kept so the strip below can say when even that was more than
+   * one page. A picker that silently shows a subset is worse than one that
+   * admits it.
+   */
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoadingReceipts(true)
+    api
+      .get<Paginated<GrnOption>>(
+        `/purchase/grn?limit=100${supplierId ? `&supplierId=${supplierId}` : ''}`
+      )
+      .then((r) => {
+        if (cancelled) return
+        setGrns(r.data ?? [])
+        setReceiptTotal(r.pagination?.total ?? r.data?.length ?? 0)
+      })
+      .catch(() => {
+        // Left as it was rather than emptied. A failed refresh should not
+        // take the rows somebody has already ticked off the screen.
+        if (!cancelled) setReceiptTotal(0)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingReceipts(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, supplierId])
+
+  /*
+   * A filter cannot outlive the list it was picked from.
+   *
+   * Ticking a receipt settles the supplier, which fetches that supplier's
+   * receipts, which can leave all three boxes pointing at numbers no longer
+   * on the list. A `<select>` whose value matches none of its options renders
+   * blank — so the box would read as cleared while still filtering the table
+   * down to nothing, and the clerk would be looking at an empty list with no
+   * filter on screen to explain it.
+   */
+  useEffect(() => {
+    if (filterPo && !grns.some((g) => g.po?.id === filterPo)) setFilterPo('')
+    if (filterChallan && !grns.some((g) => (g.challanNo ?? '') === filterChallan)) {
+      setFilterChallan('')
+    }
+    if (filterGrn && !grns.some((g) => g.id === filterGrn)) setFilterGrn('')
+  }, [grns, filterPo, filterChallan, filterGrn])
 
   useEffect(() => {
     if (!open) return
@@ -473,6 +568,133 @@ export function PurchaseBillDialog({
         a.grnNumber.localeCompare(b.grnNumber)
     )
   }, [grns, supplierId, billedSet])
+
+  /*
+   * ── The three filters over the delivery list ─────────────────────────────
+   *
+   * The clerk holds the supplier's invoice. It quotes his challan numbers and
+   * our order numbers; it never quotes our receipt numbers, because those are
+   * ours and he has never seen them. So the list has to be reachable from any
+   * of the three, and each box narrows the other two rather than standing on
+   * its own — picking a challan with no idea which order it was against is
+   * exactly the position the clerk is in.
+   *
+   * Each box's options are built from the receipts the *other* two boxes
+   * allow, which is what keeps a filter from offering a choice that would
+   * empty the list.
+   */
+  const matchesPo = (g: GrnOption) => !filterPo || g.po?.id === filterPo
+  const matchesChallan = (g: GrnOption) => !filterChallan || (g.challanNo ?? '') === filterChallan
+  const matchesGrn = (g: GrnOption) => !filterGrn || g.id === filterGrn
+
+  const poChoices = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const g of receiptChoices) {
+      if (!g.po || !matchesChallan(g) || !matchesGrn(g)) continue
+      seen.set(g.po.id, g.po.poNumber)
+    }
+    return [...seen]
+      .map(([id, poNumber]) => ({ id, poNumber }))
+      .sort((a, b) => a.poNumber.localeCompare(b.poNumber))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, filterChallan, filterGrn])
+
+  const challanChoices = useMemo(() => {
+    const seen = new Set<string>()
+    for (const g of receiptChoices) {
+      // A receipt with no challan recorded has nothing to offer this box. It
+      // is still in the table below, wearing a dash, so it can be reached.
+      if (!g.challanNo || !matchesPo(g) || !matchesGrn(g)) continue
+      seen.add(g.challanNo)
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, filterPo, filterGrn])
+
+  const grnChoices = useMemo(
+    () => receiptChoices.filter((g) => matchesPo(g) && matchesChallan(g)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [receiptChoices, filterPo, filterChallan]
+  )
+
+  /** The rows the table actually shows — everything all three boxes allow. */
+  const visibleReceipts = useMemo(
+    () => receiptChoices.filter((g) => matchesPo(g) && matchesChallan(g) && matchesGrn(g)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [receiptChoices, filterPo, filterChallan, filterGrn]
+  )
+
+  /**
+   * Gathers several receipts one after the other, never at once.
+   *
+   * `pullFromGrn` reads and rewrites the same `linesRef`, so two of them in
+   * flight together would each build their new line list from the same stale
+   * one and the second would overwrite the first. The loop is the point.
+   */
+  const pullMany = async (rows: GrnOption[]) => {
+    for (const g of rows) {
+      // Read fresh each turn, from the ref rather than the render's own
+      // `billedSet` — the receipt pulled a moment ago is on the bill but not
+      // yet in this render, and asking for it twice is refused as a
+      // duplicate with a message the clerk did nothing to deserve.
+      const on = new Set(linesRef.current.map((l) => l.grnNumber).filter(Boolean))
+      if (on.has(g.grnNumber)) continue
+      await pullFromGrn(g.id)
+    }
+  }
+
+  /**
+   * Picking a challan.
+   *
+   * The challan is the one number on the supplier's invoice that names a
+   * delivery, so choosing one is as close to "this is the delivery I am
+   * billing" as the clerk can get — and the receipts under it are ticked for
+   * them rather than left as a second step they can forget. The order narrows
+   * with it when the challan only ever came against one, which is the normal
+   * case.
+   */
+  const chooseChallan = (no: string) => {
+    setFilterChallan(no)
+    setFilterGrn('')
+    if (!no) return
+    const under = receiptChoices.filter((g) => (g.challanNo ?? '') === no)
+    const orders = new Set(under.map((g) => g.po?.id).filter(Boolean) as string[])
+    if (orders.size === 1) setFilterPo([...orders][0])
+    void pullMany(under)
+  }
+
+  /**
+   * Picking a receipt number, for whoever is working from our side of the
+   * paperwork. Its challan and its order fill themselves in behind it.
+   */
+  const chooseGrn = (id: string) => {
+    setFilterGrn(id)
+    if (!id) return
+    const g = receiptChoices.find((r) => r.id === id)
+    if (!g) return
+    if (g.po?.id) setFilterPo(g.po.id)
+    if (g.challanNo) setFilterChallan(g.challanNo)
+    void pullMany([g])
+  }
+
+  /**
+   * Picking an order only narrows. It does not tick anything: an order can
+   * have a month of deliveries under it, and pulling all of them onto a bill
+   * because somebody wanted to look at the list is not a filter, it is a
+   * decision taken on their behalf.
+   */
+  const choosePo = (id: string) => {
+    setFilterPo(id)
+    // Whatever was chosen below it may not belong to this order any more.
+    setFilterChallan((prev) =>
+      prev && receiptChoices.some((g) => g.po?.id === id && (g.challanNo ?? '') === prev)
+        ? prev
+        : ''
+    )
+    setFilterGrn((prev) =>
+      prev && receiptChoices.some((g) => g.id === prev && g.po?.id === id) ? prev : ''
+    )
+  }
 
   /**
    * Takes a delivery back off the bill, and the lines it brought with it.
@@ -893,7 +1115,12 @@ export function PurchaseBillDialog({
 
             {!isEdit && (
               <Section icon={Download} title="Deliveries Being Billed">
-                {receiptChoices.length === 0 ? (
+                {loadingReceipts && receiptChoices.length === 0 ? (
+                  <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+                    <Loader2 size={12} className="animate-spin" />
+                    Looking for deliveries waiting to be billed...
+                  </p>
+                ) : receiptChoices.length === 0 ? (
                   <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
                     <Info size={12} className="mt-0.5 shrink-0 opacity-70" />
                     {supplierId
@@ -902,91 +1129,242 @@ export function PurchaseBillDialog({
                   </p>
                 ) : (
                   <>
-                    <p className="text-muted-foreground mb-1.5 text-[11px] leading-snug">
-                      Tick every delivery this invoice covers — one bill can settle several. The
-                      number on each is what is still to bill.
+                    <p className="text-muted-foreground mb-2 text-[11px] leading-snug">
+                      Tick every delivery this invoice covers — one bill can settle several. Find it
+                      by the supplier&rsquo;s challan number, by the order, or by our own receipt
+                      number; each box narrows the other two.
                     </p>
-                    {/* ── Sized to the receipt number, not to the dialog ──────
-                    Each of these was a half-width box holding a quarter of
-                    that in words. A supplier with a fortnight of deliveries
-                    on one invoice — which is the whole reason this list
-                    exists — pushed the bill itself off the screen. They are
-                    chips that wrap now, and the strip is capped: past about
-                    four rows it scrolls rather than growing. */}
-                    <div className="-mx-0.5 max-h-24 overflow-y-auto px-0.5 py-0.5">
-                      <div className="flex flex-wrap gap-1">
-                        {receiptChoices.map((g) => {
-                          const on = billedSet.has(g.grnNumber)
-                          const left = Number(g.billing?.pendingQty ?? 0)
-                          return (
-                            <label
-                              key={g.id}
-                              title={
-                                left > 0
-                                  ? `${left.toLocaleString('en-IN')} still to bill on ${g.grnNumber}`
-                                  : g.grnNumber
-                              }
-                              className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-1.5 py-1 text-[11px] leading-none transition ${
-                                on
-                                  ? 'border-primary/40 bg-primary/10'
-                                  : 'border-border bg-secondary/40 hover:border-primary/40'
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                className="accent-primary size-3 shrink-0"
-                                checked={on}
-                                disabled={pulling}
-                                onChange={() => {
-                                  if (on) dropReceipt(g.grnNumber)
-                                  else void pullFromGrn(g.id)
-                                }}
-                              />
-                              <span className="text-foreground font-mono">{g.grnNumber}</span>
-                              {/* Until a supplier is settled the list spans all
-                              of them, and a receipt number alone says nothing
-                              about whose delivery it was. The order number is
-                              the first thing to go when space is short. */}
-                              {!supplierId && g.po?.supplier?.name ? (
-                                <span className="text-muted-foreground max-w-[9rem] truncate">
-                                  {g.po.supplier.name}
-                                </span>
-                              ) : (
-                                g.po && (
-                                  <span className="text-muted-foreground">{g.po.poNumber}</span>
-                                )
-                              )}
-                              {left > 0 && (
-                                <span className="text-muted-foreground tabular-nums">
-                                  {left.toLocaleString('en-IN')}
-                                </span>
-                              )}
-                            </label>
-                          )
-                        })}
-                      </div>
+
+                    {/* ── The three ways in ────────────────────────────────
+                      The clerk is holding the supplier's invoice. It quotes
+                      his challan numbers and our order numbers, and never our
+                      receipt numbers — he has never seen one. A picker that
+                      offered only GRN numbers was asking them to translate
+                      between two documents in their head, which is how the
+                      wrong delivery gets billed. */}
+                    <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      <label className="block">
+                        <span className="form-label">Order no.</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterPo}
+                          onChange={(e) => choosePo(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All orders</option>
+                          {poChoices.map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.poNumber}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="form-label">Challan no. (theirs)</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterChallan}
+                          onChange={(e) => chooseChallan(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All challans</option>
+                          {challanChoices.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="form-label">Receipt no. (ours)</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterGrn}
+                          onChange={(e) => chooseGrn(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All receipts</option>
+                          {grnChoices.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.grnNumber}
+                              {g.challanNo ? ` · ${g.challanNo}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
+
+                    {/* ── What is waiting ───────────────────────────────────
+                      A table, not a strip of chips. "GRN-0009 PO-0006 650"
+                      read as a receipt, an order and six hundred and fifty
+                      rupees; it was six hundred and fifty pieces, and there
+                      was nowhere in it for the one number the clerk actually
+                      has in front of them. Every figure gets a column with a
+                      heading over it, and the money is named as an estimate
+                      because that is what it is — the supplier's own invoice
+                      is what gets booked. */}
+                    <div className="border-border bg-card max-h-60 overflow-auto rounded-lg border">
+                      <table className="w-full min-w-[700px] border-collapse text-xs">
+                        <thead className="sticky top-0 z-10">
+                          <tr className="bg-secondary">
+                            {[
+                              ['', 'w-8', 'left'],
+                              ['Receipt', 'w-24', 'left'],
+                              ['Order', 'w-24', 'left'],
+                              ['Challan', 'w-28', 'left'],
+                              ['Received', 'w-24', 'left'],
+                              ['Unbilled', 'w-24', 'right'],
+                              ['Est. value', 'w-28', 'right'],
+                              ['', 'w-24', 'left'],
+                            ].map(([label, width, align], n) => (
+                              <th
+                                key={`${label}-${n}`}
+                                className={`${width} bg-secondary border-border text-muted-foreground border-b px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                  align === 'right' ? 'text-right' : 'text-left'
+                                }`}
+                              >
+                                {label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleReceipts.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={8}
+                                className="text-muted-foreground px-2 py-6 text-center text-xs"
+                              >
+                                Nothing matches those filters. Clear one to widen the list.
+                              </td>
+                            </tr>
+                          ) : (
+                            visibleReceipts.map((g, n) => {
+                              const on = billedSet.has(g.grnNumber)
+                              const left = Number(g.billing?.pendingQty ?? 0)
+                              const worth = Number(g.billing?.pendingValue ?? 0)
+                              const part = Number(g.billing?.billedQty ?? 0) > 0
+                              const flip = () => {
+                                if (pulling) return
+                                if (on) dropReceipt(g.grnNumber)
+                                else void pullFromGrn(g.id)
+                              }
+                              return (
+                                <tr
+                                  key={g.id}
+                                  onClick={flip}
+                                  className={`border-border/50 cursor-pointer border-b last:border-0 ${
+                                    on ? 'bg-primary/5' : n % 2 === 1 ? 'zebra-row' : ''
+                                  }`}
+                                >
+                                  <td className="px-2 py-1.5">
+                                    <input
+                                      type="checkbox"
+                                      className="accent-primary size-3.5 align-middle"
+                                      checked={on}
+                                      disabled={pulling}
+                                      onChange={flip}
+                                      /* The whole row is the hit target. Without
+                                        this the click lands twice — once on the
+                                        box, once on the row — and the receipt
+                                        goes on and straight back off again. */
+                                      onClick={(e) => e.stopPropagation()}
+                                      aria-label={`Bill ${g.grnNumber}${
+                                        g.challanNo ? `, challan ${g.challanNo}` : ''
+                                      }`}
+                                    />
+                                  </td>
+                                  <td className="text-foreground px-2 py-1.5 font-mono">
+                                    {g.grnNumber}
+                                  </td>
+                                  <td className="text-muted-foreground px-2 py-1.5 font-mono">
+                                    {g.po?.poNumber ?? '—'}
+                                    {/* Only while the bill has no supplier —
+                                      until then the list spans all of them and
+                                      a receipt number says nothing about whose
+                                      delivery it was. */}
+                                    {!supplierId && g.po?.supplier?.name && (
+                                      <span className="text-muted-foreground block max-w-[10rem] truncate font-sans text-[10px]">
+                                        {g.po.supplier.name}
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td
+                                    className={`px-2 py-1.5 font-mono ${
+                                      g.challanNo ? 'text-foreground' : 'text-muted-foreground'
+                                    }`}
+                                  >
+                                    {g.challanNo || '—'}
+                                  </td>
+                                  <td className="text-muted-foreground whitespace-nowrap px-2 py-1.5">
+                                    {g.grnDate
+                                      ? new Date(g.grnDate).toLocaleDateString('en-IN', {
+                                          day: '2-digit',
+                                          month: 'short',
+                                          year: 'numeric',
+                                        })
+                                      : '—'}
+                                  </td>
+                                  <td className="text-foreground px-2 py-1.5 text-right tabular-nums">
+                                    {left.toLocaleString('en-IN')}
+                                  </td>
+                                  <td className="text-muted-foreground px-2 py-1.5 text-right tabular-nums">
+                                    {worth > 0 ? `₹${inr(worth)}` : '—'}
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    {/* Part-billed is the one that has caught
+                                      people out: the receipt is on this list
+                                      because something is still owed on it,
+                                      not because nothing has been billed. */}
+                                    {part && (
+                                      <span className="whitespace-nowrap rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
+                                        Part billed
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              )
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
                     {/* Which receipts are on the bill is said by the ticks above
                     and again by the "Against receipt" tag on every line below.
                     Saying it a third time in prose cost two lines and told
                     nobody anything. Only the warning about the figures is
                     left, because that one is not written anywhere else. */}
-                    <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-[11px]">
-                      {pulling ? (
-                        <>
-                          <Loader2 size={11} className="animate-spin" />
-                          Reading the delivery...
-                        </>
-                      ) : (
-                        billedReceipts.length > 0 && (
+                    <div className="text-muted-foreground mt-1.5 space-y-1 text-[11px]">
+                      <p className="flex items-center gap-1.5">
+                        {pulling ? (
                           <>
-                            <Info size={11} className="shrink-0 opacity-70" />
-                            Quantities and rates came from the gate — change them only where their
-                            invoice differs.
+                            <Loader2 size={11} className="animate-spin" />
+                            Reading the delivery...
                           </>
-                        )
+                        ) : (
+                          billedReceipts.length > 0 && (
+                            <>
+                              <Info size={11} className="shrink-0 opacity-70" />
+                              Quantities and rates came from the gate — change them only where their
+                              invoice differs.
+                            </>
+                          )
+                        )}
+                      </p>
+                      {/* Said out loud rather than left to be discovered. The
+                        server pages at a hundred, and a picker quietly showing
+                        a subset of what is owed is how a delivery goes unbilled
+                        for a quarter. */}
+                      {receiptTotal > grns.length && (
+                        <p className="flex items-start gap-1.5 text-amber-500">
+                          <TriangleAlert size={11} className="mt-px shrink-0" />
+                          Showing the {grns.length} most recent receipts of {receiptTotal}
+                          {supplierId ? ' for this supplier' : ''}. Pick the supplier first, or
+                          start the bill from the delivery on the goods receipt screen.
+                        </p>
                       )}
-                    </p>
+                    </div>
                   </>
                 )}
               </Section>

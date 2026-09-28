@@ -6,11 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber } from '../lib/docNumber'
-import {
-  priceNote,
-  notedQtyByGrnLine,
-  syncBillAdjustments,
-} from '../services/purchaseNote.service'
+import { priceNote, notedQtyByGrnLine, syncBillAdjustments } from '../services/purchaseNote.service'
 import { syncEnquiryStatus } from '../services/purchaseEnquiry.service'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import {
@@ -952,11 +948,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
       )
     }
     if (data.enquiryId && data.enquiryId !== enquiry.id) {
-      throw new AppError(
-        'That quote belongs to a different enquiry',
-        400,
-        'ENQUIRY_QUOTE_MISMATCH'
-      )
+      throw new AppError('That quote belongs to a different enquiry', 400, 'ENQUIRY_QUOTE_MISMATCH')
     }
     if (enquiry.status === 'CLOSED') {
       throw new AppError(
@@ -1410,7 +1402,11 @@ router.patch(
         throw new AppError('This line is already closed short.', 400, 'ALREADY_CLOSED')
       }
       if (Number(line.pendingQty) <= 0) {
-        throw new AppError('Everything on this line has already been received — there is nothing to close.', 400, 'NOTHING_PENDING')
+        throw new AppError(
+          'Everything on this line has already been received — there is nothing to close.',
+          400,
+          'NOTHING_PENDING'
+        )
       }
       neverReceived = Number(line.receivedQty) <= 0
 
@@ -1427,7 +1423,10 @@ router.patch(
       return syncOrderFromReceipts(tx, po.id)
     })
 
-    const full = await prisma.purchaseOrder.findUnique({ where: { id: after.id }, include: poInclude })
+    const full = await prisma.purchaseOrder.findUnique({
+      where: { id: after.id },
+      include: poInclude,
+    })
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -1476,7 +1475,10 @@ router.patch(
       return syncOrderFromReceipts(tx, po.id)
     })
 
-    const full = await prisma.purchaseOrder.findUnique({ where: { id: after.id }, include: poInclude })
+    const full = await prisma.purchaseOrder.findUnique({
+      where: { id: after.id },
+      include: poInclude,
+    })
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -1974,7 +1976,13 @@ const grnInclude = {
   lines: {
     include: {
       item: {
-        select: { id: true, code: true, name: true, hsnCode: true, uom: { select: { symbol: true } } },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          hsnCode: true,
+          uom: { select: { symbol: true } },
+        },
       },
       warehouse: { select: { id: true, name: true } },
       // What has already been claimed against each receipt line, so the list
@@ -2005,17 +2013,38 @@ function billingStateOf(grn: {
   lines: Array<{
     acceptedQty: Prisma.Decimal | number | string
     receivedQty: Prisma.Decimal | number | string
+    unitRate: Prisma.Decimal | number | string
     billLines: Array<{ qty: Prisma.Decimal | number | string }>
   }>
 }) {
   let accepted = 0
   let received = 0
   let billed = 0
+  /*
+   * What the unbilled part of this receipt is worth, at the rate the goods
+   * came in at.
+   *
+   * Priced per line and only then added up. Totalling the quantities first
+   * and multiplying once would price a delivery of fabric and buttons at
+   * whichever rate happened to be last, which is not a smaller error than
+   * getting the quantity wrong — it is the same error with a currency symbol
+   * in front of it.
+   *
+   * An estimate, and named as one wherever it is shown. The supplier's own
+   * invoice is what gets booked; this only says which of five receipts is the
+   * ten-lakh one, so the bill clerk is not choosing between bare numbers.
+   */
+  let pendingValue = 0
 
   for (const line of grn.lines) {
     accepted += Number(line.acceptedQty)
     received += Number(line.receivedQty)
-    for (const bl of line.billLines) billed += Number(bl.qty)
+
+    let billedOnLine = 0
+    for (const bl of line.billLines) billedOnLine += Number(bl.qty)
+    billed += billedOnLine
+
+    pendingValue += Math.max(0, Number(line.receivedQty) - billedOnLine) * Number(line.unitRate)
   }
 
   return {
@@ -2023,8 +2052,15 @@ function billingStateOf(grn: {
     receivedQty: round3(received),
     billedQty: round3(billed),
     pendingQty: round3(Math.max(0, received - billed)),
+    pendingValue: Math.round(pendingValue * 100) / 100,
     status:
-      received <= 0 ? 'NOTHING_TO_BILL' : billed <= 0 ? 'NOT_BILLED' : billed >= received ? 'BILLED' : 'PARTLY_BILLED',
+      received <= 0
+        ? 'NOTHING_TO_BILL'
+        : billed <= 0
+          ? 'NOT_BILLED'
+          : billed >= received
+            ? 'BILLED'
+            : 'PARTLY_BILLED',
   }
 }
 
@@ -2261,7 +2297,11 @@ function prepareGrnLines(
   const prepared = lines.map((line) => {
     const poLine = poLines.get(line.poLineId)
     if (!poLine) {
-      throw new AppError('One of those lines is not on this order. Reopen it and try again.', 400, 'LINE_NOT_ON_ORDER')
+      throw new AppError(
+        'One of those lines is not on this order. Reopen it and try again.',
+        400,
+        'LINE_NOT_ON_ORDER'
+      )
     }
 
     if (poLine.shortClosed) {
@@ -2905,7 +2945,11 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       },
     })
     if (!po || po.deletedAt) {
-      throw new AppError('The purchase order this receipt is against no longer exists', 404, 'NOT_FOUND')
+      throw new AppError(
+        'The purchase order this receipt is against no longer exists',
+        404,
+        'NOT_FOUND'
+      )
     }
     if (po.status === 'CANCELLED') {
       throw new AppError(
@@ -2942,7 +2986,10 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     )
     for (const line of before.lines) {
       if (!line.poLineId) continue
-      already.set(line.poLineId, round3((already.get(line.poLineId) ?? 0) - Number(line.receivedQty)))
+      already.set(
+        line.poLineId,
+        round3((already.get(line.poLineId) ?? 0) - Number(line.receivedQty))
+      )
     }
 
     const { prepared } = prepareGrnLines(poLines, already, data.lines)
@@ -3094,17 +3141,17 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
           create: pairs
             .filter((pair) => !pair.old)
             .map(({ prepared: p }) => ({
-            poLineId: p.poLine.id,
-            itemId: p.poLine.itemId,
-            warehouseId: p.warehouseId,
-            orderedQty: p.orderedQty,
-            receivedQty: p.received,
-            rejectedQty: p.rejected,
-            acceptedQty: p.accepted,
-            batchNumber: p.batchNumber,
-            unitRate: p.unitRate,
-            amount: round2(p.accepted * p.unitRate),
-          })),
+              poLineId: p.poLine.id,
+              itemId: p.poLine.itemId,
+              warehouseId: p.warehouseId,
+              orderedQty: p.orderedQty,
+              receivedQty: p.received,
+              rejectedQty: p.rejected,
+              acceptedQty: p.accepted,
+              batchNumber: p.batchNumber,
+              unitRate: p.unitRate,
+              amount: round2(p.accepted * p.unitRate),
+            })),
         },
       },
     })
@@ -3936,7 +3983,9 @@ router.get('/bills/:id', requirePermission(MODULE, 'view'), async (req, res) => 
       ...bill,
       lines: bill.lines.map((l) => ({
         ...l,
-        grnLine: l.grnLine ? { ...l.grnLine, rejectedNotedQty: notedById.get(l.grnLine.id) ?? 0 } : null,
+        grnLine: l.grnLine
+          ? { ...l.grnLine, rejectedNotedQty: notedById.get(l.grnLine.id) ?? 0 }
+          : null,
       })),
     },
   })
@@ -4073,7 +4122,13 @@ const RATE_EPSILON = 0.01
  */
 async function findRateVariances(
   tx: Prisma.TransactionClient,
-  lines: Array<{ grnLineId?: string | null; unitPrice: number; qty: number; gstRate?: number; itemId: string }>
+  lines: Array<{
+    grnLineId?: string | null
+    unitPrice: number
+    qty: number
+    gstRate?: number
+    itemId: string
+  }>
 ): Promise<RateVariance[]> {
   const grnLineIds = lines
     .map((l) => l.grnLineId)
@@ -4898,11 +4953,7 @@ router.get('/payments/outstanding', requirePermission(MODULE, 'view'), async (re
 
   const data = bills.map((b) => {
     const reference = b.dueDate ?? b.billDate
-    const refDay = new Date(
-      reference.getFullYear(),
-      reference.getMonth(),
-      reference.getDate()
-    )
+    const refDay = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate())
     const daysOverdue = Math.floor((startOfToday.getTime() - refDay.getTime()) / 86_400_000)
 
     return {
@@ -4977,7 +5028,10 @@ router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRe
 
     // Paying before the bill was raised is somebody typing the wrong year, and
     // it puts the two documents in different periods.
-    if (when < new Date(bill.billDate.getFullYear(), bill.billDate.getMonth(), bill.billDate.getDate())) {
+    if (
+      when <
+      new Date(bill.billDate.getFullYear(), bill.billDate.getMonth(), bill.billDate.getDate())
+    ) {
       throw new AppError(
         `${bill.billNumber} is dated after this payment. Check the date.`,
         400,
@@ -5144,11 +5198,7 @@ router.post(
       })
       if (!before) throw new AppError('That payment no longer exists', 404, 'NOT_FOUND')
       if (before.status === 'REVERSED') {
-        throw new AppError(
-          `${before.paymentNumber} is already reversed.`,
-          409,
-          'ALREADY_REVERSED'
-        )
+        throw new AppError(`${before.paymentNumber} is already reversed.`, 409, 'ALREADY_REVERSED')
       }
 
       const updated = await tx.supplierPayment.update({
