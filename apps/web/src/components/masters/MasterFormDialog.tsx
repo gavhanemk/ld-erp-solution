@@ -1,8 +1,76 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { X, Loader2, AlertCircle } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import {
+  X,
+  Loader2,
+  AlertCircle,
+  Save,
+  Boxes,
+  CreditCard,
+  Database,
+  Factory,
+  FileText,
+  FolderTree,
+  Gauge,
+  Handshake,
+  IndianRupee,
+  Landmark,
+  Layers,
+  MapPin,
+  Package,
+  Palette,
+  Percent,
+  Phone,
+  Receipt,
+  Route,
+  Ruler,
+  Shirt,
+  Tag,
+  Truck,
+  Users,
+  Warehouse,
+  type LucideIcon,
+} from 'lucide-react'
 import { ApiError, masterResource, type Paginated } from '@/lib/api'
+import { Section } from '@/components/purchase/Section'
+
+/** The tile in the form's title bar, by master. */
+const RESOURCE_ICONS: Record<string, LucideIcon> = {
+  items: Package,
+  'item-categories': FolderTree,
+  styles: Shirt,
+  'size-groups': Ruler,
+  sizes: Ruler,
+  customers: Users,
+  suppliers: Truck,
+  brokers: Handshake,
+  workstations: Factory,
+  charges: Receipt,
+  'charge-types': Receipt,
+  warehouses: Warehouse,
+  'bank-accounts': Landmark,
+  routings: Route,
+}
+
+/** Each panel's icon, by the section name the screens already give their fields. */
+const SECTION_ICONS: Record<string, LucideIcon> = {
+  Identity: Tag,
+  Contact: Phone,
+  Address: MapPin,
+  'Bank Details': Landmark,
+  Tax: Receipt,
+  Costing: IndianRupee,
+  'Stock Control': Boxes,
+  'Payment Terms': CreditCard,
+  Terms: FileText,
+  Commission: Percent,
+  Construction: Layers,
+  'Size & Colour': Palette,
+  Capacity: Gauge,
+  Other: FileText,
+}
 
 export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags'
 
@@ -80,7 +148,7 @@ export function MasterFormDialog<T extends { id: string }>({
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const dialogRef = useRef<HTMLDivElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
 
   // Reset whenever the dialog opens, so a previous record's values and errors
   // never leak into the next one.
@@ -92,14 +160,28 @@ export function MasterFormDialog<T extends { id: string }>({
       const existing = record ? (record as Record<string, unknown>)[f.name] : undefined
       if (existing !== undefined && existing !== null) {
         seed[f.name] = f.type === 'tags' && Array.isArray(existing) ? existing.join(', ') : existing
+      } else if (f.type === 'checkbox') {
+        // A new record is added to be used. Starting "Active" unticked saved
+        // every new item, customer and supplier as inactive, so it vanished
+        // from the list and never appeared in a single dropdown.
+        seed[f.name] = !record && f.name === 'isActive'
       } else {
-        seed[f.name] = f.type === 'checkbox' ? false : ''
+        seed[f.name] = ''
       }
     }
     setValues(seed)
     setFieldErrors({})
     setFormError(null)
   }, [open, record, fields])
+
+  // The cursor starts in the first box, so a clerk can type straight away.
+  useEffect(() => {
+    if (!open) return
+    const first = bodyRef.current?.querySelector<HTMLElement>(
+      'input:not([disabled]):not([type=checkbox]), select, textarea',
+    )
+    first?.focus()
+  }, [open])
 
   // Foreign-key selects load their choices from the API the first time the
   // dialog opens, keyed by field name.
@@ -258,7 +340,7 @@ export function MasterFormDialog<T extends { id: string }>({
 
       // The banner sits at the top of a long form; without this it is often
       // off-screen and the save looks as though it simply did nothing.
-      dialogRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
     } finally {
       setSaving(false)
     }
@@ -273,40 +355,86 @@ export function MasterFormDialog<T extends { id: string }>({
     return acc
   }, {})
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div
-        ref={dialogRef}
-        className="glass-card w-full max-w-3xl my-auto"
+  const HeaderIcon = RESOURCE_ICONS[resource] ?? Database
+  const heading = isEdit ? `Edit ${title}` : `New ${title}`
+  const code = isEdit ? (visibleFields.find((f) => f.generated) ?? null) : null
+  const codeValue = code ? String(values[code.name] ?? '') : ''
+
+  const saveButton = (
+    <button type="submit" form="master-form" className="btn-primary" disabled={saving}>
+      {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+      {isEdit ? 'Save changes' : `Save ${title.toLowerCase()}`}
+    </button>
+  )
+
+  /*
+   * The same frame as the purchase forms.
+   *
+   * Portalled to <body>. Drawn inside the page it sat in whatever box the page
+   * transition had made, so `fixed` measured from that box and the top of the
+   * screen showed a strip of the page above the dimmed cover.
+   *
+   * The cover stops where the sidebar ends, so the menu is neither dimmed nor
+   * covered and you can still move to another screen with the form open. On
+   * a phone the sidebar is a drawer, so there the cover takes the full width.
+   */
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+      <form
+        id="master-form"
+        onSubmit={submit}
+        noValidate
+        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-labelledby="master-form-title"
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <h2 className="text-lg font-semibold text-foreground">
-            {isEdit ? `Edit ${title}` : `New ${title}`}
-          </h2>
-          <button onClick={onClose} className="btn-ghost p-2" aria-label="Close">
-            <X size={18} />
-          </button>
+        {/* Header: stays put while the body scrolls, so it is always clear what is being filled in. */}
+        <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="bg-primary/10 border-primary/20 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border">
+              <HeaderIcon size={19} className="text-primary" />
+            </div>
+            <div className="min-w-0">
+              <h2
+                id="master-form-title"
+                className="text-foreground truncate text-xl font-semibold tracking-tight"
+              >
+                {heading}
+              </h2>
+              <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
+                {isEdit
+                  ? codeValue
+                    ? `${codeValue} · changes apply to new documents from now on`
+                    : 'Changes apply to new documents from now on'
+                  : 'The code is given by the system when you save'}
+              </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="hidden md:block">{saveButton}</div>
+            <button type="button" onClick={onClose} className="btn-ghost p-2" aria-label="Close">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
-        <form onSubmit={submit} className="px-6 py-5 space-y-6">
+        {/* Body: the only thing that scrolls. */}
+        <div ref={bodyRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
           {formError && (
-            <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-              <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+            <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
               <p className="text-sm text-red-400">{formError}</p>
             </div>
           )}
 
           {Object.entries(sections).map(([section, sectionFields]) => (
-            <div key={section} className="space-y-4">
-              {section && (
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {section}
-                </h3>
-              )}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Section
+              key={section || 'details'}
+              icon={SECTION_ICONS[section] ?? FileText}
+              title={section || 'Details'}
+            >
+              <div className="grid grid-cols-1 gap-x-4 gap-y-3 md:grid-cols-2 xl:grid-cols-3">
                 {sectionFields.map((f) => (
                   <Field
                     key={f.name}
@@ -318,21 +446,20 @@ export function MasterFormDialog<T extends { id: string }>({
                   />
                 ))}
               </div>
-            </div>
+            </Section>
           ))}
+        </div>
 
-          <div className="flex items-center justify-end gap-3 pt-2 border-t border-border">
-            <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
-              Cancel
-            </button>
-            <button type="submit" className="btn-primary" disabled={saving}>
-              {saving && <Loader2 size={15} className="animate-spin" />}
-              {isEdit ? 'Save changes' : `Create ${title}`}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        {/* Footer: always in reach, however long the form. */}
+        <div className="border-border flex shrink-0 items-center justify-end gap-2 border-t px-5 py-3">
+          <button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>
+            Cancel
+          </button>
+          {saveButton}
+        </div>
+      </form>
+    </div>,
+    document.body,
   )
 }
 
@@ -350,9 +477,15 @@ function Field({
   onChange: (v: unknown) => void
 }) {
   const type = field.type ?? 'text'
-  const wrapper = field.span === 2 || type === 'textarea' ? 'md:col-span-2' : ''
+  // A description or an address is read as a paragraph, so it takes the whole
+  // row; a two-wide field takes two of the three columns.
+  const wrapper =
+    type === 'textarea' ? 'min-w-0 col-span-full' : field.span === 2 ? 'min-w-0 md:col-span-2' : 'min-w-0'
   const invalid = Boolean(error)
-  const inputClass = `form-input ${invalid ? 'border-red-500/60' : ''}`
+  const inputClass = `form-input placeholder:text-muted-foreground/60 ${invalid ? 'border-red-500/60' : ''}`
+  // The screens give a sample value as the hint. Shown bare, "Rajan Traders"
+  // or "500" in an empty box reads as already filled in; "e.g." says it is not.
+  const hint = field.placeholder ? `e.g. ${field.placeholder}` : undefined
 
   // Only ever reached when editing — a generated field is filtered out of a
   // create form entirely. It is shown because the code is on documents by now
@@ -370,7 +503,7 @@ function Field({
           readOnly
           disabled
         />
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="form-help">
           Given by the system. It appears on documents, so it cannot be changed.
         </p>
       </div>
@@ -389,7 +522,7 @@ function Field({
           id={field.name}
           rows={3}
           className={inputClass}
-          placeholder={field.placeholder}
+          placeholder={hint}
           value={String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
         />
@@ -413,16 +546,18 @@ function Field({
         </select>
       )}
 
+      {/* Boxed at the same height as the fields beside it, so a tick box
+        lines up with its row instead of floating under its label. */}
       {type === 'checkbox' && (
-        <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer select-none h-10">
+        <label className="form-readout text-foreground h-[2.625rem] cursor-pointer select-none items-center">
           <input
             id={field.name}
             type="checkbox"
-            className="accent-teal-500"
+            className="h-4 w-4 shrink-0 accent-teal-500"
             checked={Boolean(value)}
             onChange={(e) => onChange(e.target.checked)}
           />
-          {field.placeholder ?? 'Yes'}
+          <span className="min-w-0 truncate">{field.placeholder ?? 'Yes'}</span>
         </label>
       )}
 
@@ -432,16 +567,16 @@ function Field({
           type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
           step={type === 'number' ? 'any' : undefined}
           className={inputClass}
-          placeholder={field.placeholder}
+          placeholder={hint}
           value={String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
         />
       )}
 
       {error ? (
-        <p className="text-xs text-red-400 mt-1">{error}</p>
+        <p className="form-help !text-red-400">{error}</p>
       ) : field.help ? (
-        <p className="text-xs text-muted-foreground mt-1">{field.help}</p>
+        <p className="form-help">{field.help}</p>
       ) : null}
     </div>
   )
