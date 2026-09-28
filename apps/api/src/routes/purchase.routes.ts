@@ -2246,6 +2246,13 @@ async function rejectedByPoLine(
   return new Map(sums.map((s) => [s.poLineId as string, Number(s._sum.rejectedQty ?? 0)]))
 }
 
+/**
+ * How far past its order a line may be booked before the receipt has to say
+ * why. The Receive goods form carries the same figure, so its warning and
+ * this refusal agree — change both together.
+ */
+const OVER_RECEIPT_ALLOWANCE = 0.1
+
 /** The one order line a receipt line is booking against. */
 interface BookablePoLine {
   id: string
@@ -2276,22 +2283,47 @@ interface GrnLineInput {
  * there is a "this receipt" to exclude.
  *
  * **There is no limit on how much a receipt may book in.** A delivery can be
- * short or over by any amount and it saves without being questioned: fabric
- * comes in the lengths the mill sends, and a lorry at the gate is not the
- * place to argue about it. An allowance of a few per cent was tried and
- * removed — it only taught the store keeper to type a number the scale did
- * not show. The order's own quantity is still what the bill is matched
- * against, so nothing is paid for twice.
+ * short or over by any amount and it is never refused: fabric comes in the
+ * lengths the mill sends, and a lorry at the gate is not the place to argue
+ * about it. An allowance of a few per cent was tried and removed — it only
+ * taught the store keeper to type a number the scale did not show. The
+ * order's own quantity is still what the bill is matched against, so nothing
+ * is paid for twice.
+ *
+ * What it does ask for is a reason once a line runs well past its order —
+ * more than `OVER_RECEIPT_ALLOWANCE` over. Without one, a slipped zero (500
+ * keyed for 50) went into stock unquestioned and surfaced weeks later as a
+ * stock count nobody could explain. Ordinary over-delivery stays free; only
+ * the size of a typo has to be explained, and the explanation can be anything.
  */
 function prepareGrnLines(
   poLines: Map<string, BookablePoLine>,
   already: Map<string, number>,
-  lines: GrnLineInput[]
+  lines: GrnLineInput[],
+  overReason?: string | null
 ) {
   const bookingByPoLine = new Map<string, number>()
   for (const line of lines) {
     const accepted = round3(round3(line.receivedQty) - round3(line.rejectedQty ?? 0))
     bookingByPoLine.set(line.poLineId, round3((bookingByPoLine.get(line.poLineId) ?? 0) + accepted))
+  }
+
+  if ((overReason?.trim().length ?? 0) < 5) {
+    for (const [poLineId, booking] of bookingByPoLine) {
+      const poLine = poLines.get(poLineId)
+      const ordered = poLine ? Number(poLine.qty) : 0
+      if (!poLine || ordered <= 0) continue
+      const total = round3((already.get(poLineId) ?? 0) + booking)
+      if (total > round3(ordered * (1 + OVER_RECEIPT_ALLOWANCE))) {
+        throw new AppError(
+          `${poLine.item.name}: ${total} received against ${ordered} ordered — more than ` +
+            `${OVER_RECEIPT_ALLOWANCE * 100}% over the order. Check the quantity; if it is right, ` +
+            `say why in "Why more than ordered".`,
+          400,
+          'OVER_RECEIPT_NEEDS_REASON'
+        )
+      }
+    }
   }
 
   const prepared = lines.map((line) => {
@@ -2774,7 +2806,7 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
       po.lines.map((l) => l.id)
     )
 
-    const { prepared } = prepareGrnLines(poLines, already, data.lines)
+    const { prepared } = prepareGrnLines(poLines, already, data.lines, data.overReceiptReason)
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
 
@@ -2992,7 +3024,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       )
     }
 
-    const { prepared } = prepareGrnLines(poLines, already, data.lines)
+    const { prepared } = prepareGrnLines(poLines, already, data.lines, data.overReceiptReason)
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
 
