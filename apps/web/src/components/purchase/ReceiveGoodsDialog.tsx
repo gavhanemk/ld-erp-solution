@@ -947,6 +947,26 @@ export function ReceiveGoodsDialog({
     }
 
     /*
+     * The challan, refused here as well as on the server.
+     *
+     * It is the one piece of the delivery's paperwork the receipt cannot do
+     * without: it is the paper that travelled with the goods, and it is what
+     * a query about the supplier's bill is settled against months later. A
+     * receipt that cannot name one cannot be checked against anything.
+     *
+     * Named separately rather than as one message about "the challan", so the
+     * store keeper is not told to look at a box they have already filled in.
+     */
+    if (!delivery.challanNo.trim()) {
+      return setError(
+        "Enter the challan number, under Delivery Paperwork — it is on the supplier's delivery note."
+      )
+    }
+    if (!delivery.challanDate) {
+      return setError('Enter the challan date, under Delivery Paperwork.')
+    }
+
+    /*
      * Caught here as well as on the server. The server's message names the
      * item and is the one that counts, but a store keeper who has just split a
      * line across two stores should be told before the round trip.
@@ -1043,13 +1063,35 @@ export function ReceiveGoodsDialog({
   const paper = (
     label: string,
     field: keyof Delivery,
-    opts: { type?: string; placeholder?: string; help?: string; min?: number } = {}
+    opts: {
+      type?: string
+      placeholder?: string
+      help?: string
+      min?: number
+      /** Refused on save, and said so before the press rather than after it. */
+      required?: boolean
+    } = {}
   ) => (
     <label className="block">
-      <span className="form-label">{label}</span>
+      <span className="form-label">
+        {label}
+        {opts.required && (
+          <span className="ml-0.5 text-red-400" aria-hidden>
+            *
+          </span>
+        )}
+      </span>
       <input
         type={opts.type ?? 'text'}
-        className="form-input h-9"
+        required={opts.required}
+        aria-required={opts.required}
+        /* Tinted while empty, the same amber the order form's missing
+          quantities wear. Not red: nothing has gone wrong yet — the box is
+          simply not filled in, and a form that opens shouting is a form
+          people stop reading. */
+        className={`form-input h-9${
+          opts.required && delivery[field].trim() === '' ? 'border-amber-500/70' : ''
+        }`}
         value={delivery[field]}
         min={opts.min}
         onChange={(e) => {
@@ -1340,11 +1382,19 @@ export function ReceiveGoodsDialog({
             paperwork is one press away on the days it is the thing that was
             mis-typed. */}
           <Section
+            /* Remounted once a receipt being corrected has arrived. `Section`
+              reads `openByDefault` when it mounts, and the form mounts before
+              the record does — at that moment every box is empty and "is the
+              challan missing?" has no answer yet. */
+            key={editing && loadingOrder ? 'paperwork-loading' : 'paperwork'}
             icon={ClipboardList}
             title="Delivery Paperwork"
             foldable
-            openByDefault={!editing}
-            summary="Gate entry, challan, the supplier's bill — all optional"
+            /* Folded when correcting, because a correction is nearly always a
+              quantity — unless the challan is what is missing, in which case
+              the panel holding it cannot start out of sight. */
+            openByDefault={!editing || !delivery.challanNo || !delivery.challanDate}
+            summary="Challan number and date needed — gate entry and the supplier's bill optional"
           >
             {/* `auto-fit`, not a fixed two columns — the gate entry pairs
               with its own date and the challan with its on any phone wide
@@ -1354,9 +1404,10 @@ export function ReceiveGoodsDialog({
               {paper('Gate entry number', 'gateEntryNo')}
               {paper('Gate entry date', 'gateEntryDate', { type: 'date' })}
               {paper('Challan number', 'challanNo', {
+                required: true,
                 help: 'A range is fine when one delivery covers several',
               })}
-              {paper('Challan date', 'challanDate', { type: 'date' })}
+              {paper('Challan date', 'challanDate', { type: 'date', required: true })}
 
               {paper('Supplier bill number', 'supplierInvoiceNo', {
                 help: 'What accounts will book the bill against',
