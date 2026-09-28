@@ -19,6 +19,7 @@ import { api, apiErrorMessage } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
+import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
 
 /**
@@ -176,6 +177,8 @@ export function PurchaseEnquiryDialog({
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
   const [loadingRefs, setLoadingRefs] = useState(true)
   const [indentOpen, setIndentOpen] = useState(false)
+  /** Which row asked for a brand-new item, or null when nobody has. */
+  const [newItemFor, setNewItemFor] = useState<Line | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const filesRef = useRef<AttachmentsBoxHandle>(null)
@@ -329,8 +332,23 @@ export function PurchaseEnquiryDialog({
    * controls are one question asked three ways, and whichever of them the buyer
    * answers, the other two have to agree with it.
    */
+  /**
+   * A value the item list carries that is not an item.
+   *
+   * Picking it opens the new-item window instead of setting the row. A row in
+   * the dropdown is where somebody looks when the thing they want is not in
+   * the dropdown — a button elsewhere on the panel is not, and they abandon
+   * the form or pick a near-enough item instead. The second is worse: six
+   * months on, the purchase history says the mill bought something it did not.
+   */
+  const ADD_NEW = '__new__'
+
   const pickItem = useCallback(
     (key: string, itemId: string) => {
+      if (itemId === ADD_NEW) {
+        setNewItemFor(linesRef.current.find((l) => l.key === key) ?? null)
+        return
+      }
       const item = items.find((i) => i.id === itemId)
       const cat = categories.find((c) => c.id === item?.category?.id)
       setLine(key, {
@@ -816,6 +834,7 @@ export function PurchaseEnquiryDialog({
                             aria-label={`Row ${i + 1} item`}
                           >
                             <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
+                            <option value={ADD_NEW}>+ Add a new item…</option>
                             {itemsFor(l).map((it) => (
                               <option key={it.id} value={it.id}>
                                 {it.code} · {it.name}
@@ -1019,6 +1038,40 @@ export function PurchaseEnquiryDialog({
           </div>
         </div>
       </div>
+
+      {newItemFor && (
+        <NewItemDialog
+          categories={categories}
+          categoryId={newItemFor.categoryId}
+          subcategoryId={newItemFor.subcategoryId}
+          onClose={() => setNewItemFor(null)}
+          onCreated={(item) => {
+            const row = newItemFor
+            setNewItemFor(null)
+            /*
+             * Added to the list this form is holding as well as to the master.
+             * Without it the item exists on the server and not in the dropdown,
+             * and the row that asked for it still cannot select it — the master
+             * list is fetched once, when the form opens.
+             */
+            setItems((prev) => [...prev, item as unknown as Item])
+            const cat = categories.find((c) => c.id === item.category?.id)
+            setLine(row.key, {
+              itemId: item.id,
+              codeText: item.code,
+              uom: item.uom?.symbol ?? '',
+              categoryId: cat?.parentId ?? cat?.id ?? '',
+              subcategoryId: cat?.parentId ? cat.id : '',
+              // Offered as the expected rate where the master carries one. It
+              // is the mill's own figure, which is exactly what that column
+              // holds — and it stays editable.
+              ...(item.standardRate && Number(item.standardRate) > 0 && !row.expectedRate
+                ? { expectedRate: String(Number(item.standardRate)) }
+                : {}),
+            })
+          }}
+        />
+      )}
 
       {indentOpen && (
         <IndentItemsDialog
