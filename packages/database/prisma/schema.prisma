@@ -102,6 +102,9 @@ enum TransactionType {
   OPENING
   ISSUE
   PRODUCTION
+  /// A customer's own material arriving for us to work on. Held apart from
+  /// PURCHASE because nothing was bought and nobody is owed.
+  CUSTOMER_MATERIAL
 }
 
 enum VoucherType {
@@ -319,6 +322,11 @@ model User {
   @@index([email])
   @@index([roleId])
   @@map("users")
+  customerGrnReceived  CustomerGRN[]    @relation("CustomerGRNReceivedBy")
+  customerGrnCancelled CustomerGRN[]    @relation("CustomerGRNCancelledBy")
+  jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
+  jobWorkCancelled     JobWorkChallan[] @relation("JobWorkChallanCancelledBy")
+  jobWorkReturnsTaken  JobWorkReturn[]  @relation("JobWorkReturnReceivedBy")
 }
 
 model Role {
@@ -583,6 +591,9 @@ model Item {
   @@index([code])
   @@index([type])
   @@map("items")
+  customerGrnLines    CustomerGRNLine[]    @relation("CustomerGRNLines")
+  jobWorkChallanLines JobWorkChallanLine[] @relation("JobWorkChallanLines")
+  jobWorkReturnLines  JobWorkReturnLine[]  @relation("JobWorkReturnLines")
 }
 
 model Style {
@@ -821,7 +832,9 @@ model Customer {
   invoices     SalesInvoice[]
   payments     PaymentReceipt[]
   creditNotes  CreditNote[]
-  ownedStock   StockLedger[]    @relation("CustomerOwnedStock")
+  ownedStock   StockLedger[]  @relation("CustomerOwnedStock")
+  suppliedMaterial CustomerGRN[] @relation("CustomerSuppliedMaterial")
+  materialRequisitionLines MaterialRequisitionLine[] @relation("CustomerMaterialRequisitionLines")
 
   @@index([code])
   @@map("customers")
@@ -910,6 +923,7 @@ model Supplier {
 
   @@index([code])
   @@map("suppliers")
+  jobWorkChallans JobWorkChallan[] @relation("JobWorkChallans")
 }
 
 model Warehouse {
@@ -936,6 +950,10 @@ model Warehouse {
   returnLines      PurchaseReturnLine[]
 
   @@map("warehouses")
+  customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
+  jobWorkSentFrom          JobWorkChallan[] @relation("JobWorkChallanFrom")
+  jobWorkSentTo            JobWorkChallan[] @relation("JobWorkChallanTo")
+  jobWorkReturnLines       JobWorkReturnLine[] @relation("JobWorkReturnLines")
 }
 
 model Department {
@@ -1059,6 +1077,7 @@ model SalesOrder {
   @@index([customerId])
   @@index([status])
   @@map("sales_orders")
+  customerMaterial CustomerGRN[] @relation("SalesOrderCustomerMaterial")
 }
 
 model SalesOrderLine {
@@ -2102,6 +2121,16 @@ model MaterialRequisitionLine {
   warehouse    Warehouse           @relation(fields: [warehouseId], references: [id])
   purpose      String?
 
+  /// Whose material this line draws.
+  ///
+  /// Without it, a line asking for a customer's fabric would be issued out of
+  /// our own balance of the same cloth — the customer's would sit in the godown
+  /// unusable, and ours would quietly go missing. The pair matches StockLedger
+  /// so the issue can hand them straight to the stock service.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("CustomerMaterialRequisitionLines", fields: [ownerCustomerId], references: [id])
+
   /// Issue it off the rack, or buy it. Defaults to the rack, which is what
   /// every line written before this existed meant.
   fulfilment RequisitionFulfilment @default(FROM_STOCK)
@@ -2219,6 +2248,217 @@ model StockAdjustmentLine {
   unitRate     Decimal?        @db.Decimal(10, 2)
 
   @@map("stock_adjustment_lines")
+}
+
+/// How far a job work consignment has got.
+enum JobWorkStatus {
+  SENT
+  PARTLY_BACK
+  CLOSED
+  CANCELLED
+}
+
+/// A customer's own material, received in for us to work on.
+///
+/// Donear send fabric, we process it, it goes back. It sits in our godown the
+/// whole time and it is never ours: docs/04-business-rules.md rule 6.5 is
+/// explicit that a customer's fabric in our godown is left out of the stock
+/// value. So every movement this writes carries CUSTOMER_OWNED and the
+/// customer's id, which is what holds it apart from our own balance of the same
+/// cloth in the same store.
+///
+/// There is no purchase order behind it and no money owed. What stands in its
+/// place is the customer's own delivery challan, whose number and date are
+/// recorded so the two documents can be put side by side later.
+model CustomerGRN {
+  id              String      @id @default(cuid())
+  grnNumber       String      @unique
+  customerId      String
+  customer        Customer    @relation("CustomerSuppliedMaterial", fields: [customerId], references: [id])
+  /// The sales order this material is for, when there is one.
+  ///
+  /// docs/07-business-processes.md records that the old system raises this
+  /// against a sales order. It is optional here deliberately, and that is a
+  /// departure worth naming: the purchase goods receipt requires its order,
+  /// because the order is what was agreed with the supplier. A customer's lorry
+  /// can arrive before anybody has raised the paperwork, and refusing the
+  /// material at the gate would put the stock figure behind the goods.
+  soId            String?
+  so              SalesOrder? @relation("SalesOrderCustomerMaterial", fields: [soId], references: [id])
+  receiptDate     DateTime    @default(now())
+  /// The customer's own challan — their paperwork, not ours.
+  challanNumber   String?
+  challanDate     DateTime?
+  /// The mill's own record of the lorry arriving at the gate.
+  gateEntryNumber String?
+  gateEntryDate   DateTime?
+  vehicleNo       String?
+  transporter     String?
+  /// One store for the whole receipt: a customer's consignment is unloaded in
+  /// one place.
+  warehouseId     String
+  warehouse       Warehouse   @relation("CustomerMaterialReceipts", fields: [warehouseId], references: [id])
+  notes           String?
+  receivedById    String?
+  receivedBy      User?       @relation("CustomerGRNReceivedBy", fields: [receivedById], references: [id])
+  /// Set when the receipt is taken back out. The document and its number stay.
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledBy     User?       @relation("CustomerGRNCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason    String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  lines CustomerGRNLine[]
+
+  @@index([customerId])
+  @@index([receiptDate])
+  @@map("customer_grn")
+}
+
+model CustomerGRNLine {
+  id          String      @id @default(cuid())
+  grnId       String
+  grn         CustomerGRN @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item        @relation("CustomerGRNLines", fields: [itemId], references: [id])
+  /// What the customer's challan says they sent.
+  challanQty  Decimal     @db.Decimal(10, 3)
+  /// What actually came off the lorry, and what reaches the ledger. The
+  /// difference between the two is the short or excess, worked out rather than
+  /// typed — a storekeeper counting rolls should not also be doing subtraction.
+  receivedQty Decimal     @db.Decimal(10, 3)
+  batchNumber String?
+  /// Lot, shade, or whatever the customer wrote on the roll. Free text, because
+  /// every customer marks their material differently.
+  markings    String?
+
+  @@map("customer_grn_lines")
+}
+
+/// Our own fabric sent out to an outside unit for processing.
+///
+/// docs/07-business-processes.md records that fabric constantly leaves the mill
+/// for cutting, stitching, embroidery, washing and dyeing at named outside
+/// units, and that under GST the movement needs a challan of its own or it
+/// counts as a taxable sale. It is our stock the whole time — rule 6.5 from the
+/// other side: fabric at a job worker is our stock at their location.
+///
+/// So the goods move to a warehouse standing for that unit rather than leaving
+/// the ledger, which keeps rule 6.4 intact: stock always lives in a warehouse.
+model JobWorkChallan {
+  id              String        @id @default(cuid())
+  challanNumber   String        @unique
+  /// The unit doing the work. They are suppliers in these books, because we pay
+  /// them for the processing.
+  jobWorkerId     String
+  jobWorker       Supplier      @relation("JobWorkChallans", fields: [jobWorkerId], references: [id])
+  challanDate     DateTime      @default(now())
+  /// What the work is: "cutting", "stitching", "dyeing — navy".
+  process         String
+  /// Where it leaves from, and the store standing for the job worker's floor.
+  fromWarehouseId String
+  fromWarehouse   Warehouse     @relation("JobWorkChallanFrom", fields: [fromWarehouseId], references: [id])
+  toWarehouseId   String
+  toWarehouse     Warehouse     @relation("JobWorkChallanTo", fields: [toWarehouseId], references: [id])
+  /// When the goods are due back. Fabric that has been out too long is the
+  /// question this document exists to answer.
+  expectedBackOn  DateTime?
+  vehicleNo       String?
+  transporter     String?
+  lrNumber        String?
+  notes           String?
+  status          JobWorkStatus @default(SENT)
+  sentById        String?
+  sentBy          User?         @relation("JobWorkSentBy", fields: [sentById], references: [id])
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledBy     User?         @relation("JobWorkChallanCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  lines   JobWorkChallanLine[]
+  returns JobWorkReturn[]
+
+  @@index([jobWorkerId])
+  @@index([status])
+  @@map("job_work_challans")
+}
+
+model JobWorkChallanLine {
+  id        String         @id @default(cuid())
+  challanId String
+  challan   JobWorkChallan @relation(fields: [challanId], references: [id], onDelete: Cascade)
+  itemId    String
+  item      Item           @relation("JobWorkChallanLines", fields: [itemId], references: [id])
+  qty       Decimal        @db.Decimal(10, 3)
+  /// Copied from the item when the challan is raised. A GST challan carries the
+  /// HSN, and correcting the item master next month must not change what a
+  /// challan already sent out says.
+  hsnCode   String?
+  /// What the stock was carried at when it left, so the challan prints the same
+  /// figure next year.
+  unitRate  Decimal?       @db.Decimal(10, 2)
+
+  returnLines JobWorkReturnLine[]
+
+  @@map("job_work_challan_lines")
+}
+
+/// Goods coming back from an outside unit against a challan.
+///
+/// Separate from the challan because one consignment often comes back in
+/// several lots, and because what returns is not always what went out: forty
+/// metres of fabric come back as three hundred cut panels. Both are recorded —
+/// the material consumed leaves the job worker's balance, and whatever arrived
+/// comes into ours.
+model JobWorkReturn {
+  id             String         @id @default(cuid())
+  returnNumber   String         @unique
+  challanId      String
+  challan        JobWorkChallan @relation(fields: [challanId], references: [id])
+  returnDate     DateTime       @default(now())
+  vehicleNo      String?
+  lrNumber       String?
+  /// Their document, when they send one.
+  theirChallanNo String?
+  notes          String?
+  receivedById   String?
+  receivedBy     User?          @relation("JobWorkReturnReceivedBy", fields: [receivedById], references: [id])
+  createdAt      DateTime       @default(now())
+
+  lines JobWorkReturnLine[]
+
+  @@index([challanId])
+  @@map("job_work_returns")
+}
+
+model JobWorkReturnLine {
+  id            String             @id @default(cuid())
+  returnId      String
+  jobWorkReturn JobWorkReturn      @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  /// Which challan line this settles.
+  challanLineId String
+  challanLine   JobWorkChallanLine @relation(fields: [challanLineId], references: [id])
+  /// How much of the material sent is accounted for by this row — consumed at
+  /// the job worker's end, whether it comes back as itself or as something else.
+  consumedQty   Decimal            @db.Decimal(10, 3)
+  /// What actually arrived. Usually the same item; on a conversion it is the
+  /// made item, and the quantity is then in that item's own unit.
+  itemId        String
+  item          Item               @relation("JobWorkReturnLines", fields: [itemId], references: [id])
+  receivedQty   Decimal            @db.Decimal(10, 3)
+  /// Material the job worker could not return — cutting waste, shrinkage, loss.
+  /// Recorded rather than quietly absorbed, because a unit losing five per cent
+  /// every time is a conversation somebody needs to have.
+  wastedQty     Decimal            @default(0) @db.Decimal(10, 3)
+  /// Which of our stores it landed in.
+  warehouseId   String
+  warehouse     Warehouse          @relation("JobWorkReturnLines", fields: [warehouseId], references: [id])
+  notes         String?
+
+  @@map("job_work_return_lines")
 }
 
 // ═══════════════════════════════════════════
