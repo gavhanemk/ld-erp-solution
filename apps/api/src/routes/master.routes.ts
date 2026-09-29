@@ -814,6 +814,94 @@ router.use(
   }),
 )
 
+/*
+ * What else points at a store, beyond the relations this schema declares.
+ * Other branches' tables (customer GRNs, job-work challans, purchase
+ * returns, enquiries) hold store ids in the one shared database, and an
+ * enquiry's would even be cleared without a word. Each is counted by name,
+ * and a table not in this database is simply passed over.
+ */
+const WAREHOUSE_OTHER_USES: Array<{ table: string; columns: string[]; one: string; many: string }> = [
+  { table: 'customer_grn', columns: ['warehouseId'], one: 'customer goods receipt', many: 'customer goods receipts' },
+  { table: 'job_work_challans', columns: ['fromWarehouseId', 'toWarehouseId'], one: 'job-work challan', many: 'job-work challans' },
+  { table: 'job_work_return_lines', columns: ['warehouseId'], one: 'job-work return line', many: 'job-work return lines' },
+  { table: 'purchase_return_lines', columns: ['warehouseId'], one: 'purchase return line', many: 'purchase return lines' },
+  { table: 'purchase_enquiries', columns: ['locationId'], one: 'purchase enquiry', many: 'purchase enquiries' },
+]
+
+async function warehouseOtherUses(id: string): Promise<string[]> {
+  // Which of the tables this database has, asked once; then all counted together.
+  const present = await prisma.$queryRawUnsafe<Array<{ t: string }>>(
+    `select table_name as t from information_schema.tables where table_schema = 'ld_erp' and table_name = any($1)`,
+    WAREHOUSE_OTHER_USES.map((u) => u.table),
+  )
+  const have = new Set(present.map((r) => r.t))
+  const counts = await Promise.all(
+    WAREHOUSE_OTHER_USES.filter((u) => have.has(u.table)).map(async (use) => {
+      const where = use.columns.map((c) => `"${c}" = $1`).join(' or ')
+      const [row] = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+        `select count(*) as n from ld_erp."${use.table}" where ${where}`,
+        id,
+      )
+      const n = Number(row?.n ?? 0)
+      return n > 0 ? `${n} ${n === 1 ? use.one : use.many}` : null
+    }),
+  )
+  return counts.filter((c): c is string => Boolean(c))
+}
+
+const WAREHOUSE_REFUSE = (one: string, many: string): DeleteUse => ({ one, many, then: 'refuse' })
+/** Everything that records goods in, out of or held at a store: none of it can lose its store. */
+const WAREHOUSE_USES: Record<string, DeleteUse> = {
+  stockLedger: WAREHOUSE_REFUSE('stock entry', 'stock entries'),
+  grnLines: WAREHOUSE_REFUSE('goods receipt line', 'goods receipt lines'),
+  mrLines: WAREHOUSE_REFUSE('material requisition line', 'material requisition lines'),
+  transfersOut: WAREHOUSE_REFUSE('transfer out', 'transfers out'),
+  transfersIn: WAREHOUSE_REFUSE('transfer in', 'transfers in'),
+  adjustments: WAREHOUSE_REFUSE('stock adjustment', 'stock adjustments'),
+  purchaseOrders: WAREHOUSE_REFUSE('purchase order delivering here', 'purchase orders delivering here'),
+  purchaseNotes: WAREHOUSE_REFUSE('purchase note', 'purchase notes'),
+  supplierPayments: WAREHOUSE_REFUSE('supplier payment', 'supplier payments'),
+}
+
+/*
+ * Deleting a store for good. Its stock history says where goods physically
+ * were, so nothing that uses it is ever moved or cleared: moving the ledger
+ * to another store would make both stores' stock wrong. A store is deleted
+ * only when nothing at all uses it; otherwise it is deactivated instead.
+ * These two run ahead of the CRUD to add the other branches' tables to what
+ * the CRUD counts itself.
+ */
+router.get('/warehouses/:id/delete-check', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const [store, others] = await Promise.all([
+    prisma.warehouse.findUnique({
+      where: { id: req.params.id },
+      select: { _count: { select: Object.fromEntries(Object.keys(WAREHOUSE_USES).map((k) => [k, true])) } },
+    }),
+    warehouseOtherUses(req.params.id),
+  ])
+  if (!store) throw new AppError('Warehouse not found', 404, 'NOT_FOUND')
+  const counts = store._count as Record<string, number>
+  const own = Object.entries(WAREHOUSE_USES)
+    .filter(([key]) => counts[key] > 0)
+    .map(([key, use]) => `${counts[key]} ${counts[key] === 1 ? use.one : use.many}`)
+  res.json({ success: true, data: { move: [], blank: [], refuse: [...own, ...others] } })
+})
+router.delete('/warehouses/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, _res, next) => {
+  if (req.query.permanent !== 'true') return next()
+  const others = await warehouseOtherUses(req.params.id)
+  if (others.length) {
+    const store = await prisma.warehouse.findUnique({ where: { id: req.params.id }, select: { name: true } })
+    throw new AppError(
+      `${store?.name ?? 'This store'} is used by ${others.join(', ')}, so it cannot be deleted. Deactivate it instead.`,
+      409,
+      'IN_USE',
+    )
+  }
+  next()
+})
+
+
 router.use(
   '/warehouses',
   crudRouter({
@@ -828,6 +916,8 @@ router.use(
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
+    // Any of it stops a delete; nothing is moved or cleared.
+    permanentDelete: WAREHOUSE_USES,
   }),
 )
 

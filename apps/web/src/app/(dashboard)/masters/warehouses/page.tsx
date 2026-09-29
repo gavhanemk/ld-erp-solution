@@ -43,6 +43,8 @@ export default function WarehousesPage() {
       columns={columns}
       formFields={formFields}
       defaultSort="name"
+      allowDelete
+      deleteRefusedHint="Its stock history has to keep saying where goods were. Deactivate it instead: it stays on past documents but is no longer offered."
       searchPlaceholder="Search warehouse name or code..."
       emptyMessage="No warehouses yet. Add your fabric store, trim store and finished goods store."
     />
