@@ -10,6 +10,7 @@ import {
   AlertCircle,
   Pencil,
   Ban,
+  Trash2,
   X,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
@@ -83,6 +84,12 @@ interface MasterTableProps<T> {
   formColumns?: 3 | 4
   /** Singular noun used in the dialog heading, e.g. "Customer". */
   entityName?: string
+  /**
+   * Offers a permanent Delete beside Deactivate. Returns null when the record
+   * may go, or why it may not, which the greyed-out button says on hover. The
+   * API checks again; this only decides what to offer.
+   */
+  deleteBlockedBy?: (row: T) => string | null
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
 }
@@ -100,6 +107,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   formColumns,
   entityName,
   filterDefs = [],
+  deleteBlockedBy,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -296,6 +304,27 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
    * rather than deletes. The wording here has to match that or it reads as
    * destructive.
    */
+  const remove = async (row: T) => {
+    const label = (row as Record<string, unknown>).name ?? (row as Record<string, unknown>).code
+    if (
+      !window.confirm(
+        `Delete ${label} permanently?
+
+Nothing uses it, so nothing else changes, but it cannot be brought back. To keep it on record and only stop offering it, deactivate it instead.`,
+      )
+    ) {
+      return
+    }
+
+    setActionError(null)
+    try {
+      await api.delete(`/masters/${resource}/${row.id}?permanent=true`)
+      await load()
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not delete. Is the API running?')
+    }
+  }
+
   const deactivate = async (row: T) => {
     const label = (row as Record<string, unknown>).name ?? (row as Record<string, unknown>).code
     if (
@@ -459,19 +488,18 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                 {columns.map((col) => (
                   <th
                     key={col.key}
-                    className={[
-                      col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : '',
-                      col.sortable ? 'cursor-pointer select-none hover:text-foreground' : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                    // Inline, because the stylesheet's `.data-table > thead > tr > th`
+                    // sets text-left at a weight a `text-right` class cannot beat,
+                    // which left a number's heading at the far side of its column.
+                    style={col.align ? { textAlign: col.align } : undefined}
+                    className={col.sortable ? 'cursor-pointer select-none hover:text-foreground' : undefined}
                     onClick={col.sortable ? () => toggleSort(col.key) : undefined}
                   >
                     {col.header}
                     {sort === col.key && (order === 'asc' ? ' ↑' : ' ↓')}
                   </th>
                 ))}
-                {editable && <th className="text-right">Actions</th>}
+                {editable && <th style={{ textAlign: 'right' }}>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -534,15 +562,32 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                       >
                         <Pencil size={14} />
                       </button>
-                      {row.isActive !== false && (
-                        <button
-                          className="btn-ghost p-1.5 text-red-400"
-                          title={`Deactivate ${singular.toLowerCase()}`}
-                          onClick={() => void deactivate(row)}
-                        >
-                          <Ban size={14} />
-                        </button>
-                      )}
+                      {/* Kept in place but hidden on an inactive row, so the
+                        Delete beside it stays in the same column on every row. */}
+                      <button
+                        className={`btn-ghost p-1.5 text-red-400 ${row.isActive === false ? 'invisible' : ''}`}
+                        title={`Deactivate ${singular.toLowerCase()}`}
+                        onClick={() => void deactivate(row)}
+                      >
+                        <Ban size={14} />
+                      </button>
+                      {deleteBlockedBy &&
+                        (() => {
+                          const blocked = deleteBlockedBy(row)
+                          return (
+                            <button
+                              className={`btn-ghost p-1.5 ${blocked ? 'cursor-not-allowed text-muted-foreground/40' : 'text-red-500'}`}
+                              title={blocked ?? `Delete ${singular.toLowerCase()} permanently`}
+                              aria-disabled={Boolean(blocked)}
+                              onClick={() => {
+                                if (blocked) setActionError(blocked)
+                                else void remove(row)
+                              }}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )
+                        })()}
                     </td>
                   )}
                 </tr>

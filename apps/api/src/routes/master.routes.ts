@@ -66,6 +66,19 @@ const noneOr = (field: string) => (values: string[]) => {
   return { OR: or }
 }
 
+/** Everything that can point at a department, as said in a sentence. */
+const DEPARTMENT_USES: Record<string, [string, string]> = {
+  items: ['item', 'items'],
+  workstations: ['workstation', 'workstations'],
+  operations: ['operation', 'operations'],
+  requisitions: ['requisition', 'requisitions'],
+  employees: ['employee', 'employees'],
+  machines: ['machine', 'machines'],
+  routingSteps: ['routing step', 'routing steps'],
+  bomLines: ['BOM line', 'BOM lines'],
+  productionEntries: ['production entry', 'production entries'],
+}
+
 const router = Router()
 const MODULE = 'masters'
 
@@ -428,6 +441,7 @@ router.use(
     createSchema: createDepartmentSchema,
     updateSchema: updateDepartmentSchema,
     uniqueFields: ['name'],
+    permanentDelete: DEPARTMENT_USES,
     injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
@@ -436,7 +450,9 @@ router.use(
     // deactivates it.
     include: {
       operations: true,
-      _count: { select: { items: true, workstations: true, operations: true, requisitions: true } },
+      _count: {
+        select: Object.fromEntries(Object.keys(DEPARTMENT_USES).map((k) => [k, true])),
+      },
     },
   }),
 )

@@ -28,6 +28,13 @@ export interface CrudOptions {
    */
   filters?: Record<string, CrudFilter>
   /**
+   * Allows DELETE /:id?permanent=true, for a record nothing refers to. Names
+   * every relation that would stop it, with how to say one and several:
+   * { requisitions: ['requisition', 'requisitions'] }. A record in use is
+   * refused with a sentence saying what uses it.
+   */
+  permanentDelete?: Record<string, [string, string]>
+  /**
    * Columns no two records may share, compared without regard to capitals or
    * spaces at the ends, so "Printing" and "printing " cannot both be offered
    * in one dropdown. The clash is reported under that field on the form.
@@ -104,6 +111,7 @@ export function crudRouter(options: CrudOptions): Router {
     filters = {},
     facets = [],
     uniqueFields = [],
+    permanentDelete,
   } = options
 
   const router = Router({ mergeParams: true })
@@ -295,6 +303,47 @@ export function crudRouter(options: CrudOptions): Router {
   router.delete('/:id', requirePermission(module, 'delete'), async (req: AuthRequest, res) => {
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
+
+    /*
+     * Gone for good, which only a record nothing points at may be. Every
+     * relation is counted first rather than leaving it to the foreign keys:
+     * some of them clear rather than refuse (an item's department is set to
+     * nothing), and those would lose information without a word.
+     */
+    if (req.query.permanent === 'true') {
+      if (!permanentDelete) {
+        throw new AppError(
+          `${entityType} records are deactivated, never deleted`,
+          400,
+          'NO_PERMANENT_DELETE',
+        )
+      }
+      const { _count: counts } = await delegate().findUnique({
+        where: { id: req.params.id },
+        select: { _count: { select: Object.fromEntries(Object.keys(permanentDelete).map((k) => [k, true])) } },
+      })
+      const uses = Object.entries(permanentDelete)
+        .filter(([key]) => counts[key] > 0)
+        .map(([key, [one, many]]) => `${counts[key]} ${counts[key] === 1 ? one : many}`)
+      if (uses.length) {
+        const list = uses.length === 1 ? uses[0] : `${uses.slice(0, -1).join(', ')} and ${uses.at(-1)}`
+        throw new AppError(
+          `${before.name ?? entityType} is used by ${list}, so it cannot be deleted. Deactivate it instead: it stays on those records but is no longer offered for new ones.`,
+          409,
+          'IN_USE',
+        )
+      }
+
+      await delegate().delete({ where: { id: req.params.id } })
+      await writeAuditLog(req, {
+        module,
+        action: 'DELETE',
+        entityType,
+        entityId: req.params.id,
+        before,
+      })
+      return res.json({ success: true, message: `${entityType} deleted` })
+    }
 
     if (softDelete) {
       const updated = await delegate().update({
