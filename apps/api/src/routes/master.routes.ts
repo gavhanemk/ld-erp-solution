@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
-import { crudRouter } from '../lib/crud'
+import { crudRouter, type DeleteUse } from '../lib/crud'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
@@ -66,17 +66,22 @@ const noneOr = (field: string) => (values: string[]) => {
   return { OR: or }
 }
 
-/** Everything that can point at a department, as said in a sentence. */
-const DEPARTMENT_USES: Record<string, [string, string]> = {
-  items: ['item', 'items'],
-  workstations: ['workstation', 'workstations'],
-  operations: ['operation', 'operations'],
-  requisitions: ['requisition', 'requisitions'],
-  employees: ['employee', 'employees'],
-  machines: ['machine', 'machines'],
-  routingSteps: ['routing step', 'routing steps'],
-  bomLines: ['BOM line', 'BOM lines'],
-  productionEntries: ['production entry', 'production entries'],
+/**
+ * Everything that can point at a department, and what deleting the
+ * department does to it. An item or a BOM line may have no department, so
+ * it is left blank. The rest must have one (a requisition has to say who
+ * asked), so they move to the department the person picks.
+ */
+const DEPARTMENT_USES: Record<string, DeleteUse> = {
+  items: { one: 'item', many: 'items', model: 'item', field: 'departmentId', then: 'blank' },
+  bomLines: { one: 'BOM line', many: 'BOM lines', model: 'bOMLine', field: 'departmentId', then: 'blank' },
+  workstations: { one: 'workstation', many: 'workstations', model: 'workstation', field: 'departmentId', then: 'move' },
+  operations: { one: 'operation', many: 'operations', model: 'operation', field: 'departmentId', then: 'move' },
+  requisitions: { one: 'requisition', many: 'requisitions', model: 'materialRequisition', field: 'departmentId', then: 'move' },
+  employees: { one: 'employee', many: 'employees', model: 'employee', field: 'departmentId', then: 'move' },
+  machines: { one: 'machine', many: 'machines', model: 'machine', field: 'departmentId', then: 'move' },
+  routingSteps: { one: 'routing step', many: 'routing steps', model: 'routingStep', field: 'departmentId', then: 'move' },
+  productionEntries: { one: 'production entry', many: 'production entries', model: 'productionEntry', field: 'departmentId', then: 'move' },
 }
 
 const router = Router()

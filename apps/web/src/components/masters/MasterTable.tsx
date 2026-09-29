@@ -16,6 +16,7 @@ import {
 import { api, ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
 import { MasterFormDialog, type FormField } from './MasterFormDialog'
 import { FilterMenu, type FilterChoice } from './FilterMenu'
+import { DeleteDialog } from './DeleteDialog'
 import { useAppSettings } from '@/lib/appSettings'
 
 export interface Column<T> {
@@ -85,11 +86,11 @@ interface MasterTableProps<T> {
   /** Singular noun used in the dialog heading, e.g. "Customer". */
   entityName?: string
   /**
-   * Offers a permanent Delete beside Deactivate. Returns null when the record
-   * may go, or why it may not, which the greyed-out button says on hover. The
-   * API checks again; this only decides what to offer.
+   * Offers a permanent Delete beside Deactivate. The route must allow it (the
+   * crudRouter's `permanentDelete`); the box then says what it would clear
+   * or move, and asks where, before anything is done.
    */
-  deleteBlockedBy?: (row: T) => string | null
+  allowDelete?: boolean
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
 }
@@ -107,7 +108,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   formColumns,
   entityName,
   filterDefs = [],
-  deleteBlockedBy,
+  allowDelete = false,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -124,6 +125,9 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<T | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  // The record whose delete box is open, and what the last delete did.
+  const [deleting, setDeleting] = useState<T | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   // Rows per page comes from Settings -> Preferences.
   const { rowsPerPage } = useAppSettings()
@@ -304,27 +308,6 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
    * rather than deletes. The wording here has to match that or it reads as
    * destructive.
    */
-  const remove = async (row: T) => {
-    const label = (row as Record<string, unknown>).name ?? (row as Record<string, unknown>).code
-    if (
-      !window.confirm(
-        `Delete ${label} permanently?
-
-Nothing uses it, so nothing else changes, but it cannot be brought back. To keep it on record and only stop offering it, deactivate it instead.`,
-      )
-    ) {
-      return
-    }
-
-    setActionError(null)
-    try {
-      await api.delete(`/masters/${resource}/${row.id}?permanent=true`)
-      await load()
-    } catch (err) {
-      setActionError(err instanceof ApiError ? err.message : 'Could not delete. Is the API running?')
-    }
-  }
-
   const deactivate = async (row: T) => {
     const label = (row as Record<string, unknown>).name ?? (row as Record<string, unknown>).code
     if (
@@ -468,6 +451,22 @@ Nothing uses it, so nothing else changes, but it cannot be brought back. To keep
         )}
       </div>
 
+      {/* What the last delete did, in the API's words: "Embroidery QC deleted.
+        1 operation and 1 routing step moved to Embroidery." */}
+      {notice && (
+        <div className="glass-card flex items-start justify-between gap-3 border-emerald-500/40 p-4">
+          <p className="text-sm text-foreground">{notice}</p>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="text-muted-foreground hover:text-foreground"
+            aria-label="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {(error || actionError) && (
         <div className="glass-card p-4 flex items-start gap-3 border-red-500/40">
           <AlertCircle size={18} className="text-red-400 mt-0.5 shrink-0" />
@@ -571,23 +570,19 @@ Nothing uses it, so nothing else changes, but it cannot be brought back. To keep
                       >
                         <Ban size={14} />
                       </button>
-                      {deleteBlockedBy &&
-                        (() => {
-                          const blocked = deleteBlockedBy(row)
-                          return (
-                            <button
-                              className={`btn-ghost p-1.5 ${blocked ? 'cursor-not-allowed text-muted-foreground/40' : 'text-red-500'}`}
-                              title={blocked ?? `Delete ${singular.toLowerCase()} permanently`}
-                              aria-disabled={Boolean(blocked)}
-                              onClick={() => {
-                                if (blocked) setActionError(blocked)
-                                else void remove(row)
-                              }}
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          )
-                        })()}
+                      {allowDelete && (
+                        <button
+                          className="btn-ghost p-1.5 text-red-500"
+                          title={`Delete ${singular.toLowerCase()} permanently`}
+                          onClick={() => {
+                            setActionError(null)
+                            setNotice(null)
+                            setDeleting(row)
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
                     </td>
                   )}
                 </tr>
@@ -622,6 +617,21 @@ Nothing uses it, so nothing else changes, but it cannot be brought back. To keep
           </div>
         )}
       </div>
+
+      {deleting && (
+        <DeleteDialog
+          resource={resource}
+          id={deleting.id}
+          name={String((deleting as Record<string, unknown>).name ?? (deleting as Record<string, unknown>).code ?? singular)}
+          entityName={singular}
+          onClose={() => setDeleting(null)}
+          onDeleted={(message) => {
+            setDeleting(null)
+            setNotice(message)
+            void load()
+          }}
+        />
+      )}
 
       {editable && formFields && (
         <MasterFormDialog<T>

@@ -12,35 +12,6 @@ interface Department {
   _count?: Record<string, number>
 }
 
-/** Every use the API counts, as said in a sentence. */
-const USES: Record<string, [string, string]> = {
-  items: ['item', 'items'],
-  workstations: ['workstation', 'workstations'],
-  operations: ['operation', 'operations'],
-  requisitions: ['requisition', 'requisitions'],
-  employees: ['employee', 'employees'],
-  machines: ['machine', 'machines'],
-  routingSteps: ['routing step', 'routing steps'],
-  bomLines: ['BOM line', 'BOM lines'],
-  productionEntries: ['production entry', 'production entries'],
-}
-
-/**
- * Null when nothing uses the department and it can be deleted outright;
- * otherwise what uses it, so the greyed-out button can say why not.
- */
-const deleteBlockedBy = (d: Department): string | null => {
-  const uses = Object.entries(USES)
-    .filter(([key]) => (d._count?.[key] ?? 0) > 0)
-    .map(([key, [one, many]]) => {
-      const n = d._count![key]
-      return `${n} ${n === 1 ? one : many}`
-    })
-  if (!uses.length) return null
-  const list = uses.length === 1 ? uses[0] : `${uses.slice(0, -1).join(', ')} and ${uses.at(-1)}`
-  return `${d.name} is used by ${list}, so it cannot be deleted. Deactivate it instead.`
-}
-
 /** A count, or a quiet dash for none, so the eye goes to what is in use. */
 const used = (n: number | undefined) =>
   n ? <span className="tabular-nums">{n}</span> : <span className="text-muted-foreground">—</span>
@@ -104,7 +75,7 @@ export default function DepartmentsPage() {
       resource="departments"
       columns={columns}
       formFields={formFields}
-      deleteBlockedBy={deleteBlockedBy}
+      allowDelete
       defaultSort="name"
       searchPlaceholder="Search department name or code..."
       emptyMessage="No departments yet. Add Cutting, Stitching, Finishing and the rest of the floor."

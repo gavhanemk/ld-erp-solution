@@ -28,12 +28,13 @@ export interface CrudOptions {
    */
   filters?: Record<string, CrudFilter>
   /**
-   * Allows DELETE /:id?permanent=true, for a record nothing refers to. Names
-   * every relation that would stop it, with how to say one and several:
-   * { requisitions: ['requisition', 'requisitions'] }. A record in use is
-   * refused with a sentence saying what uses it.
+   * Allows DELETE /:id?permanent=true, and GET /:id/delete-check to say
+   * beforehand what it would do. Keyed by relation name, every link to the
+   * record and what deleting does to it: left blank, where the link is
+   * optional, or moved to another record of this master (?moveTo=), where
+   * it is not.
    */
-  permanentDelete?: Record<string, [string, string]>
+  permanentDelete?: Record<string, DeleteUse>
   /**
    * Columns no two records may share, compared without regard to capitals or
    * spaces at the ends, so "Printing" and "printing " cannot both be offered
@@ -64,6 +65,21 @@ export interface CrudOptions {
   injectOnCreate?: () => Promise<Record<string, unknown>>
 }
 
+export interface DeleteUse {
+  /** How to say one and several: 'requisition', 'requisitions'. */
+  one: string
+  many: string
+  /** The model and foreign key holding the link, so it can be cleared or moved. */
+  model: string
+  field: string
+  /**
+   * 'blank' where the link is optional: an item simply has no department.
+   * 'move' where it is not: a requisition must say who asked, so its
+   * department changes to one the person picks.
+   */
+  then: 'blank' | 'move'
+}
+
 export interface CrudFilter {
   where: (values: string[]) => Record<string, unknown>
   /**
@@ -75,6 +91,11 @@ export interface CrudFilter {
 }
 
 const MAX_PAGE_SIZE = 200
+
+/** ['1 item', '2 machines', '1 operation'] → '1 item, 2 machines and 1 operation' */
+function sentence(parts: string[]): string {
+  return parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
+}
 
 /** 'category.parent.name' → { category: { parent: { name: leaf } } } */
 function nested(path: string, leaf: unknown): Record<string, unknown> {
@@ -300,49 +321,106 @@ export function crudRouter(options: CrudOptions): Router {
     res.json({ success: true, data: updated })
   })
 
+  /** What links to a record, counted, with what deleting it does to each. */
+  const usesOf = async (id: string) => {
+    if (!permanentDelete) {
+      throw new AppError(`${entityType} records are deactivated, never deleted`, 400, 'NO_PERMANENT_DELETE')
+    }
+    const row = await delegate().findUnique({
+      where: { id },
+      select: { _count: { select: Object.fromEntries(Object.keys(permanentDelete).map((k) => [k, true])) } },
+    })
+    if (!row) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
+    return Object.entries(permanentDelete)
+      .filter(([key]) => row._count[key] > 0)
+      .map(([key, use]) => {
+        const n: number = row._count[key]
+        return { ...use, key, count: n, label: `${n} ${n === 1 ? use.one : use.many}` }
+      })
+  }
+
+  /*
+   * What a permanent delete would do, asked before doing it, so the screen
+   * can say "1 operation will move, 2 items will be left blank" and ask where
+   * to move them. Registered as /:id/delete-check, clear of /:id.
+   */
+  router.get('/:id/delete-check', requirePermission(module, 'delete'), async (req: AuthRequest, res) => {
+    const uses = await usesOf(req.params.id)
+    res.json({
+      success: true,
+      data: {
+        move: uses.filter((u) => u.then === 'move').map((u) => u.label),
+        blank: uses.filter((u) => u.then === 'blank').map((u) => u.label),
+      },
+    })
+  })
+
   router.delete('/:id', requirePermission(module, 'delete'), async (req: AuthRequest, res) => {
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
 
     /*
-     * Gone for good, which only a record nothing points at may be. Every
-     * relation is counted first rather than leaving it to the foreign keys:
-     * some of them clear rather than refuse (an item's department is set to
-     * nothing), and those would lose information without a word.
+     * Gone for good. Everything linked to it is dealt with first, in the same
+     * transaction as the delete, so a failure part-way leaves nothing half
+     * moved: optional links are cleared, required ones move to the record
+     * the person chose. Nothing is left to the foreign keys, which would
+     * either refuse with a database error or clear a link without a word.
      */
     if (req.query.permanent === 'true') {
-      if (!permanentDelete) {
-        throw new AppError(
-          `${entityType} records are deactivated, never deleted`,
-          400,
-          'NO_PERMANENT_DELETE',
-        )
-      }
-      const { _count: counts } = await delegate().findUnique({
-        where: { id: req.params.id },
-        select: { _count: { select: Object.fromEntries(Object.keys(permanentDelete).map((k) => [k, true])) } },
-      })
-      const uses = Object.entries(permanentDelete)
-        .filter(([key]) => counts[key] > 0)
-        .map(([key, [one, many]]) => `${counts[key]} ${counts[key] === 1 ? one : many}`)
-      if (uses.length) {
-        const list = uses.length === 1 ? uses[0] : `${uses.slice(0, -1).join(', ')} and ${uses.at(-1)}`
-        throw new AppError(
-          `${before.name ?? entityType} is used by ${list}, so it cannot be deleted. Deactivate it instead: it stays on those records but is no longer offered for new ones.`,
-          409,
-          'IN_USE',
-        )
+      const uses = await usesOf(req.params.id)
+      const toMove = uses.filter((u) => u.then === 'move')
+      const moveTo = typeof req.query.moveTo === 'string' ? req.query.moveTo : ''
+
+      let target: Record<string, any> | null = null
+      if (toMove.length) {
+        if (!moveTo) {
+          throw new AppError(
+            `${before.name ?? entityType} has ${sentence(toMove.map((u) => u.label))} that must belong to a ${entityType.toLowerCase()}. Choose one to move ${toMove.length === 1 && toMove[0].count === 1 ? 'it' : 'them'} to.`,
+            409,
+            'NEEDS_MOVE_TARGET',
+          )
+        }
+        if (moveTo === req.params.id) {
+          throw new AppError(`Choose a different ${entityType.toLowerCase()} to move them to`, 400, 'BAD_MOVE_TARGET')
+        }
+        target = await delegate().findUnique({ where: { id: moveTo } })
+        if (!target) {
+          throw new AppError(`The ${entityType.toLowerCase()} to move them to no longer exists`, 400, 'BAD_MOVE_TARGET')
+        }
       }
 
-      await delegate().delete({ where: { id: req.params.id } })
+      await prisma.$transaction(async (tx) => {
+        const t = tx as unknown as Record<string, any>
+        for (const u of uses) {
+          await t[u.model].updateMany({
+            where: { [u.field]: req.params.id },
+            data: { [u.field]: u.then === 'move' ? moveTo : null },
+          })
+        }
+        await t[model].delete({ where: { id: req.params.id } })
+        // A slow pooler once took ten seconds to answer; the default of five
+        // would abandon a delete that was only waiting.
+      }, { timeout: 20000 })
+
+      const moved = toMove.map((u) => u.label)
+      const blanked = uses.filter((u) => u.then === 'blank').map((u) => u.label)
       await writeAuditLog(req, {
         module,
         action: 'DELETE',
         entityType,
         entityId: req.params.id,
         before,
+        after: { deleted: true, movedTo: target ? { id: target.id, name: target.name } : null, moved, blanked },
       })
-      return res.json({ success: true, message: `${entityType} deleted` })
+
+      const parts = [
+        moved.length ? `${sentence(moved)} moved to ${target?.name}` : '',
+        blanked.length ? `${sentence(blanked)} left blank` : '',
+      ].filter(Boolean)
+      return res.json({
+        success: true,
+        message: `${before.name ?? entityType} deleted${parts.length ? `. ${parts.join('; ')}.` : ''}`,
+      })
     }
 
     if (softDelete) {
