@@ -75,6 +75,8 @@ const SECTION_ICONS: Record<string, LucideIcon> = {
   Other: FileText,
   'Identity & Contact': Tag,
   'Credit, Bank & Notes': CreditCard,
+  'Address & Terms': MapPin,
+  'Bank, MSME & Notes': Landmark,
   Style: Tag,
 }
 
@@ -188,6 +190,8 @@ interface MasterFormDialogProps<T> {
    * fields, like an item, and keeps the whole form on one screen.
    */
   columns?: 3 | 4
+  /** A wider card, for a master with many fields to set four across. */
+  wide?: boolean
 }
 
 export function MasterFormDialog<T extends { id: string }>({
@@ -199,6 +203,7 @@ export function MasterFormDialog<T extends { id: string }>({
   record,
   title,
   columns = 3,
+  wide = false,
 }: MasterFormDialogProps<T>) {
   const isEdit = Boolean(record)
   const client = useMemo(() => masterResource<T>(resource), [resource])
@@ -514,7 +519,7 @@ export function MasterFormDialog<T extends { id: string }>({
         noValidate
         // As tall as what it holds, up to the screen. A short master fills a
         // short card rather than a full-height one with a blank lower half.
-        className="glass-card po-form flex max-h-full w-full max-w-5xl flex-col self-center overflow-hidden"
+        className={`glass-card po-form flex max-h-full w-full ${wide ? 'max-w-6xl' : 'max-w-5xl'} flex-col self-center overflow-hidden`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="master-form-title"

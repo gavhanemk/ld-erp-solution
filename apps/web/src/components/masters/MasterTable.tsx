@@ -95,6 +95,8 @@ interface MasterTableProps<T> {
   formFields?: FormField[]
   /** Fields per row in the form on a wide screen. */
   formColumns?: 3 | 4
+  /** A wider form card, for a master with many fields (suppliers). */
+  formWide?: boolean
   /** Singular noun used in the dialog heading, e.g. "Customer". */
   entityName?: string
   /**
@@ -133,6 +135,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   emptyMessage = 'Nothing here yet.',
   formFields,
   formColumns,
+  formWide = false,
   entityName,
   filterDefs = [],
   allowDelete = false,
@@ -746,6 +749,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           record={editing}
           title={singular}
           columns={formColumns}
+          wide={formWide}
         />
       )}
     </div>

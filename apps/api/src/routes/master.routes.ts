@@ -6,6 +6,7 @@ import { buildTemplate, planImport, readSheet, runImport } from '../services/ite
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
 import * as customerImport from '../services/customerImport.service'
+import * as supplierImport from '../services/supplierImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
@@ -468,6 +469,52 @@ router.patch(
   }
 )
 
+/*
+ * Suppliers from a spreadsheet, as customers: check first, then all or
+ * nothing. New suppliers only; one already there is skipped. Ahead of the
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/suppliers/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await supplierImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'suppliers-with-current-list.xlsx' : 'suppliers-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/suppliers/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await supplierImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await supplierImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newSuppliers: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.supplier === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await supplierImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'SupplierImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'supplier' : 'suppliers'}.`
+      : 'Nothing to import: every supplier is already in the system.',
+    data: { summary, created },
+  })
+})
+
 router.use(
   '/suppliers',
   crudRouter({
@@ -478,9 +525,54 @@ router.use(
     updateSchema: updateSupplierSchema,
     // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
     uniqueFields: ['name', 'gstin'],
-    searchFields: ['name', 'code', 'gstin', 'phone', 'email'],
+    searchFields: ['name', 'code', 'gstin', 'phone', 'email', 'city'],
     sortableFields: ['name', 'code', 'createdAt', 'rating', 'leadTimeDays'],
     defaultSort: { field: 'name', order: 'asc' },
+    filters: {
+      category: { where: (v) => ({ category: { in: v } }), facets: ['category'] },
+      state: textFilter('state'),
+      city: textFilter('city'),
+      creditDays: {
+        where: (v) => ({ creditDays: { in: v.map(Number).filter(Number.isFinite) } }),
+        facets: ['creditDays'],
+      },
+      rating: {
+        where: (v) => {
+          const stars = v.filter((x) => x !== 'none').map(Number).filter(Number.isFinite)
+          const or: Record<string, unknown>[] = []
+          if (stars.length) or.push({ rating: { in: stars } })
+          if (v.includes('none')) or.push({ rating: null })
+          return { OR: or }
+        },
+        facets: ['rating'],
+      },
+      // Registered for GST or not: an unregistered supplier's order carries no GST.
+      gst: {
+        where: (v) =>
+          v.includes('registered') && v.includes('unregistered')
+            ? {}
+            : v.includes('registered')
+              ? { AND: [{ gstin: { not: null } }, { gstin: { not: '' } }] }
+              : { OR: [{ gstin: null }, { gstin: '' }] },
+        facets: ['gst'],
+      },
+      isPreferred: flagFilter('isPreferred'),
+      isMsme: flagFilter('isMsme'),
+    },
+    facets: ['category', 'state', 'city', 'creditDays', 'rating', 'gst', 'isPreferred', 'isMsme'],
+    customFacets: {
+      gst: async (where) => {
+        const [registered, unregistered] = await Promise.all([
+          prisma.supplier.count({ where: { AND: [where, { gstin: { not: null } }, { gstin: { not: '' } }] } }),
+          prisma.supplier.count({ where: { AND: [where, { OR: [{ gstin: null }, { gstin: '' }] }] } }),
+        ])
+        return { registered, unregistered }
+      },
+    },
+    exportSheet: {
+      fileName: 'suppliers',
+      build: (rows) => supplierImport.supplierWorkbook(rows, false),
+    },
   }),
 )
 
