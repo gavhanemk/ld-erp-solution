@@ -72,9 +72,9 @@ Indent Requisition → Provisional PO → Supplier Rates → Purchase Order
 
 | # | Stage | Old system states | Built here? |
 |---|---|---|---|
-| 1 | Indent Requisition — a department asks for something | PO Pending → PO Created | No |
-| 2 | Provisional PO — an enquiry, its own Enquiry No, sent to suppliers | — | No |
-| 3 | Supplier Rates — rates come back against the enquiry, compared | — | No |
+| 1 | Indent Requisition — a department asks for something | PO Pending → PO Created | **Yes** — `MaterialRequisition` lines marked `PURCHASE` wait on the buyer, and the order and enquiry forms both open onto them through *Select from indent* |
+| 2 | Provisional PO — an enquiry, its own Enquiry No, sent to suppliers | — | **Yes** — `PurchaseEnquiry`, numbered `ENQ` |
+| 3 | Supplier Rates — rates come back against the enquiry, compared | — | **Partly** — the supplier's proforma invoice is recorded against the enquiry, one supplier per enquiry. No side-by-side comparison across suppliers: ask three suppliers by raising three enquiries |
 | 4 | **Purchase Order** | Open/Approve → Partially Billed → Billed | **Yes** |
 | 5 | **Goods receipt (GRN)** | — | **Yes** |
 | 6 | QC on the GRN — approve/reject quantity, reason, per line | — | Yes, on one screen with receiving — see below |

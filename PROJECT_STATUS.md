@@ -1,9 +1,84 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 28 Sep 2026 — the BOM form trimmed to what is used_
+_Last updated: Mon 28 Sep 2026 — BOM costing and pricing_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## BOM costing and pricing (Mon 28 Sep)
+
+A BOM now carries what one garment costs to make and what it sells for, not
+just its material. The form has three steps, and each step saves before moving on:
+**1 Materials → 2 Costing → 3 Pricing.**
+
+**How it works:**
+
+- **Materials** is the form as it was.
+  - A "supplied by customer" tick per line was added on 28 Sep and removed the
+    same day, on request.
+  - Its database column (`bom_lines.customerSupplied`) was already applied, so it
+    stays. It is unused and always false.
+  - A cut-make-trim BOM therefore costs the customer's fabric like any other line.
+- **Costing** holds two tables:
+  - **Labour:** one row per job, in ₹ per piece, with an optional department.
+    **Fill from routing** copies in a routing's rated steps as a starting point.
+    It is a copy, not a link.
+  - **Overheads:** each one either ₹ per piece or a % of material + labour.
+- **Cost per piece** = material + labour + overhead, rounded to the paisa at
+  every step.
+- **Pricing:** type a **margin** and the price is worked out, or type the
+  **price** and the margin is worked back.
+  - The margin is a share of the selling price: at 20%, price = cost ÷ 0.80.
+  - The price is rounded **up** to the rupee, before GST. The GST figure shown
+    uses the default rate in Settings.
+  - A price below cost is allowed, with a warning. A price below half the cost is
+    refused as a probable typo.
+
+**Rules:**
+
+- **Who sees costing:** only people with **masters: approve**, which today is
+  Admin and MD. The API leaves labour, overhead, cost, margin and price out of
+  every answer for anyone else, who still get the materials step exactly as
+  before. Giving a merchandiser that right is a role setting under Settings.
+- **Approve locks the costing, not the price.** Materials and costing are frozen
+  with the BOM. The price stays editable after approval, through
+  `PATCH /masters/bom/:id/price`, and every change goes to the audit log.
+- **A draft's price follows its margin.** If the cost of a draft changes, its
+  price is worked out again from the saved margin.
+- **Copy** carries over the costing rows, the margin and the price, but not who
+  priced it.
+- **The AI assistant is unchanged:** it still reports material cost only, so it
+  cannot quote a price to someone who may not see one.
+
+**The BOM list:**
+
+- Approvers see cost and price on each row.
+- The expanded view shows Material + Labour + Overhead = Cost per piece, then the
+  selling price, margin and profit.
+- The old "Labour — making steps" table, which showed demo routing rates, is
+  replaced by the BOM's own labour and overhead rows.
+
+**Database:** migration `20260928100000_bom_costing_and_pricing`, applied to the
+shared database on 28 Sep. See `MIGRATION-NOTES.md`.
+
+**Tested:**
+
+- Type-check passes for both apps, and `next build` passes.
+- All three steps were rendered with sample data in both themes, and as a user
+  without approve rights.
+- The save requests were checked for a draft, an approved BOM and a non-approver.
+- The migration was dry-run in a rolled-back transaction, then applied, and its
+  results were read back.
+- **Not yet tried by hand against the live API.**
+
+**Not in this step:**
+
+- actual cost after production (Phase 5)
+- a price per buyer, or prices filled into sales orders
+- broker commission
+- a price-history screen (the audit log holds it)
 
 ---
 

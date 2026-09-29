@@ -59,8 +59,30 @@ export const AttachmentsBox = forwardRef<
         wants to show it somewhere the ref itself cannot reach — a folded
         section's own summary line, say, which has to re-render to update. */
     onCountChange?: (count: number) => void
+    /**
+     * Extra fields sent with each attach, for a document that files its files
+     * under something narrower than itself.
+     *
+     * A purchase enquiry is the one that needs it: a drawing belongs to the
+     * enquiry and every supplier gets the same one, but a scanned proforma
+     * invoice belongs to the supplier who sent it, and three unlabelled PDFs in
+     * one list is not a filing system. The box does not know or care what the
+     * fields mean — it passes them through.
+     */
+    extraBody?: Record<string, unknown>
+    /**
+     * Which of the document's files this box is showing.
+     *
+     * Applied to what the server returns, so a box scoped to one supplier does
+     * not list another's paperwork. Absent shows everything, which is what every
+     * caller but the enquiry wants.
+     */
+    filter?: (file: Attachment) => boolean
   }
->(function AttachmentsBox({ basePath, linkBasePath, recordId, onError, onCountChange }, ref) {
+>(function AttachmentsBox(
+  { basePath, linkBasePath, recordId, onError, onCountChange, extraBody, filter },
+  ref
+) {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [uploading, setUploading] = useState(false)
@@ -80,7 +102,7 @@ export const AttachmentsBox = forwardRef<
     void (async () => {
       try {
         const res = await api.get<{ data: Attachment[] }>(`${basePath}/${recordId}/attachments`)
-        if (!cancelled) setAttachments(res.data)
+        if (!cancelled) setAttachments(filter ? res.data.filter(filter) : res.data)
       } catch {
         // Silent. The document itself has already loaded; a failed file list
         // is not worth a banner over, and the box below simply reads empty.
@@ -89,6 +111,8 @@ export const AttachmentsBox = forwardRef<
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `filter` is an
+    // inline closure on most callers and would refetch on every render.
   }, [basePath, recordId])
 
   const uploadOne = async (file: File, id: string): Promise<Attachment> => {
@@ -111,6 +135,7 @@ export const AttachmentsBox = forwardRef<
     const saved = await api.post<{ data: Attachment }>(`${basePath}/${id}/attachments`, {
       fileName: file.name,
       storagePath: signed.data.storagePath,
+      ...extraBody,
     })
     return saved.data
   }

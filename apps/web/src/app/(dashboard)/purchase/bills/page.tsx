@@ -17,6 +17,8 @@ import {
   Paperclip,
   FileText,
   Undo2,
+  PackageMinus,
+  Wallet,
 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
@@ -34,6 +36,7 @@ import {
 } from '@/lib/export'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { PurchaseNoteDialog } from '@/components/purchase/PurchaseNoteDialog'
+import { ReturnChallanDialog } from '@/components/purchase/ReturnChallanDialog'
 import { FilesCell } from '@/components/tables/FilesCell'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
@@ -128,7 +131,11 @@ function PurchaseBillsTable() {
     }
   }, [])
   const [busy, setBusy] = useState(false)
-  const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseBill | null }>({
+  const [dialog, setDialog] = useState<{
+    open: boolean
+    record: PurchaseBill | null
+    expense?: boolean
+  }>({
     open: false,
     record: null,
   })
@@ -149,6 +156,20 @@ function PurchaseBillsTable() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const fromGrn = searchParams.get('fromGrn')
+
+  /*
+   * A search handed over in the address — the link from a return challan to
+   * the document next to it in the chain. Without it the link lands on the
+   * whole list and the clerk types the number they just clicked.
+   */
+  useEffect(() => {
+    const q = searchParams.get('q')
+    if (q) {
+      setSearch(q)
+      setDebounced(q)
+    }
+  }, [searchParams])
+
   /**
    * One receipt, or several separated by commas.
    *
@@ -337,6 +358,8 @@ function PurchaseBillsTable() {
   /** What can be done to one bill, in words, behind a single Actions button. */
   /** The bill a note is being raised against, if any. */
   const [adjusting, setAdjusting] = useState<PurchaseBill | null>(null)
+  /** The bill goods are being sent back against, on a return challan. */
+  const [returning, setReturning] = useState<PurchaseBill | null>(null)
 
   const billActions = (bill: PurchaseBill): RowAction[] => {
     const items: RowAction[] = [
@@ -356,24 +379,37 @@ function PurchaseBillsTable() {
     ]
 
     /*
-     * Raising the adjustment from the bill it adjusts.
+     * Two ways to take something back off a bill, because they are two
+     * different events signed by two different people.
      *
-     * This is where the accounts desk is standing when they find the problem —
-     * the invoice is open in front of them. Reaching the same place by opening
-     * Debit Notes, pressing New, picking the supplier and then finding this
-     * bill again is four steps to arrive where they already were.
+     * Goods physically going back leave on a return challan — the gate pass
+     * the godown loads the vehicle against. Saving it takes the stock out and
+     * writes the debit note for accounts, so the chain reads Bill → Challan →
+     * Note and nothing leaves the gate without paper.
      *
-     * Offered on a cancelled bill too, and refused by the server with a reason,
-     * because "nothing left to adjust" is a better answer than a missing menu
-     * item somebody spends a minute hunting for.
+     * A rate difference or a discount agreed after the bill moves nothing, and
+     * goes straight onto a debit note against the bill. That form only offers
+     * the reasons where nothing leaves the godown, so a material return cannot
+     * slip through it without a challan.
+     *
+     * Raised from the bill because that is where the desk is standing when the
+     * problem is found — the invoice is open in front of them.
      */
     if (bill.status !== 'CANCELLED') {
-      items.push({
-        key: 'adjust',
-        label: 'Raise a debit note',
-        icon: <Undo2 size={14} />,
-        onClick: () => setAdjusting(bill),
-      })
+      items.push(
+        {
+          key: 'return',
+          label: 'Create return challan (material return)',
+          icon: <PackageMinus size={14} />,
+          onClick: () => setReturning(bill),
+        },
+        {
+          key: 'adjust',
+          label: 'Raise direct debit note (rate / financial difference only)',
+          icon: <Undo2 size={14} />,
+          onClick: () => setAdjusting(bill),
+        }
+      )
     }
     // A bill can be corrected right up until a payment lands against it —
     // after that it is part of the payment record, and cancelling or a debit
@@ -423,6 +459,17 @@ function PurchaseBillsTable() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
+          {/* Beside Book Bill, not inside it: a bill with no order and no
+            receipt behind it — electricity, rent, a repair — has nothing for
+            the deliveries half of the ordinary form to find. */}
+          <button
+            className="btn-secondary"
+            onClick={() => setDialog({ open: true, record: null, expense: true })}
+            aria-label="Expense bill (no PO)"
+            title="Electricity, rent, repairs, services — a bill with no order or receipt"
+          >
+            <Wallet size={15} /> <span className="hidden sm:inline">Expense bill</span>
+          </button>
           <button
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}
@@ -659,7 +706,7 @@ function PurchaseBillsTable() {
                         {receiptsOn(bill).length ? (
                           <span className="font-mono">{receiptsOn(bill).join(', ')}</span>
                         ) : (
-                          <span className="text-muted-foreground">Direct</span>
+                          <span className="text-muted-foreground">Expense (no PO)</span>
                         )}
                         {fileCountOn(bill) > 0 && (
                           // Pressable here too. On the card this was a count
@@ -838,9 +885,9 @@ function PurchaseBillsTable() {
                               ) : (
                                 <span
                                   className="text-muted-foreground"
-                                  title="Entered by hand — a service or transport bill with no goods receipt behind it"
+                                  title="Entered by hand — an expense or service bill with no order or receipt behind it"
                                 >
-                                  Direct
+                                  Expense (no PO)
                                 </span>
                               )}
                             </div>
@@ -953,6 +1000,7 @@ function PurchaseBillsTable() {
       <PurchaseBillDialog
         open={dialog.open}
         record={dialog.record}
+        expense={dialog.expense}
         initialGrnIds={fromGrnIds}
         onClose={() => {
           setDialog({ open: false, record: null })
@@ -981,9 +1029,25 @@ function PurchaseBillsTable() {
         open={Boolean(adjusting)}
         moduleType="OUR_DEBIT_NOTE"
         initialBillId={adjusting?.id ?? null}
+        financialOnly
         onClose={() => setAdjusting(null)}
         onSaved={() => void load()}
       />
+
+      {returning && (
+        <ReturnChallanDialog
+          billId={returning.id}
+          onClose={() => setReturning(null)}
+          onSaved={(msg, id) => {
+            setReturning(null)
+            setMessage(msg)
+            void load()
+            // The gate pass is what the vehicle leaves with, so it opens now
+            // rather than being something to go and find afterwards.
+            window.open('/print/purchase-return/' + id, '_blank', 'noopener')
+          }}
+        />
+      )}
     </div>
   )
 }

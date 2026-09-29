@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
+import Link from 'next/link'
 import { X, Loader2, AlertCircle, Search } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
@@ -227,9 +228,25 @@ export function IndentItemsDialog({
             <div className="px-4 py-10 text-center">
               <p className="text-muted-foreground text-sm">
                 {rows.length === 0
-                  ? 'Nothing is waiting to be bought. A requisition line only appears here once it is approved and marked “Buy it”.'
+                  ? 'Nothing is waiting to be bought.'
                   : 'Nothing matches that. Clear the search to see the rest.'}
               </p>
+              {/* Where these come from, said on the screen that has none.
+                "Indent" is the mill's word and "Material Requisition" is this
+                system's, and somebody looking at an empty list needs to be told
+                both — and told which two conditions a line has to meet before it
+                arrives here, because neither is obvious from the purchase side. */}
+              {rows.length === 0 && (
+                <p className="text-muted-foreground mx-auto mt-2 max-w-md text-xs">
+                  Indents are raised in{' '}
+                  <Link href="/inventory/requisitions" className="text-primary hover:underline">
+                    Inventory &rarr; Requisitions
+                  </Link>
+                  . A line reaches this list once its requisition is{' '}
+                  <span className="text-foreground">approved</span> and the line is marked{' '}
+                  <span className="text-foreground">Buy it</span> rather than issued from stock.
+                </p>
+              )}
             </div>
           ) : (
             <div className="p-4">

@@ -837,6 +837,8 @@ export async function moveNoteStock(
     effect: PurchaseNoteEffect
     warehouseId: string | null
     noteDate: Date
+    /** The return challan the note was raised from, if any. */
+    returnId?: string | null
     lines: Array<{
       itemId: string
       qty: Prisma.Decimal | number
@@ -846,6 +848,14 @@ export async function moveNoteStock(
   /** POST moves the goods the way the note says; REVERSE puts them back. */
   mode: 'POST' | 'REVERSE'
 ): Promise<number> {
+  /*
+   * A note raised from a return challan is the money side of goods that have
+   * already gone. The challan took them off the rack at the gate; moving them
+   * again here would take the same rolls out twice. Checked on the link, not
+   * on the warehouse being empty, because the note form lets somebody fill in
+   * a godown and the rule must not depend on them leaving it blank.
+   */
+  if (note.returnId) return 0
   if (!note.warehouseId || !REASON_RULES[note.reason].movesGoods) return 0
 
   const natural = note.effect === 'REDUCES_PAYABLE' ? 'OUT' : 'IN'
@@ -913,4 +923,37 @@ export function assertEditable(status: string, noteNumber: string): void {
       'NOT_EDITABLE'
     )
   }
+}
+
+/**
+ * The state a supplier is in for tax, read once and frozen onto the note.
+ *
+ * Copied from the bill where there is one, because an adjustment has to carry
+ * the same split as the document it corrects — a CGST bill credited with IGST
+ * leaves a difference on the GST return that nobody can clear.
+ */
+export async function taxContextFor(
+  tx: Prisma.TransactionClient,
+  supplierId: string,
+  billId: string | null | undefined
+): Promise<boolean> {
+  if (billId) {
+    const bill = await tx.purchaseInvoice.findUnique({
+      where: { id: billId },
+      select: { igst: true, cgst: true, sgst: true },
+    })
+    if (bill && (Number(bill.igst) > 0 || Number(bill.cgst) > 0 || Number(bill.sgst) > 0)) {
+      return Number(bill.igst) <= 0
+    }
+  }
+
+  const [company, supplier] = await Promise.all([
+    tx.company.findFirst({ select: { stateCode: true, gstin: true } }),
+    tx.supplier.findUnique({ where: { id: supplierId }, select: { stateCode: true, gstin: true } }),
+  ])
+  const ours = company?.stateCode || company?.gstin?.slice(0, 2)
+  const theirs = supplier?.stateCode || supplier?.gstin?.slice(0, 2)
+  // An unregistered supplier carries no split to make, and a note against them
+  // carries no tax either. Treated as intra-state so nothing lands in IGST.
+  return !theirs || !ours || theirs === ours
 }

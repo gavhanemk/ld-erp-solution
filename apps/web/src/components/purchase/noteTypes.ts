@@ -98,6 +98,17 @@ export interface PurchaseNote {
   withoutBillReason: string | null
   po: { id: string; poNumber: string; poDate: string } | null
   grn: { id: string; grnNumber: string; grnDate: string } | null
+  /**
+   * The return challan this note was raised from, when goods physically went
+   * back. Such a note never moves stock, and its items and quantities follow
+   * the challan — only its rate and GST are accounts' to change.
+   */
+  purchaseReturn?: {
+    id: string
+    returnNumber: string
+    status: 'DISPATCHED' | 'CANCELLED'
+    returnDate: string
+  } | null
 
   noteDate: string
   supplierDocNo: string | null

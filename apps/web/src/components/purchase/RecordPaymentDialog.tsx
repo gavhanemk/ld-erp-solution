@@ -295,7 +295,14 @@ export function RecordPaymentDialog({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <button type="button" className="btn-primary" onClick={save} disabled={busy}>
+            {/* Desktop only: on a phone the footer has it, and a second
+              copy here squeezed the title to "Rec…". */}
+            <button
+              type="button"
+              className="btn-primary hidden md:inline-flex"
+              onClick={save}
+              disabled={busy}
+            >
               {busy ? <Loader2 size={15} className="animate-spin" /> : <IndianRupee size={15} />}
               Record payment
             </button>
