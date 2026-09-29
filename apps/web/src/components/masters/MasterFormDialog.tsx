@@ -127,6 +127,16 @@ export interface FormField {
   resets?: string[]
   /** Height of a textarea, in lines. */
   rows?: number
+  /**
+   * Must be filled on this form, though the API allows it empty. True, or
+   * 'ifOptions' for a list that is only asked for when it has something in
+   * it: a sub-category, when the category chosen has any.
+   *
+   * On the form rather than in the API because other screens create the
+   * same record more briefly (a purchase order's quick "new item" has no
+   * department), and they must keep working.
+   */
+  mustFill?: boolean | 'ifOptions'
   /** Short hint rendered under the input. */
   help?: string
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
@@ -354,8 +364,32 @@ export function MasterFormDialog<T extends { id: string }>({
     return payload
   }
 
+  // Whether this form insists on a field, given what is in its list now.
+  const insists = (f: FormField) =>
+    f.mustFill === true || (f.mustFill === 'ifOptions' && (optionsFor(f)?.length ?? 0) > 0)
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
+
+    const unfilled = fields.filter(
+      (f) => !f.generated && insists(f) && (values[f.name] === '' || values[f.name] == null),
+    )
+    if (unfilled.length) {
+      setFieldErrors(
+        Object.fromEntries(
+          unfilled.map((f) => [
+            f.name,
+            f.type === 'select' ? `Choose a ${f.label.toLowerCase()}` : `${f.label} is needed`,
+          ]),
+        ),
+      )
+      setFormError(
+        `Could not save. Check ${unfilled.map((f) => f.label).join(', ')} — the problem is marked in red below.`,
+      )
+      bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
+
     setSaving(true)
     setFormError(null)
     setFieldErrors({})
@@ -514,6 +548,7 @@ export function MasterFormDialog<T extends { id: string }>({
                     error={fieldErrors[f.name]}
                     options={optionsFor(f)}
                     columns={columns}
+                    starred={Boolean(f.required) || insists(f)}
                     onChange={(v) => set(f.name, v)}
                   />
                 ))}
@@ -557,6 +592,7 @@ function Field({
   error,
   options,
   columns,
+  starred,
   onChange,
 }: {
   field: FormField
@@ -564,6 +600,8 @@ function Field({
   error?: string
   options?: { value: string; label: string }[]
   columns: 3 | 4
+  /** Shows the red asterisk: required by the API, or by this form. */
+  starred: boolean
   onChange: (v: unknown) => void
 }) {
   const type = field.type ?? 'text'
@@ -605,7 +643,7 @@ function Field({
     <div className={wrapper}>
       <label className="form-label" htmlFor={field.name}>
         {field.label}
-        {field.required && <span className="text-red-400 ml-0.5">*</span>}
+        {starred && <span className="text-red-400 ml-0.5">*</span>}
       </label>
 
       {type === 'textarea' && (

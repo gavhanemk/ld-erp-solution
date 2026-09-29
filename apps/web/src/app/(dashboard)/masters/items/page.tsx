@@ -29,6 +29,7 @@ interface Item {
   isActive: boolean
   category: { id: string; name: string; parentId: string | null; parent?: { name: string } | null } | null
   departmentId: string | null
+  department?: { id: string; name: string; code: string } | null
   uom: { id: string; name: string; symbol: string } | null
 }
 
@@ -81,6 +82,12 @@ const columnsFor = (toReorder: Map<string, number>): Column<Item>[] => [
     header: 'Sub Category',
     render: (i) =>
       i.category?.parent ? i.category.name : <span className="text-muted-foreground">—</span>,
+  },
+  // Which department uses it: the column the list is most often read by.
+  {
+    key: 'department',
+    header: 'Department',
+    render: (i) => i.department?.name ?? <span className="text-muted-foreground">—</span>,
   },
   {
     key: 'uom',
@@ -195,6 +202,7 @@ const formFields: FormField[] = [
     section: 'Identity',
     sendAs: 'categoryId',
     emptyLabel: 'None under this category',
+    mustFill: 'ifOptions',
     optionsFrom: {
       resource: 'item-categories',
       filter: (row, values) => Boolean(values.mainCategoryId) && row.parentId === values.mainCategoryId,
@@ -209,6 +217,7 @@ const formFields: FormField[] = [
     label: 'Department',
     type: 'select',
     section: 'Identity',
+    mustFill: true,
     optionsFrom: { resource: 'departments' },
   },
   {
