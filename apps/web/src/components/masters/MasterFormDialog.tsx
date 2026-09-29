@@ -534,7 +534,9 @@ export function MasterFormDialog<T extends { id: string }>({
                   ? codeValue
                     ? `${codeValue} · changes apply to new documents from now on`
                     : 'Changes apply to new documents from now on'
-                  : 'The code is given by the system when you save'}
+                  : fields.some((f) => f.name === 'code')
+                    ? 'Nothing is saved until you press Save'
+                    : 'The code is given by the system when you save'}
               </p>
             </div>
           </div>

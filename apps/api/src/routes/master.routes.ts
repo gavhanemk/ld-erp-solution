@@ -4,6 +4,7 @@ import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
+import * as styleImport from '../services/styleImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
@@ -485,6 +486,67 @@ router.use(
   }),
 )
 
+/*
+ * Styles from a spreadsheet, as items and categories: check first, then all
+ * or nothing. New styles only; one already there is skipped. Ahead of the
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/styles/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await styleImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'styles-with-current-list.xlsx' : 'styles-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/styles/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await styleImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await styleImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newStyles: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.style === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await styleImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'StyleImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'style' : 'styles'}.`
+      : 'Nothing to import: every style is already in the system.',
+    data: { summary, created },
+  })
+})
+
+/**
+ * A filter on a typed-in column (garment, season, fabric, fit): the exact
+ * values picked, and 'none' for the styles with nothing typed.
+ */
+const textFilter = (field: string) => ({
+  where: (v: string[]) => {
+    const values = v.filter((x) => x !== 'none')
+    const or: Record<string, unknown>[] = []
+    if (values.length) or.push({ [field]: { in: values } })
+    if (v.includes('none')) or.push({ [field]: null }, { [field]: '' })
+    return { OR: or }
+  },
+  facets: [field],
+})
+
 router.use(
   '/styles',
   crudRouter({
@@ -497,6 +559,48 @@ router.use(
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
     include: { sizeGroup: { select: { id: true, name: true } } },
+    filters: {
+      brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
+      category: textFilter('category'),
+      season: textFilter('season'),
+      fabricType: textFilter('fabricType'),
+      fit: textFilter('fit'),
+      sizeGroupId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) or.push({ sizeGroupId: { in: ids } })
+          if (v.includes('none')) or.push({ sizeGroupId: null })
+          return { OR: or }
+        },
+        facets: ['sizeGroupId'],
+      },
+      // Styles made in any of the colours picked.
+      colour: {
+        where: (v) => {
+          const colours = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (colours.length) or.push({ colors: { hasSome: colours } })
+          if (v.includes('none')) or.push({ colors: { isEmpty: true } })
+          return { OR: or }
+        },
+        facets: ['colour'],
+      },
+    },
+    facets: ['brandType', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
+    // Colours are a list on each style, so they are counted one by one: a
+    // style in White and Navy counts once under each.
+    customFacets: {
+      colour: async (where) => {
+        const rows = await prisma.style.findMany({ where, select: { colors: true } })
+        const counts: Record<string, number> = {}
+        for (const r of rows) {
+          for (const c of new Set(r.colors.map((x) => x.trim()).filter(Boolean))) counts[c] = (counts[c] ?? 0) + 1
+          if (r.colors.length === 0) counts.none = (counts.none ?? 0) + 1
+        }
+        return counts
+      },
+    },
   }),
 )
 

@@ -1,7 +1,10 @@
 'use client'
 
-import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import { useState } from 'react'
+import { FileSpreadsheet } from 'lucide-react'
+import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { ImportStylesDialog } from '@/components/masters/ImportStylesDialog'
 
 interface Style {
   id: string
@@ -97,56 +100,110 @@ const columns: Column<Style>[] = [
   { key: 'isActive', header: 'Status', render: (s) => <ActiveBadge isActive={s.isActive} /> },
 ]
 
+/*
+ * Four across, so the whole style fits without scrolling: what it is on the
+ * first rows, how it is made on the next, and the size run beside its
+ * colours on the last.
+ */
 const formFields: FormField[] = [
-  { name: 'code', label: 'Style Code', required: true, placeholder: 'SS-SLIM-101', section: 'Identity' },
-  { name: 'name', label: 'Style Name', required: true, placeholder: 'Slim Fit Formal Shirt', section: 'Identity' },
+  { name: 'code', label: 'Style Code', required: true, placeholder: 'LD-SH-2701', section: 'Style' },
+  {
+    name: 'name',
+    label: 'Style Name',
+    required: true,
+    placeholder: 'Slim Fit Formal Shirt',
+    section: 'Style',
+    span: 2,
+  },
   {
     name: 'brandType',
     label: 'Brand',
     type: 'select',
     required: true,
-    section: 'Identity',
+    section: 'Style',
     options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
   },
-  { name: 'category', label: 'Garment Type', section: 'Identity', placeholder: 'Shirt' },
-  { name: 'season', label: 'Season', section: 'Identity', placeholder: 'SS26' },
+  { name: 'category', label: 'Garment Type', section: 'Style', placeholder: 'Shirt' },
+  { name: 'season', label: 'Season', section: 'Style', placeholder: 'SS-26' },
+  { name: 'fabricType', label: 'Fabric', section: 'Style', placeholder: 'Cotton Poplin' },
+  { name: 'gsm', label: 'GSM', type: 'number', section: 'Style', placeholder: '120' },
   { name: 'collarType', label: 'Collar Type', section: 'Construction', placeholder: 'Cutaway' },
   { name: 'sleeveType', label: 'Sleeve Type', section: 'Construction', placeholder: 'Full sleeve' },
   { name: 'fit', label: 'Fit', section: 'Construction', placeholder: 'Slim' },
-  { name: 'fabricType', label: 'Fabric', section: 'Construction', placeholder: 'Cotton Poplin' },
-  { name: 'gsm', label: 'GSM', type: 'number', section: 'Construction', placeholder: '120' },
   {
     name: 'sizeGroupId',
     label: 'Size Run',
     type: 'select',
     section: 'Size & Colour',
-    span: 2,
     optionsFrom: { resource: 'size-groups' },
-    help: 'The named size run this style is cut in, so quantities reconcile from order to invoice',
+    help: 'The sizes it is cut in',
   },
   {
     name: 'colors',
     label: 'Colours',
     type: 'tags',
     section: 'Size & Colour',
-    span: 2,
+    span: 3,
     placeholder: 'White, Sky Blue, Navy',
     help: 'Separate colours with commas',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Size & Colour' },
 ]
 
+/*
+ * A dropdown for each thing a style is picked out by. Garment, season,
+ * fabric, fit and colour are typed on the style, so their choices are the
+ * values in use; each counts what it would leave.
+ */
+const filterDefs: FilterDef[] = [
+  {
+    key: 'brandType',
+    label: 'Brand',
+    facet: 'brandType',
+    options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
+  },
+  { key: 'category', label: 'Garment', facet: 'category', valuesFromFacet: true, noneLabel: 'Not set' },
+  { key: 'season', label: 'Season', facet: 'season', valuesFromFacet: true, noneLabel: 'Not set' },
+  { key: 'fabricType', label: 'Fabric', facet: 'fabricType', valuesFromFacet: true, noneLabel: 'Not set' },
+  { key: 'fit', label: 'Fit', facet: 'fit', valuesFromFacet: true, noneLabel: 'Not set' },
+  {
+    key: 'sizeGroupId',
+    label: 'Size Run',
+    facet: 'sizeGroupId',
+    optionsFrom: { resource: 'size-groups' },
+    noneLabel: 'No size run',
+  },
+  { key: 'colour', label: 'Colour', facet: 'colour', valuesFromFacet: true, noneLabel: 'No colours' },
+]
+
 export default function StylesPage() {
+  const [importing, setImporting] = useState(false)
+  // Bumped after an import, so the list and its filter counts reload.
+  const [refreshKey, setRefreshKey] = useState(0)
+
   return (
-    <MasterTable<Style>
-      title="Styles & SKUs"
-      entityName="Style"
-      resource="styles"
-      columns={columns}
-      formFields={formFields}
-      defaultSort="code"
-      searchPlaceholder="Search style code, name, season, fabric..."
-      emptyMessage="No styles yet. Add a style, then build its bill of materials."
-    />
+    <>
+      <MasterTable<Style>
+        title="Styles & SKUs"
+        entityName="Style"
+        resource="styles"
+        columns={columns}
+        formFields={formFields}
+        formColumns={4}
+        filterDefs={filterDefs}
+        defaultSort="code"
+        searchPlaceholder="Search style code, name, season, fabric..."
+        emptyMessage="No styles yet. Add a style, then build its bill of materials."
+        refreshKey={refreshKey}
+        actions={
+          <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+            <FileSpreadsheet size={16} /> Import
+          </button>
+        }
+      />
+      {importing && (
+        <ImportStylesDialog onClose={() => setImporting(false)} onImported={() => setRefreshKey((k) => k + 1)} />
+      )}
+    </>
   )
 }

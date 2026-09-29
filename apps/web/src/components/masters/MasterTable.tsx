@@ -54,6 +54,12 @@ export interface FilterDef {
   /** The facet whose counts label each choice. */
   facet?: string
   /**
+   * Or choices read off the facet itself, for a typed-in column with no
+   * master behind it (a style's season, fabric, fit): every value in use,
+   * each its own label.
+   */
+  valuesFromFacet?: boolean
+  /**
    * For a count that has to be added up rather than read off: a main
    * category counts the items under its sub-categories too.
    */
@@ -228,6 +234,10 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
       })
   }, [narrowing, resource, hasFacets])
 
+  // Every value a facet-fed dropdown has offered, so a value the other
+  // filters narrow to nought stays in its list with 0 rather than vanishing.
+  const facetValuesSeen = useRef<Record<string, Set<string>>>({})
+
   const choicesFor = (def: FilterDef): FilterChoice[] | undefined => {
     const counts = def.facet && facetCounts ? (facetCounts[def.facet] ?? {}) : undefined
     const countOf = (value: string, rows: Row[]) =>
@@ -238,7 +248,20 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           : (counts[value] ?? 0)
 
     let list: FilterChoice[]
-    if (def.optionsFrom) {
+    if (def.valuesFromFacet) {
+      if (!counts) return undefined
+      const seen = (facetValuesSeen.current[def.key] ??= new Set())
+      for (const v of Object.keys(counts)) if (v && v !== 'none') seen.add(v)
+      for (const v of picked[def.key] ?? []) if (v !== 'none') seen.add(v)
+      list = [...seen]
+        .sort((a, b) => a.localeCompare(b))
+        .map((v) => ({ value: v, label: v, count: counts[v] ?? 0 }))
+      // Typed-in columns hold both nothing and an empty string; both are "not set".
+      if (def.noneLabel) {
+        list.push({ value: 'none', label: def.noneLabel, count: (counts.none ?? 0) + (counts[''] ?? 0) })
+      }
+      return list
+    } else if (def.optionsFrom) {
       const rows = filterRows[def.key]
       if (!rows) return undefined
       const { filter, label } = def.optionsFrom
