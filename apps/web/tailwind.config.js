@@ -41,6 +41,13 @@ module.exports = {
           foreground: 'hsl(var(--destructive-foreground))',
         },
         border: 'hsl(var(--border))',
+        /* A field is two colours: what it is filled with, and the edge that
+           says where it begins. `bg-field` and `border-field-edge`. The edge
+           is deliberately not `--border` — see globals.css for why. */
+        field: {
+          DEFAULT: 'hsl(var(--field))',
+          edge: 'hsl(var(--field-border))',
+        },
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
         // Brand Colors

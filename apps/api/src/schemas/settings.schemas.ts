@@ -133,6 +133,18 @@ export const createTaxRateSchema = z.object({
 
 export const updateTaxRateSchema = createTaxRateSchema.partial()
 
+// ── TDS sections ─────────────────────────────────────────────────────────────
+
+export const createTdsSectionSchema = z.object({
+  section: z.string().min(1, 'Section is required').max(20),
+  label: z.string().min(1, 'Label is required').max(80),
+  rate: z.number().min(0, 'Cannot be negative').max(100, 'Cannot exceed 100%'),
+  isDefault: z.boolean().default(false),
+  isActive: z.boolean().default(true),
+})
+
+export const updateTdsSectionSchema = createTdsSectionSchema.partial()
+
 // ── Preferences ──────────────────────────────────────────────────────────────
 
 export interface PreferenceDefinition {
@@ -209,17 +221,6 @@ export const PREFERENCES: PreferenceDefinition[] = [
     min: 1,
     max: 30,
     affects: 'Dashboard pending approvals',
-  },
-  {
-    key: 'grnOverReceiptTolerancePercent',
-    label: 'Allow receiving over the ordered quantity by',
-    help: 'A delivery within this percentage of the order is booked in without asking anything. Past it, receiving still goes through, but a reason has to be typed and is kept on the receipt.',
-    group: 'Purchase',
-    type: 'number',
-    default: 2,
-    min: 0,
-    max: 25,
-    affects: 'Receiving goods against a purchase order',
   },
 ]
 

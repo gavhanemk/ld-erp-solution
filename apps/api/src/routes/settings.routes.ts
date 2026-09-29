@@ -13,12 +13,14 @@ import {
   createNumberSeriesSchema,
   createRoleSchema,
   createTaxRateSchema,
+  createTdsSectionSchema,
   createUserSchema,
   preferencesPatchSchema,
   resetPasswordSchema,
   updateNumberSeriesSchema,
   updateRoleSchema,
   updateTaxRateSchema,
+  updateTdsSectionSchema,
   updateUserSchema,
   withDefaults,
 } from '../schemas/settings.schemas'
@@ -766,6 +768,86 @@ router.delete('/tax-rates/:id', requirePermission(SETTINGS, 'delete'), async (re
   })
 
   res.json({ success: true, message: `${before.name} is no longer offered on new documents.` })
+})
+
+// ═══════════════════════════════════════════
+// TDS SECTIONS
+// ═══════════════════════════════════════════
+
+router.get('/tds-sections', requirePermission(SETTINGS, 'view'), async (_req, res) => {
+  const sections = await prisma.tdsSection.findMany({
+    where: { companyId: await companyId() },
+    orderBy: [{ section: 'asc' }, { rate: 'asc' }],
+  })
+  res.json({ success: true, data: sections.map((s) => ({ ...s, rate: Number(s.rate) })) })
+})
+
+router.post('/tds-sections', requirePermission(SETTINGS, 'create'), async (req: AuthRequest, res) => {
+  const data = createTdsSectionSchema.parse(req.body)
+  const company = await companyId()
+
+  const created = await prisma.$transaction(async (tx) => {
+    if (data.isDefault) await tx.tdsSection.updateMany({ where: { companyId: company }, data: { isDefault: false } })
+    return tx.tdsSection.create({ data: { ...data, companyId: company } })
+  })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'CREATE',
+    entityType: 'TdsSection',
+    entityId: created.id,
+    after: created,
+  })
+
+  res.status(201).json({ success: true, data: { ...created, rate: Number(created.rate) } })
+})
+
+router.patch('/tds-sections/:id', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const data = updateTdsSectionSchema.parse(req.body)
+
+  const before = await prisma.tdsSection.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('TDS section not found', 404, 'NOT_FOUND')
+
+  // Exactly one section may be the default, so setting a new one clears the rest
+  // in the same transaction.
+  const after = await prisma.$transaction(async (tx) => {
+    if (data.isDefault) {
+      await tx.tdsSection.updateMany({
+        where: { companyId: before.companyId, id: { not: before.id } },
+        data: { isDefault: false },
+      })
+    }
+    return tx.tdsSection.update({ where: { id: before.id }, data })
+  })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'TdsSection',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, data: { ...after, rate: Number(after.rate) } })
+})
+
+router.delete('/tds-sections/:id', requirePermission(SETTINGS, 'delete'), async (req: AuthRequest, res) => {
+  const before = await prisma.tdsSection.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('TDS section not found', 404, 'NOT_FOUND')
+
+  const after = await prisma.tdsSection.update({ where: { id: before.id }, data: { isActive: false } })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'DELETE',
+    entityType: 'TdsSection',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, message: `${before.label} is no longer offered on new documents.` })
 })
 
 // ═══════════════════════════════════════════

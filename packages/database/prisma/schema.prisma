@@ -111,6 +111,12 @@ enum VoucherType {
   CONTRA
 }
 
+/// Whether a supplier payment still settles anything.
+enum PaymentStatus {
+  POSTED
+  REVERSED
+}
+
 enum PaymentMode {
   CASH
   CHEQUE
@@ -231,6 +237,30 @@ enum NoteStatus {
   CANCELLED
 }
 
+/// Where a bill of materials is in its life. A costing being typed and a
+/// costing the cutting floor is working to are not the same document, and
+/// until now nothing told them apart. Only one BOM per style is APPROVED at
+/// a time, and that is the one an order is costed against.
+enum BOMStatus {
+  DRAFT
+  APPROVED
+  OBSOLETE
+}
+
+/// What a costing row on a BOM pays for: the people who make the garment, or
+/// everything else it has to carry (power, rent, transport).
+enum BOMCostKind {
+  LABOUR
+  OVERHEAD
+}
+
+/// How a costing row is typed: rupees for one piece, or a percentage of the
+/// material and labour together.
+enum BOMCostBasis {
+  PER_PIECE
+  PERCENT
+}
+
 // ═══════════════════════════════════════════
 // AUTH & RBAC
 // ═══════════════════════════════════════════
@@ -250,26 +280,41 @@ model User {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  auditLogs       AuditLog[]
-  notifications   Notification[]
-  aiConversations AIConversation[]
-  createdSOs      SalesOrder[]              @relation("SOCreatedBy")
-  approvedSOs     SalesOrder[]              @relation("SOApprovedBy")
-  createdPOs      PurchaseOrder[]           @relation("POCreatedBy")
-  approvedPOs     PurchaseOrder[]           @relation("POApprovedBy")
-  createdMOs      ManufacturingOrder[]      @relation("MOCreatedBy")
-  raisedMRs       MaterialRequisition[]     @relation("MRRaisedBy")
-  approvedMRs     MaterialRequisition[]     @relation("MRApprovedBy")
-  issuedMRs       MaterialRequisition[]     @relation("MRIssuedBy")
-  createdBills    PurchaseInvoice[]         @relation("BillCreatedBy")
-  createdPayments SupplierPayment[]         @relation("PaymentCreatedBy")
-  uploadedFiles   PurchaseOrderAttachment[] @relation("AttachmentUploadedBy")
-  movedStock      StockTransfer[]           @relation("TransferMovedBy")
-  cancelledStock  StockTransfer[]           @relation("TransferCancelledBy")
-  countedStock    StockAdjustment[]         @relation("AdjustmentMadeBy")
-  receivedGoods   GRN[]                     @relation("GRNCreatedBy")
-  uploadedGrnFiles GRNAttachment[]          @relation("GRNAttachmentUploadedBy")
-  shortClosedPoLines PurchaseOrderLine[]    @relation("PurchaseOrderLineShortClosedBy")
+  auditLogs            AuditLog[]
+  notifications        Notification[]
+  aiConversations      AIConversation[]
+  createdSOs           SalesOrder[]                @relation("SOCreatedBy")
+  approvedSOs          SalesOrder[]                @relation("SOApprovedBy")
+  createdEnquiries     PurchaseEnquiry[]           @relation("EnquiryCreatedBy")
+  createdPOs           PurchaseOrder[]             @relation("POCreatedBy")
+  approvedPOs          PurchaseOrder[]             @relation("POApprovedBy")
+  createdMOs           ManufacturingOrder[]        @relation("MOCreatedBy")
+  raisedMRs            MaterialRequisition[]       @relation("MRRaisedBy")
+  approvedMRs          MaterialRequisition[]       @relation("MRApprovedBy")
+  issuedMRs            MaterialRequisition[]       @relation("MRIssuedBy")
+  createdBills         PurchaseInvoice[]           @relation("BillCreatedBy")
+  createdPayments      SupplierPayment[]           @relation("PaymentCreatedBy")
+  reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
+  uploadedFiles        PurchaseOrderAttachment[]   @relation("AttachmentUploadedBy")
+  uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
+  movedStock           StockTransfer[]             @relation("TransferMovedBy")
+  cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
+  countedStock         StockAdjustment[]           @relation("AdjustmentMadeBy")
+  receivedGoods        GRN[]                       @relation("GRNCreatedBy")
+  uploadedGrnFiles     GRNAttachment[]             @relation("GRNAttachmentUploadedBy")
+  uploadedPaymentFiles SupplierPaymentAttachment[] @relation("PaymentAttachmentUploadedBy")
+  shortClosedPoLines   PurchaseOrderLine[]         @relation("PurchaseOrderLineShortClosedBy")
+  createdNotes         PurchaseNote[]              @relation("NoteCreatedBy")
+  submittedNotes       PurchaseNote[]              @relation("NoteSubmittedBy")
+  approvedNotes        PurchaseNote[]              @relation("NoteApprovedBy")
+  postedNotes          PurchaseNote[]              @relation("NotePostedBy")
+  closedNotes          PurchaseNote[]              @relation("NoteClosedBy")
+  gstTreatedNotes      PurchaseNote[]              @relation("NoteGstTreatedBy")
+  createdReturns       PurchaseReturn[]            @relation("ReturnCreatedBy")
+  cancelledReturns     PurchaseReturn[]            @relation("ReturnCancelledBy")
+  uploadedNoteFiles    PurchaseNoteAttachment[]    @relation("NoteAttachmentUploadedBy")
+  approvedBOMs         BOM[]                       @relation("BOMApprovedBy")
+  pricedBOMs           BOM[]                       @relation("BOMPricedBy")
 
   @@index([email])
   @@index([roleId])
@@ -378,6 +423,7 @@ model Company {
   departments  Department[]
   numberSeries NumberSeries[]
   taxRates     TaxRate[]
+  tdsSections  TdsSection[]
   settings     AppSetting[]
   documents    DocumentTemplate[]
 
@@ -435,6 +481,22 @@ model TaxRate {
 
   @@unique([companyId, name])
   @@map("tax_rates")
+}
+
+model TdsSection {
+  id        String   @id @default(cuid())
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  section   String // e.g. "194C"
+  label     String // e.g. "Contractor payments — Individual/HUF"
+  rate      Decimal  @db.Decimal(5, 2)
+  isDefault Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, section, label])
+  @@map("tds_sections")
 }
 
 /// One row per preference. A key/value table rather than columns, so adding a
@@ -512,6 +574,7 @@ model Item {
 
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
+  enquiryLines  PurchaseEnquiryLine[]
   poLines       PurchaseOrderLine[]
   soLines       SalesOrderLine[]
   mrLines       MaterialRequisitionLine[]
@@ -521,6 +584,8 @@ model Item {
   invoiceLines  SalesInvoiceLine[]
   billLines     PurchaseInvoiceLine[]
   creditLines   CreditNoteLine[]
+  noteLines     PurchaseNoteLine[]
+  returnLines   PurchaseReturnLine[]
   debitLines    DebitNoteLine[]
 
   @@unique([styleId, color])
@@ -563,37 +628,159 @@ model Style {
 }
 
 model BOM {
-  id        String   @id @default(cuid())
-  styleId   String
-  style     Style    @relation(fields: [styleId], references: [id])
-  version   String   @default("1.0")
-  isActive  Boolean  @default(true)
-  totalCost Decimal? @db.Decimal(10, 2)
-  notes     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String    @id @default(cuid())
+  styleId       String
+  style         Style     @relation(fields: [styleId], references: [id])
+  version       String    @default("1.0")
+  /// The colourway this BOM is for. A white shirt and a dusty blue one take
+  /// different fabric, so the production team makes one BOM per colour — the
+  /// same way the old system made one item per colourway. Always one of the
+  /// style's own colours. Blank only on BOMs made before colour was recorded.
+  color         String?
+  /// The operations this garment goes through, for the labour half of its
+  /// cost. It points at the routing rather than repeating the steps, so a rate
+  /// is changed in one place and every BOM built on it moves with it.
+  routingId     String?
+  routing       Routing?  @relation(fields: [routingId], references: [id])
+  /// The size the quantities on the lines are measured against. This used to
+  /// live in the notes, as "size 40 basis", where nothing could read it and
+  /// anyone opening a BOM somebody else built had to guess.
+  baseSizeId    String?
+  baseSize      Size?     @relation(fields: [baseSizeId], references: [id])
+  /// Where this costing is in its life. Separate from isActive on purpose:
+  /// isActive decides whether it is offered in a dropdown, status decides
+  /// whether it may still be edited and whether orders are costed against it.
+  status        BOMStatus @default(DRAFT)
+  approvedById  String?
+  approvedBy    User?     @relation("BOMApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  /// Approving freezes a BOM, so a new version has to start from a copy.
+  /// Otherwise the choice is re-typing twelve lines, and what happens instead
+  /// is that somebody edits the approved one. This records what it came from.
+  copiedFromId  String?
+  copiedFrom    BOM?      @relation("BOMCopy", fields: [copiedFromId], references: [id])
+  isActive      Boolean   @default(true)
+  /// Material only, for one garment at the base size. Deliberately not an
+  /// average across the size run: an order is never an equal split of sizes,
+  /// and the split lives on the order rather than here.
+  totalCost     Decimal?  @db.Decimal(10, 2)
+  /// The sum of the LABOUR rows in costLines. It used to be read off the linked
+  /// routing, whose rates were demo figures nobody at the mill had entered.
+  labourCost    Decimal?  @db.Decimal(10, 2)
+  /// The sum of the OVERHEAD rows, each worked out to rupees for one piece.
+  overheadCost  Decimal?  @db.Decimal(10, 2)
+  /// Material + labour + overhead: what one garment costs to make.
+  costPerPiece  Decimal?  @db.Decimal(10, 2)
+  /// Profit as a share of the selling price, not a mark-up on cost: 20% here
+  /// means cost ÷ 0.80. Kept with the price it produced, so either can be read.
+  marginPercent Decimal?  @db.Decimal(5, 2)
+  /// Before GST, rounded up to the rupee. Unlike the costing it stays editable
+  /// after approval: cost is how the garment is made, price is a commercial
+  /// call that moves with the buyer.
+  sellingPrice  Decimal?  @db.Decimal(10, 2)
+  pricedById    String?
+  pricedBy      User?     @relation("BOMPricedBy", fields: [pricedById], references: [id])
+  pricedAt      DateTime?
+  notes         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
-  lines BOMLine[]
+  lines     BOMLine[]
+  costLines BOMCostLine[]
+  copies    BOM[]         @relation("BOMCopy")
 
-  @@unique([styleId, version])
+  // White v1.0 and Dusty Blue v1.0 of the same style are two different BOMs.
+  // Postgres counts two blank colours as different, so two colourless BOMs at
+  // one version would slip past this; the route checks that case itself.
+  @@unique([styleId, color, version])
+  @@index([status])
   @@map("bom")
 }
 
 model BOMLine {
-  id              String   @id @default(cuid())
-  bomId           String
-  bom             BOM      @relation(fields: [bomId], references: [id], onDelete: Cascade)
-  componentItemId String
-  componentItem   Item     @relation("ComponentItem", fields: [componentItemId], references: [id])
-  qtyPerUnit      Decimal  @db.Decimal(10, 4)
-  wastagePercent  Decimal  @default(0) @db.Decimal(5, 2)
-  effectiveQty    Decimal  @db.Decimal(10, 4)
-  unitCost        Decimal? @db.Decimal(10, 4)
-  totalCost       Decimal? @db.Decimal(10, 4)
-  notes           String?
-  sortOrder       Int      @default(0)
+  id               String      @id @default(cuid())
+  bomId            String
+  bom              BOM         @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  componentItemId  String
+  componentItem    Item        @relation("ComponentItem", fields: [componentItemId], references: [id])
+  /// Which part of the garment this goes into, such as "Body", "Collar" or
+  /// "Cuff". The same self fabric legitimately appears twice on one BOM at two
+  /// different wastages, because the parts are cut differently. Without this
+  /// the second line reads as a typo, and it is why there is no unique
+  /// constraint on bomId plus componentItemId.
+  component        String?
+  /// The department that draws this material from the store: Cutting takes the
+  /// fabric, Stitching the thread and labels, Packing the cartons. A material
+  /// requisition is always raised by one department, so this is what lets an
+  /// order's materials be asked for stage by stage rather than all at once.
+  departmentId     String?
+  department       Department? @relation(fields: [departmentId], references: [id])
+  /// Consumption for one garment at the BOM base size. Sizes that differ carry
+  /// their own row in BOMLineSize; every other size falls back to this.
+  qtyPerUnit       Decimal     @db.Decimal(10, 4)
+  wastagePercent   Decimal     @default(0) @db.Decimal(5, 2)
+  effectiveQty     Decimal     @db.Decimal(10, 4)
+  unitCost         Decimal?    @db.Decimal(10, 4)
+  totalCost        Decimal?    @db.Decimal(10, 4)
+  /// Not used. Added on 28 Sep for a "supplied by customer" tick that was
+  /// taken off the form the same day; nothing reads or writes it, and every
+  /// row is false. Left in place rather than dropped, because dropping it is
+  /// another change to the shared database — see MIGRATION-NOTES.md.
+  customerSupplied Boolean     @default(false)
+  notes            String?
+  sortOrder        Int         @default(0)
 
+  sizes BOMLineSize[]
+
+  @@index([bomId])
+  @@index([componentItemId])
   @@map("bom_lines")
+}
+
+/// One labour or overhead row on a BOM's costing: "Stitching — ₹42 a piece",
+/// "Factory overhead — 10%". Written with the BOM and locked with it on approval.
+model BOMCostLine {
+  id           String       @id @default(cuid())
+  bomId        String
+  bom          BOM          @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  kind         BOMCostKind
+  name         String
+  /// Optional: which department the labour is paid to.
+  departmentId String?
+  department   Department?  @relation(fields: [departmentId], references: [id])
+  basis        BOMCostBasis @default(PER_PIECE)
+  /// What was typed: rupees for PER_PIECE, a percentage for PERCENT.
+  value        Decimal      @db.Decimal(10, 2)
+  /// The row worked out to rupees for one piece.
+  amount       Decimal      @db.Decimal(10, 2)
+  sortOrder    Int          @default(0)
+
+  @@index([bomId])
+  @@map("bom_cost_lines")
+}
+
+/// One size's own consumption, written only for the lines where it actually
+/// differs. A 3XL shirt eats more cloth than an S, and a single figure for the
+/// whole size run quietly over-orders the small end and under-orders the large.
+/// Buttons, care labels and poly bags never vary, so most lines carry no rows
+/// here at all and keep using the figure on the line above. That fallback is
+/// what lets a style with no size run behave exactly as it did before.
+model BOMLineSize {
+  id           String   @id @default(cuid())
+  bomLineId    String
+  bomLine      BOMLine  @relation(fields: [bomLineId], references: [id], onDelete: Cascade)
+  sizeId       String
+  size         Size     @relation(fields: [sizeId], references: [id])
+  qtyPerUnit   Decimal  @db.Decimal(10, 4)
+  /// The line's wastage applied to this size's quantity, worked out on save so
+  /// store and the costing sheet never do the multiplication differently.
+  effectiveQty Decimal  @db.Decimal(10, 4)
+  /// What one garment of this size costs in this component. The rate belongs to
+  /// the item and does not change with size, so it is not repeated here.
+  totalCost    Decimal? @db.Decimal(10, 4)
+
+  @@unique([bomLineId, sizeId])
+  @@map("bom_line_sizes")
 }
 
 model Customer {
@@ -721,12 +908,15 @@ model Supplier {
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
-  addresses      SupplierAddress[]
-  purchaseOrders PurchaseOrder[]
-  invoices       PurchaseInvoice[]
-  payments       SupplierPayment[]
-  debitNotes     DebitNote[]
-  workstations   Workstation[]
+  addresses       SupplierAddress[]
+  enquiryQuotes   PurchaseEnquiryQuote[]
+  purchaseOrders  PurchaseOrder[]
+  invoices        PurchaseInvoice[]
+  payments        SupplierPayment[]
+  purchaseNotes   PurchaseNote[]
+  purchaseReturns PurchaseReturn[]
+  debitNotes      DebitNote[]
+  workstations    Workstation[]
 
   @@index([code])
   @@map("suppliers")
@@ -741,13 +931,19 @@ model Warehouse {
   address   String?
   isActive  Boolean @default(true)
 
-  stockLedger    StockLedger[]
-  mrLines        MaterialRequisitionLine[]
-  grnLines       GRNLine[]
-  purchaseOrders PurchaseOrder[]
-  transfersOut   StockTransfer[]           @relation("TransferFrom")
-  transfersIn    StockTransfer[]           @relation("TransferTo")
-  adjustments    StockAdjustment[]
+  stockLedger       StockLedger[]
+  mrLines           MaterialRequisitionLine[]
+  grnLines          GRNLine[]
+  /// Enquiries that name this store as where the goods are wanted.
+  purchaseEnquiries PurchaseEnquiry[]         @relation("EnquiryLocation")
+  purchaseOrders    PurchaseOrder[]
+  transfersOut      StockTransfer[]           @relation("TransferFrom")
+  transfersIn       StockTransfer[]           @relation("TransferTo")
+  adjustments       StockAdjustment[]
+
+  supplierPayments SupplierPayment[]
+  purchaseNotes    PurchaseNote[]
+  returnLines      PurchaseReturnLine[]
 
   @@map("warehouses")
 }
@@ -767,6 +963,8 @@ model Department {
   requisitions      MaterialRequisition[]
   productionEntries ProductionEntry[]
   routingSteps      RoutingStep[]
+  bomLines          BOMLine[]
+  bomCostLines      BOMCostLine[]
 
   @@map("departments")
 }
@@ -1006,19 +1204,307 @@ model PaymentReceipt {
 // PURCHASE
 // ═══════════════════════════════════════════
 
+/// How far an enquiry has got.
+///
+/// Read off the quotes under it, never written by hand. One enquiry can go to
+/// three suppliers; it is SENT once any of them has it, QUOTED once any of them
+/// has answered, and ORDERED once a live purchase order stands on it.
+///
+/// Part-ordering is ordinary — the mill orders 600 of the 1,240 quoted because
+/// that is what the winning supplier will hold the price on — so an ORDERED
+/// enquiry still has to show the other 640 as quoted but unplaced.
+enum PurchaseEnquiryStatus {
+  /// Being prepared. Nothing has left the building.
+  DRAFT
+  /// With at least one supplier, waiting on rates.
+  SENT
+  /// At least one proforma invoice is recorded against it.
+  QUOTED
+  /// At least one purchase order has been raised from it.
+  ORDERED
+  /// Dropped, with a reason — every rate was too high, the job was cancelled.
+  CLOSED
+}
+
+/// What the mill asks its suppliers before it commits to anything.
+///
+/// The old ERP calls this a *provisional PO*, and the chain it sits in is:
+/// indent → provisional PO → supplier rates → purchase order. The step exists
+/// because the buyer frequently does not know the rate. An enquiry goes out
+/// carrying quantities and no prices; each supplier answers with a proforma
+/// invoice — his own numbered document, quoting a rate and saying how long he
+/// will hold it; the buyer compares what came back; and the purchase order is
+/// raised against the winning PI's number.
+///
+/// **The question is here; the answers are in `quotes`.** One enquiry, many
+/// suppliers. Holding a supplier on the enquiry itself was the first shape of
+/// this and it could not answer the question the step exists for — *which of
+/// them is cheapest* — without the buyer opening three documents side by side
+/// and doing the arithmetic on paper.
+///
+/// **Its own document rather than a sixth `PurchaseOrderStatus`.** A
+/// provisional order sitting in `purchase_orders` is read as a real one by
+/// everything that does not explicitly exclude it, and far more code queries
+/// purchase orders than looks at their status. An enquiry leaking in would tell
+/// a buyer goods were coming that nobody had agreed to supply, put them on the
+/// indent as bought, and offer a goods receipt against an order no supplier has
+/// ever seen.
+///
+/// Nothing on this document commits the mill. That is the point of it, and it is
+/// why an open enquiry does not reduce what an indent still needs ordered.
+model PurchaseEnquiry {
+  id            String                @id @default(cuid())
+  enquiryNumber String                @unique
+  enquiryDate   DateTime              @default(now())
+  /// When the mill needs the goods. Printed, so a supplier quotes against a
+  /// date instead of quoting a rate he cannot hold long enough to be useful.
+  requiredDate  DateTime?
+  status        PurchaseEnquiryStatus @default(DRAFT)
+
+  /// Where the goods are wanted. Null means head office, which is how the old
+  /// system's "HO" reads and what most enquiries are.
+  locationId String?
+  location   Warehouse? @relation("EnquiryLocation", fields: [locationId], references: [id])
+
+  /// Whatever the mill needs quoted back — a job number, an indent slip, the
+  /// buyer's own reference. Free text, as it is on the purchase order: every
+  /// mill numbers these differently and a fixed format would fit none of them.
+  reference String?
+
+  /// Printed on the supplier's copy.
+  notes  String?
+  terms  String?
+  /// Internal. A remark about a supplier is not always something to send him.
+  remark String?
+
+  /// Why it was dropped. A decision with no reason recorded gets taken again.
+  closeReason String?
+  closedAt    DateTime?
+
+  createdById String
+  createdBy   User     @relation("EnquiryCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// Recycle bin, as a purchase order has: the row stays, marked, and every
+  /// list, count and lookup outside the bin itself passes over it.
+  deletedAt   DateTime?
+  deletedById String?
+
+  lines          PurchaseEnquiryLine[]
+  quotes         PurchaseEnquiryQuote[]
+  attachments    PurchaseEnquiryAttachment[]
+  purchaseOrders PurchaseOrder[]
+
+  @@index([status])
+  @@index([deletedAt])
+  @@index([locationId])
+  @@map("purchase_enquiries")
+}
+
+/// One line of the question: what we want, and how much of it.
+///
+/// Carries no rate any supplier gave. `expectedRate` is the mill's own view and
+/// is usually empty; what each supplier quoted lives on his own
+/// `PurchaseEnquiryQuoteLine`, because three suppliers answering the same line
+/// give three different rates and only one column here could hold them.
+model PurchaseEnquiryLine {
+  id          String          @id @default(cuid())
+  enquiryId   String
+  enquiry     PurchaseEnquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item            @relation(fields: [itemId], references: [id])
+  /// What we asked for in our own words, when it differs from the item name.
+  description String?
+  /// Copied from the item when the enquiry is raised, so correcting the master
+  /// later does not change what the suppliers were asked about.
+  hsnCode     String?
+  qty         Decimal         @db.Decimal(10, 3)
+
+  /// What the mill expects to pay, where the buyer has a view. Usually empty —
+  /// an enquiry goes out precisely because nobody knows the rate. Where it is
+  /// set it is worth keeping: the gap between it and what came back is the
+  /// reason the buyer reads a PI twice.
+  expectedRate Decimal? @db.Decimal(10, 2)
+
+  sortOrder Int @default(0)
+
+  /// The indent line this was raised to answer, where it came off the indent
+  /// list rather than being typed. Null for an enquiry about something nobody
+  /// requisitioned, which is ordinary.
+  mrLineId String?
+  mrLine   MaterialRequisitionLine? @relation(fields: [mrLineId], references: [id])
+
+  /// What each supplier said about this line.
+  quoteLines PurchaseEnquiryQuoteLine[]
+
+  /// The order lines raised from this one.
+  ///
+  /// How much of the enquiry has been ordered is read off these rather than
+  /// kept as a running total here, for the same reason the indent does it: a
+  /// counter and the orders it counts drift apart the first time an order is
+  /// cancelled, and then the buyer is told to order what they already ordered.
+  poLines PurchaseOrderLine[]
+
+  @@index([enquiryId])
+  @@index([mrLineId])
+  @@map("purchase_enquiry_lines")
+}
+
+/// One supplier's answer to the enquiry.
+///
+/// The row exists from the moment a supplier is added to the enquiry, before he
+/// has been sent anything and long before he answers — so "asked three, two have
+/// replied" is a fact the screen can state rather than infer from absence.
+///
+/// `piAmount` is the total *his* PI states and is deliberately not recomputed
+/// from the rates on his quote lines: when his arithmetic and ours disagree the
+/// buyer has to see that before ordering rather than have it silently corrected
+/// into agreement.
+model PurchaseEnquiryQuote {
+  id         String          @id @default(cuid())
+  enquiryId  String
+  enquiry    PurchaseEnquiry @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  supplierId String
+  supplier   Supplier        @relation(fields: [supplierId], references: [id])
+
+  /// When it actually went out, which is not the date on the enquiry. One
+  /// drafted Monday and sent Wednesday starts this supplier's clock on
+  /// Wednesday, and any later argument about how long he took runs from here.
+  sentAt DateTime?
+
+  /// The supplier's proforma invoice, as he wrote it. `piNumber` is his
+  /// reference, and it is what goes onto the purchase order so the document he
+  /// receives quotes the document he sent.
+  piNumber     String?
+  piDate       DateTime?
+  piAmount     Decimal?  @db.Decimal(12, 2)
+  /// How long he will hold the price. A rate that expired in August is not a
+  /// rate, and an order raised against one is an argument waiting to happen.
+  piValidUntil DateTime?
+  piReceivedAt DateTime?
+
+  /// Where the goods would be delivered, as a two-digit GST state code. Carried
+  /// per supplier because it is his tax position that decides whether his rate
+  /// reads as CGST+SGST or IGST, and two suppliers can sit in different states.
+  placeOfSupplyCode String?
+
+  /// Internal note about this supplier's answer. Never printed.
+  remark String?
+
+  /// Why this one was passed over, where the buyer said. Kept on the losing
+  /// quotes as well as read off the winner, because "we went elsewhere" and
+  /// "he never answered" are different things to tell him next time.
+  declinedReason String?
+  declinedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines          PurchaseEnquiryQuoteLine[]
+  attachments    PurchaseEnquiryAttachment[]
+  purchaseOrders PurchaseOrder[]
+
+  /// One row per supplier per enquiry. Asking the same supplier twice on one
+  /// enquiry is a mistake, not a second quote — a revised PI replaces the
+  /// first on this row and the audit log holds what it said before.
+  @@unique([enquiryId, supplierId])
+  @@index([supplierId])
+  @@map("purchase_enquiry_quotes")
+}
+
+/// What one supplier quoted for one line of the enquiry.
+///
+/// The cell of the comparison grid: enquiry lines down the side, suppliers
+/// across the top. A missing row means he did not price that line, which is
+/// different from quoting zero and is shown as different.
+model PurchaseEnquiryQuoteLine {
+  id            String               @id @default(cuid())
+  quoteId       String
+  quote         PurchaseEnquiryQuote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  enquiryLineId String
+  enquiryLine   PurchaseEnquiryLine  @relation(fields: [enquiryLineId], references: [id], onDelete: Cascade)
+
+  quotedRate Decimal? @db.Decimal(10, 2)
+  /// His GST rate for the line, which is not always the one on our master and
+  /// is his to state.
+  gstRate    Decimal? @db.Decimal(5, 2)
+  /// What he says he can deliver, where it differs from what was asked. A
+  /// supplier who can only supply 800 of the 1,240 has answered the enquiry,
+  /// and refusing to record that would lose the reason the buyer split the
+  /// order between two of them.
+  offeredQty Decimal? @db.Decimal(10, 3)
+  /// His own note against the line — a pack size, a lead time, a substitute.
+  remark     String?
+
+  @@unique([quoteId, enquiryLineId])
+  @@index([enquiryLineId])
+  @@map("purchase_enquiry_quote_lines")
+}
+
+/// A file kept against an enquiry, or against one supplier's answer to it.
+///
+/// `quoteId` is what separates the two. A drawing or a specification belongs to
+/// the enquiry and every supplier sees the same one; a scanned proforma invoice
+/// belongs to the supplier who sent it, and filing it against the enquiry would
+/// leave three PDFs in one list with nothing saying whose each was.
+model PurchaseEnquiryAttachment {
+  id        String                @id @default(cuid())
+  enquiryId String
+  enquiry   PurchaseEnquiry       @relation(fields: [enquiryId], references: [id], onDelete: Cascade)
+  /// Set when the file is one supplier's paperwork rather than the mill's.
+  quoteId   String?
+  quote     PurchaseEnquiryQuote? @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+
+  /// What the person called it on their own machine. Shown in the list; never
+  /// used to build the storage path, because two people upload "scan.pdf".
+  fileName     String
+  storagePath  String   @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User     @relation("EnquiryAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([enquiryId])
+  @@index([quoteId])
+  @@map("purchase_enquiry_attachments")
+}
+
 model PurchaseOrder {
-  id                  String              @id @default(cuid())
-  poNumber            String              @unique
+  id                  String                @id @default(cuid())
+  poNumber            String                @unique
   supplierId          String
-  supplier            Supplier            @relation(fields: [supplierId], references: [id])
-  poDate              DateTime            @default(now())
+  supplier            Supplier              @relation(fields: [supplierId], references: [id])
+  poDate              DateTime              @default(now())
   deliveryDate        DateTime?
-  status              PurchaseOrderStatus @default(DRAFT)
-  poType              String              @default("STANDARD")
+  status              PurchaseOrderStatus   @default(DRAFT)
+  poType              String                @default("STANDARD")
+  /// The enquiry this order came out of, where it came out of one.
+  ///
+  /// Null for an order typed straight in, which is most of them: a buyer who
+  /// already knows the rate does not send an enquiry first. Where it is set,
+  /// `enquiryNo` below is filled from that enquiry's PI number, so the order
+  /// the supplier receives quotes the document the supplier sent.
+  enquiryId           String?
+  enquiry             PurchaseEnquiry?      @relation(fields: [enquiryId], references: [id])
+  /// Which supplier's answer this order was raised against.
+  ///
+  /// Separate from the enquiry: the enquiry says what was asked, the quote
+  /// says whose price won. Without it an enquiry sent to three suppliers
+  /// could not say which of them the order went to, and `enquiryNo` would be
+  /// a PI number with no way back to the document it came off.
+  enquiryQuoteId      String?
+  enquiryQuote        PurchaseEnquiryQuote? @relation(fields: [enquiryQuoteId], references: [id])
   /// The supplier's quotation or our enquiry that this order answers. Carried
   /// on the order because the first thing asked when a price is questioned
   /// months later is which quote it came from, and that answer lived only in
   /// somebody's email before now.
+  ///
+  /// Set from the enquiry's PI number when the order is raised from one, and
+  /// free text otherwise — an order can answer a quote that never became an
+  /// enquiry on this system, and refusing to record that would lose the
+  /// reference entirely.
   enquiryNo           String?
   enquiryDate         DateTime?
   /// Whatever the mill needs to quote back — a job number, an indent slip, the
@@ -1032,29 +1518,29 @@ model PurchaseOrder {
   /// Where the goods are delivered, as a two-digit GST state code. Compared
   /// against ours to decide whether the supplier should bill CGST+SGST or IGST.
   placeOfSupplyCode   String?
-  subtotal            Decimal             @default(0) @db.Decimal(12, 2)
-  discountAmount      Decimal             @default(0) @db.Decimal(12, 2)
-  taxableAmount       Decimal             @default(0) @db.Decimal(12, 2)
+  subtotal            Decimal               @default(0) @db.Decimal(12, 2)
+  discountAmount      Decimal               @default(0) @db.Decimal(12, 2)
+  taxableAmount       Decimal               @default(0) @db.Decimal(12, 2)
   /// Split rather than one lump, so the order can be checked against the bill
   /// the supplier eventually sends.
-  cgst                Decimal             @default(0) @db.Decimal(12, 2)
-  sgst                Decimal             @default(0) @db.Decimal(12, 2)
-  igst                Decimal             @default(0) @db.Decimal(12, 2)
-  roundOff            Decimal             @default(0) @db.Decimal(6, 2)
+  cgst                Decimal               @default(0) @db.Decimal(12, 2)
+  sgst                Decimal               @default(0) @db.Decimal(12, 2)
+  igst                Decimal               @default(0) @db.Decimal(12, 2)
+  roundOff            Decimal               @default(0) @db.Decimal(6, 2)
   /// Anything the mill agrees to pay that is not one of the named charges and
   /// carries no GST of its own — the old ERP's "Other charges" box. Added
   /// after tax, which is why it is not part of `taxableAmount`.
-  otherCharges        Decimal             @default(0) @db.Decimal(12, 2)
-  totalAmount         Decimal             @default(0) @db.Decimal(12, 2)
+  otherCharges        Decimal               @default(0) @db.Decimal(12, 2)
+  totalAmount         Decimal               @default(0) @db.Decimal(12, 2)
   /// Where the supplier is told to deliver.
   deliveryWarehouseId String?
-  deliveryWarehouse   Warehouse?          @relation(fields: [deliveryWarehouseId], references: [id])
+  deliveryWarehouse   Warehouse?            @relation(fields: [deliveryWarehouseId], references: [id])
   /// Set when the supplier ships straight to a customer instead of to us.
   /// It changes the tax: goods are taxed where they are delivered, so a
   /// customer in another state makes the supplier's bill IGST even though we
   /// are in theirs.
   deliveryCustomerId  String?
-  deliveryCustomer    Customer?           @relation("PODeliveryCustomer", fields: [deliveryCustomerId], references: [id])
+  deliveryCustomer    Customer?             @relation("PODeliveryCustomer", fields: [deliveryCustomerId], references: [id])
   /// The address as it read the day the order was raised. A customer moves;
   /// an order already with a supplier must not.
   deliveryAddress     String?
@@ -1068,12 +1554,12 @@ model PurchaseOrder {
   notes               String?
   terms               String?
   createdById         String
-  createdBy           User                @relation("POCreatedBy", fields: [createdById], references: [id])
+  createdBy           User                  @relation("POCreatedBy", fields: [createdById], references: [id])
   approvedById        String?
-  approvedBy          User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
+  approvedBy          User?                 @relation("POApprovedBy", fields: [approvedById], references: [id])
   approvedAt          DateTime?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
 
   /// When this order was put in the recycle bin, and by whom.
   ///
@@ -1087,15 +1573,18 @@ model PurchaseOrder {
   deletedAt   DateTime?
   deletedById String?
 
-  lines       PurchaseOrderLine[]
-  charges     PurchaseOrderCharge[]
-  grns        GRN[]
-  invoices    PurchaseInvoice[]
-  attachments PurchaseOrderAttachment[]
+  lines         PurchaseOrderLine[]
+  charges       PurchaseOrderCharge[]
+  grns          GRN[]
+  invoices      PurchaseInvoice[]
+  attachments   PurchaseOrderAttachment[]
+  purchaseNotes PurchaseNote[]
 
   @@index([poNumber])
   @@index([supplierId])
   @@index([status])
+  @@index([enquiryId])
+  @@index([enquiryQuoteId])
   /// Every list of orders filters on this, so it earns an index of its own.
   @@index([deletedAt])
   @@map("purchase_orders")
@@ -1167,6 +1656,14 @@ model PurchaseOrderLine {
   pendingQty  Decimal       @default(0) @db.Decimal(10, 3)
   sortOrder   Int           @default(0)
 
+  /// The enquiry line this was raised from, where the order came off an
+  /// enquiry. It is what lets the enquiry say how much of what it quoted has
+  /// actually been placed, and it survives the order being cancelled — which is
+  /// the point, because a cancelled order has to put its quantity back on the
+  /// enquiry as unplaced rather than leave it looking bought.
+  enquiryLineId String?
+  enquiryLine   PurchaseEnquiryLine? @relation(fields: [enquiryLineId], references: [id])
+
   /// The requisition line this was raised to answer, where it was raised from
   /// one.
   ///
@@ -1195,6 +1692,7 @@ model PurchaseOrderLine {
   grnLines GRNLine[]
 
   @@index([mrLineId])
+  @@index([enquiryLineId])
   @@map("purchase_order_lines")
 }
 
@@ -1300,9 +1798,10 @@ model GRN {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  lines       GRNLine[]
-  qcRecords   InwardQC[]
-  attachments GRNAttachment[]
+  lines         GRNLine[]
+  qcRecords     InwardQC[]
+  attachments   GRNAttachment[]
+  purchaseNotes PurchaseNote[]
 
   @@map("grn")
 }
@@ -1335,8 +1834,14 @@ model GRNLine {
   id           String             @id @default(cuid())
   grnId        String
   grn          GRN                @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  /// The order line this was received against.
+  ///
+  /// `Restrict` for the same reason as the bill line: a receipt line with no
+  /// order line behind it cannot be matched, and the guards that refuse
+  /// editing an order with goods against it were only advisory while the
+  /// database would quietly null this instead.
   poLineId     String?
-  poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id])
+  poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: Restrict)
   itemId       String
   item         Item               @relation(fields: [itemId], references: [id])
   warehouseId  String
@@ -1351,6 +1856,7 @@ model GRNLine {
   amount       Decimal            @default(0) @db.Decimal(12, 2)
 
   billLines PurchaseInvoiceLine[]
+  noteLines PurchaseNoteLine[]
 
   @@map("grn_lines")
 }
@@ -1398,6 +1904,15 @@ model PurchaseInvoice {
   roundOff            Decimal        @default(0) @db.Decimal(6, 2)
   totalAmount         Decimal        @db.Decimal(12, 2)
   paidAmount          Decimal        @default(0) @db.Decimal(12, 2)
+  /// The net effect of every POSTED purchase note against this bill — positive
+  /// where the notes reduce what is owed, which is the ordinary case.
+  ///
+  /// Summed from the notes and written here, never incremented, on the same
+  /// footing as `paidAmount`: a running total that is added to on each note
+  /// drifts the first time one is cancelled, and then nobody can say which
+  /// figure is true. The notes are the record; this is their sum, put where a
+  /// list screen can sort on it.
+  noteAdjustment      Decimal        @default(0) @db.Decimal(12, 2)
   balanceAmount       Decimal        @db.Decimal(12, 2)
   status              InvoiceStatus  @default(UNPAID)
   notes               String?
@@ -1406,10 +1921,13 @@ model PurchaseInvoice {
   createdAt           DateTime       @default(now())
   updatedAt           DateTime       @updatedAt
 
-  payments   SupplierPayment[]
-  lines      PurchaseInvoiceLine[]
-  charges    PurchaseInvoiceCharge[]
-  debitNotes DebitNote[]
+  payments    SupplierPayment[]
+  lines       PurchaseInvoiceLine[]
+  charges     PurchaseInvoiceCharge[]
+  adjustments PurchaseNote[]
+  /// Goods sent back against this bill, on a return challan each.
+  returns     PurchaseReturn[]
+  debitNotes  DebitNote[]
 
   /// The same supplier bill must never be booked twice — a duplicate claims the
   /// input credit a second time, which is the mistake a GST notice is written
@@ -1422,24 +1940,81 @@ model PurchaseInvoice {
 }
 
 model SupplierPayment {
-  id            String           @id @default(cuid())
-  paymentNumber String           @unique
-  supplierId    String
-  supplier      Supplier         @relation(fields: [supplierId], references: [id])
-  invoiceId     String?
-  invoice       PurchaseInvoice? @relation(fields: [invoiceId], references: [id])
-  paymentDate   DateTime         @default(now())
-  amount        Decimal          @db.Decimal(12, 2)
-  mode          PaymentMode
-  referenceNo   String?
-  chequeDate    DateTime?
-  notes         String?
-  createdById   String
-  createdBy     User             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
-  createdAt     DateTime         @default(now())
+  id             String           @id @default(cuid())
+  paymentNumber  String           @unique
+  supplierId     String
+  supplier       Supplier         @relation(fields: [supplierId], references: [id])
+  /// The bill this settles. Null for a payment on account.
+  ///
+  /// `Restrict`: the bill delete route already refuses a bill with payments
+  /// against it, and set-null would have let a payment survive with nothing
+  /// to reconcile it to.
+  invoiceId      String?
+  invoice        PurchaseInvoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  /// Which of our places the payment is booked at — the old ERP's "Location",
+  /// empty meaning head office. Kept on the payment rather than read from the
+  /// bill because a unit can settle a bill the head office raised.
+  warehouseId    String?
+  warehouse      Warehouse?       @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+  /// The account the money actually left — the old ERP's "Paid Through".
+  /// Restrict, not set-null: a payment that forgets which account it came out
+  /// of cannot be reconciled against a bank statement, and retiring an account
+  /// is what `isActive` is for.
+  bankAccountId  String?
+  bankAccount    BankAccount?     @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  paymentDate    DateTime         @default(now())
+  amount         Decimal          @db.Decimal(12, 2)
+  /// Tax withheld from this payment and owed to the government instead of to
+  /// the supplier. Only ever set when the bill did not already record TDS —
+  /// deducting in both places would pay the supplier twice short.
+  tdsAmount      Decimal          @default(0) @db.Decimal(12, 2)
+  mode           PaymentMode
+  referenceNo    String?
+  /// Its own column rather than borrowed from `referenceNo`, which already sat
+  /// beside `chequeDate` with nothing to pair with. A cheque number is quoted
+  /// back by the bank and searched on; a UTR is not the same thing.
+  chequeNo       String?
+  chequeDate     DateTime?
+  notes          String?
+  /// Whether this payment still counts.
+  ///
+  /// A bounced cheque had nowhere to go: the payment could only be deleted,
+  /// which removed the evidence that the mill had ever tried to pay. Reversing
+  /// keeps the record and stops it settling the bill, so the bill reopens for
+  /// the amount and the trail still shows what happened.
+  status         PaymentStatus    @default(POSTED)
+  reversedAt     DateTime?
+  reversedById   String?
+  reversedBy     User?            @relation("PaymentReversedBy", fields: [reversedById], references: [id])
+  /// Why. Required by the route — a reversal with no reason is unauditable.
+  reversalReason String?
+  createdById    String
+  createdBy      User             @relation("PaymentCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime         @default(now())
+
+  attachments SupplierPaymentAttachment[]
 
   @@index([supplierId])
   @@map("supplier_payments")
+}
+
+/// The bank advice, the cheque counterfoil, the UTR screenshot. Same shape as
+/// the order and receipt attachments: the file lives in object storage and the
+/// row only says where.
+model SupplierPaymentAttachment {
+  id           String          @id @default(cuid())
+  paymentId    String
+  payment      SupplierPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String          @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User            @relation("PaymentAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime        @default(now())
+
+  @@index([paymentId])
+  @@map("supplier_payment_attachments")
 }
 
 // ═══════════════════════════════════════════
@@ -1544,6 +2119,14 @@ model MaterialRequisitionLine {
   /// Issue it off the rack, or buy it. Defaults to the rack, which is what
   /// every line written before this existed meant.
   fulfilment RequisitionFulfilment @default(FROM_STOCK)
+
+  /// The enquiry lines raised against this one.
+  ///
+  /// Shown to the buyer, but never subtracted from what the request still
+  /// needs: an enquiry is a question, not a purchase. Without it a buyer cannot
+  /// tell a request nobody has looked at from one already out with a supplier,
+  /// and enquires about it a second time.
+  enquiryLines PurchaseEnquiryLine[]
 
   /// The order lines raised against this one.
   ///
@@ -1883,6 +2466,8 @@ model BankAccount {
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
 
+  supplierPayments SupplierPayment[]
+
   @@map("bank_accounts")
 }
 
@@ -2170,6 +2755,7 @@ model Routing {
   updatedAt DateTime @updatedAt
 
   steps RoutingStep[]
+  boms  BOM[]
 
   @@index([styleId])
   @@map("routings")
@@ -2217,8 +2803,10 @@ model Size {
   label       String
   sequence    Int       @default(0)
 
-  soLineSizes SalesOrderLineSize[]
-  moLineSizes MOLineSize[]
+  soLineSizes  SalesOrderLineSize[]
+  moLineSizes  MOLineSize[]
+  bomLineSizes BOMLineSize[]
+  baseSizeBoms BOM[]
 
   @@unique([sizeGroupId, code])
   @@map("sizes")
@@ -2288,8 +2876,15 @@ model PurchaseInvoiceLine {
   /// row at a time. Held per line rather than once on the bill, because a
   /// supplier routinely bills several deliveries together — and because a bill
   /// line for something never received is exactly what the match must catch.
+  /// The receipt line this bill line settles.
+  ///
+  /// `Restrict`, not the default set-null. Set-null made the GRN_BILLED guard
+  /// on the receipt delete route dead code: the receipt went, its stock came
+  /// back out, and the bill line survived pointing at nothing — so that bill
+  /// was never three-way matched again and nobody could see why. Proved in a
+  /// rolled-back transaction before it was changed.
   grnLineId    String?
-  grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id])
+  grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
   description  String?
   hsnCode      String?
   qty          Decimal         @db.Decimal(10, 3)
@@ -2302,6 +2897,12 @@ model PurchaseInvoiceLine {
   igst         Decimal         @default(0) @db.Decimal(12, 2)
   amount       Decimal         @default(0) @db.Decimal(12, 2)
   sortOrder    Int             @default(0)
+
+  /// Adjustments raised against this line. What is left to adjust is this
+  /// line's quantity less what these already claim.
+  noteLines   PurchaseNoteLine[]
+  /// Goods physically sent back against this line.
+  returnLines PurchaseReturnLine[]
 
   @@index([billId])
   @@map("purchase_invoice_lines")
@@ -2396,7 +2997,7 @@ model PurchaseInvoiceCharge {
 }
 
 // ═══════════════════════════════════════════
-// RETURNS
+// SALES RETURNS
 // ═══════════════════════════════════════════
 
 /// Issued to a customer when goods come back or a bill is reduced. Without it a
@@ -2445,7 +3046,457 @@ model CreditNoteLine {
   @@map("credit_note_lines")
 }
 
-/// Raised against a supplier — short supply, rejected goods, a rate correction.
+// ═══════════════════════════════════════════
+// PURCHASE ADJUSTMENTS
+// ═══════════════════════════════════════════
+
+/// Who raised the adjustment — ours or theirs.
+///
+/// Held on its own because it is the one fact a purchase clerk always knows
+/// for certain, and because it is not the same question as what kind of
+/// document resulted. We can raise a claim the supplier never answers; the
+/// supplier can send a note we never asked for.
+enum PurchaseAdjustmentIssuer {
+  OUR_COMPANY
+  SUPPLIER
+}
+
+/// What kind of document this actually is.
+///
+/// Deliberately NOT two values. "Debit note" and "credit note" are a pair only
+/// if you assume every adjustment comes off the bill, and that assumption is
+/// what this enum exists to break: a supplier who undercharged raises a debit
+/// note ON us and the payable goes UP. Collapsing that into a DEBIT/CREDIT
+/// flag moved money the wrong way and read as correct while doing it.
+///
+/// OUR_DEBIT_NOTE is a commercial claim, not a GST document. Whether it ever
+/// becomes one is the accounts desk's call — see `gstTreatment`. That is the
+/// whole reason the two are separate columns.
+enum PurchaseAdjustmentDoc {
+  /// Our own commercial debit note or claim on the supplier.
+  OUR_DEBIT_NOTE
+  /// Their document, reducing the value of their own invoice.
+  SUPPLIER_CREDIT_NOTE
+  /// Their document, increasing the value of their own invoice.
+  SUPPLIER_DEBIT_NOTE
+  /// Anything the accounts desk configures that is none of the above.
+  OTHER
+}
+
+/// How the accounts desk has classified this for GST — and nobody else.
+///
+/// A purchase clerk records that twelve rolls came back damaged. Whether that
+/// becomes a section 34 credit note, an ITC reversal, or stays a purely
+/// commercial claim with no GST consequence at all is a question about the
+/// supplier's filing, the month, and whether they ever issued a document. The
+/// purchase office cannot answer it and must not be asked to, so this column
+/// starts at NOT_REVIEWED and only an accounts hand may move it.
+enum PurchaseGstTreatment {
+  /// The default. Accounts has not looked at this yet.
+  NOT_REVIEWED
+  /// Supplier issued a credit note under s.34(1); our ITC reduces.
+  GST_CREDIT_NOTE
+  /// Supplier issued a debit note under s.34(3); further ITC is available.
+  GST_DEBIT_NOTE
+  /// No supplier document — we reverse the input credit ourselves.
+  ITC_REVERSAL_ONLY
+  /// Commercial only. The invoice and the input credit both stand.
+  NO_GST_IMPACT
+}
+
+/// What happened, in the words the purchase office already uses.
+///
+/// This is a description of an event in the godown or on the bill. It is NOT
+/// a document type and NOT an accounting position, and nothing here may be
+/// read as implying either: the same damaged lot can end up as our claim, as
+/// their credit note, or as neither, depending on what the supplier does next.
+///
+/// `EXCESS_QUANTITY_BILLED` was dropped as a duplicate — "the bill shows more
+/// than the challan" and SHORT_QUANTITY's "billed for more than arrived" are
+/// one event written twice, and offering both only split the reporting.
+enum PurchaseNoteReason {
+  PURCHASE_RETURN
+  SHORT_QUANTITY
+  DAMAGED_MATERIAL
+  QUALITY_REJECTION
+  WRONG_MATERIAL
+  WRONG_RATE
+  EXCESS_BILLING
+  POST_PURCHASE_DISCOUNT
+  OTHER
+}
+
+/// What the adjustment does to the money owed.
+///
+/// Decided by the DOCUMENT, never by the reason. Damaged goods reduce the bill
+/// when we claim for them and when the supplier credits them; the identical
+/// damaged goods increase it if the supplier's answer is a debit note for the
+/// replacement they sent. The event does not carry a direction — only the
+/// document does.
+enum PurchaseNoteEffect {
+  REDUCES_PAYABLE
+  INCREASES_PAYABLE
+}
+
+/// Draft → Submitted → Approved → Posted, with two ways out.
+///
+/// Its own enum rather than `NoteStatus`, which the sales credit note still
+/// wears. Saving is not issuing and issuing is not posting: a note moves the
+/// payable at POSTED and at no earlier step, which is a separate press by the
+/// accounts desk.
+enum PurchaseNoteStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  POSTED
+  REJECTED
+  CANCELLED
+}
+
+/// An adjustment to what a supplier is owed, raised after their bill was
+/// booked.
+///
+/// One table for every kind. Our commercial claim, the supplier's credit note
+/// and the supplier's debit note carry the same fields, point at the same
+/// bill, validate against the same remaining balance and print on the same
+/// sheet. What differs between them is who issued it, which way the money
+/// goes and how GST sees it — three columns, not three tables.
+///
+/// The bill it adjusts is never edited. `PurchaseInvoice.noteAdjustment` is a
+/// roll-up recomputed from the posted notes, so the invoice's own lines and
+/// totals stand exactly as the supplier sent them, however many adjustments
+/// accumulate against it.
+model PurchaseNote {
+  id         String             @id @default(cuid())
+  /// Ours, always. A supplier's credit note is filed under our own reference
+  /// so it can be found; their number is `supplierDocNo`.
+  noteNumber String             @unique
+  status     PurchaseNoteStatus @default(DRAFT)
+
+  // ── The three facts, kept apart ────────────────────────────────────────
+  //
+  // One column used to carry all three and could therefore express only two
+  // of the eight combinations that occur. They are separate because they are
+  // answered by different people from different evidence: the godown says
+  // what happened, the post says who issued what, and the accounts desk says
+  // what it means for GST.
+
+  /// What happened. A description of an event, carrying no direction.
+  reason     PurchaseNoteReason
+  /// Required when the reason is OTHER; a free remark otherwise.
+  reasonNote String?
+
+  /// Who raised it. Ours or theirs.
+  issuedBy PurchaseAdjustmentIssuer @default(OUR_COMPANY)
+  /// What kind of document resulted.
+  docType  PurchaseAdjustmentDoc    @default(OUR_DEBIT_NOTE)
+
+  /// Which way the money moves. Follows `docType`, never `reason`.
+  effect PurchaseNoteEffect
+
+  /// The accounts desk's classification. Purchase cannot set it; posting is
+  /// refused until somebody with the accounts permission has.
+  gstTreatment   PurchaseGstTreatment @default(NOT_REVIEWED)
+  gstNote        String?
+  gstTreatedById String?
+  gstTreatedBy   User?                @relation("NoteGstTreatedBy", fields: [gstTreatedById], references: [id])
+  gstTreatedAt   DateTime?
+
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  /// The bill being adjusted. Optional only for the authorised case of an
+  /// adjustment with no invoice behind it — which is recorded as a decision,
+  /// not assumed: see `withoutBillReason`.
+  billId            String?
+  bill              PurchaseInvoice? @relation(fields: [billId], references: [id], onDelete: Restrict)
+  /// Why this note has no bill behind it. Present exactly when `billId` is
+  /// null, so an unlinked note can never look like an oversight.
+  withoutBillReason String?
+
+  /// Carried for the trail, never for the arithmetic — the bill is what a
+  /// note adjusts. Settable by hand for a note raised off a delivery the
+  /// supplier has not billed yet.
+  poId  String?
+  po    PurchaseOrder? @relation(fields: [poId], references: [id], onDelete: Restrict)
+  grnId String?
+  grn   GRN?           @relation(fields: [grnId], references: [id], onDelete: Restrict)
+
+  noteDate DateTime @default(now())
+
+  /// The return challan this note was raised from, when the goods physically
+  /// went back. Set only by the challan itself, never by the note form.
+  ///
+  /// A note carrying one never moves stock: the challan already took the goods
+  /// off the rack at the gate, and posting the note is the money side of the
+  /// same event, not a second trip. `Restrict` because a challan with the note
+  /// it produced deleted from under it would leave goods gone and nothing
+  /// claimed for them.
+  returnId       String?
+  purchaseReturn PurchaseReturn? @relation(fields: [returnId], references: [id], onDelete: Restrict)
+
+  /// The supplier's own document, when they are the one who wrote it. Their
+  /// number and their date, kept as they printed them.
+  supplierDocNo   String?
+  supplierDocDate DateTime?
+
+  /// Where the goods sat, which is where a return takes them out of. Only a
+  /// note that actually moves goods needs one.
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  /// The paperwork that travels with returned goods.
+  lrNumber  String?
+  vehicleNo String?
+  otherRef  String?
+
+  /// Frozen when the note is raised. A supplier whose state is corrected next
+  /// month must not silently re-split the tax on a note already posted.
+  isIntraState Boolean @default(true)
+
+  taxableAmount  Decimal @default(0) @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  cgst           Decimal @default(0) @db.Decimal(12, 2)
+  sgst           Decimal @default(0) @db.Decimal(12, 2)
+  igst           Decimal @default(0) @db.Decimal(12, 2)
+  otherCharges   Decimal @default(0) @db.Decimal(12, 2)
+  roundOff       Decimal @default(0) @db.Decimal(6, 2)
+  totalAmount    Decimal @default(0) @db.Decimal(12, 2)
+
+  notes String?
+
+  createdById String
+  createdBy   User     @relation("NoteCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// Who moved it, and when. Separate columns rather than one audit blob,
+  /// because docs/04-business-rules.md forbids the person who raised a
+  /// document from approving it, and that rule cannot be enforced against a
+  /// single name.
+  submittedById String?
+  submittedBy   User?     @relation("NoteSubmittedBy", fields: [submittedById], references: [id])
+  submittedAt   DateTime?
+  approvedById  String?
+  approvedBy    User?     @relation("NoteApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  postedById    String?
+  postedBy      User?     @relation("NotePostedBy", fields: [postedById], references: [id])
+  postedAt      DateTime?
+  closedById    String?
+  closedBy      User?     @relation("NoteClosedBy", fields: [closedById], references: [id])
+  closedAt      DateTime?
+  /// Why it was rejected or cancelled. A document that stops moving has to say
+  /// what stopped it.
+  closedReason  String?
+
+  lines       PurchaseNoteLine[]
+  attachments PurchaseNoteAttachment[]
+
+  /// A supplier's own document booked twice claims the same adjustment twice,
+  /// which is the mistake the duplicate-bill guard exists for. Postgres treats
+  /// NULLs as distinct, so our own commercial claims — which carry no supplier
+  /// document number — are unaffected.
+  @@unique([supplierId, supplierDocNo])
+  @@index([supplierId])
+  @@index([billId])
+  @@index([docType, status])
+  @@index([issuedBy, status])
+  @@index([returnId])
+  @@map("purchase_notes")
+}
+
+/// Whether a return challan still stands.
+///
+/// No draft: a challan is written at the gate as the vehicle is loaded, and the
+/// goods leave the moment it is saved. Cancelling puts them back — possible
+/// only while the debit note it produced is still a draft, because once that
+/// note is posted the supplier's account has been charged for the return.
+enum PurchaseReturnStatus {
+  DISPATCHED
+  CANCELLED
+}
+
+/// A purchase return challan — the outward gate pass for goods going back to a
+/// supplier.
+///
+/// The physical half of a return. The debit note is the financial half, and
+/// they are separate documents because they are signed by different people at
+/// different times: the godown loads the vehicle and the security gate lets it
+/// out against this, and accounts decides days later what the return is worth
+/// and posts the note. Before this existed a debit note did both, which meant
+/// goods could leave with no gate pass at all, or a gate pass could exist only
+/// once accounts had got round to it.
+///
+/// The chain is Purchase Bill → Return Challan → Debit Note. Every challan is
+/// raised against a bill, and saving one writes a draft note linked back to it.
+model PurchaseReturn {
+  id           String               @id @default(cuid())
+  /// PRC-0001 upward. One running series, like the rest of the purchase chain.
+  returnNumber String               @unique
+  status       PurchaseReturnStatus @default(DISPATCHED)
+  returnDate   DateTime             @default(now())
+
+  supplierId String
+  supplier   Supplier        @relation(fields: [supplierId], references: [id])
+  billId     String
+  bill       PurchaseInvoice @relation(fields: [billId], references: [id], onDelete: Restrict)
+
+  /// Why the goods are going back. Only the reasons where material moves.
+  reason     PurchaseNoteReason
+  reasonNote String?
+
+  /// How they are going. What the security gate checks and what an e-way bill
+  /// is raised against.
+  vehicleNo       String?
+  transporterName String?
+  lrNumber        String?
+  ewayBillNo      String?
+  driverName      String?
+
+  remarks String?
+
+  createdById   String
+  createdBy     User      @relation("ReturnCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  cancelledById String?
+  cancelledBy   User?     @relation("ReturnCancelledBy", fields: [cancelledById], references: [id])
+  cancelledAt   DateTime?
+  cancelReason  String?
+
+  lines      PurchaseReturnLine[]
+  debitNotes PurchaseNote[]
+
+  @@index([supplierId])
+  @@index([billId])
+  @@index([status, returnDate])
+  @@map("purchase_returns")
+}
+
+/// One item going back, from one godown, against one bill line.
+model PurchaseReturnLine {
+  id             String         @id @default(cuid())
+  returnId       String
+  purchaseReturn PurchaseReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  itemId String
+  item   Item   @relation(fields: [itemId], references: [id])
+
+  /// The bill line the goods were charged on. Required: a return with nothing
+  /// to be returned against cannot be valued, and cannot be checked against
+  /// what was bought.
+  billLineId String
+  billLine   PurchaseInvoiceLine @relation(fields: [billLineId], references: [id], onDelete: Restrict)
+
+  /// The godown it leaves from — per line, because one delivery is routinely
+  /// split across two stores and the goods go back from wherever they are.
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
+
+  qty       Decimal @db.Decimal(10, 3)
+  /// The bill's own rate and GST, frozen here for the challan's declared value
+  /// and carried onto the debit note it produces.
+  unitPrice Decimal @db.Decimal(10, 2)
+  gstRate   Decimal @default(0) @db.Decimal(5, 2)
+
+  remarks   String?
+  sortOrder Int     @default(0)
+
+  @@index([returnId])
+  @@index([billLineId])
+  @@map("purchase_return_lines")
+}
+
+model PurchaseNoteLine {
+  id     String       @id @default(cuid())
+  noteId String
+  note   PurchaseNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  itemId String
+  item   Item         @relation(fields: [itemId], references: [id])
+
+  /// The bill line this adjusts, which is the whole basis of the balance
+  /// check: what is left to adjust is that line's quantity less every note
+  /// line already pointing at it. Without this a note can only be validated
+  /// against the bill as a lump, and 100 metres of the wrong item passes so
+  /// long as the total fits.
+  ///
+  /// `Restrict`, matching `PurchaseInvoiceLine.grnLineId` — a set-null here
+  /// would leave a posted adjustment pointing at nothing, and the line it
+  /// adjusted claimable all over again.
+  billLineId String?
+  billLine   PurchaseInvoiceLine? @relation(fields: [billLineId], references: [id], onDelete: Restrict)
+
+  /// The receipt line this adjusts, on a note raised with no bill behind it.
+  ///
+  /// Goods rejected at the gate are never billed, so there is no bill line to
+  /// point at — this is what "how much of this GRN line is still left to
+  /// note" is worked out from instead, the same way `billLineId` answers that
+  /// for a note that does have a bill. `Restrict`, matching `billLineId`: a
+  /// receipt line deleted out from under a posted note would leave the note
+  /// pointing at nothing and its quantity claimable all over again.
+  grnLineId String?
+  grnLine   GRNLine? @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
+
+  description String?
+  hsnCode     String?
+
+  /// What the bill said, snapshotted. Printed beside the adjustment so the
+  /// reader sees 100 billed and 12 returned without opening the bill.
+  originalQty  Decimal? @db.Decimal(10, 3)
+  originalRate Decimal? @db.Decimal(10, 2)
+
+  /// The adjustment itself — how much is coming off, at what rate.
+  qty       Decimal @db.Decimal(10, 3)
+  unitPrice Decimal @db.Decimal(10, 2)
+
+  taxableValue Decimal @default(0) @db.Decimal(12, 2)
+  gstRate      Decimal @default(0) @db.Decimal(5, 2)
+  cgst         Decimal @default(0) @db.Decimal(12, 2)
+  sgst         Decimal @default(0) @db.Decimal(12, 2)
+  igst         Decimal @default(0) @db.Decimal(12, 2)
+  amount       Decimal @default(0) @db.Decimal(12, 2)
+
+  remarks   String?
+  sortOrder Int     @default(0)
+
+  @@index([noteId])
+  @@index([billLineId])
+  @@index([grnLineId])
+  @@map("purchase_note_lines")
+}
+
+model PurchaseNoteAttachment {
+  id           String       @id @default(cuid())
+  noteId       String
+  note         PurchaseNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String       @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User         @relation("NoteAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime     @default(now())
+
+  @@index([noteId])
+  @@map("purchase_note_attachments")
+}
+
+// ═══════════════════════════════════════════
+// AWAITING REMOVAL
+// ═══════════════════════════════════════════
+
+/// Superseded by `PurchaseNote`. Kept only until this work reaches `main`.
+///
+/// Nothing in the application reads or writes these two models any more. They
+/// are still here because the API deployed from `main` does: its `billInclude`
+/// joins `debit_notes` on every read of a purchase bill, so dropping the table
+/// now would break the live bill list days before the branch that replaced it
+/// is merged. Both tables are empty.
+///
+/// Delete these models and their three relation fields — `Supplier.debitNotes`,
+/// `Item.debitLines`, `PurchaseInvoice.debitNotes` — in the same change that
+/// merges, and let the migration drop the tables then.
 model DebitNote {
   id          String           @id @default(cuid())
   noteNumber  String           @unique
@@ -2472,6 +3523,7 @@ model DebitNote {
   @@map("debit_notes")
 }
 
+/// Superseded by `PurchaseNoteLine`. See `DebitNote`.
 model DebitNoteLine {
   id           String    @id @default(cuid())
   noteId       String

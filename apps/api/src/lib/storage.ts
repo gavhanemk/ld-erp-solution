@@ -167,9 +167,14 @@ export async function statObject(path: string): Promise<{ sizeBytes: number; mim
     )
   }
 
-  const info = (await res.json()) as { size?: number; contentType?: string; metadata?: { size?: number; mimetype?: string } }
+  // Supabase answers this endpoint in snake_case — `content_type`, not
+  // `contentType`. Reading only the camelCase spelling stored null as the type
+  // of every file ever attached, so nothing downstream could tell a PDF from a
+  // photograph. Both spellings are read now, and the nested `metadata` shape
+  // some versions use is still the last resort.
+  const info = (await res.json()) as { size?: number; content_type?: string; contentType?: string; metadata?: { size?: number; mimetype?: string } }
   const size = info.size ?? info.metadata?.size ?? 0
-  const type = info.contentType ?? info.metadata?.mimetype ?? null
+  const type = info.content_type ?? info.contentType ?? info.metadata?.mimetype ?? null
 
   return { sizeBytes: Number(size), mimeType: type }
 }

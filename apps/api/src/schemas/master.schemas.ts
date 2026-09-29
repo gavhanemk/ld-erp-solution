@@ -304,29 +304,134 @@ export const updateStyleSchema = createStyleSchema.partial()
 // BOM — header plus its component lines
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * A size that draws more or less cloth than the base size. Only the sizes that
+ * actually differ are sent — everything else falls back to the line's own
+ * quantity, which is what lets a style with no size run carry on unchanged.
+ */
+export const bomLineSizeSchema = z.object({
+  sizeId: z.string().min(1, 'Pick a size'),
+  qtyPerUnit: decimal,
+})
+
 export const bomLineSchema = z.object({
   componentItemId: z.string().min(1, 'Component item is required'),
+  /**
+   * Which part of the garment this goes into. The same self fabric appears
+   * twice on a shirt BOM at two different wastages, and without a label the
+   * second line looks like somebody added it by mistake.
+   */
+  component: z.string().max(60).optional().nullable(),
+  /** The department that draws this from the store — Cutting, Stitching, Packing. */
+  departmentId: z.string().optional().nullable(),
   qtyPerUnit: decimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
   notes: optionalText,
   sortOrder: z.number().int().min(0).optional(),
+  sizes: z
+    .array(bomLineSizeSchema)
+    .optional()
+    .refine((rows) => !rows || new Set(rows.map((r) => r.sizeId)).size === rows.length, {
+      message: 'A size can only be given once on a component',
+    }),
 })
+
+/**
+ * One labour or overhead row on a BOM's costing. Labour is always rupees for
+ * one piece — that is how a stitching rate is quoted. An overhead can be either
+ * rupees or a percentage of material and labour together.
+ */
+export const bomCostLineSchema = z
+  .object({
+    kind: z.enum(['LABOUR', 'OVERHEAD']),
+    name: z.string().trim().min(1, 'Name the cost, such as Stitching or Transport').max(60),
+    departmentId: z.string().optional().nullable(),
+    basis: z.enum(['PER_PIECE', 'PERCENT']).default('PER_PIECE'),
+    value: z.number().min(0, 'A cost cannot be negative'),
+  })
+  .superRefine((row, ctx) => {
+    if (row.kind === 'LABOUR' && row.basis !== 'PER_PIECE') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['basis'],
+        message: 'Labour is typed in rupees for one piece',
+      })
+    }
+    if (row.basis === 'PERCENT' && row.value > 100) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['value'],
+        message: 'An overhead percentage cannot be more than 100',
+      })
+    }
+  })
+
+/**
+ * Setting the price takes one of the two: a margin, which works the price out,
+ * or a price typed straight in, which works the margin back from it. Margin is
+ * a share of the selling price, so 100% would mean a cost of nothing.
+ */
+export const bomPriceSchema = z
+  .object({
+    marginPercent: z
+      .number()
+      .min(0, 'A margin cannot be negative. To sell below cost, type the price instead.')
+      .lt(100, 'A margin must be under 100%')
+      .optional(),
+    sellingPrice: z.number().positive('Type a price above zero').optional(),
+  })
+  .refine((v) => (v.marginPercent === undefined) !== (v.sellingPrice === undefined), {
+    message: 'Give either a margin or a selling price',
+  })
 
 export const createBomSchema = z.object({
   styleId: z.string().min(1, 'Style is required'),
+  /**
+   * One BOM per colour. Whether it is required depends on the style — one with
+   * colours listed needs it — so that check lives in the route, not here.
+   */
+  color: z.string().trim().max(60).optional().nullable(),
   version: z.string().max(20).optional(),
+  /** The routing that supplies the labour half of the cost. Optional. */
+  routingId: z.string().optional().nullable(),
+  /** The size the quantities on the lines are measured against. */
+  baseSizeId: z.string().optional().nullable(),
   notes: optionalText,
   lines: z.array(bomLineSchema).min(1, 'A BOM needs at least one component'),
+  /** Labour and overhead. Only someone who may approve masters can send these. */
+  costLines: z.array(bomCostLineSchema).max(50).optional(),
   isActive,
 })
 
 export const updateBomSchema = z.object({
   version: z.string().max(20).optional(),
+  routingId: z.string().optional().nullable(),
+  baseSizeId: z.string().optional().nullable(),
   notes: optionalText,
   lines: z.array(bomLineSchema).min(1).optional(),
+  /** Left out, the BOM keeps the rows it has; sent, they replace them. */
+  costLines: z.array(bomCostLineSchema).max(50).optional(),
   isActive,
 })
+
+/**
+ * Approving freezes a BOM, so a new version has to start life as a copy. If it
+ * did not, the only way to change an approved costing would be to edit it in
+ * place, which is exactly what the freeze exists to stop.
+ */
+export const copyBomSchema = z
+  .object({
+    version: z.string().trim().min(1, 'Give the copy a version, such as 1.1').max(20).optional(),
+    /**
+     * Copying to another colour is the usual way a new colourway's BOM is made:
+     * the buttons, labels and packing carry over, and only the fabric changes.
+     */
+    color: z.string().trim().max(60).optional().nullable(),
+  })
+  .refine((v) => v.version !== undefined || v.color !== undefined, {
+    message: 'Give the copy a new version, a different colour, or both',
+  })
 
 // ─────────────────────────────────────────────────────────────
 // Warehouse / Department / Operation / Machine / UOM / Category
@@ -342,6 +447,31 @@ export const createWarehouseSchema = z.object({
   isActive,
 })
 export const updateWarehouseSchema = createWarehouseSchema.partial()
+
+/**
+ * The accounts money leaves from — what a supplier payment calls "Paid
+ * through". The mill's own vouchers name one on every payment that is not
+ * cash, so the list has to be somewhere a person can add to.
+ *
+ * IFSC is eleven characters with a fixed shape: four letters, a zero, then
+ * six of either. Wrong and the money does not move, so it is worth refusing
+ * at the form rather than at the bank.
+ */
+export const createBankAccountSchema = z.object({
+  accountName: name,
+  bankName: z.string().min(1, 'Which bank it is with').max(120),
+  accountNumber: z.string().min(1, 'The account number is required').max(30),
+  ifscCode: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, 'An IFSC code looks like HDFC0001234'),
+  branch: optionalText,
+  accountType: z.enum(['CURRENT', 'SAVINGS', 'CC', 'OD']).optional(),
+  openingBalance: z.coerce.number().optional(),
+  isActive,
+})
+export const updateBankAccountSchema = createBankAccountSchema.partial()
 
 export const createDepartmentSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),

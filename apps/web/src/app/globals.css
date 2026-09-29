@@ -38,7 +38,31 @@
 
     --border: 217 33% 20%;
     --input: 217 33% 18%;
+
+    /*
+     * The edge of a box you type into, which is not the edge of a card.
+     *
+     * `--border` separates one surface from another and is meant to be quiet.
+     * A field border does a different job: it says where the box you can type
+     * in begins and ends, and at `--border` it was doing that at about 1.5:1
+     * against the fill — visible if you looked for it, invisible on a form of
+     * forty boxes seen at arm's length in a mill office.
+     *
+     * Set so the edge clears roughly 3:1 against the field it encloses, which
+     * is the floor WCAG 1.4.11 puts on a control's own boundary. Kept apart
+     * from `--border` on purpose: darkening that would have outlined every
+     * card, table row and divider in the application to fix the forms.
+     */
+    --field-border: 217 25% 44%;
     --ring: 173 80% 40%;
+
+    /* What a form field is filled with.
+       Its own token rather than `--secondary`, because the two want opposite
+       things: a badge or a tab sits *on* the card and should barely lift off
+       it, while a field is a hole punched *into* the card and has to read as
+       recessed. Sharing one value meant whichever won, the other was wrong.
+       Dark mode wants the field lighter than the card. */
+    --field: 217 33% 15%;
 
     --radius: 0.625rem;
 
@@ -61,12 +85,57 @@
     /* Row and button hover. White tint on dark; the light theme flips it. */
     --hover-overlay: rgba(255, 255, 255, 0.04);
     --hover-overlay-strong: rgba(255, 255, 255, 0.07);
+
+    /* Chart series — three slots, and they are not decoration.
+       Checked rather than chosen by eye: each theme's set clears the
+       lightness band, the chroma floor, colour-blind separation against its
+       neighbour, and contrast against the card behind it. The brand teal at
+       its usual --primary weight reads as grey in a chart fill, which is why
+       slot one is a step brighter than the buttons.
+       These are plain hex, not the HSL triples above: nothing tints them, and
+       a triple converted by hand is a colour nobody validated. */
+    --viz-1: #0d9488;
+    --viz-2: #d95926;
+    --viz-3: #9085e9;
+    /* Magnitude is one hue, light to dark — never a rainbow. Used for the
+       ordered panels (ageing bands, a funnel) and the matrix heat map. */
+    --viz-ramp-1: #ccfbf1;
+    --viz-ramp-2: #5eead4;
+    --viz-ramp-3: #2dd4bf;
+    --viz-ramp-4: #14b8a6;
+    --viz-ramp-5: #0d9488;
+    --viz-ramp-6: #0f766e;
+
+    /* Colour by meaning, and the same meaning on every report in the ERP:
+       finished is green, the ordinary measure is teal, a neutral stage is
+       blue, waiting is amber, overdue or refused is red, a remainder is grey.
+       Two pairs are measured and must never touch — teal against green, and
+       amber against red — each being under the floor at which full colour
+       vision can separate them. */
+    --tone-good: #17a34a;
+    --tone-normal: #14b8a6;
+    --tone-info: #3987e5;
+    --tone-warn: #d97706;
+    --tone-bad: #dc2626;
+    --tone-neutral: #94a3b8;
   }
 
   /* Light mode is for a bright factory office, not a dark room. It is kept
      deliberately soft: a warm grey page rather than white, so the screen is not
      glaring over a long shift, with cards lifted slightly above it. */
   .light {
+    /* The same three slots stepped for a white card, not flipped: a dark
+       theme's colours inverted land outside the light band and stop being
+       distinguishable from each other. Slot one holds — teal reads on both. */
+    --viz-2: #eb6834;
+    --viz-3: #4a3aa7;
+
+    /* Stepped for a white card, not flipped. Green and teal both darken;
+       amber and red already sit in the light band. */
+    --tone-good: #15803d;
+    --tone-normal: #0f766e;
+    --tone-info: #2a78d6;
+
     --background: 220 16% 93%;       /* soft warm grey, not white */
     --foreground: 222 40% 18%;       /* near-black would glare against it */
 
@@ -81,6 +150,13 @@
 
     --secondary: 220 16% 96%;
     --secondary-foreground: 222 40% 18%;
+
+    /* Light mode wants the field *darker* than the card, and by enough to see.
+       Fields used to take `--secondary` at 96% on a 100% white card — four
+       points of lightness, which on a bright office screen is no difference at
+       all: every box on a form read as one flat white sheet with text floating
+       on it. 91% is a clear step down without turning the form grey. */
+    --field: 220 16% 91%;
 
     --muted: 220 14% 90%;
     /* Secondary text: labels, hints, placeholders, table headers, the small
@@ -102,6 +178,10 @@
 
     --border: 220 14% 85%;           /* visible enough to separate cards from the page */
     --input: 220 14% 88%;
+    /* See the dark theme for why this is its own token. The light form was the
+       one that prompted it: a 91%-light fill inside an 85%-light border on a
+       white card is three greys nobody can tell apart. */
+    --field-border: 220 13% 58%;
     --ring: 173 75% 33%;
 
     /* The sidebar stays dark in both themes: it anchors the layout and keeps
@@ -273,6 +353,149 @@
     @apply px-3 py-2;
   }
 
+  /* ── A list that fits the space it is given ──────────────────────────────
+
+     These lists used to swap between a card stack and a table at Tailwind's
+     `xl`, which is a window measurement. The table does not live in the
+     window though — it lives in what is left of it after the sidebar, and
+     the sidebar is 260px wide and can be collapsed to 68px. So the same
+     window gave the list two quite different widths and one breakpoint had
+     to answer for both. It got it wrong in the obvious direction: on a
+     1366px laptop, the commonest screen in the office, `xl` said "table"
+     while the list itself had only 1056px — under the 1080px floor the table
+     was holding — so the thing dragged sideways.
+
+     A container query asks the list how wide *it* is, which is the question
+     that was being answered wrongly. Collapse the sidebar and the columns
+     come back on their own; nothing has to know the sidebar exists.
+
+     `container-type: inline-size` makes this a containing block for `fixed`
+     descendants, the same trap `.glass-card`'s backdrop-filter set. Every
+     row menu here already renders through a portal, so nothing inside is
+     positioned against it. */
+  .list-scope {
+    container-type: inline-size;
+  }
+
+  /* Below this the columns cannot be made to read, so each row becomes a
+     block instead. 700px clears the widest of the six base tiers, which is
+     the purchase bill list at 682px. */
+  .list-cards {
+    display: block;
+  }
+
+  .list-rows {
+    display: none;
+  }
+
+  @container (min-width: 700px) {
+    .list-cards {
+      display: none;
+    }
+
+    .list-rows {
+      display: block;
+    }
+  }
+
+  /* Columns that earn their place as the list widens. Below their tier they
+     are gone — not squeezed to four characters over three lines, which is
+     what a `min-width` floor and a sideways drag buy you.
+
+     Three tiers, the same three for every list, so the lists behave alike.
+     Which columns go in which tier is the per-list judgement and is written
+     down at each table. Two rules hold it together:
+
+       · nothing needed to identify a row or act on it goes in a tier at all
+       · a tier must not hold more than still fits at that tier's width
+
+     The second one is measurable, not a matter of taste: force the tier on,
+     set the table to `width: min-content` and read it back. Every list here
+     was checked that way, and the widths below are the widest of those
+     floors with a little room over. They are deliberately the only numbers —
+     name the tiers by size rather than by pixels and retuning is one edit
+     here instead of six files of class renames.
+
+     Applied to the `th` and every matching `td` together — a table with one
+     more cell in a row than in its header is a table with its columns off by
+     one from there rightwards. */
+  .col-roomy,
+  .col-wide,
+  .col-full {
+    display: table-cell;
+  }
+
+  /* 1390 clears the widest full tier, the goods receipt list at 1369px. It
+     wants a real desk: a 1920px screen, or a 1600px one with the sidebar
+     collapsed. That is the honest answer for the least-scanned columns in
+     each list, and it is the only tier no laptop reaches. */
+  @container (max-width: 1389px) {
+    .col-full {
+      display: none;
+    }
+  }
+
+  /* 1010 has a ceiling as well as a floor, and it is the only tier that
+     does. The floor is the widest wide tier, the goods receipt list at
+     1000px. The ceiling is the 1056px a 1366px laptop has with the sidebar
+     open — the commonest screen in the office, and the one this whole
+     arrangement exists to serve. Above 1056 that screen loses the tier
+     entirely, so anything added to a wide tier has to be measured against
+     1010 and not guessed at. When the files column pushed the bill list's
+     wide tier to 1053 there was nowhere left to raise the number to, and
+     its due date moved up a tier instead. */
+  @container (max-width: 1009px) {
+    .col-wide {
+      display: none;
+    }
+  }
+
+  /* 890 clears the widest roomy tier, the bill list at 876px. */
+  @container (max-width: 889px) {
+    .col-roomy {
+      display: none;
+    }
+  }
+
+
+  /* ── The table inside an expanded row ────────────────────────────────────
+
+     There were four ideas of this in the purchase module. Three lists drew
+     it with a tinted, sticky, uppercase header at 10px; the goods receipt
+     list drew it with `.data-table`, so its rows stood at the full 12px of
+     padding and read as a second list rather than as detail; and the bill
+     list drew it in sentence case at `font-medium` with no tint and no
+     sticky header at all. Put side by side — which is how somebody scrolling
+     a list sees them — they did not look like the same application.
+
+     One class, so they cannot drift again. It is deliberately quieter than
+     `.data-table`: smaller type, tighter rows, a lighter rule between lines.
+     A panel that opens underneath a row is detail about that row, and
+     detail that shouts as loudly as the list makes the list harder to read.
+
+     `:where()` keeps this at zero specificity from the class, so a
+     `text-right` on a numeric column still wins. Written as
+     `.subtable > thead > tr > th` it would score above a plain utility and
+     every figure would sit left of its own heading — which is exactly what
+     went wrong with `.data-table` once already. */
+  :where(.subtable) > thead > tr > th {
+    @apply bg-secondary text-muted-foreground border-border border-b px-3 py-1.5
+           text-left text-[10px] font-semibold uppercase tracking-wider;
+  }
+
+  :where(.subtable) > tbody > tr > td {
+    @apply border-border/40 border-b px-3 py-1.5 text-xs;
+  }
+
+  :where(.subtable) > tbody > tr:last-child > td {
+    @apply border-b-0;
+  }
+
+  /* A totals line, where a panel has one to draw. */
+  :where(.subtable) > tfoot > tr > td {
+    @apply border-border border-t px-3 py-1.5 text-xs font-semibold;
+  }
+
   /* Status Badges */
   .badge {
     @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium;
@@ -328,10 +551,19 @@
   /* Form Inputs */
   .form-input {
     @apply w-full px-3 py-2.5 rounded-lg text-sm
-           bg-secondary border border-border text-foreground
+           border text-foreground
            placeholder:text-muted-foreground
            focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-teal-500
            transition-colors duration-200;
+    background: hsl(var(--field));
+    border-color: hsl(var(--field-border));
+  }
+
+  /* A disabled box is still a box — it keeps its edge and loses its contrast,
+     rather than dissolving into the card and reading as a gap in the form. */
+  .form-input:disabled {
+    border-color: hsl(var(--field-border) / 0.45);
+    @apply cursor-not-allowed opacity-70;
   }
 
   /* A dropdown is the same control as a text field and must look like one, but
@@ -341,15 +573,22 @@
      10px of padding, inside a 1px border. The filter row above every list sets
      `h-9` to line the control up with the buttons beside it, which leaves 14px
      of content box for that 20px line. A text field simply overflows its box
-     and the browser still centres the caret, so nobody noticed. A select clips
-     its label against the padding box instead, and the words sit half-buried
-     along the bottom edge.
+     and the browser still centres the caret, so nobody noticed.
 
-     Padding is therefore dropped for a select and the centring left to the
-     height, which is what a select does well — the label ends up centred in
-     whatever height it is given, 36px in a filter row or the full 42px in a
-     form. The height below is deliberately not `min-height`: a minimum would
-     win against `h-9` and defeat the whole filter row.
+     A select cannot be left to do the same thing, and for a reason that only
+     showed up once `appearance: none` was added below. With the native
+     control drawn, height alone was enough — a select centres its own label
+     top to bottom regardless of padding, which is what let padding be dropped
+     here in the first place. Strip the native appearance away, as the arrow
+     below has to, and that centring goes with it: the label reverts to a
+     plain inline box sitting at the top of whatever height it is given, which
+     read as the text clipped against the bottom edge on anything shorter than
+     the default 42px. `display: grid; align-items: center` replaces the
+     centring the native control used to do for free — a single grid item
+     filling the row and centred on the cross axis, which is the standard fix
+     for exactly this once `appearance: none` is in play. The height below is
+     deliberately not `min-height`: a minimum would win against `h-9` and
+     defeat the whole filter row.
 
      The arrow used to be left to the browser, on the reasoning that drawing
      our own meant choosing a colour twice — once per theme. That reasoning
@@ -372,6 +611,8 @@
   :where(select).form-input {
     @apply appearance-none bg-no-repeat py-0 pr-9;
     height: 2.625rem;
+    display: grid;
+    align-items: center;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     background-position: right 0.7rem center;
     background-size: 0.85rem;
@@ -403,18 +644,19 @@
     @apply block text-sm font-medium text-foreground mb-1.5;
   }
 
-  /* A denser field on the longest forms in the ERP.
+  /* The rhythm of the purchase forms.
 
-     The purchase order form asks for about forty things on one screen. At the
-     app's normal rhythm — a 14px label over a 42px control, 6px apart — that
-     is roughly 55px of height per field before anything is typed, and the
-     form scrolled past two screens with a third of it spent on labels.
+     These once ran the other way: an 11px uppercase muted caption over a 38px
+     control, to fit the purchase order's forty fields into fewer screens. It
+     bought about 4px a field and cost more than it bought — a capitalised
+     grey caption reads as a footnote about the field rather than as its name,
+     and on a form where half the boxes are optional the eye could not tell
+     which was which without reading every one.
 
-     So inside `.po-form` the label steps back and the control tightens: a
-     small capitalised label in the muted colour, which reads as a caption
-     rather than competing with the value beside it, and 38px of control
-     instead of 42px. Nothing about the hit area suffers — 38px is still well
-     above the floor for a pointer target.
+     So the label is a name again: sentence case, the body colour, medium
+     weight. The control is 42px, which is the rhythm the rest of the app
+     already uses, and the saving is taken back by folding the sections
+     nobody fills in on most orders.
 
      Written as `:where(.po-form)` so the whole rule stays at one class of
      specificity. Written plainly, `.po-form .form-input` would outrank every
@@ -423,17 +665,66 @@
      Tailwind's utilities come last and win, which is what a component class
      should do. */
   :where(.po-form) .form-label {
-    @apply mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground;
+    @apply mb-1.5 text-[13px] font-medium normal-case tracking-normal text-foreground;
   }
 
-  :where(.po-form) .form-input {
-    @apply py-2;
+  /* The 42px rhythm is set by the height rule at the foot of this layer, not
+     by padding.
+
+     This rule used to say `@apply py-2.5`, and it was the reason the item
+     rows looked sliced off along the bottom edge. It sits after the select
+     fix above at the same specificity, so it put back the 10px of vertical
+     padding that fix had deliberately taken away — and it did it to every
+     control in the form, including the ones the markup gives an explicit
+     `h-8` to. A 32px box, less 20px of padding and 2px of border, leaves
+     10px of room for a 16px line: the glyphs overflow, and what shows on
+     screen is a descender cut in half.
+
+     Nothing replaces it here, because the base `.form-input` already carries
+     the same padding for the controls that want it — textareas — and the
+     single-line controls are sized by height instead. */
+
+  /* The sentence under a field, for the ones that need one. Muted and small,
+     so it reads as guidance rather than as a second label. */
+  :where(.po-form) .form-help {
+    @apply text-muted-foreground mt-1.5 block text-xs leading-snug;
+  }
+
+  /* A read-only fact the form shows rather than asks for — the supplier's
+     billing address, where the goods are going. Boxed so it is plainly not a
+     field somebody failed to fill in. */
+  :where(.po-form) .form-readout {
+    @apply flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-sm;
+    background: hsl(var(--field));
+    border-color: hsl(var(--field-border));
+  }
+
+  /* The icon that leads a readout — a pin on an address, a lorry on where the
+     goods are going. Muted, because it labels the box rather than competing
+     with what is in it. */
+  :where(.po-form) .form-readout > svg {
+    @apply text-muted-foreground mt-0.5 shrink-0;
+  }
+
+  /* The item table inside a purchase form. A quiet header band and a hairline
+     between rows, so the eye reads down a column without a grid drawn round
+     every cell. */
+  :where(.po-form) .line-table thead tr {
+    @apply bg-secondary;
+  }
+
+  :where(.po-form) .line-table thead th {
+    @apply text-muted-foreground px-3 py-2.5 text-left text-xs font-semibold;
+  }
+
+  :where(.po-form) .line-table tbody tr {
+    @apply border-border/60 border-b last:border-0;
   }
 
   /* The select's height is set rather than padded, for the reason given
      further up. Placed after that rule so it wins at the same specificity. */
   :where(.po-form) :where(select).form-input {
-    height: 2.375rem;
+    height: 2.625rem;
   }
 
   /* Amber text that holds up in both themes.
@@ -444,6 +735,39 @@
      is the last thing that should be hard to read. */
   .warn-text { @apply text-amber-400; }
   .light .warn-text { @apply text-amber-700; }
+
+  /* Single-line fields are sized by HEIGHT, never by vertical padding.
+     ------------------------------------------------------------------
+     Padding and a forced height are in direct conflict: the height fixes the
+     border box, the padding eats it from both ends, and whatever line of text
+     is left over spills out of the bottom. That is what put a 20px line into
+     the 14px box an `h-9` leaves, and a 16px line into the 10px an `h-8`
+     leaves — measured across the app, 24 controls on eight screens, the worst
+     of them 10px short.
+
+     Taking the vertical padding off and setting a height instead removes the
+     conflict rather than tuning around it. A single-line `input` centres its
+     own value inside whatever content box it is given, and the `select` rule
+     further up does the same with `display: grid; align-items: center` since
+     `appearance: none` costs it the browser's native centring. So both centre
+     at ANY height, and a screen is free to ask for 32px, 36px or the default
+     42px without a new rule each time.
+
+     Checkboxes and radios are excluded: they are not text, they are sized by
+     `h-4 w-4` in the markup, and a height here would blow them up to the size
+     of a text field.
+
+     Textareas are excluded by omission — they hold several lines, they scroll
+     by design, and they keep the base padding.
+
+     `:where()` so the whole thing stays at one class of specificity, which
+     leaves Tailwind's `h-8` / `h-9` utilities free to win on height. Placed
+     at the foot of the layer so nothing later in it can put the padding back
+     — which is exactly how this broke the first time. */
+  :where(input:not([type='checkbox']):not([type='radio']), select).form-input {
+    padding-block: 0;
+    height: 2.625rem;
+  }
 
   /* Divider */
   .divider {
@@ -498,4 +822,20 @@
   /* Hide scrollbar but keep functionality */
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}
+
+/* iPhone zooms the whole page in whenever a field under 16px is tapped, and
+   leaves it zoomed — every form in the app did it, because fields are 14px.
+   16px on touch-Safari phones only: `-webkit-touch-callout` is supported by
+   iOS Safari and nothing else, so Android and desktop keep the 14px they were
+   designed at. `!important` because many fields set their own size with a
+   utility class, and each one of those would otherwise still zoom. */
+@supports (-webkit-touch-callout: none) {
+  @media (max-width: 639px) {
+    input:not([type='checkbox']):not([type='radio']),
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+  }
 }

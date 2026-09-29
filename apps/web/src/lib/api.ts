@@ -24,6 +24,27 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The message worth showing in an error banner.
+ *
+ * A rejected quantity that outruns what arrived, a store picked twice, a
+ * line that isn't on the order — every one of these is a Zod refinement with
+ * a message written for the person at the gate. But the server's own
+ * `message` for any of them is the flat "Validation error", because that
+ * field is shared by every field the form got wrong at once and cannot name
+ * just one. The real reason travels in `fieldErrors` instead, and a form that
+ * only ever reads `err.message` shows the flat headline and throws the reason
+ * away — which is what "why is it showing validation error" was asking.
+ */
+export function apiErrorMessage(err: unknown, fallback = 'Could not save. Try again.'): string {
+  if (!(err instanceof ApiError)) return fallback
+  if (err.fieldErrors) {
+    const detail = [...new Set(Object.values(err.fieldErrors))].join(' ')
+    if (detail) return detail
+  }
+  return err.message
+}
+
 const ACCESS_KEY = 'access_token'
 const REFRESH_KEY = 'refresh_token'
 
@@ -106,7 +127,11 @@ async function request<T>(path: string, init: RequestInit = {}, isRetry = false)
 
   if (!res.ok) {
     throw new ApiError(
-      body?.message ?? `Request failed (${res.status})`,
+      // `error` as well as `message`. Our own handler always sends `message`,
+      // but middleware that answers before it ever reaches us — the rate
+      // limiter was the one that caught us out — brings its own shape, and a
+      // refusal nobody can read is barely better than no refusal at all.
+      body?.message ?? body?.error ?? `Request failed (${res.status})`,
       res.status,
       body?.code,
       toFieldErrors(body?.errors),
@@ -156,7 +181,11 @@ export const api = {
     request<T>(path, { method: 'POST', body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
-  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  delete: <T>(path: string, body?: unknown) =>
+    request<T>(
+      path,
+      body === undefined ? { method: 'DELETE' } : { method: 'DELETE', body: JSON.stringify(body) },
+    ),
 }
 
 /**
@@ -172,6 +201,27 @@ export function masterResource<T>(resource: string) {
     update: (id: string, data: Partial<T>) => api.patch<Single<T>>(`${base}/${id}`, data),
     deactivate: (id: string) => api.delete<{ success: boolean; message: string }>(`${base}/${id}`),
   }
+}
+
+/**
+ * Whether this user may do a thing, asked on the client.
+ *
+ * The server is the guard; this only decides whether to *offer* the control.
+ * Both matter: a menu item that always answers 403 is a menu nobody trusts,
+ * and a menu that hides what somebody may do is worse.
+ *
+ * Fails open. If the stored user carries no permission list — an older session,
+ * a cleared cache — the control is offered and the server refuses it with a
+ * sentence saying why. That is the safe direction for a UI hint: the wrong
+ * answer costs one confusing message, where failing closed would silently
+ * remove a button somebody needs and give them nothing to go on.
+ */
+export const can = (module: string, action: string): boolean => {
+  const user = currentUser() as { role?: string; permissions?: string[] } | null
+  if (!user) return true
+  if (user.role === 'Admin') return true
+  if (!Array.isArray(user.permissions)) return true
+  return user.permissions.includes(`${module}:${action}`) || user.permissions.includes(`${module}:*`)
 }
 
 export const currentUser = () => {

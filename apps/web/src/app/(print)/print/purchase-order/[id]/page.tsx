@@ -1550,6 +1550,7 @@ export default function PrintPurchaseOrder() {
         backHref="/purchase/orders"
         backLabel="Back to orders"
         copies={template.copies.length || 1}
+        fileName={order.poNumber}
       />
 
       <style>{SHEET_CSS}</style>

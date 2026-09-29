@@ -408,7 +408,12 @@ export default function PrintGoodsReceipt() {
         padding is inline — and those few millimetres are enough to push the
         bottom of the sheet onto a second piece of paper. Measured: it did
         exactly that, 2 pages for a two-line receipt. */}
-      <PrintToolbar backHref="/purchase/grn" backLabel="Goods receipts" copies={1} />
+      <PrintToolbar
+        backHref="/purchase/grn"
+        backLabel="Goods receipts"
+        copies={1}
+        fileName={grn.grnNumber}
+      />
 
       <div
         className="grn-sheet"
@@ -553,9 +558,8 @@ export default function PrintGoodsReceipt() {
           <Panel title="Against">
             <Fact label="PO No" value={grn.po.poNumber} mono />
             <Fact label="PO date" value={longDate(grn.po.poDate)} />
-            <Fact label="Bill No" value={grn.supplierBillNo} mono />
-            <Fact label="Invoice No" value={grn.supplierInvoiceNo} mono />
-            <Fact label="Invoice date" value={longDate(grn.supplierInvoiceDate)} />
+            <Fact label="Bill No" value={grn.supplierInvoiceNo} mono />
+            <Fact label="Bill date" value={longDate(grn.supplierInvoiceDate)} />
             <Fact label="Form No" value={grn.formNo} mono />
             <Fact label="Client" value={grn.clientName} />
             <Fact label="Ordered by" value={grn.orderedBy} />

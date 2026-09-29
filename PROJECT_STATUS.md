@@ -1,17 +1,147 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sat 19 Sep 2026 — an item can be a style in one colour_
+_Last updated: Mon 28 Sep 2026 — BOM costing and pricing_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
-**This copy is behind `main` on GitHub.** The Bill of Materials work (per
-colour, sizes, routing, a status lifecycle) is merged into this branch's
-history but its own PROJECT_STATUS.md entries live on PR #12
-(`feat/masters-bom-colour-and-process`), not yet merged. Whoever merges both
-branches into `main` will need to reconcile that one remaining set of
-entries at the top of this file — normal, expected, nothing to avoid it for.
-The purchase module's own entry (Thu 17 Sep, below) is already merged in.
+---
+
+## BOM costing and pricing (Mon 28 Sep)
+
+A BOM now carries what one garment costs to make and what it sells for, not
+just its material. The form has three steps, and each step saves before moving on:
+**1 Materials → 2 Costing → 3 Pricing.**
+
+**How it works:**
+
+- **Materials** is the form as it was.
+  - A "supplied by customer" tick per line was added on 28 Sep and removed the
+    same day, on request.
+  - Its database column (`bom_lines.customerSupplied`) was already applied, so it
+    stays. It is unused and always false.
+  - A cut-make-trim BOM therefore costs the customer's fabric like any other line.
+- **Costing** holds two tables:
+  - **Labour:** one row per job, in ₹ per piece, with an optional department.
+    **Fill from routing** copies in a routing's rated steps as a starting point.
+    It is a copy, not a link.
+  - **Overheads:** each one either ₹ per piece or a % of material + labour.
+- **Cost per piece** = material + labour + overhead, rounded to the paisa at
+  every step.
+- **Pricing:** type a **margin** and the price is worked out, or type the
+  **price** and the margin is worked back.
+  - The margin is a share of the selling price: at 20%, price = cost ÷ 0.80.
+  - The price is rounded **up** to the rupee, before GST. The GST figure shown
+    uses the default rate in Settings.
+  - A price below cost is allowed, with a warning. A price below half the cost is
+    refused as a probable typo.
+
+**Rules:**
+
+- **Who sees costing:** only people with **masters: approve**, which today is
+  Admin and MD. The API leaves labour, overhead, cost, margin and price out of
+  every answer for anyone else, who still get the materials step exactly as
+  before. Giving a merchandiser that right is a role setting under Settings.
+- **Approve locks the costing, not the price.** Materials and costing are frozen
+  with the BOM. The price stays editable after approval, through
+  `PATCH /masters/bom/:id/price`, and every change goes to the audit log.
+- **A draft's price follows its margin.** If the cost of a draft changes, its
+  price is worked out again from the saved margin.
+- **Copy** carries over the costing rows, the margin and the price, but not who
+  priced it.
+- **The AI assistant is unchanged:** it still reports material cost only, so it
+  cannot quote a price to someone who may not see one.
+
+**The BOM list:**
+
+- Approvers see cost and price on each row.
+- The expanded view shows Material + Labour + Overhead = Cost per piece, then the
+  selling price, margin and profit.
+- The old "Labour — making steps" table, which showed demo routing rates, is
+  replaced by the BOM's own labour and overhead rows.
+
+**Database:** migration `20260928100000_bom_costing_and_pricing`, applied to the
+shared database on 28 Sep. See `MIGRATION-NOTES.md`.
+
+**Tested:**
+
+- Type-check passes for both apps, and `next build` passes.
+- All three steps were rendered with sample data in both themes, and as a user
+  without approve rights.
+- The save requests were checked for a draft, an approved BOM and a non-approver.
+- The migration was dry-run in a rolled-back transaction, then applied, and its
+  results were read back.
+- **Not yet tried by hand against the live API.**
+
+**Not in this step:**
+
+- actual cost after production (Phase 5)
+- a price per buyer, or prices filled into sales orders
+- broker commission
+- a price-history screen (the audit log holds it)
+
+---
+
+## BOM form — redesigned, and trimmed to what is used (Sat 26 Sep)
+
+Laid out to a reference design supplied on 26 Sep, and cut down to the fields
+something actually reads today.
+
+**On the form now:**
+
+- Style and Colour.
+- Per line:
+  - Item, with an icon for its category.
+  - Process.
+  - Qty / pc, with the unit shown inside the box.
+  - Rate in ₹; blank means the standard rate.
+  - Cost.
+  - A **+** beside Delete, which adds a new line directly below that one.
+- Notes.
+
+**Taken off the form, and why:**
+
+- **Version.** A new BOM starts at 1.0, and later versions still come from Copy
+  on the BOM list. An open BOM still shows its version in the header.
+- **Wastage %.** Removed on request: consumption is now typed with the wastage
+  already in it. **This reverses the 17 Sep decision below that "wastage stays
+  as its own column".** The column stays in the database, and a line saved with
+  a wastage keeps it. The form sends it back unchanged and shows "+5%" in the
+  cost box, so the cost still adds up on screen.
+- **Part, Sized on, quantities by size, Routing, Active.** Nothing reads these
+  yet. On 26 Sep nothing outside the BOM list used them, and the MO cannot be
+  created at all. Existing values are kept on save, not wiped. Offering and
+  retiring a BOM is done from the BOM list.
+- **Effective.** It only ever showed quantity plus wastage.
+
+**Kept on purpose: Process.** Roadmap step 1.2 raises one store requisition per
+department from it. Every BOM saved without it would need reopening then.
+
+**Fixed along the way:**
+
+- **Saving an approved BOM always failed.** The form sent the locked lines, and
+  the API refused them with a 409. It now sends only the notes, and the button
+  says "Save notes".
+- **Clearer message when a style and colour already has a BOM.** When the form
+  sends no version, the API used to say "give this one a different version",
+  which the form can no longer do. It now says to copy the existing BOM from the
+  list.
+- **Routing hint on the BOM list.** It no longer tells people to "edit this BOM
+  to link a routing".
+
+**Not changed:**
+
+- The database.
+- The BOM list's expanded view. It still shows wastage, effective quantity and
+  quantities by size for BOMs that have them.
+- The copy dialog, which still takes a version.
+
+**Tested:**
+
+- Type-check passes for both apps.
+- Rendered with sample data in both themes.
+- The save request was checked for a draft BOM and for an approved one.
+- **Not yet tried against the shared database.**
 
 ---
 
@@ -65,6 +195,139 @@ the real database covering every branch of the validation, then cleaned up.
 `MOLine.color` still duplicate what `Item` now owns properly, as free text.
 Left as a follow-up for whenever Sales or Production is next worked on —
 noted directly on those two schema fields as doc comments.
+
+---
+
+## Bill of Materials — per colour, with a department per line (Thu 17 Sep)
+
+Checked against a manufacturing order exported from the old ERP (MO00089). What
+it showed, and what the production team, accounts and the old ERP's users decided:
+
+- **One BOM per colour, quantities by size inside it.** A white shirt and a dusty
+  blue one take different cloth. `BOM.color`; the unique key is now style +
+  colour + version. Approving retires the old approved BOM of the **same colour
+  only**. Copying is how a colour's BOM is made — copy White to Dusty Blue and
+  change the fabric line.
+- **A department on each BOM line.** The old ERP ties every component to a
+  process. A material requisition is raised by one department, so this is what
+  lets the Production module ask the store for materials stage by stage.
+- **Wastage stays as it is** — its own column on each line.
+- The assistant now reports material cost **per colour**; taking the first
+  approved BOM would have quoted one colour's cost as the whole style's.
+
+**The migration was applied on 17 Sep, during the team's hold on migrations**, so
+this could be tested — a deliberate call. `main` is one more migration behind the
+database as a result. See `MIGRATION-NOTES.md`.
+
+The four existing BOMs have no colour, because every one belongs to a style in two
+or three colours and guessing is worse than a blank. They show **Colour not set**.
+
+**Decided (17 Sep): a sellable shirt is one item per style + colour, with sizes
+recorded on the order** — the way the old ERP's MO00089 works: one item, S to 3XL
+underneath it. So style + colour is the key that joins everything: the finished-
+goods item, the sales order line, the manufacturing order line (which already
+carries style and colour) and the BOM (which now does too).
+
+What that means for the next branch, which gives finished-goods items a style and
+a colour so an order can find its BOM:
+- The four finished-goods items in the database (`FG-SHRT-001` and friends) are
+  generic — no colour, no style. Like the four colourless BOMs, they will need
+  splitting per colour rather than guessing.
+- Sales order lines and manufacturing order lines are both empty today, so no saved
+  order has to change shape.
+- **Still to decide, with whoever owns Inventory, before packed goods go into
+  stock:** `stock_ledger` has no size. With one item per colour, finished stock
+  would say "LD-SH-2601 White: 848" with no way to tell how many are XL. That is an
+  Inventory change, not a masters one, and it is not needed until packing.
+
+---
+
+## Bill of Materials — extended (Wed 16 Sep) — READ THE MIGRATION NOTE
+
+The BOM module already existed. This round closed the gaps that stopped it
+being usable for a real garment costing.
+
+**What is new**
+
+- **Consumption by size.** `BOMLineSize` holds a per-size quantity as a sparse
+  override: a size with no row of its own consumes what the line consumes, so a
+  style with no size run behaves exactly as it did before. The base size is a
+  field now (`BOM.baseSizeId`) instead of the words "size 40 basis" sitting in
+  the notes where nothing could read them.
+- **A routing link.** `BOM.routingId` points at the Routing master rather than
+  repeating its steps, and `BOM.labourCost` is the sum of rate per piece across
+  them. The screen shows Material, Labour and Total — it used to say
+  "per piece" and mean material only, which is what a merchandiser would have
+  quoted a buyer.
+- **A status lifecycle.** DRAFT to APPROVED to OBSOLETE. Approving freezes the
+  components and retires any other approved BOM for that style in the same
+  transaction, so "which version is current" finally has an answer. An approved
+  BOM cannot be edited, so `POST /masters/bom/:id/copy` ships alongside it —
+  without a copy action people would simply edit the approved one.
+
+**Bugs found and fixed**
+
+- The assistant quoted a material cost from `boms[0]` on a query with no
+  ordering, so a style with two live versions answered differently on different
+  days. It reads the approved BOM now.
+- `GET /masters/bom` ignored `q`, `sort`, `order` and `active`. Because DELETE
+  only sets `isActive = false`, a retired BOM never left the list — retiring one
+  looked like it had done nothing.
+- A repeated version showed the clerk `styleId,version already exists`.
+- Line cost was worked out from the unrounded quantity while the rounded one was
+  displayed, so Effective times Rate did not equal Cost on screen.
+- An item with no standard rate was silently costed at zero. Saving still works
+  — a BOM is often costed before anyone has quoted — but the response now names
+  the components, and approving is refused outright.
+- The edit dialog loaded one page of active items and priced from it, so a
+  component deactivated since would show a blank dropdown and ₹0.00 while the
+  server held the real cost. A clerk would have deleted the row.
+- The BOM screen had no way to deactivate a BOM at all.
+
+**The migration has NOT been run**
+
+The schema is changed and `pnpm db:generate` is clean, but `prisma migrate dev`
+needs `DATABASE_URL` and `DIRECT_URL`, which the machine this was written on did
+not have. **Until it is run the code does not match the database.**
+
+Generate it with `--create-only` and append the status backfill before applying.
+`status` defaults to DRAFT, which would otherwise mark every existing BOM a
+draft that nothing can cost against:
+
+```sql
+-- Only where the answer is not ambiguous. A style with two active BOMs would
+-- get two approved ones, which is the very thing this work removes.
+update ld_erp.bom b set status = 'APPROVED'
+where b."isActive"
+  and (select count(*) from ld_erp.bom x
+       where x."styleId" = b."styleId" and x."isActive") = 1;
+```
+
+Then list the ambiguous ones so somebody can choose:
+
+```sql
+select s.code, count(b.id) from ld_erp.styles s
+join ld_erp.bom b on b."styleId" = s.id and b."isActive"
+group by s.code having count(b.id) > 1;
+```
+
+**Still open**
+
+- **Re-pricing a BOM after a rate change is still not possible.** The rate is
+  resolved and stored on the first write, so the item master is read once and
+  never again. Fixing it needs a column that tells a borrowed rate from a typed
+  one, and that is another schema change.
+- BOM still does not reach production. `POST /inventory/requisitions` is live and
+  working, so BOM to material requisition is the natural next branch. BOM to
+  manufacturing order is blocked until an MO can be created at all — every
+  handler in `production.routes.ts` is a GET.
+- `@@unique([bomId, componentItemId])` was considered and deliberately left out:
+  the same self fabric legitimately appears twice at two wastages, body and
+  collar. `BOMLine.component` labels the part instead, and the constraint would
+  have failed on any live data that already has a repeat.
+- `next build` fails prerendering `/404` with a React `useRef` error. It fails
+  the same way on a clean checkout, so it is not from this work — but somebody
+  should chase it, because it means the web app cannot be built for production.
 
 ---
 

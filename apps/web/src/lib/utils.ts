@@ -16,6 +16,19 @@ export function formatCurrency(amount: number, currency = 'INR'): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency }).format(amount)
 }
 
+/**
+ * An exact rupee amount: ₹1,540.50 — always two places, Indian grouping. For
+ * costing sheets and documents, where a figure gets checked with a calculator.
+ *
+ * formatCurrency above shortens to K, L and Cr, which suits a dashboard tile but
+ * would show a ₹1,540.50 fabric line as ₹1.5K, and prints ₹2.4 beside ₹0.65 below
+ * a thousand. This matches `money()` on the printed sheet, with the symbol added.
+ */
+export function formatRupees(amount: number | string | null | undefined): string {
+  const value = Number(amount ?? 0)
+  return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
 export function formatDate(date: Date | string, format: 'short' | 'long' | 'relative' = 'short'): string {
   const d = new Date(date)
 
@@ -71,4 +84,24 @@ export function debounce<T extends (...args: unknown[]) => unknown>(fn: T, delay
 export function truncate(str: string, maxLength: number): string {
   if (str.length <= maxLength) return str
   return str.slice(0, maxLength - 3) + '...'
+}
+
+/**
+ * The line-item names for an order or receipt row, condensed to what a
+ * table cell can actually hold.
+ *
+ * Two names read as a preview; past that, a count says the rest without
+ * trying to list a purchase order that runs to thirty lines. `full` is
+ * every name, for a hover title on the truncated text — the one place
+ * somebody genuinely needs to see all of them without opening the row.
+ */
+export function itemsPreview(names: Array<string | null | undefined>): {
+  shown: string
+  extra: string
+  full: string
+} {
+  const clean = names.filter((n): n is string => Boolean(n))
+  const shown = clean.slice(0, 2).join(', ')
+  const extra = clean.length > 2 ? ` +${clean.length - 2} more` : ''
+  return { shown, extra, full: clean.join(', ') }
 }

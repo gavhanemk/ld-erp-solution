@@ -507,7 +507,7 @@ async function main() {
   const bomData: BomSeed[] = [
     {
       style: 'LD-SH-2601',
-      notes: 'Full sleeve formal shirt, 58" fabric, size 40 basis.',
+      notes: 'Full sleeve formal shirt, 58" fabric.',
       lines: [
         ['FAB-COT-001', 1.55, 8],
         ['TRM-INT-001', 0.18, 5],
@@ -555,7 +555,7 @@ async function main() {
     },
     {
       style: 'LD-TR-2601',
-      notes: 'Cotton trouser, waist 34 basis.',
+      notes: 'Cotton trouser.',
       lines: [
         ['FAB-COT-004', 1.35, 10],
         ['TRM-INT-001', 0.12, 5],
@@ -570,38 +570,109 @@ async function main() {
     },
   ]
 
+  // How much more cloth each step up the size run takes. Only the fabric
+  // varies — buttons, care labels and poly bags are the same on a 3XL as on
+  // an S, which is why most lines below carry no size rows at all.
+  const SIZE_STEP = 0.04
+
+  // Which department draws each kind of material from the store. Fabric goes to
+  // Cutting and interlining to Fusing; thread, labels and zips are sewn in at
+  // Stitching; buttons go on at Kaj Button; tags and collar stays at Finishing;
+  // poly bags, clips and tissue at Packing. Keyed on the item-code prefix,
+  // because that is how the demo items happen to be grouped.
+  const processByPrefix: Array<[string, string]> = [
+    ['FAB-', 'CUT'],
+    ['TRM-INT-', 'FUS'],
+    ['TRM-COL-', 'FIN'],
+    ['TRM-ZIP-', 'STI'],
+    ['THR-', 'STI'],
+    ['LBL-', 'STI'],
+    ['BTN-', 'KAJ'],
+    ['TAG-', 'FIN'],
+    ['PKG-', 'PKG'],
+  ]
+  const processFor = (itemCode: string) => {
+    const hit = processByPrefix.find(([prefix]) => itemCode.startsWith(prefix))
+    return hit ? dept(hit[1]) : null
+  }
+
   for (const b of bomData) {
     const styleId = styles.get(b.style)!
     await prisma.bOM.deleteMany({ where: { styleId } })
 
+    const style = await prisma.style.findUnique({
+      where: { id: styleId },
+      select: { sizeGroupId: true, colors: true },
+    })
+    const runSizes = style?.sizeGroupId
+      ? await prisma.size.findMany({
+          where: { sizeGroupId: style.sizeGroupId },
+          orderBy: { sequence: 'asc' },
+          select: { id: true },
+        })
+      : []
+    // The middle of the run, which is the size a pattern is actually cut to.
+    const baseIndex = runSizes.length > 0 ? Math.floor((runSizes.length - 1) / 2) : -1
+    const baseSizeId = baseIndex >= 0 ? runSizes[baseIndex].id : null
+
     const lines = b.lines.map(([itemCode, qty, wastage], i) => {
       const item = itemData.find((x) => x.code === itemCode)!
-      const effectiveQty = Number((qty * (1 + wastage / 100)).toFixed(4))
+      const factor = 1 + wastage / 100
+      const effectiveQty = Number((qty * factor).toFixed(4))
+
+      const sizes =
+        itemCode.startsWith('FAB-') && baseIndex >= 0
+          ? runSizes.map((sz, si) => {
+              const sizeQty = Number((qty + SIZE_STEP * (si - baseIndex)).toFixed(4))
+              const sizeEffective = Number((sizeQty * factor).toFixed(4))
+              return {
+                sizeId: sz.id,
+                qtyPerUnit: sizeQty,
+                effectiveQty: sizeEffective,
+                totalCost: Number((sizeEffective * item.rate).toFixed(2)),
+              }
+            })
+          : []
+
       return {
         componentItemId: items.get(itemCode)!,
+        departmentId: processFor(itemCode),
         qtyPerUnit: qty,
         wastagePercent: wastage,
         effectiveQty,
         unitCost: item.rate,
-        totalCost: Number((effectiveQty * item.rate).toFixed(4)),
+        // Two places, off the rounded quantity — the same arithmetic the API
+        // does, so a reseeded BOM agrees with one typed in by hand.
+        totalCost: Number((effectiveQty * item.rate).toFixed(2)),
         sortOrder: i,
+        ...(sizes.length > 0 ? { sizes: { create: sizes } } : {}),
       }
     })
 
-    const totalCost = Number(
-      lines.reduce((sum, l) => sum + Number(l.totalCost), 0).toFixed(2),
-    )
+    const totalCost = Number(lines.reduce((sum, l) => sum + Number(l.totalCost), 0).toFixed(2))
 
-    await prisma.bOM.create({
-      data: {
-        styleId,
-        version: '1.0',
-        isActive: true,
-        notes: b.notes,
-        totalCost,
-        lines: { create: lines },
-      },
-    })
+    // One BOM per colour, the way the production team makes them. The demo
+    // keeps one fabric item for every colour, which a real mill would not —
+    // a dusty blue shirt's BOM names the dusty blue cloth.
+    const colours = style?.colors?.length ? style.colors : [null]
+    for (const color of colours) {
+      await prisma.bOM.create({
+        data: {
+          styleId,
+          color,
+          version: '1.0',
+          // Demo BOMs are the ones orders get costed against, so they are
+          // approved rather than left as drafts nothing can use.
+          status: 'APPROVED',
+          approvedAt: new Date(),
+          baseSizeId,
+          isActive: true,
+          notes: b.notes,
+          totalCost,
+          lines: { create: lines },
+        },
+      })
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────
@@ -795,6 +866,64 @@ async function main() {
         },
       },
     })
+  }
+
+  // The routings exist now, so each style BOM can point at one, and its rated
+  // steps become the BOM's labour rows — the same thing the costing migration
+  // (20260928100000) does to a live database. It happens here rather than up
+  // with the BOM itself because a BOM cannot reference a routing that is not
+  // created yet.
+  for (const r of routingData) {
+    const styleId = styles.get(r.style)
+    if (!styleId) continue
+
+    const routing = await prisma.routing.findUnique({
+      where: { code: r.code },
+      select: {
+        id: true,
+        steps: {
+          orderBy: { sequence: 'asc' },
+          select: {
+            departmentId: true,
+            ratePerPiece: true,
+            operation: { select: { name: true } },
+          },
+        },
+      },
+    })
+    if (!routing) continue
+
+    const labourRows = routing.steps
+      .filter((st) => Number(st.ratePerPiece ?? 0) > 0)
+      .map((st, i) => ({
+        kind: 'LABOUR' as const,
+        name: st.operation.name,
+        departmentId: st.departmentId,
+        basis: 'PER_PIECE' as const,
+        value: Number(st.ratePerPiece),
+        amount: Number(st.ratePerPiece),
+        sortOrder: i,
+      }))
+    const labourCost = Number(labourRows.reduce((sum, row) => sum + row.amount, 0).toFixed(2))
+
+    const boms = await prisma.bOM.findMany({ where: { styleId }, select: { id: true, totalCost: true } })
+    for (const bom of boms) {
+      await prisma.bOMCostLine.deleteMany({ where: { bomId: bom.id } })
+      if (labourRows.length > 0) {
+        await prisma.bOMCostLine.createMany({
+          data: labourRows.map((row) => ({ ...row, bomId: bom.id })),
+        })
+      }
+      await prisma.bOM.update({
+        where: { id: bom.id },
+        data: {
+          routingId: routing.id,
+          labourCost,
+          overheadCost: 0,
+          costPerPiece: Number((Number(bom.totalCost ?? 0) + labourCost).toFixed(2)),
+        },
+      })
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────

@@ -194,7 +194,7 @@ export default function StockDocumentsPage() {
             ))}
           </div>
 
-          <div className="border-border bg-secondary flex min-w-[200px] max-w-sm flex-1 items-center gap-2 rounded-lg border px-3 py-2">
+          <div className="border-field-edge bg-field flex min-w-[200px] max-w-sm flex-1 items-center gap-2 rounded-lg border px-3 py-2">
             <Search size={14} className="text-muted-foreground" />
             <input
               className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"

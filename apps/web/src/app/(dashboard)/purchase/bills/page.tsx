@@ -1,11 +1,44 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { Plus, Pencil, Printer, Search, RefreshCw, AlertCircle, Ban } from 'lucide-react'
-import { api, ApiError, type Paginated } from '@/lib/api'
+import { useRouter, useSearchParams } from 'next/navigation'
+import {
+  Plus,
+  Pencil,
+  Printer,
+  Search,
+  RefreshCw,
+  AlertCircle,
+  Ban,
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  Paperclip,
+  FileText,
+  Undo2,
+  PackageMinus,
+  Wallet,
+} from 'lucide-react'
+import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { PurchaseBillDialog, type PurchaseBill } from '@/components/purchase/PurchaseBillDialog'
+import { BillItems, BillDetailDialog, BillFilesDialog } from '@/components/purchase/BillDetail'
 import { Pagination } from '@/components/tables/Pagination'
+import { ExportButton } from '@/components/tables/ExportButton'
+import { describeReport, downloadReport } from '@/lib/reportDownload'
+import {
+  asDate,
+  asNumber,
+  downloadRows,
+  fetchEveryPage,
+  type ExportColumn,
+  type ExportFormat,
+} from '@/lib/export'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { PurchaseNoteDialog } from '@/components/purchase/PurchaseNoteDialog'
+import { ReturnChallanDialog } from '@/components/purchase/ReturnChallanDialog'
+import { FilesCell } from '@/components/tables/FilesCell'
+import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 
@@ -19,7 +52,36 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 const money = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-export default function PurchaseBillsPage() {
+/**
+ * The goods receipts a bill was raised from, without repeats.
+ *
+ * One bill routinely settles several — a supplier ships through the week and
+ * invoices once — so this is a list, not a field. A bill with none behind it
+ * was typed by hand, which is legitimate for a service or a transporter.
+ */
+const receiptsOn = (bill: PurchaseBill): string[] => [
+  ...new Set(
+    (bill.lines ?? []).map((l) => l.grnLine?.grn?.grnNumber).filter((n): n is string => Boolean(n))
+  ),
+]
+
+/**
+ * How many files sit behind a bill, counting the order's and each receipt's.
+ *
+ * A bill holds no files of its own — the quotation is on the order and the
+ * challan on the receipt — so this counts by id across both, or a receipt
+ * reached through two lines would be counted twice.
+ */
+const fileCountOn = (bill: PurchaseBill): number => {
+  const ids = new Set<string>()
+  for (const f of bill.po?.attachments ?? []) ids.add(f.id)
+  for (const l of bill.lines ?? []) {
+    for (const f of l.grnLine?.grn?.attachments ?? []) ids.add(f.id)
+  }
+  return ids.size
+}
+
+function PurchaseBillsTable() {
   const { rowsPerPage } = useAppSettings()
 
   const [rows, setRows] = useState<PurchaseBill[]>([])
@@ -31,28 +93,215 @@ export default function PurchaseBillsPage() {
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [status, setStatus] = useState('')
+  const [supplierId, setSupplierId] = useState('')
+  const [itemId, setItemId] = useState('')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
   const [overdueOnly, setOverdueOnly] = useState(false)
   const [page, setPage] = useState(1)
+
+  /*
+   * Every supplier and every item, for the filter dropdowns.
+   *
+   * This list is paginated at the server, so there is no free set of
+   * "suppliers on this page" worth building — the master list is what a
+   * filter needs here, fetched once rather than on every keystroke.
+   */
+  const [suppliers, setSuppliers] = useState<Array<{ id: string; name: string }>>([])
+  const [items, setItems] = useState<Array<{ id: string; name: string }>>([])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const [s, i] = await Promise.all([
+          masterResource<{ id: string; name: string }>('suppliers').list({ limit: 500 }),
+          masterResource<{ id: string; name: string }>('items').list({ limit: 500 }),
+        ])
+        if (cancelled) return
+        setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
+        setItems([...i.data].sort((a, b) => a.name.localeCompare(b.name)))
+      } catch {
+        // The filters just come up empty — the list itself still loads and
+        // still works without them.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [busy, setBusy] = useState(false)
-  const [dialog, setDialog] = useState<{ open: boolean; record: PurchaseBill | null }>({
+  const [dialog, setDialog] = useState<{
+    open: boolean
+    record: PurchaseBill | null
+    expense?: boolean
+  }>({
     open: false,
     record: null,
   })
+  /** The one bill whose items are showing. One at a time, so the list stays a list. */
+  const [expanded, setExpanded] = useState<string | null>(null)
+  /** The bill open in the full detail window. */
+  const [detail, setDetail] = useState<PurchaseBill | null>(null)
+  /** The bill whose files are open on their own, from the paperclip. */
+  const [filesFor, setFilesFor] = useState<PurchaseBill | null>(null)
+
+  /*
+   * Arriving from "Book a bill for this" on a goods receipt.
+   *
+   * The receipt's id travels in the address rather than in shared state so the
+   * link is an ordinary link — it survives a new tab, a refresh and the back
+   * button, none of which a click handler would.
+   */
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const fromGrn = searchParams.get('fromGrn')
+
+  /*
+   * A search handed over in the address — the link from a return challan to
+   * the document next to it in the chain. Without it the link lands on the
+   * whole list and the clerk types the number they just clicked.
+   */
+  useEffect(() => {
+    const q = searchParams.get('q')
+    if (q) {
+      setSearch(q)
+      setDebounced(q)
+    }
+  }, [searchParams])
+
+  /**
+   * One receipt, or several separated by commas.
+   *
+   * A row's own "Add bill" sends one. "Bill together" on the receipts screen
+   * sends the whole ticked set, because a supplier's one invoice routinely
+   * covers a week of deliveries. Memoised because the dialog gathers on the
+   * identity of this array, and a fresh one every render would gather twice.
+   */
+  const fromGrnIds = useMemo(() => (fromGrn ? fromGrn.split(',').filter(Boolean) : null), [fromGrn])
+
+  useEffect(() => {
+    if (fromGrn) setDialog({ open: true, record: null })
+  }, [fromGrn])
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
     return () => clearTimeout(t)
   }, [search])
 
+  /**
+   * The list's query string, built once, so the export and the screen can
+   * never describe two different lists.
+   */
+  const query = (p: number, limit: number) => {
+    const qs = new URLSearchParams({ page: String(p), limit: String(limit) })
+    if (debounced) qs.set('q', debounced)
+    if (status) qs.set('status', status)
+    if (supplierId) qs.set('supplierId', supplierId)
+    if (itemId) qs.set('itemId', itemId)
+    if (fromDate) qs.set('from', fromDate)
+    if (toDate) qs.set('to', toDate)
+    if (overdueOnly) qs.set('overdue', 'true')
+    return `/purchase/bills?${qs}`
+  }
+
+  /**
+   * One row per bill.
+   *
+   * Every column here is money or a date belonging to the bill as a whole, so
+   * repeating it down the bill's lines would double-count the first time
+   * anybody put a sum under Total — which is the first thing anybody does.
+   * The item detail lives on the goods receipt export, where there is no money
+   * to double.
+   */
+  const EXPORT_COLUMNS: ExportColumn<PurchaseBill>[] = [
+    { header: 'Their Bill No.', value: (b) => b.supplierInvoiceNo ?? '' },
+    { header: 'Their Bill Date', value: (b) => asDate(b.supplierInvoiceDate) },
+    { header: 'Our Ref', value: (b) => b.billNumber },
+    { header: 'Booked On', value: (b) => asDate(b.billDate) },
+    { header: 'Due', value: (b) => asDate(b.dueDate) },
+    { header: 'Status', value: (b) => STATUS[b.status]?.label ?? b.status },
+    { header: 'Supplier', value: (b) => b.supplier?.name ?? '' },
+    { header: 'Supplier Code', value: (b) => b.supplier?.code ?? '' },
+    { header: 'GSTIN', value: (b) => b.supplier?.gstin ?? '' },
+    { header: 'Order No.', value: (b) => b.po?.poNumber ?? '' },
+    { header: 'Against Receipts', value: (b) => receiptsOn(b).join(', ') },
+    { header: 'Subtotal', value: (b) => asNumber(b.subtotal) },
+    { header: 'Discount', value: (b) => asNumber(b.discountAmount) },
+    { header: 'Taxable', value: (b) => asNumber(b.taxableAmount) },
+    { header: 'CGST', value: (b) => asNumber(b.cgst) },
+    { header: 'SGST', value: (b) => asNumber(b.sgst) },
+    { header: 'IGST', value: (b) => asNumber(b.igst) },
+    { header: 'Round Off', value: (b) => asNumber(b.roundOff) },
+    { header: 'Total', value: (b) => asNumber(b.totalAmount) },
+    { header: 'TDS Section', value: (b) => b.tdsSection ?? '' },
+    { header: 'TDS', value: (b) => asNumber(b.tdsAmount) },
+    { header: 'Reverse Charge', value: (b) => (b.isReverseCharge ? 'Yes' : 'No') },
+    { header: 'Paid', value: (b) => asNumber(b.paidAmount) },
+    { header: 'Outstanding', value: (b) => asNumber(b.balanceAmount) },
+    { header: 'Booked By', value: (b) => b.createdBy?.name ?? '' },
+    { header: 'Notes', value: (b) => b.notes ?? '' },
+  ]
+
+  /**
+   * The same filters, built as a report rather than as a grid.
+   *
+   * Every filter on this screen goes up with it, the search box and the
+   * overdue switch included — the purchase register learned to take both for
+   * exactly this. A report answering a different question from the one on
+   * screen, and saying nothing about it, would be worse than no button.
+   */
+  const exportReport = async () => {
+    setError(null)
+    try {
+      const params: Record<string, string> = {}
+      if (debounced) params.q = debounced
+      if (status) params.status = status
+      if (supplierId) params.supplierId = supplierId
+      if (itemId) params.itemId = itemId
+      if (fromDate) params.from = fromDate
+      if (toDate) params.to = toDate
+      if (overdueOnly) params.overdue = 'true'
+      setMessage(describeReport(await downloadReport('purchase-register', 'xlsx', params)))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The report could not be built.')
+    }
+  }
+
+  const exportList = async (format: ExportFormat) => {
+    setError(null)
+    try {
+      const {
+        rows: all,
+        total,
+        truncated,
+      } = await fetchEveryPage<PurchaseBill>((p) => query(p, 100))
+      if (all.length === 0) {
+        setMessage('Nothing to export — no bills match these filters.')
+        return
+      }
+      await downloadRows({
+        rows: all,
+        columns: EXPORT_COLUMNS,
+        name: 'purchase-bills',
+        sheet: 'Purchase Bills',
+        format,
+      })
+      setMessage(
+        truncated
+          ? `Exported the first ${all.length} of ${total} bills. Narrow the filters to get the rest.`
+          : `Exported ${all.length} ${all.length === 1 ? 'bill' : 'bills'}.`
+      )
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the export.')
+    }
+  }
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: String(rowsPerPage) })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      if (overdueOnly) qs.set('overdue', 'true')
-      const res = await api.get<Paginated<PurchaseBill>>(`/purchase/bills?${qs}`)
+      const res = await api.get<Paginated<PurchaseBill>>(query(page, rowsPerPage))
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
@@ -67,7 +316,7 @@ export default function PurchaseBillsPage() {
     } finally {
       setLoading(false)
     }
-  }, [debounced, status, overdueOnly, page, rowsPerPage])
+  }, [debounced, status, supplierId, itemId, fromDate, toDate, overdueOnly, page, rowsPerPage])
 
   useEffect(() => {
     void load()
@@ -77,7 +326,7 @@ export default function PurchaseBillsPage() {
   // list, which reads as "nothing found" rather than "you moved".
   useEffect(() => {
     setPage(1)
-  }, [debounced, status, overdueOnly])
+  }, [debounced, status, supplierId, itemId, fromDate, toDate, overdueOnly])
 
   const cancel = async (bill: PurchaseBill) => {
     const reason = prompt(
@@ -106,21 +355,127 @@ export default function PurchaseBillsPage() {
     new Date(b.dueDate) < new Date() &&
     (b.status === 'UNPAID' || b.status === 'PARTIAL')
 
+  /** What can be done to one bill, in words, behind a single Actions button. */
+  /** The bill a note is being raised against, if any. */
+  const [adjusting, setAdjusting] = useState<PurchaseBill | null>(null)
+  /** The bill goods are being sent back against, on a return challan. */
+  const [returning, setReturning] = useState<PurchaseBill | null>(null)
+
+  const billActions = (bill: PurchaseBill): RowAction[] => {
+    const items: RowAction[] = [
+      {
+        key: 'view',
+        label: 'View full detail',
+        icon: <Eye size={14} />,
+        onClick: () => setDetail(bill),
+      },
+      {
+        key: 'print',
+        label: 'Print',
+        icon: <Printer size={14} />,
+        href: `/print/purchase-bill/${bill.id}`,
+        newTab: true,
+      },
+    ]
+
+    /*
+     * Two ways to take something back off a bill, because they are two
+     * different events signed by two different people.
+     *
+     * Goods physically going back leave on a return challan — the gate pass
+     * the godown loads the vehicle against. Saving it takes the stock out and
+     * writes the debit note for accounts, so the chain reads Bill → Challan →
+     * Note and nothing leaves the gate without paper.
+     *
+     * A rate difference or a discount agreed after the bill moves nothing, and
+     * goes straight onto a debit note against the bill. That form only offers
+     * the reasons where nothing leaves the godown, so a material return cannot
+     * slip through it without a challan.
+     *
+     * Raised from the bill because that is where the desk is standing when the
+     * problem is found — the invoice is open in front of them.
+     */
+    if (bill.status !== 'CANCELLED') {
+      items.push(
+        {
+          key: 'return',
+          label: 'Create return challan (material return)',
+          icon: <PackageMinus size={14} />,
+          onClick: () => setReturning(bill),
+        },
+        {
+          key: 'adjust',
+          label: 'Raise direct debit note (rate / financial difference only)',
+          icon: <Undo2 size={14} />,
+          onClick: () => setAdjusting(bill),
+        }
+      )
+    }
+    // A bill can be corrected right up until a payment lands against it —
+    // after that it is part of the payment record, and cancelling or a debit
+    // note is how it is undone instead.
+    if (bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0) {
+      items.push(
+        {
+          key: 'edit',
+          label: 'Edit',
+          icon: <Pencil size={14} />,
+          onClick: () => setDialog({ open: true, record: bill }),
+        },
+        {
+          key: 'cancel',
+          label: 'Cancel',
+          icon: <Ban size={14} />,
+          onClick: () => void cancel(bill),
+          danger: true,
+        }
+      )
+    }
+    return items
+  }
+
   return (
     <div className="space-y-5">
-      <div className="page-header flex-wrap gap-3">
-        <div>
-          <h1 className="page-title">Purchase Bills</h1>
-          <p className="page-subtitle">
+      {/* One row at every width, title included. It used to carry
+        `flex-wrap`, which on a phone put refresh and Book Bill on a line
+        of their own underneath the title. Letting the heading itself wrap
+        to two short lines instead was tried next and read just as
+        oddly — "Purchase" over "Bills" is not how the title is read
+        anywhere else in the module. What actually buys the row enough
+        width is the title taking a size down and Book Bill losing its
+        words below `sm`, matching Purchase Orders and Goods Receipt. */}
+      <div className="page-header gap-3">
+        <div className="min-w-0">
+          <h1 className="page-title text-xl sm:text-2xl">Purchase Bills</h1>
+          {/* Desk only. On a phone the heading already says what this is —
+            the sentence under it cost a line of a list somebody is
+            scrolling. */}
+          <p className="page-subtitle hidden sm:block">
             What your suppliers have charged you, and what is still owed
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
-            <Plus size={15} /> Book Bill
+          <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
+          {/* Beside Book Bill, not inside it: a bill with no order and no
+            receipt behind it — electricity, rent, a repair — has nothing for
+            the deliveries half of the ordinary form to find. */}
+          <button
+            className="btn-secondary"
+            onClick={() => setDialog({ open: true, record: null, expense: true })}
+            aria-label="Expense bill (no PO)"
+            title="Electricity, rent, repairs, services — a bill with no order or receipt"
+          >
+            <Wallet size={15} /> <span className="hidden sm:inline">Expense bill</span>
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => setDialog({ open: true, record: null })}
+            aria-label="Book Bill"
+          >
+            <Plus size={15} /> <span className="hidden sm:inline">Book Bill</span>
           </button>
         </div>
       </div>
@@ -138,39 +493,132 @@ export default function PurchaseBillsPage() {
       )}
 
       <div className="glass-card overflow-hidden p-0">
-        <div className="border-border flex flex-wrap items-center gap-3 border-b px-4 py-3">
-          <div className="bg-secondary border-border flex w-full min-w-0 flex-1 items-center gap-2 rounded-lg border px-3 py-2 sm:w-auto sm:min-w-[220px] sm:max-w-sm">
-            <Search size={14} className="text-muted-foreground" />
-            <input
-              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
-              placeholder="Search our number, theirs, or supplier..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              aria-label="Search purchase bills"
-            />
+        {/* Two rows on a phone, one flowing row at a desk — see the same
+          grouping on Purchase Orders. The wrappers are `sm:contents` above a
+          phone, so their children rejoin the one wrapping row they were
+          always in rather than keeping a second, disagreeing layout. */}
+        <div className="border-border flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:flex-wrap sm:items-center">
+          {/* Search on its own line at a phone width, the two dates on the
+            one under it — sharing a row with a fixed-width date pair left
+            the search box too narrow to read what was typed into it. See
+            the same fix on Supplier Payments. `sm:contents` still
+            dissolves both back into the one row a tablet or a desk has
+            the width for. */}
+          <div className="flex flex-col gap-2 sm:contents">
+            <div className="border-field-edge bg-field flex min-w-0 flex-1 items-center gap-2 rounded-lg border px-2 py-1.5 sm:min-w-[150px] sm:max-w-[190px] sm:basis-0 sm:px-2.5">
+              <Search size={14} className="text-muted-foreground hidden shrink-0 sm:block" />
+              <input
+                className="text-foreground placeholder:text-muted-foreground min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                placeholder="Search..."
+                title="Reaches our number, theirs, and the supplier"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search purchase bills"
+              />
+            </div>
+
+            {/* Two dates, not a preset list — the mill asks "what did we book
+              between the 3rd and the 11th" far more often than "last month",
+              and either end alone is a valid question. */}
+            <div className="flex shrink-0 items-center gap-1">
+              <input
+                type="date"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="From date"
+              />
+              <span className="text-muted-foreground hidden text-xs sm:inline">to</span>
+              <input
+                type="date"
+                className="form-input h-8 min-w-0 flex-1 px-1 py-0 text-[10px] sm:w-[7.75rem] sm:flex-none sm:px-3 sm:text-xs"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="To date"
+              />
+            </div>
           </div>
-          <select
-            className="form-input h-9 w-full sm:w-40"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            aria-label="Filter by status"
-          >
-            <option value="">All statuses</option>
-            {Object.entries(STATUS).map(([v, s]) => (
-              <option key={v} value={v}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <label className="text-muted-foreground flex cursor-pointer items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={overdueOnly}
-              onChange={(e) => setOverdueOnly(e.target.checked)}
-            />
-            Overdue only
-          </label>
-          <span className="text-muted-foreground ml-auto text-xs">{total} bills</span>
+
+          <div className="flex items-center gap-2 sm:contents">
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
+              value={supplierId}
+              onChange={(e) => setSupplierId(e.target.value)}
+              aria-label="Filter by supplier"
+            >
+              <option value="">All suppliers</option>
+              {suppliers.map((sup) => (
+                <option key={sup.id} value={sup.id}>
+                  {sup.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={itemId}
+              onChange={(e) => setItemId(e.target.value)}
+              aria-label="Filter by item"
+            >
+              <option value="">All items</option>
+              {items.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              aria-label="Filter by status"
+            >
+              <option value="">All statuses</option>
+              {Object.entries(STATUS).map(([v, s]) => (
+                <option key={v} value={v}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 sm:contents">
+            <label className="text-muted-foreground flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
+              <input
+                type="checkbox"
+                checked={overdueOnly}
+                onChange={(e) => setOverdueOnly(e.target.checked)}
+              />
+              Overdue only
+            </label>
+
+            {/* Only when it is doing something. A permanent Clear is a
+              control that does nothing on the screen somebody usually
+              sees. */}
+            {(search || status || supplierId || itemId || fromDate || toDate || overdueOnly) && (
+              <button
+                className="btn-ghost h-8 shrink-0 px-2 text-xs"
+                onClick={() => {
+                  setSearch('')
+                  setStatus('')
+                  setSupplierId('')
+                  setItemId('')
+                  setFromDate('')
+                  setToDate('')
+                  setOverdueOnly(false)
+                }}
+              >
+                Clear
+              </button>
+            )}
+
+            <span className="text-muted-foreground ml-auto shrink-0 text-xs tabular-nums">
+              {total} {total === 1 ? 'bill' : 'bills'}
+            </span>
+          </div>
         </div>
 
         {loading && rows.length === 0 ? (
@@ -178,23 +626,23 @@ export default function PurchaseBillsPage() {
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
             <p className="text-muted-foreground text-sm">
-              {debounced || status || overdueOnly
+              {debounced || status || supplierId || itemId || fromDate || toDate || overdueOnly
                 ? 'No bills match what you are looking for. Clear the filters to see them all.'
                 : 'No supplier bills booked yet. Book one to record what a supplier has charged you — start from a goods receipt and it fills itself in.'}
             </p>
           </div>
         ) : (
-          <>
+          <div className="list-scope">
             {/* ── On a phone, not a table ──────────────────────────────────
 
-              Same reasoning as the purchase order list: 9 columns cannot be
-              made to fit a phone, and a table you drag sideways costs two
-              gestures for every read and keeps the buttons off whichever edge
-              you are not looking at. Below xl each row is a block instead.
+              Eleven columns cannot be made to fit a phone, and a table you
+              drag sideways costs two gestures for every read and keeps the
+              buttons off whichever edge you are not looking at. Under 700px
+              of list each row is a block instead.
 
-              xl and not lg, because lg is where the sidebar comes back and
-              takes 260px of the screen with it. */}
-            <div className="divide-border divide-y xl:hidden">
+              Measured on the list rather than the window, so collapsing the
+              sidebar widens it — see `.list-scope` in globals.css. */}
+            <div className="list-cards divide-border divide-y">
               {rows.map((bill) => {
                 const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                 const overdue =
@@ -202,12 +650,21 @@ export default function PurchaseBillsPage() {
                   bill.status !== 'PAID' &&
                   bill.status !== 'CANCELLED' &&
                   new Date(bill.dueDate) < new Date()
+                const open = expanded === bill.id
                 return (
                   <div key={bill.id} className="p-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-foreground font-mono text-xs font-semibold">
+                          <Link
+                            href={`/print/purchase-bill/${bill.id}`}
+                            target="_blank"
+                            className="font-mono text-xs font-semibold text-teal-400 underline-offset-2 hover:underline"
+                            title="Open this bill to print or save"
+                          >
+                            {bill.supplierInvoiceNo || bill.billNumber}
+                          </Link>
+                          <span className="text-muted-foreground font-mono text-[10px]">
                             {bill.billNumber}
                           </span>
                           <span className={s.cls}>{s.label}</span>
@@ -244,6 +701,31 @@ export default function PurchaseBillsPage() {
                           <span className="text-muted-foreground">—</span>
                         )}
                       </dd>
+                      <dt className="text-muted-foreground">Against</dt>
+                      <dd className="text-foreground min-w-0">
+                        {receiptsOn(bill).length ? (
+                          <span className="font-mono">{receiptsOn(bill).join(', ')}</span>
+                        ) : (
+                          <span className="text-muted-foreground">Expense (no PO)</span>
+                        )}
+                        {fileCountOn(bill) > 0 && (
+                          // Pressable here too. On the card this was a count
+                          // and nothing else, so the same paperclip opened
+                          // the files in the table and did nothing at all on
+                          // a phone.
+                          <button
+                            type="button"
+                            className="text-primary hover:text-primary/80 ml-1.5 inline-flex items-center gap-0.5 underline transition"
+                            onClick={() => setFilesFor(bill)}
+                            title={`Open the ${fileCountOn(bill)} file${
+                              fileCountOn(bill) === 1 ? '' : 's'
+                            } on this bill's order and receipts`}
+                          >
+                            <Paperclip size={10} />
+                            {fileCountOn(bill)}
+                          </button>
+                        )}
+                      </dd>
                       <dt className="text-muted-foreground">Booked</dt>
                       <dd className="text-foreground min-w-0">{formatDate(bill.billDate)}</dd>
                       <dt className="text-muted-foreground">Due</dt>
@@ -268,61 +750,84 @@ export default function PurchaseBillsPage() {
                       </dd>
                     </dl>
 
-                    <div className="mt-3 flex justify-end gap-1">
-                      <Link
-                        href={`/print/purchase-bill/${bill.id}`}
-                        target="_blank"
-                        className="btn-ghost border-border rounded-lg border p-1.5"
-                        title="Print"
-                        aria-label={`Print ${bill.billNumber}`}
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        onClick={() => setExpanded(open ? null : bill.id)}
+                        disabled={!bill.lines?.length}
+                        className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                          !bill.lines?.length
+                            ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                            : 'bg-primary/10 text-primary hover:bg-primary/20'
+                        }`}
+                        aria-expanded={open}
                       >
-                        <Printer size={15} />
-                      </Link>
-                      {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
-                        <>
-                          <button
-                            className="btn-ghost border-border rounded-lg border p-1.5"
-                            onClick={() => setDialog({ open: true, record: bill })}
-                            title="Edit"
-                            aria-label={`Edit ${bill.billNumber}`}
-                          >
-                            <Pencil size={15} />
-                          </button>
-                          <button
-                            className="btn-ghost border-border text-muted-foreground rounded-lg border p-1.5 hover:text-red-400"
-                            onClick={() => void cancel(bill)}
-                            disabled={busy}
-                            title="Cancel"
-                            aria-label={`Cancel ${bill.billNumber}`}
-                          >
-                            <Ban size={15} />
-                          </button>
-                        </>
-                      )}
+                        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {open ? 'Hide items' : 'Bill items'}
+                      </button>
+                      <ActionMenu
+                        label={`Actions for ${bill.billNumber}`}
+                        items={billActions(bill)}
+                      />
                     </div>
+
+                    {open && (
+                      <div className="border-border bg-secondary/40 mt-2.5 max-h-[22rem] overflow-y-auto rounded-lg border p-2">
+                        <BillItems bill={bill} />
+                      </div>
+                    )}
                   </div>
                 )
               })}
             </div>
 
-            <div className="hidden w-full overflow-x-auto xl:block">
-              {/* A floor, so the nine columns scroll rather than squash. With no
-              minimum they squeeze to fit whatever they are given, and on a
-              narrow screen the supplier and the invoice number end up two
-              characters wide over four lines. 900px is under the 1058px a
-              1366px laptop has to give, so the commonest screen still shows
-              the whole table without scrolling. */}
-              <table className="data-table w-full min-w-[900px]">
+            <div className="list-rows w-full">
+              {/* What goes when the list narrows, in the order it goes:
+
+                  under "full"   our own reference and the booking date — the
+                              supplier's number is the one both sides quote
+                              and ours is on the card and in the detail
+                              window, and nobody scans a list for the day a
+                              bill was keyed in
+                  under "wide"   the receipts it settles, and the due date
+                  under "roomy"  what is outstanding
+
+                  Never dropped: the bill number, the supplier, the total, the
+                  status and the actions. That is enough to find a row and do
+                  something to it, which is the floor.
+
+                  Sized by content, not by a table of percentages. Percentages
+                  only ever add to 100% with every column showing — with five
+                  of them gone the other half of the table went to whichever
+                  column the browser felt like, which here was the 30px expand
+                  toggle: 345px of empty first column and a bill number
+                  spilling out of 79px beside it. Content sizing redistributes
+                  on its own, and the two columns that can run long are capped
+                  below so one supplier with a long name cannot push the
+                  figures off the end. */}
+              <table className="data-table w-full">
                 <thead>
-                  <tr>
-                    <th>Our ref</th>
-                    <th>Their invoice</th>
+                  <tr className="bg-secondary">
+                    <th style={{ width: 30 }} />
+                    {/* The supplier's own number leads, because that is the one
+                      both sides quote. Ours is the book reference beside it —
+                      the old ERP printed one value in both places and lost the
+                      distinction entirely. */}
+                    <th>Bill no.</th>
+                    <th className="col-full">Our ref</th>
+                    {/* The receipts this bill settles. The old ERP called it
+                      Reference# and put a GRN number in it, because that is
+                      what the accounts team reconciles against — the bill's
+                      own number means nothing to the store. */}
+                    <th className="col-wide">Against receipt</th>
                     <th>Supplier</th>
-                    <th>Booked</th>
-                    <th>Due</th>
+                    <th className="col-full">Booked</th>
+                    <th className="col-full">Due</th>
                     <th style={{ textAlign: 'right' }}>Total</th>
-                    <th style={{ textAlign: 'right' }}>Outstanding</th>
+                    <th className="col-roomy" style={{ textAlign: 'right' }}>
+                      Outstanding
+                    </th>
                     <th>Status</th>
+                    <th className="col-roomy">Files</th>
                     <th />
                   </tr>
                 </thead>
@@ -330,107 +835,157 @@ export default function PurchaseBillsPage() {
                   {rows.map((bill) => {
                     const s = STATUS[bill.status] ?? { label: bill.status, cls: 'badge-neutral' }
                     const overdue = isOverdue(bill)
+                    const open = expanded === bill.id
+                    const lines = bill.lines ?? []
                     return (
-                      <tr key={bill.id}>
-                        <td className="font-mono text-xs text-teal-400">{bill.billNumber}</td>
-                        <td>
-                          {bill.supplierInvoiceNo ? (
-                            <>
-                              <div className="text-foreground font-mono text-xs">
-                                {bill.supplierInvoiceNo}
-                              </div>
-                              {bill.supplierInvoiceDate && (
-                                <div className="text-muted-foreground text-[10px]">
-                                  {formatDate(bill.supplierInvoiceDate)}
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td>
-                          <div className="text-foreground font-medium">{bill.supplier?.name}</div>
-                          <div className="mt-0.5 flex items-center gap-1.5">
-                            {bill.supplier?.gstin && (
-                              <span className="text-muted-foreground font-mono text-[10px]">
-                                {bill.supplier.gstin}
-                              </span>
-                            )}
-                            {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
-                          </div>
-                        </td>
-                        <td className="text-xs">{formatDate(bill.billDate)}</td>
-                        <td className="text-xs">
-                          {bill.dueDate ? (
-                            <span className={overdue ? 'font-medium text-red-400' : undefined}>
-                              {formatDate(bill.dueDate)}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                        <td className="text-right font-semibold tabular-nums">
-                          ₹{money(bill.totalAmount)}
-                        </td>
-                        <td className="text-right tabular-nums">
-                          {bill.status === 'CANCELLED' ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : (
-                            <>
-                              ₹{money(bill.balanceAmount)}
-                              {Number(bill.tdsAmount) > 0 && (
-                                <div className="text-muted-foreground text-[10px]">
-                                  after ₹{money(bill.tdsAmount)} TDS
-                                </div>
-                              )}
-                            </>
-                          )}
-                        </td>
-                        <td>
-                          <span className={s.cls}>{s.label}</span>
-                        </td>
-                        <td className="whitespace-nowrap text-right">
-                          <div className="flex justify-end gap-1">
+                      <Fragment key={bill.id}>
+                        <tr>
+                          <td>
+                            <button
+                              className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                                lines.length === 0
+                                  ? 'text-muted-foreground cursor-not-allowed opacity-50'
+                                  : 'bg-primary/10 text-primary hover:bg-primary/20'
+                              }`}
+                              onClick={() => setExpanded(open ? null : bill.id)}
+                              disabled={lines.length === 0}
+                              title={open ? 'Hide items' : 'Show items'}
+                              aria-label={`${open ? 'Hide' : 'Show'} items on ${bill.billNumber}`}
+                              aria-expanded={open}
+                            >
+                              {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </td>
+                          <td className="whitespace-nowrap font-mono text-xs">
+                            {/* The number opens the printable bill, the way the
+                            old ERP's invoice number did. */}
                             <Link
                               href={`/print/purchase-bill/${bill.id}`}
                               target="_blank"
-                              className="btn-ghost p-1.5"
-                              title="Print"
-                              aria-label={`Print ${bill.billNumber}`}
+                              className="text-teal-400 underline-offset-2 hover:underline"
+                              title="Open this bill to print or save"
                             >
-                              <Printer size={15} />
+                              {bill.supplierInvoiceNo || bill.billNumber}
                             </Link>
-                            {bill.status !== 'CANCELLED' && Number(bill.paidAmount) === 0 && (
+                            {bill.supplierInvoiceDate && (
+                              <div className="text-muted-foreground text-[10px]">
+                                {formatDate(bill.supplierInvoiceDate)}
+                              </div>
+                            )}
+                          </td>
+                          <td className="text-muted-foreground col-full font-mono text-xs">
+                            {bill.billNumber}
+                          </td>
+                          <td className="col-wide text-xs">
+                            <div className="flex items-center gap-2">
+                              {receiptsOn(bill).length ? (
+                                <span className="text-foreground max-w-[11rem] truncate font-mono">
+                                  {receiptsOn(bill).join(', ')}
+                                </span>
+                              ) : (
+                                <span
+                                  className="text-muted-foreground"
+                                  title="Entered by hand — an expense or service bill with no order or receipt behind it"
+                                >
+                                  Expense (no PO)
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td>
+                            {/* Capped, because nothing else caps it. Under
+                            content sizing the column grows to whatever the
+                            longest name on the page is, and one
+                            "Shree Balaji Textiles Private Limited" would push
+                            the figures off the end of the screen. */}
+                            <div className="text-foreground max-w-[15rem] truncate font-medium">
+                              {bill.supplier?.name}
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-1.5">
+                              {bill.supplier?.gstin && (
+                                <span className="text-muted-foreground font-mono text-[10px]">
+                                  {bill.supplier.gstin}
+                                </span>
+                              )}
+                              {bill.isReverseCharge && <span className="badge-purple">RCM</span>}
+                            </div>
+                          </td>
+                          <td className="col-full whitespace-nowrap text-xs">
+                            {formatDate(bill.billDate)}
+                          </td>
+                          <td className="col-full whitespace-nowrap text-xs">
+                            {bill.dueDate ? (
+                              <span className={overdue ? 'font-medium text-red-400' : undefined}>
+                                {formatDate(bill.dueDate)}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap text-right font-semibold tabular-nums">
+                            ₹{money(bill.totalAmount)}
+                          </td>
+                          <td className="col-roomy whitespace-nowrap text-right tabular-nums">
+                            {bill.status === 'CANCELLED' ? (
+                              <span className="text-muted-foreground">—</span>
+                            ) : (
                               <>
-                                <button
-                                  className="btn-ghost p-1.5"
-                                  onClick={() => setDialog({ open: true, record: bill })}
-                                  title="Edit"
-                                  aria-label={`Edit ${bill.billNumber}`}
-                                >
-                                  <Pencil size={15} />
-                                </button>
-                                <button
-                                  className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                                  onClick={() => void cancel(bill)}
-                                  disabled={busy}
-                                  title="Cancel"
-                                  aria-label={`Cancel ${bill.billNumber}`}
-                                >
-                                  <Ban size={15} />
-                                </button>
+                                ₹{money(bill.balanceAmount)}
+                                {Number(bill.tdsAmount) > 0 && (
+                                  <div className="text-muted-foreground text-[10px]">
+                                    after ₹{money(bill.tdsAmount)} TDS
+                                  </div>
+                                )}
                               </>
                             )}
-                          </div>
-                        </td>
-                      </tr>
+                          </td>
+                          <td>
+                            <span className={s.cls}>{s.label}</span>
+                          </td>
+                          <td className="col-roomy whitespace-nowrap">
+                            {/* A paperclip opens the files, and only the
+                              files. It used to open the whole detail window
+                              scrolled down to its attachments panel — which
+                              answers "tell me everything about this bill"
+                              when the question asked was "let me see the
+                              challan". */}
+                            <FilesCell
+                              count={fileCountOn(bill)}
+                              onOpen={() => setFilesFor(bill)}
+                              what="on this bill's order and receipts"
+                            />
+                          </td>
+                          <td className="whitespace-nowrap text-right">
+                            <div className="flex justify-end">
+                              <ActionMenu
+                                label={`Actions for ${bill.billNumber}`}
+                                items={billActions(bill)}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                        {open && lines.length > 0 && (
+                          <tr>
+                            <td colSpan={12} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <RowPanel
+                                icon={FileText}
+                                title="Bill Items"
+                                note={`${lines.length} ${
+                                  lines.length === 1 ? 'line' : 'lines'
+                                } on ${bill.billNumber}`}
+                              >
+                                <BillItems bill={bill} />
+                              </RowPanel>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     )
                   })}
                 </tbody>
               </table>
             </div>
-          </>
+          </div>
         )}
 
         <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
@@ -445,9 +1000,64 @@ export default function PurchaseBillsPage() {
       <PurchaseBillDialog
         open={dialog.open}
         record={dialog.record}
-        onClose={() => setDialog({ open: false, record: null })}
+        expense={dialog.expense}
+        initialGrnIds={fromGrnIds}
+        onClose={() => {
+          setDialog({ open: false, record: null })
+          // Arriving here was "Add bill" on a receipt, not a visit to this
+          // list in its own right — so closing the form, saved or not,
+          // goes back to the Goods Receipt screen it was raised from rather
+          // than stranding the user on the bill list they never asked for.
+          if (fromGrn) router.replace('/purchase/grn')
+        }}
         onSaved={() => void load()}
       />
+
+      {filesFor && (
+        <BillFilesDialog
+          trail={filesFor}
+          label={filesFor.supplierInvoiceNo || filesFor.billNumber}
+          onClose={() => setFilesFor(null)}
+        />
+      )}
+
+      {detail && <BillDetailDialog bill={detail} onClose={() => setDetail(null)} />}
+
+      {/* Opens straight onto the bill it was raised from, so the lines and
+        what is left of each are already on the screen. */}
+      <PurchaseNoteDialog
+        open={Boolean(adjusting)}
+        moduleType="OUR_DEBIT_NOTE"
+        initialBillId={adjusting?.id ?? null}
+        financialOnly
+        onClose={() => setAdjusting(null)}
+        onSaved={() => void load()}
+      />
+
+      {returning && (
+        <ReturnChallanDialog
+          billId={returning.id}
+          onClose={() => setReturning(null)}
+          onSaved={(msg, id) => {
+            setReturning(null)
+            setMessage(msg)
+            void load()
+            // The gate pass is what the vehicle leaves with, so it opens now
+            // rather than being something to go and find afterwards.
+            window.open('/print/purchase-return/' + id, '_blank', 'noopener')
+          }}
+        />
+      )}
     </div>
+  )
+}
+
+export default function PurchaseBillsPage() {
+  // useSearchParams needs a Suspense boundary or the whole route opts out of
+  // static rendering and Next refuses to build.
+  return (
+    <Suspense fallback={<p className="text-muted-foreground text-sm">Loading...</p>}>
+      <PurchaseBillsTable />
+    </Suspense>
   )
 }
