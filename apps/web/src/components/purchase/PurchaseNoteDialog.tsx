@@ -213,6 +213,7 @@ export function PurchaseNoteDialog({
   moduleType,
   initialBillId,
   initialGrnId,
+  financialOnly = false,
 }: {
   open: boolean
   onClose: () => void
@@ -227,6 +228,16 @@ export function PurchaseNoteDialog({
    * for the document a note can be raised against when there is no bill.
    */
   initialGrnId?: string | null
+  /**
+   * A money-only adjustment: a rate difference, a discount after the bill,
+   * excess billing. Offered from the bill as "Raise direct debit note".
+   *
+   * Only the reasons where nothing physically moves are offered, the godown
+   * box is not shown, and no rejected quantity is pre-filled. Goods that are
+   * going back to the supplier go out on a return challan first — raised from
+   * the same bill — and the challan writes its own note.
+   */
+  financialOnly?: boolean
 }) {
   const isEdit = Boolean(record)
   const mayPost = can('purchase', 'post')
@@ -448,7 +459,7 @@ export function PurchaseNoteDialog({
                something still unclaimed is suggested, not only one, and one
                note can close out the whole bill's rejections in one save. */
             const stillRejected = Math.max(0, l.rejectedQty - l.adjustedQty)
-            const suggestRejected = !record && !was && stillRejected > 0
+            const suggestRejected = !financialOnly && !record && !was && stillRejected > 0
             const suggestedQty = suggestRejected ? Math.min(stillRejected, l.remainingQty) : 0
             if (suggestedQty > 0 && l.warehouseId && !firstSuggestedWarehouse) {
               firstSuggestedWarehouse = l.warehouseId
@@ -479,7 +490,7 @@ export function PurchaseNoteDialog({
         setPulling(false)
       }
     },
-    [record]
+    [record, financialOnly]
   )
 
   useEffect(() => {
@@ -564,6 +575,15 @@ export function PurchaseNoteDialog({
     },
     [record]
   )
+
+  /** The note a return challan wrote, if this is one. */
+  const fromChallan = record?.purchaseReturn ?? null
+  /*
+   * A note a challan wrote keeps its goods reason — that is what happened —
+   * but moves nothing, so it is treated as money-only everywhere below.
+   */
+  const noGoods = financialOnly || Boolean(fromChallan)
+  const reasonChoices = financialOnly ? reasons.filter((r) => !r.movesGoods) : reasons
 
   /* The reason SUGGESTS a document. It does not decide one.
      Applied only when the reason is changed by hand, so reopening a saved
@@ -928,8 +948,12 @@ export function PurchaseNoteDialog({
                   {isEdit ? `Edit ${record?.noteNumber}` : `New ${title}`}
                 </h2>
                 <p className="text-muted-foreground mt-0.5 hidden text-[13px] sm:block">
-                  {DOC_WORDS[docType].hint}
-                  {' Saved as a draft; nothing moves until it is posted.'}
+                  {fromChallan
+                    ? `Raised from return challan ${fromChallan.returnNumber} — the goods have already left. Its items and quantities follow the challan; the rate and GST are yours to settle.`
+                    : financialOnly
+                      ? 'A rate or money difference only — nothing leaves the godown. Goods going back to the supplier go out on a return challan from the bill.'
+                      : DOC_WORDS[docType].hint +
+                        ' Saved as a draft; nothing moves until it is posted.'}
                 </p>
               </div>
             </div>
@@ -1013,7 +1037,7 @@ export function PurchaseNoteDialog({
                           onChange={(e) => pickReason(e.target.value)}
                         >
                           <option value="">Pick one…</option>
-                          {reasons.map((r) => (
+                          {reasonChoices.map((r) => (
                             <option key={r.value} value={r.value}>
                               {r.label}
                             </option>
@@ -1179,7 +1203,7 @@ export function PurchaseNoteDialog({
                           onChange={(e) => pickReason(e.target.value)}
                         >
                           <option value="">Pick one…</option>
-                          {reasons.map((r) => (
+                          {reasonChoices.map((r) => (
                             <option key={r.value} value={r.value}>
                               {r.label}
                             </option>
@@ -1896,24 +1920,26 @@ export function PurchaseNoteDialog({
                             onChange={(e) => setNoteDate(e.target.value)}
                           />
                         </div>
-                        <div>
-                          <label className="form-label" htmlFor="note-warehouse">
-                            Godown they left
-                          </label>
-                          <select
-                            id="note-warehouse"
-                            className="form-input"
-                            value={warehouseId}
-                            onChange={(e) => setWarehouseId(e.target.value)}
-                          >
-                            <option value="">Not taken out of stock</option>
-                            {warehouses.map((w) => (
-                              <option key={w.id} value={w.id}>
-                                {w.name}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
+                        {!noGoods && (
+                          <div>
+                            <label className="form-label" htmlFor="note-warehouse">
+                              Godown they left
+                            </label>
+                            <select
+                              id="note-warehouse"
+                              className="form-input"
+                              value={warehouseId}
+                              onChange={(e) => setWarehouseId(e.target.value)}
+                            >
+                              <option value="">Not taken out of stock</option>
+                              {warehouses.map((w) => (
+                                <option key={w.id} value={w.id}>
+                                  {w.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                         <div>
                           <label className="form-label" htmlFor="sup-doc-no">
                             Supplier&rsquo;s document number

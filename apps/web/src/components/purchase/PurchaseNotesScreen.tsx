@@ -200,6 +200,20 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
 
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
+
+  /*
+   * A search handed over in the address — the link from a return challan to
+   * the document next to it in the chain. Without it the link lands on the
+   * whole list and the clerk types the number they just clicked.
+   */
+  useEffect(() => {
+    const q = searchParams.get('q')
+    if (q) {
+      setSearch(q)
+      setDebounced(q)
+    }
+  }, [searchParams])
+
   const [status, setStatus] = useState('')
   const [reason, setReason] = useState('')
   const [supplierId, setSupplierId] = useState('')
@@ -539,7 +553,17 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
       newTab: true,
     })
 
-    if (n.status !== 'CANCELLED' && mayEdit) {
+    if (n.purchaseReturn) {
+      items.push({
+        key: 'challan',
+        label: `Open return challan ${n.purchaseReturn.returnNumber}`,
+        icon: <Printer size={14} />,
+        href: '/print/purchase-return/' + n.purchaseReturn.id,
+        newTab: true,
+      })
+    }
+
+    if (n.status !== 'CANCELLED' && mayEdit && !n.purchaseReturn) {
       items.push({
         key: 'cancel',
         label: n.status === 'POSTED' ? 'Cancel and reverse' : 'Cancel note',
@@ -549,7 +573,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
       })
     }
 
-    if (n.status === 'DRAFT' && mayDelete) {
+    if (n.status === 'DRAFT' && mayDelete && !n.purchaseReturn) {
       items.push({
         key: 'delete',
         label: 'Delete draft',
@@ -910,6 +934,11 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                           <span className={s.cls} title={s.hint}>
                             {s.label}
                           </span>
+                          {n.purchaseReturn && (
+                            <span className="text-primary font-mono text-[11px]">
+                              from {n.purchaseReturn.returnNumber}
+                            </span>
+                          )}
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">
                           {n.supplier.name}
@@ -1103,6 +1132,17 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                               {formatDate(n.noteDate)}
                               {n.supplierDocNo ? ` · their ${n.supplierDocNo}` : ''}
                             </p>
+                            {n.purchaseReturn && (
+                              <a
+                                href={'/print/purchase-return/' + n.purchaseReturn.id}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-primary font-mono text-[11px] hover:underline"
+                                title="The return challan the goods left on"
+                              >
+                                from {n.purchaseReturn.returnNumber}
+                              </a>
+                            )}
                           </td>
                           <td className="px-3 py-2">
                             <p className="text-foreground text-[13px]">

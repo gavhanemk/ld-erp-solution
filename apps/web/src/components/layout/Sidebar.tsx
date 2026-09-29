@@ -82,9 +82,18 @@ const navItems: NavItem[] = [
   {
     label: 'Purchase', icon: Package,
     children: [
+      /* First, because it comes first: the buyer sends an enquiry, the
+         supplier answers with a proforma invoice, and the order is raised
+         against its number. Optional — plenty of orders are placed at a rate
+         already known — which is why it reads as a step and not a gate. */
+      { label: 'Purchase Enquiries', href: '/purchase/enquiries' },
       { label: 'Purchase Orders', href: '/purchase/orders' },
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
       { label: 'Purchase Bills', href: '/purchase/bills' },
+      /* After the bill, because a return is always raised against one — and
+         before the notes, because the challan comes first and writes the
+         note. The menu reads in the order the paper does. */
+      { label: 'Purchase Returns', href: '/purchase/returns' },
       { label: 'Supplier Payments', href: '/purchase/payments' },
       /* Two entries for three kinds of document, on purpose. Ours and the
          supplier's debit notes both live under Debit Notes — they are both

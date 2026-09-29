@@ -170,6 +170,7 @@ interface EditingGrn {
   clientName: string | null
   orderedBy: string | null
   referenceNo: string | null
+  overReceiptReason?: string | null
   supplierAddress: string | null
   shippingAddress: string | null
   lines: Array<{
@@ -189,6 +190,32 @@ interface EditingGrn {
   } | null
   /** Received-elsewhere per order line — this receipt's own lines already left out. */
   otherReceived: Record<string, number>
+}
+
+/**
+ * How far past its order a line may be booked before the receipt has to say
+ * why. The server refuses at the same figure (`OVER_RECEIPT_ALLOWANCE` in the
+ * purchase routes) — change both together.
+ *
+ * A little over is ordinary and needs nothing. Well over is usually a slipped
+ * zero, so the line turns amber and the reason becomes required.
+ */
+const OVER_RECEIPT_ALLOWANCE = 0.1
+
+function wellPastOrder(ordered: number, already: number, taking: number): boolean {
+  return ordered > 0 && already + taking > ordered * (1 + OVER_RECEIPT_ALLOWANCE) + 0.0001
+}
+
+function OverNote({ extra, unit, wellOver }: { extra: number; unit: string; wellOver: boolean }) {
+  const qty = `${Number(extra.toFixed(3))} ${unit}`.trim()
+  return wellOver ? (
+    <div className="mt-1 text-[11px] font-medium text-amber-400">
+      {qty} more than is still due — over {OVER_RECEIPT_ALLOWANCE * 100}% past the order. Check the
+      quantity.
+    </div>
+  ) : (
+    <div className="text-muted-foreground mt-1 text-[11px]">{qty} more than is still due.</div>
+  )
 }
 
 /** A stable empty list, so a line with no rows yet does not defeat the memo below. */
@@ -287,9 +314,11 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                     )}
                   </div>
                   {over && (
-                    <div className="text-muted-foreground mt-1 text-[11px]">
-                      {Number((lineAccepted - pending).toFixed(3))} {unit} more than is still due.
-                    </div>
+                    <OverNote
+                      extra={lineAccepted - pending}
+                      unit={unit}
+                      wellOver={wellPastOrder(ordered, already, lineAccepted)}
+                    />
                   )}
                   {line.shortClosed && (
                     <div
@@ -442,9 +471,11 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
         )}
       </div>
       {over && (
-        <div className="text-muted-foreground mt-1 text-[11px]">
-          {Number((lineAccepted - pending).toFixed(3))} {unit} more than is still due.
-        </div>
+        <OverNote
+          extra={lineAccepted - pending}
+          unit={unit}
+          wellOver={wellPastOrder(ordered, already, lineAccepted)}
+        />
       )}
       {line.shortClosed && (
         <div className="mt-1 text-[11px] text-amber-400" title={line.shortCloseReason ?? undefined}>
@@ -684,14 +715,16 @@ export function ReceiveGoodsDialog({
   }, [editing])
 
   useEffect(() => {
+    // A receipt being corrected loads through the effect below instead —
+    // this one exists to turn a freshly-picked order into a blank receipt,
+    // which is not what an edit is. That includes its note: clearing it here
+    // too would wipe the reason the correction loaded, whenever the store
+    // list arrived after the receipt did.
+    if (editing) return
+
     // A fresh order starts with a blank note — carrying one over from
     // whatever order was open before would attach it to the wrong receipt.
     setOverReceiptReason('')
-
-    // A receipt being corrected loads through the effect below instead —
-    // this one exists to turn a freshly-picked order into a blank receipt,
-    // which is not what an edit is.
-    if (editing) return
 
     if (!poId) {
       setOrder(null)
@@ -813,6 +846,9 @@ export function ReceiveGoodsDialog({
 
         setVehicleNo(g.vehicleNo ?? '')
         setNotes(g.notes ?? '')
+        // Saving the correction writes the note back, so a receipt already
+        // explained keeps its explanation rather than losing it to a blank.
+        setOverReceiptReason(g.overReceiptReason ?? '')
         setGrnDate(toDateInput(g.grnDate))
         setGrnTime(toTimeInput(g.grnDate))
         setDelivery({
@@ -947,6 +983,35 @@ export function ReceiveGoodsDialog({
     }
 
     /*
+     * The challan, refused here as well as on the server.
+     *
+     * It is the one piece of the delivery's paperwork the receipt cannot do
+     * without: it is the paper that travelled with the goods, and it is what
+     * a query about the supplier's bill is settled against months later. A
+     * receipt that cannot name one cannot be checked against anything.
+     *
+     * Named separately rather than as one message about "the challan", so the
+     * store keeper is not told to look at a box they have already filled in.
+     */
+    if (!delivery.challanNo.trim()) {
+      return setError(
+        "Enter the challan number, under Delivery Paperwork — it is on the supplier's delivery note."
+      )
+    }
+    if (!delivery.challanDate) {
+      return setError('Enter the challan date, under Delivery Paperwork.')
+    }
+
+    // Well past the order is usually a slipped zero. Nothing is refused for
+    // it — the store keeper only has to say it is real.
+    if (needsOverReason) {
+      document.getElementById('grn-over-reason')?.focus()
+      return setError(
+        `A line is more than ${OVER_RECEIPT_ALLOWANCE * 100}% over its order. Check the quantity; if it is right, say why in "Why more than ordered".`
+      )
+    }
+
+    /*
      * Caught here as well as on the server. The server's message names the
      * item and is the one that counts, but a store keeper who has just split a
      * line across two stores should be told before the round trip.
@@ -1043,13 +1108,35 @@ export function ReceiveGoodsDialog({
   const paper = (
     label: string,
     field: keyof Delivery,
-    opts: { type?: string; placeholder?: string; help?: string; min?: number } = {}
+    opts: {
+      type?: string
+      placeholder?: string
+      help?: string
+      min?: number
+      /** Refused on save, and said so before the press rather than after it. */
+      required?: boolean
+    } = {}
   ) => (
     <label className="block">
-      <span className="form-label">{label}</span>
+      <span className="form-label">
+        {label}
+        {opts.required && (
+          <span className="ml-0.5 text-red-400" aria-hidden>
+            *
+          </span>
+        )}
+      </span>
       <input
         type={opts.type ?? 'text'}
-        className="form-input h-9"
+        required={opts.required}
+        aria-required={opts.required}
+        /* Tinted while empty, the same amber the order form's missing
+          quantities wear. Not red: nothing has gone wrong yet — the box is
+          simply not filled in, and a form that opens shouting is a form
+          people stop reading. */
+        className={`form-input h-9${
+          opts.required && delivery[field].trim() === '' ? 'border-amber-500/70' : ''
+        }`}
         value={delivery[field]}
         min={opts.min}
         onChange={(e) => {
@@ -1078,6 +1165,15 @@ export function ReceiveGoodsDialog({
     const taking = (entries[line.id] ?? []).reduce((sum, a) => sum + num(a.received), 0)
     return taking > pending
   })
+  // A line far enough past its order that the reason stops being optional.
+  const wellOverOrder = (order?.lines ?? []).some((line) =>
+    wellPastOrder(
+      num(line.qty),
+      num(line.receivedQty),
+      (entries[line.id] ?? []).reduce((sum, a) => sum + num(a.received), 0)
+    )
+  )
+  const needsOverReason = wellOverOrder && overReceiptReason.trim().length < 5
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
@@ -1151,10 +1247,15 @@ export function ReceiveGoodsDialog({
             <label className="block">
               <span className="form-label">
                 Why more than ordered{' '}
-                <span className="text-muted-foreground font-normal">(optional)</span>
+                {wellOverOrder ? (
+                  <span className="text-red-400">*</span>
+                ) : (
+                  <span className="text-muted-foreground font-normal">(optional)</span>
+                )}
               </span>
               <input
-                className="form-input h-9"
+                id="grn-over-reason"
+                className={`form-input h-9 ${needsOverReason ? 'border-amber-500/70' : ''}`}
                 value={overReceiptReason}
                 onChange={(e) => setOverReceiptReason(e.target.value)}
                 placeholder="e.g. supplier combined this with next month's delivery"
@@ -1340,11 +1441,19 @@ export function ReceiveGoodsDialog({
             paperwork is one press away on the days it is the thing that was
             mis-typed. */}
           <Section
+            /* Remounted once a receipt being corrected has arrived. `Section`
+              reads `openByDefault` when it mounts, and the form mounts before
+              the record does — at that moment every box is empty and "is the
+              challan missing?" has no answer yet. */
+            key={editing && loadingOrder ? 'paperwork-loading' : 'paperwork'}
             icon={ClipboardList}
             title="Delivery Paperwork"
             foldable
-            openByDefault={!editing}
-            summary="Gate entry, challan, the supplier's bill — all optional"
+            /* Folded when correcting, because a correction is nearly always a
+              quantity — unless the challan is what is missing, in which case
+              the panel holding it cannot start out of sight. */
+            openByDefault={!editing || !delivery.challanNo || !delivery.challanDate}
+            summary="Challan number and date needed — gate entry and the supplier's bill optional"
           >
             {/* `auto-fit`, not a fixed two columns — the gate entry pairs
               with its own date and the challan with its on any phone wide
@@ -1354,9 +1463,10 @@ export function ReceiveGoodsDialog({
               {paper('Gate entry number', 'gateEntryNo')}
               {paper('Gate entry date', 'gateEntryDate', { type: 'date' })}
               {paper('Challan number', 'challanNo', {
+                required: true,
                 help: 'A range is fine when one delivery covers several',
               })}
-              {paper('Challan date', 'challanDate', { type: 'date' })}
+              {paper('Challan date', 'challanDate', { type: 'date', required: true })}
 
               {paper('Supplier bill number', 'supplierInvoiceNo', {
                 help: 'What accounts will book the bill against',

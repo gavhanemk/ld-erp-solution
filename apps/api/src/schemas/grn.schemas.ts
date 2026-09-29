@@ -53,16 +53,50 @@ const grnFields = {
   /*
    * The delivery itself.
    *
-   * Every one of these is optional, and that is the point: the person typing
-   * is at the gate with a lorry waiting, and a receipt refused because the
-   * driver's name was blank would put the stock figure behind the goods.
-   * They are worth capturing because they are what settles a query about the
-   * supplier's bill months later, when nobody remembers the delivery.
+   * Optional, with one exception, and the exception is the whole document:
+   * the challan is the paper that physically travelled with the goods, and it
+   * is what a query about the supplier's bill is settled against months later
+   * when nobody remembers the delivery. A receipt that cannot name one cannot
+   * be checked against anything.
+   *
+   * The rest stay optional on purpose. The person typing is at the gate with a
+   * lorry waiting, and a receipt refused because the driver's name was blank
+   * would put the stock figure behind the goods.
    */
   gateEntryNo: ref('gate entry number', 40),
   gateEntryDate: z.coerce.date().optional().nullable(),
-  challanNo: ref('challan number'),
-  challanDate: z.coerce.date().optional().nullable(),
+  /*
+   * Often a range ("1872 - 1887") where one delivery covers several, which is
+   * why it is trimmed text and not a number.
+   */
+  challanNo: z
+    .string({ invalid_type_error: "Enter the challan number off the supplier's delivery note" })
+    /*
+     * A blank box reaches here as null, not as a missing key — the form sends
+     * every paperwork field on every receipt. Taken either way and normalised,
+     * so the message is about the challan rather than about the wire.
+     */
+    .nullish()
+    .transform((v) => (v ?? '').trim())
+    .pipe(
+      z
+        .string()
+        .min(1, "Enter the challan number off the supplier's delivery note")
+        .max(60, 'That challan number is too long')
+    ),
+  /*
+   * Checked for presence before it is coerced.
+   *
+   * `z.coerce.date()` turns a missing value into `new Date(undefined)` — an
+   * Invalid Date — so by the time it looks, nothing is missing and it says
+   * "Invalid date" instead. `required_error` never fires at all.
+   */
+  challanDate: z
+    .any()
+    .refine((v) => v !== undefined && v !== null && v !== '', {
+      message: 'Enter the date on the challan',
+    })
+    .pipe(z.coerce.date({ errorMap: () => ({ message: 'That challan date is not a date' }) })),
   supplierBillNo: ref('bill number'),
   supplierInvoiceNo: ref('invoice number'),
   supplierInvoiceDate: z.coerce.date().optional().nullable(),

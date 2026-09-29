@@ -4,6 +4,12 @@ import { supplierOutstanding } from './definitions/supplier-outstanding'
 import { goodsReceiptRegister } from './definitions/goods-receipt-register'
 import { purchaseOrderStatus } from './definitions/purchase-order-status'
 import { noteRegister } from './definitions/note-register'
+import { pendingPoItems } from './definitions/pending-po-items'
+import { indentAgainstPo } from './definitions/indent-against-po'
+import { grnAgainstBill } from './definitions/grn-against-bill'
+import { purchasesByItem } from './definitions/purchases-by-item'
+import { expenseRegister } from './definitions/expense-register'
+import { grnQcRegister, qcRejections } from './definitions/grn-qc'
 
 /**
  * Every report the ERP knows about.
@@ -13,8 +19,15 @@ import { noteRegister } from './definitions/note-register'
  */
 export const REPORTS: ReportDefinition[] = [
   purchaseRegister,
+  purchasesByItem,
+  expenseRegister,
   goodsReceiptRegister,
+  grnAgainstBill,
+  grnQcRegister,
+  qcRejections,
   purchaseOrderStatus,
+  pendingPoItems,
+  indentAgainstPo,
   supplierOutstanding,
   noteRegister,
 ]

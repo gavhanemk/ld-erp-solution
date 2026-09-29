@@ -14,15 +14,14 @@ import {
   Info,
   FileText,
   Package,
-  MessageSquare,
   Calculator,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
-import { settingsApi, type TdsSection } from '@/lib/settingsApi'
 // The same panel the order and receipt forms are built from, so all three
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
+import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 
 export interface BillLine {
   itemId: string
@@ -191,7 +190,27 @@ interface Option {
   applyOnPurchase?: boolean
   /** Payment to an MSME supplier falls due within 45 days by law. */
   isMsme?: boolean
+  /** The terms agreed with this supplier — what the due date is counted in. */
+  creditDays?: number | null
+  /** An item's category, nested as the master sends it — what marks an expense head. */
+  category?: { id: string; name: string; parentId: string | null } | null
 }
+
+interface Category {
+  id: string
+  name: string
+  parentId: string | null
+}
+
+/** The item-list choice that opens "new expense head" instead of picking one. */
+const ADD_EXPENSE_HEAD = '__new_expense__'
+
+/**
+ * Whether a category is where expense heads live: named for expenses, or
+ * filed under one that is. Read off the name so the mill sets it up in
+ * Masters like any other category — no switch to find, nothing to migrate.
+ */
+const EXPENSE_NAME = /expense/i
 
 interface GrnOption {
   id: string
@@ -211,11 +230,36 @@ interface GrnOption {
     poNumber: string
     supplier?: { id: string; name: string; code?: string } | null
   } | null
+  /** When the lorry arrived. */
+  grnDate?: string | null
+  /*
+   * The supplier's own delivery challan — the number printed on the note that
+   * travelled with the goods.
+   *
+   * This is what the accounts clerk has in front of them. The supplier's
+   * invoice quotes his challan numbers, never our receipt numbers, so a
+   * picker that offers only GRN numbers is asking them to translate between
+   * two documents in their head — which is how the wrong delivery gets
+   * billed.
+   */
+  challanNo?: string | null
+  challanDate?: string | null
+  /**
+   * The supplier's invoice number as the gate wrote it down.
+   *
+   * Caught on the receipt long before accounts book anything, which is what
+   * makes it worth filtering on: the clerk is holding that invoice, and this
+   * is the mill's own record of having seen it arrive.
+   */
+  supplierInvoiceNo?: string | null
   /** What is still unbilled on this receipt. Sent by `/purchase/grn`. */
   billing?: {
     acceptedQty: number | string
     billedQty: number | string
     pendingQty: number | string
+    /** The unbilled part priced at the rate it came in at. An estimate. */
+    pendingValue?: number | string
+    status?: string
   } | null
 }
 
@@ -236,12 +280,38 @@ const num = (v: unknown) => {
 const inr = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
+/**
+ * The longest a bill to a registered small supplier may be left unpaid.
+ *
+ * Section 15 of the MSMED Act. Forty-five days is a ceiling, not a term —
+ * shorter can be agreed and usually has been, longer cannot be — so it is
+ * used as the fallback when the master carries no terms, and as a cap over
+ * whatever it does carry.
+ */
+const MSME_DAYS = 45
+
+/**
+ * A date this many days later, in the `yyyy-mm-dd` a date input wants.
+ *
+ * Built out of the local parts rather than `toISOString`, which converts to
+ * UTC first: east of Greenwich that hands back the day before, so a bill dated
+ * the 28th would fall due on the 11th rather than the 12th.
+ */
+const addDays = (iso: string, days: number) => {
+  const d = new Date(iso + 'T00:00:00')
+  if (Number.isNaN(d.getTime())) return ''
+  d.setDate(d.getDate() + days)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate())
+}
+
 export function PurchaseBillDialog({
   open,
   onClose,
   onSaved,
   record,
   initialGrnIds,
+  expense,
 }: {
   open: boolean
   onClose: () => void
@@ -262,15 +332,29 @@ export function PurchaseBillDialog({
    * four steps to arrive where the button already was.
    */
   initialGrnIds?: string[] | null
+  /**
+   * A bill with no order and no receipt behind it — electricity, rent, a
+   * repair, a service. The deliveries section goes, the lines are picked from
+   * expense heads rather than stock items, and each line carries its own
+   * description, because "Electricity" alone does not say which month.
+   */
+  expense?: boolean
 }) {
   const isEdit = Boolean(record)
+  // An existing bill with no receipt on any line was booked as an expense,
+  // and opens that way again for editing.
+  const expenseMode =
+    Boolean(expense) ||
+    Boolean(isEdit && record?.lines?.length && record.lines.every((l) => !l.grnLineId))
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<Option[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
+  /** The line a new expense head is being created for, if any. */
+  const [newHeadFor, setNewHeadFor] = useState<number | null>(null)
   const [chargeTypes, setChargeTypes] = useState<Option[]>([])
   const [grns, setGrns] = useState<GrnOption[]>([])
   const [companyState, setCompanyState] = useState<string | null>(null)
-  const [tdsSections, setTdsSections] = useState<TdsSection[]>([])
 
   const [supplierId, setSupplierId] = useState('')
   const [poId, setPoId] = useState<string | null>(null)
@@ -280,15 +364,49 @@ export function PurchaseBillDialog({
   const [dueDate, setDueDate] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [isReverseCharge, setIsReverseCharge] = useState(false)
+  /*
+   * TDS and the notes box have no controls on the form any more.
+   *
+   * The state stays, and so does the round trip: a bill already carrying a
+   * section, a rate or a note is opened with them, sends them back unchanged
+   * and keeps them. Dropping the state would have made editing any older bill
+   * silently strip its TDS — a tax figure quietly deleted by opening a form
+   * and pressing save is about the worst thing a form can do.
+   */
   const [tdsSection, setTdsSection] = useState('')
   const [tdsRate, setTdsRate] = useState('')
-  /** Forces the manual section/rate inputs even when they'd otherwise match a master row. */
-  const [tdsCustomMode, setTdsCustomMode] = useState(false)
   const [notes, setNotes] = useState('')
   /** Why a rate above the order was agreed. Asked for once, not per line. */
   const [rateVarianceReason, setRateVarianceReason] = useState('')
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
+
+  /*
+   * The three boxes over the delivery list, and the only state they keep.
+   *
+   * They narrow what the list shows; they are not part of the bill and none
+   * of them is sent anywhere. Kept as plain values rather than derived,
+   * because "no filter" and "filtered to the only option there is" have to
+   * stay tellable apart — deriving them would silently re-pick a filter the
+   * clerk had just cleared.
+   */
+  const [filterPo, setFilterPo] = useState('')
+  const [filterChallan, setFilterChallan] = useState('')
+  const [filterBill, setFilterBill] = useState('')
+  const [filterGrn, setFilterGrn] = useState('')
+  /*
+   * Whether the list is open with no filter on it.
+   *
+   * The table starts folded: a bill is raised against a delivery somebody is
+   * holding the paperwork for, so the question is always "which one is this",
+   * never "what is there". One press opens it anyway, because a clerk who has
+   * lost the challan number still has to be able to look.
+   */
+  const [showAllReceipts, setShowAllReceipts] = useState(false)
+
+  const [loadingReceipts, setLoadingReceipts] = useState(false)
+  /** How many receipts the server holds for this supplier, page or no page. */
+  const [receiptTotal, setReceiptTotal] = useState(0)
 
   const [pulling, setPulling] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -302,12 +420,19 @@ export function PurchaseBillDialog({
     setSupplierInvoiceDate(record?.supplierInvoiceDate?.slice(0, 10) ?? '')
     setBillDate((record?.billDate ?? new Date().toISOString()).slice(0, 10))
     setDueDate(record?.dueDate?.slice(0, 10) ?? '')
+    // An existing bill's date is somebody's decision, already taken.
+    dueTyped.current = Boolean(record?.dueDate)
     setDiscountAmount(num(record?.discountAmount) > 0 ? String(record?.discountAmount) : '')
     setIsReverseCharge(record?.isReverseCharge ?? false)
     setTdsSection(record?.tdsSection ?? '')
     setTdsRate(num(record?.tdsRate) > 0 ? String(record?.tdsRate) : '')
     setNotes(record?.notes ?? '')
     setRateVarianceReason('')
+    setFilterPo('')
+    setFilterChallan('')
+    setFilterBill('')
+    setFilterGrn('')
+    setShowAllReceipts(false)
     setLines(
       record?.lines?.length
         ? record.lines.map((l) => ({
@@ -321,7 +446,7 @@ export function PurchaseBillDialog({
             acceptedQty: l.grnLine ? num(l.grnLine.acceptedQty) : undefined,
             grnNumber: l.grnLine?.grn?.grnNumber,
           }))
-        : [emptyLine()]
+        : [freshLine()]
     )
     setCharges(
       record?.charges?.map((c) => ({
@@ -360,6 +485,18 @@ export function PurchaseBillDialog({
     supplierIdRef.current = supplierId
   }, [supplierId])
 
+  /**
+   * Whether the due date on screen is one somebody typed.
+   *
+   * The date fills itself in from the supplier's terms, and re-fills whenever
+   * the supplier or their bill date changes — but the moment a clerk types one
+   * of their own, that is the answer and nothing may overwrite it. An extension
+   * agreed on the phone is exactly the kind of thing that gets typed here and
+   * would have been silently reverted by the next keystroke in the date beside
+   * it.
+   */
+  const dueTyped = useRef(false)
+
   const autoPulled = useRef<string | null>(null)
   useEffect(() => {
     if (!open || record || !initialGrnIds?.length) return
@@ -395,9 +532,7 @@ export function PurchaseBillDialog({
       api
         .get<{ success: boolean; data: { stateCode: string | null } }>('/settings/company')
         .catch(() => null),
-      api.get<Paginated<GrnOption>>('/purchase/grn?limit=200').catch(() => null),
-      settingsApi.tdsSections.list().catch(() => null),
-    ]).then(([s, i, c, co, g, t]) => {
+    ]).then(([s, i, c, co]) => {
       if (cancelled) return
       setSuppliers((s as Paginated<Option>).data)
       setItems((i as Paginated<Option>).data)
@@ -407,14 +542,157 @@ export function PurchaseBillDialog({
         c ? (c as Paginated<Option>).data.filter((x) => x.applyOnPurchase !== false) : []
       )
       setCompanyState(co?.data?.stateCode ?? null)
-      setGrns(g?.data ?? [])
-      setTdsSections(t?.data.filter((x) => x.isActive) ?? [])
     })
 
     return () => {
       cancelled = true
     }
   }, [open])
+
+  // Categories, for telling expense heads from stock items. Only an expense
+  // bill needs them.
+  useEffect(() => {
+    if (!open || !expenseMode) return
+    let cancelled = false
+    masterResource<Category>('item-categories')
+      .list({ limit: 500, active: true })
+      .then((r) => {
+        if (!cancelled) setCategories(r.data)
+      })
+      .catch(() => {
+        // Without them every item is simply listed together.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, expenseMode])
+
+  const expenseCategoryIds = useMemo(() => {
+    const named = new Set(categories.filter((c) => EXPENSE_NAME.test(c.name)).map((c) => c.id))
+    for (const c of categories) if (c.parentId && named.has(c.parentId)) named.add(c.id)
+    return named
+  }, [categories])
+  /** The top-level "Expenses" category, where a new head is filed by default. */
+  const expenseCategory =
+    categories.find((c) => !c.parentId && EXPENSE_NAME.test(c.name)) ??
+    categories.find((c) => EXPENSE_NAME.test(c.name))
+  const isExpenseHead = (it?: Option | null) =>
+    Boolean(
+      it?.category &&
+      (expenseCategoryIds.has(it.category.id) ||
+        (it.category.parentId != null && expenseCategoryIds.has(it.category.parentId)))
+    )
+  const expenseHeads = useMemo(
+    () => items.filter((it) => isExpenseHead(it)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, expenseCategoryIds]
+  )
+
+  /**
+   * The choices in a line's item picker. On an expense bill the expense heads
+   * come first, with a way to add one; every other item is still listed below
+   * them, so a bill can be booked before the heads have been set up.
+   */
+  const itemChoices = () =>
+    expenseMode ? (
+      <>
+        <option value="">Select...</option>
+        {expenseHeads.length > 0 && (
+          <optgroup label="Expense heads">
+            {expenseHeads.map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.code ? `${it.code} — ${it.name}` : it.name}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        <option value={ADD_EXPENSE_HEAD}>+ Add a new expense head…</option>
+        <optgroup label="Other items">
+          {items
+            .filter((it) => !isExpenseHead(it))
+            .map((it) => (
+              <option key={it.id} value={it.id}>
+                {it.code ? `${it.code} — ${it.name}` : it.name}
+              </option>
+            ))}
+        </optgroup>
+      </>
+    ) : (
+      <>
+        <option value="">Select...</option>
+        {items.map((it) => (
+          <option key={it.id} value={it.id}>
+            {it.code ? `${it.code} — ${it.name}` : it.name}
+          </option>
+        ))}
+      </>
+    )
+
+  /** A fresh line: one of whatever it is, on an expense bill — a month's electricity is one. */
+  const freshLine = (): BillLine => (expenseMode ? { ...emptyLine(), qty: '1' } : emptyLine())
+
+  /**
+   * The deliveries waiting to be billed, asked for again whenever the
+   * supplier changes.
+   *
+   * It used to be one call on open, for the hundred most recent receipts in
+   * the mill, filtered down to this supplier's on the screen. That is fine
+   * while the mill has seven and quietly wrong once it has thousands: the
+   * supplier's oldest unbilled delivery — which is precisely the one nobody
+   * has got round to and the one he is chasing — falls off the end of the
+   * page and the picker shows no sign that anything is missing. Asking the
+   * server for his receipts bounds the list by the only thing that matters.
+   *
+   * `total` is kept so the strip below can say when even that was more than
+   * one page. A picker that silently shows a subset is worse than one that
+   * admits it.
+   */
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoadingReceipts(true)
+    api
+      .get<Paginated<GrnOption>>(
+        `/purchase/grn?limit=100${supplierId ? `&supplierId=${supplierId}` : ''}`
+      )
+      .then((r) => {
+        if (cancelled) return
+        setGrns(r.data ?? [])
+        setReceiptTotal(r.pagination?.total ?? r.data?.length ?? 0)
+      })
+      .catch(() => {
+        // Left as it was rather than emptied. A failed refresh should not
+        // take the rows somebody has already ticked off the screen.
+        if (!cancelled) setReceiptTotal(0)
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingReceipts(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, supplierId])
+
+  /*
+   * A filter cannot outlive the list it was picked from.
+   *
+   * Ticking a receipt settles the supplier, which fetches that supplier's
+   * receipts, which can leave all three boxes pointing at numbers no longer
+   * on the list. A `<select>` whose value matches none of its options renders
+   * blank — so the box would read as cleared while still filtering the table
+   * down to nothing, and the clerk would be looking at an empty list with no
+   * filter on screen to explain it.
+   */
+  useEffect(() => {
+    if (filterPo && !grns.some((g) => g.po?.id === filterPo)) setFilterPo('')
+    if (filterChallan && !grns.some((g) => (g.challanNo ?? '') === filterChallan)) {
+      setFilterChallan('')
+    }
+    if (filterBill && !grns.some((g) => (g.supplierInvoiceNo ?? '') === filterBill)) {
+      setFilterBill('')
+    }
+    if (filterGrn && !grns.some((g) => g.id === filterGrn)) setFilterGrn('')
+  }, [grns, filterPo, filterChallan, filterBill, filterGrn])
 
   useEffect(() => {
     if (!open) return
@@ -433,6 +711,44 @@ export function PurchaseBillDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
+
+  /**
+   * How long this supplier gives us, in days.
+   *
+   * Their own agreed terms where the master holds them — every supplier on the
+   * mill's list has them, and they run from 15 to 45 — and ${MSME_DAYS} where
+   * it does not. Capped at ${MSME_DAYS} for a registered small supplier
+   * whatever the master says, because that is the law's ceiling and a longer
+   * term agreed with them is not enforceable anyway.
+   *
+   * Filling the legal maximum for everybody would have been the simpler rule
+   * and the wrong one: Ambika Stitching Unit is on 15 days, and a bill quietly
+   * dated 45 would be a month late by the time anybody looked — with interest
+   * running on it, since they are an MSME.
+   */
+  const termDays = useMemo(() => {
+    const agreed = Number(supplier?.creditDays ?? 0)
+    const base = agreed > 0 ? agreed : MSME_DAYS
+    return supplier?.isMsme ? Math.min(base, MSME_DAYS) : base
+  }, [supplier])
+
+  /*
+   * Counted from the date on their bill, which is what the terms in the master
+   * say ("30 days from bill date") and what the supplier will count from when
+   * he rings about it. Until that box is filled in, from the day we are
+   * booking it — a due date that is roughly right beats an empty box, and it
+   * corrects itself the moment their date is typed.
+   */
+  const dueFrom = supplierInvoiceDate || billDate
+
+  useEffect(() => {
+    if (!open || dueTyped.current) return
+    // The terms come off the supplier, so there is nothing to work out until
+    // there is one. A date guessed before then would visibly correct itself
+    // the moment one is picked, which reads as the form changing its mind.
+    if (!supplierId || !dueFrom) return
+    setDueDate(addDays(dueFrom, termDays))
+  }, [open, supplierId, dueFrom, termDays])
 
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
@@ -473,6 +789,224 @@ export function PurchaseBillDialog({
         a.grnNumber.localeCompare(b.grnNumber)
     )
   }, [grns, supplierId, billedSet])
+
+  /*
+   * ── The three filters over the delivery list ─────────────────────────────
+   *
+   * The clerk holds the supplier's invoice. It quotes his challan numbers and
+   * our order numbers; it never quotes our receipt numbers, because those are
+   * ours and he has never seen them. So the list has to be reachable from any
+   * of the three, and each box narrows the other two rather than standing on
+   * its own — picking a challan with no idea which order it was against is
+   * exactly the position the clerk is in.
+   *
+   * Each box's options are built from the receipts the *other* two boxes
+   * allow, which is what keeps a filter from offering a choice that would
+   * empty the list.
+   */
+  const matchesPo = (g: GrnOption) => !filterPo || g.po?.id === filterPo
+  const matchesChallan = (g: GrnOption) => !filterChallan || (g.challanNo ?? '') === filterChallan
+  const matchesBill = (g: GrnOption) => !filterBill || (g.supplierInvoiceNo ?? '') === filterBill
+  const matchesGrn = (g: GrnOption) => !filterGrn || g.id === filterGrn
+
+  const poChoices = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const g of receiptChoices) {
+      if (!g.po || !matchesChallan(g) || !matchesBill(g) || !matchesGrn(g)) continue
+      seen.set(g.po.id, g.po.poNumber)
+    }
+    return [...seen]
+      .map(([id, poNumber]) => ({ id, poNumber }))
+      .sort((a, b) => a.poNumber.localeCompare(b.poNumber))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, filterChallan, filterBill, filterGrn])
+
+  const challanChoices = useMemo(() => {
+    const seen = new Set<string>()
+    for (const g of receiptChoices) {
+      // A receipt with no challan recorded has nothing to offer this box. It
+      // is still in the table below, wearing a dash, so it can be reached.
+      if (!g.challanNo || !matchesPo(g) || !matchesBill(g) || !matchesGrn(g)) continue
+      seen.add(g.challanNo)
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, filterPo, filterBill, filterGrn])
+
+  /** The supplier invoice numbers the gate caught, narrowed like the rest. */
+  const billChoices = useMemo(() => {
+    const seen = new Set<string>()
+    for (const g of receiptChoices) {
+      if (!g.supplierInvoiceNo || !matchesPo(g) || !matchesChallan(g) || !matchesGrn(g)) continue
+      seen.add(g.supplierInvoiceNo)
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, filterPo, filterChallan, filterGrn])
+
+  const grnChoices = useMemo(
+    () => receiptChoices.filter((g) => matchesPo(g) && matchesChallan(g) && matchesBill(g)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [receiptChoices, filterPo, filterChallan, filterBill]
+  )
+
+  /** The rows the table actually shows — everything all four boxes allow. */
+  const visibleReceipts = useMemo(
+    () =>
+      receiptChoices.filter(
+        (g) => matchesPo(g) && matchesChallan(g) && matchesBill(g) && matchesGrn(g)
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [receiptChoices, filterPo, filterChallan, filterBill, filterGrn]
+  )
+
+  /*
+   * Whether there is anything to show the table for.
+   *
+   * A filter, an explicit "show all", or receipts already gathered onto the
+   * bill — that last one matters most: clearing a filter after ticking
+   * something must not take what is on the bill off the screen.
+   */
+  const anyReceiptFilter = Boolean(
+    supplierId || filterPo || filterChallan || filterBill || filterGrn
+  )
+  const receiptsOpen = anyReceiptFilter || showAllReceipts || billedReceipts.length > 0
+
+  /**
+   * Gathers several receipts one after the other, never at once.
+   *
+   * `pullFromGrn` reads and rewrites the same `linesRef`, so two of them in
+   * flight together would each build their new line list from the same stale
+   * one and the second would overwrite the first. The loop is the point.
+   */
+  const pullMany = async (rows: GrnOption[]) => {
+    for (const g of rows) {
+      // Read fresh each turn, from the ref rather than the render's own
+      // `billedSet` — the receipt pulled a moment ago is on the bill but not
+      // yet in this render, and asking for it twice is refused as a
+      // duplicate with a message the clerk did nothing to deserve.
+      const on = new Set(linesRef.current.map((l) => l.grnNumber).filter(Boolean))
+      if (on.has(g.grnNumber)) continue
+      await pullFromGrn(g.id)
+    }
+  }
+
+  /**
+   * Picking a challan.
+   *
+   * The challan is the one number on the supplier's invoice that names a
+   * delivery, so choosing one is as close to "this is the delivery I am
+   * billing" as the clerk can get — and the receipts under it are ticked for
+   * them rather than left as a second step they can forget. The order narrows
+   * with it when the challan only ever came against one, which is the normal
+   * case.
+   */
+  const chooseChallan = (no: string) => {
+    setFilterChallan(no)
+    setFilterGrn('')
+    if (!no) return
+    const under = receiptChoices.filter((g) => (g.challanNo ?? '') === no)
+    const orders = new Set(under.map((g) => g.po?.id).filter(Boolean) as string[])
+    if (orders.size === 1) setFilterPo([...orders][0])
+    void pullMany(under)
+  }
+
+  /**
+   * Picking the supplier's own invoice number.
+   *
+   * The same move as the challan, from the other number printed on the same
+   * sheet. Whichever of the two the clerk reads first, they end up on the
+   * same deliveries.
+   */
+  const chooseBill = (no: string) => {
+    setFilterBill(no)
+    setFilterGrn('')
+    if (!no) return
+    const under = receiptChoices.filter((g) => (g.supplierInvoiceNo ?? '') === no)
+    const orders = new Set(under.map((g) => g.po?.id).filter(Boolean) as string[])
+    if (orders.size === 1) setFilterPo([...orders][0])
+    const challans = new Set(under.map((g) => g.challanNo).filter(Boolean) as string[])
+    if (challans.size === 1) setFilterChallan([...challans][0])
+    void pullMany(under)
+  }
+
+  /**
+   * Picking a receipt number, for whoever is working from our side of the
+   * paperwork. Its challan and its order fill themselves in behind it.
+   */
+  const chooseGrn = (id: string) => {
+    setFilterGrn(id)
+    if (!id) return
+    const g = receiptChoices.find((r) => r.id === id)
+    if (!g) return
+    if (g.po?.id) setFilterPo(g.po.id)
+    if (g.challanNo) setFilterChallan(g.challanNo)
+    if (g.supplierInvoiceNo) setFilterBill(g.supplierInvoiceNo)
+    void pullMany([g])
+  }
+
+  /**
+   * Picking the supplier — the top of the cascade.
+   *
+   * It is the same field the bill itself carries, not a filter of its own: a
+   * bill is one supplier's demand for money, so "whose deliveries am I
+   * looking at" and "whose bill is this" are one question and have to stay one
+   * piece of state. The box in Bill Details below sets it through here too.
+   *
+   * Refused outright while deliveries are on the bill. Changing it used to be
+   * allowed and did nothing but change the name at the top: the lines stayed,
+   * still tied to the other supplier's receipts, and the bill went off to
+   * somebody who had never sent those goods. Nothing downstream would have
+   * caught it — the receipt link is what the goods are matched on, and it
+   * would still have been perfectly consistent with itself.
+   */
+  const chooseSupplier = (id: string) => {
+    if (id === supplierId) return
+    if (billedReceipts.length > 0) {
+      setError(
+        `${billedReceipts.join(', ')} ${
+          billedReceipts.length === 1 ? 'is' : 'are'
+        } on this bill and ${
+          billedReceipts.length === 1 ? 'belongs' : 'belong'
+        } to the supplier it is already for. Untick ${
+          billedReceipts.length === 1 ? 'it' : 'them'
+        } before changing who the bill is from.`
+      )
+      return
+    }
+    setError(null)
+    setSupplierId(id)
+    // Everything below it was picked out of the other supplier's paperwork.
+    setFilterPo('')
+    setFilterChallan('')
+    setFilterBill('')
+    setFilterGrn('')
+    setShowAllReceipts(false)
+  }
+
+  /**
+   * Picking an order only narrows. It does not tick anything: an order can
+   * have a month of deliveries under it, and pulling all of them onto a bill
+   * because somebody wanted to look at the list is not a filter, it is a
+   * decision taken on their behalf.
+   */
+  const choosePo = (id: string) => {
+    setFilterPo(id)
+    // Whatever was chosen below it may not belong to this order any more.
+    setFilterChallan((prev) =>
+      prev && receiptChoices.some((g) => g.po?.id === id && (g.challanNo ?? '') === prev)
+        ? prev
+        : ''
+    )
+    setFilterBill((prev) =>
+      prev && receiptChoices.some((g) => g.po?.id === id && (g.supplierInvoiceNo ?? '') === prev)
+        ? prev
+        : ''
+    )
+    setFilterGrn((prev) =>
+      prev && receiptChoices.some((g) => g.id === prev && g.po?.id === id) ? prev : ''
+    )
+  }
 
   /**
    * Takes a delivery back off the bill, and the lines it brought with it.
@@ -555,6 +1089,10 @@ export function PurchaseBillDialog({
     setLine(index, { unitPrice, rateAction: null })
 
   const pickItem = (index: number, itemId: string) => {
+    if (itemId === ADD_EXPENSE_HEAD) {
+      setNewHeadFor(index)
+      return
+    }
     const item = itemById.get(itemId)
     setLine(index, {
       itemId,
@@ -834,6 +1372,38 @@ export function PurchaseBillDialog({
         aria-modal="true"
         aria-labelledby="bill-dialog-title"
       >
+        {newHeadFor !== null && (
+          <NewItemDialog
+            categories={categories}
+            categoryId={expenseCategory?.parentId ?? expenseCategory?.id}
+            subcategoryId={expenseCategory?.parentId ? expenseCategory.id : undefined}
+            onClose={() => setNewHeadFor(null)}
+            onCreated={(created: NewItem) => {
+              const index = newHeadFor
+              setNewHeadFor(null)
+              // Into the list this form holds as well as the master, so the
+              // line that asked for it can pick it straight away.
+              const option: Option = {
+                id: created.id,
+                code: created.code,
+                name: created.name,
+                hsnCode: created.hsnCode,
+                uom: created.uom,
+                category: created.category,
+                standardRate: created.standardRate ?? null,
+              }
+              setItems((p) => [...p, option])
+              setLine(index, {
+                itemId: created.id,
+                grnLineId: null,
+                unitPrice: created.standardRate
+                  ? String(created.standardRate)
+                  : (lines[index]?.unitPrice ?? ''),
+              })
+            }}
+          />
+        )}
+
         {/* Header — stays put while the body scrolls. */}
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-4 py-2.5">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -845,12 +1415,18 @@ export function PurchaseBillDialog({
                 id="bill-dialog-title"
                 className="text-foreground truncate text-xl font-semibold tracking-tight"
               >
-                {isEdit ? `Edit ${record?.billNumber}` : 'Book a Supplier Bill'}
+                {isEdit
+                  ? `Edit ${record?.billNumber}`
+                  : expenseMode
+                    ? 'Book an Expense Bill'
+                    : 'Book a Supplier Bill'}
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                 {isEdit
                   ? 'A bill can be changed until a payment is made against it'
-                  : 'Our reference number is given when you save. Type the supplier’s own number below.'}
+                  : expenseMode
+                    ? 'Electricity, rent, repairs, services — a bill with no order or receipt behind it.'
+                    : 'Our reference number is given when you save. Type the supplier’s own number below.'}
               </p>
             </div>
           </div>
@@ -880,7 +1456,7 @@ export function PurchaseBillDialog({
             space-y-5, which on a form this tall reads as a different app —
             twice the air of every other dialog, and a band of nothing under
             the header before anything to fill in. */}
-          <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+          <div className="flex-1 space-y-2.5 overflow-y-auto px-5 py-3">
             {error && (
               <div
                 id="bill-form-error"
@@ -891,9 +1467,14 @@ export function PurchaseBillDialog({
               </div>
             )}
 
-            {!isEdit && (
+            {!isEdit && !expenseMode && (
               <Section icon={Download} title="Deliveries Being Billed">
-                {receiptChoices.length === 0 ? (
+                {loadingReceipts && receiptChoices.length === 0 ? (
+                  <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+                    <Loader2 size={12} className="animate-spin" />
+                    Looking for deliveries waiting to be billed...
+                  </p>
+                ) : receiptChoices.length === 0 ? (
                   <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
                     <Info size={12} className="mt-0.5 shrink-0 opacity-70" />
                     {supplierId
@@ -902,91 +1483,327 @@ export function PurchaseBillDialog({
                   </p>
                 ) : (
                   <>
-                    <p className="text-muted-foreground mb-1.5 text-[11px] leading-snug">
-                      Tick every delivery this invoice covers — one bill can settle several. The
-                      number on each is what is still to bill.
+                    <p className="text-muted-foreground mb-2 text-[11px] leading-snug">
+                      One bill can settle several deliveries — tick every one it covers. Each box
+                      below narrows the others.
                     </p>
-                    {/* ── Sized to the receipt number, not to the dialog ──────
-                    Each of these was a half-width box holding a quarter of
-                    that in words. A supplier with a fortnight of deliveries
-                    on one invoice — which is the whole reason this list
-                    exists — pushed the bill itself off the screen. They are
-                    chips that wrap now, and the strip is capped: past about
-                    four rows it scrolls rather than growing. */}
-                    <div className="-mx-0.5 max-h-24 overflow-y-auto px-0.5 py-0.5">
-                      <div className="flex flex-wrap gap-1">
-                        {receiptChoices.map((g) => {
-                          const on = billedSet.has(g.grnNumber)
-                          const left = Number(g.billing?.pendingQty ?? 0)
-                          return (
-                            <label
-                              key={g.id}
-                              title={
-                                left > 0
-                                  ? `${left.toLocaleString('en-IN')} still to bill on ${g.grnNumber}`
-                                  : g.grnNumber
-                              }
-                              className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-1.5 py-1 text-[11px] leading-none transition ${
-                                on
-                                  ? 'border-primary/40 bg-primary/10'
-                                  : 'border-border bg-secondary/40 hover:border-primary/40'
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                className="accent-primary size-3 shrink-0"
-                                checked={on}
-                                disabled={pulling}
-                                onChange={() => {
-                                  if (on) dropReceipt(g.grnNumber)
-                                  else void pullFromGrn(g.id)
-                                }}
-                              />
-                              <span className="text-foreground font-mono">{g.grnNumber}</span>
-                              {/* Until a supplier is settled the list spans all
-                              of them, and a receipt number alone says nothing
-                              about whose delivery it was. The order number is
-                              the first thing to go when space is short. */}
-                              {!supplierId && g.po?.supplier?.name ? (
-                                <span className="text-muted-foreground max-w-[9rem] truncate">
-                                  {g.po.supplier.name}
-                                </span>
-                              ) : (
-                                g.po && (
-                                  <span className="text-muted-foreground">{g.po.poNumber}</span>
-                                )
-                              )}
-                              {left > 0 && (
-                                <span className="text-muted-foreground tabular-nums">
-                                  {left.toLocaleString('en-IN')}
-                                </span>
-                              )}
-                            </label>
-                          )
-                        })}
-                      </div>
+
+                    {/* ── The ways in ──────────────────────────────────────
+                      The clerk is holding the supplier's invoice. It carries
+                      his name, his challan number, his own bill number and our
+                      order number — and never our receipt number, which he has
+                      never seen. A picker that offered only GRN numbers was
+                      asking them to translate between two documents in their
+                      head, which is how the wrong delivery gets billed.
+
+                      The supplier leads, because it is the one box that is not
+                      only a filter: it is the bill's own supplier, the same
+                      field as the one in Bill Details below, and answering it
+                      here is answering it there. */}
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                      <label className="block">
+                        <span className="form-label">
+                          Supplier<span className="ml-0.5 text-red-400">*</span>
+                        </span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={supplierId}
+                          onChange={(e) => chooseSupplier(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All suppliers</option>
+                          {suppliers.map((sup) => (
+                            <option key={sup.id} value={sup.id}>
+                              {sup.code ? `${sup.code} — ${sup.name}` : sup.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="form-label">PO no.</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterPo}
+                          onChange={(e) => choosePo(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All orders</option>
+                          {poChoices.map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.poNumber}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="form-label">Challan no. (theirs)</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterChallan}
+                          onChange={(e) => chooseChallan(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All challans</option>
+                          {challanChoices.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="form-label">Supplier bill no.</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterBill}
+                          onChange={(e) => chooseBill(e.target.value)}
+                          disabled={pulling || billChoices.length === 0}
+                          title={
+                            billChoices.length === 0
+                              ? 'None of these deliveries had a supplier bill number written down at the gate'
+                              : undefined
+                          }
+                        >
+                          <option value="">
+                            {billChoices.length === 0 ? 'None recorded' : 'All bill numbers'}
+                          </option>
+                          {billChoices.map((b) => (
+                            <option key={b} value={b}>
+                              {b}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="form-label">Receipt no. (ours)</span>
+                        <select
+                          className="form-input h-8 text-xs"
+                          value={filterGrn}
+                          onChange={(e) => chooseGrn(e.target.value)}
+                          disabled={pulling}
+                        >
+                          <option value="">All receipts</option>
+                          {grnChoices.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.grnNumber}
+                              {g.challanNo ? ` · ${g.challanNo}` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                     </div>
-                    {/* Which receipts are on the bill is said by the ticks above
-                    and again by the "Against receipt" tag on every line below.
-                    Saying it a third time in prose cost two lines and told
-                    nobody anything. Only the warning about the figures is
-                    left, because that one is not written anywhere else. */}
-                    <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-[11px]">
-                      {pulling ? (
-                        <>
-                          <Loader2 size={11} className="animate-spin" />
-                          Reading the delivery...
-                        </>
-                      ) : (
-                        billedReceipts.length > 0 && (
+
+                    {/* Folded until one of the boxes above is answered.
+
+                      A bill is raised against a delivery somebody is holding
+                      the paperwork for, so the question is always "which one
+                      is this" and never "what is there" — and a list of every
+                      unbilled delivery in the mill, open by default, is a wall
+                      of numbers to scroll past on the way to the form. The
+                      press below opens it anyway, because a clerk who has lost
+                      the challan number still has to be able to look. */}
+                    {!receiptsOpen ? (
+                      <div className="border-border/70 mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-dashed px-3 py-2.5 text-xs">
+                        <span className="text-muted-foreground">
+                          {receiptChoices.length === 1
+                            ? '1 delivery is waiting to be billed.'
+                            : `${receiptChoices.length} deliveries are waiting to be billed.`}{' '}
+                          Name the supplier above, or the challan on the invoice in your hand.
+                        </span>
+                        <button
+                          type="button"
+                          className="text-primary font-medium hover:underline"
+                          onClick={() => setShowAllReceipts(true)}
+                        >
+                          Show them all
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        {/* ── What is waiting ──────────────────────────────
+                          A table, not a strip of chips. "GRN-0009 PO-0006
+                          650" read as a receipt, an order and six hundred and
+                          fifty rupees; it was six hundred and fifty pieces,
+                          and there was nowhere in it for the numbers the clerk
+                          actually has in front of them. The order, the
+                          challan, our receipt and their bill number come
+                          first, in that order — the three the supplier quotes,
+                          then ours — and every figure after them gets a column
+                          with a heading over it. The money is named an
+                          estimate because that is what it is: the supplier's
+                          own invoice is what gets booked. */}
+                        <div className="border-border bg-card mt-2 max-h-60 overflow-auto rounded-lg border">
+                          <table className="w-full min-w-[760px] border-collapse text-xs">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="bg-secondary">
+                                {[
+                                  ['', 'w-8', 'left'],
+                                  ['PO no.', 'w-24', 'left'],
+                                  ['Challan', 'w-28', 'left'],
+                                  ['Receipt', 'w-24', 'left'],
+                                  ['Supplier bill', 'w-28', 'left'],
+                                  ['Received', 'w-24', 'left'],
+                                  ['Unbilled', 'w-24', 'right'],
+                                  ['Est. value', 'w-28', 'right'],
+                                ].map(([label, width, align], n) => (
+                                  <th
+                                    key={`${label}-${n}`}
+                                    className={`${width} bg-secondary border-border text-muted-foreground border-b px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
+                                      align === 'right' ? 'text-right' : 'text-left'
+                                    }`}
+                                  >
+                                    {label}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {visibleReceipts.length === 0 ? (
+                                <tr>
+                                  <td
+                                    colSpan={8}
+                                    className="text-muted-foreground px-2 py-6 text-center text-xs"
+                                  >
+                                    Nothing matches those filters. Clear one to widen the list.
+                                  </td>
+                                </tr>
+                              ) : (
+                                visibleReceipts.map((g, n) => {
+                                  const on = billedSet.has(g.grnNumber)
+                                  const left = Number(g.billing?.pendingQty ?? 0)
+                                  const worth = Number(g.billing?.pendingValue ?? 0)
+                                  const part = Number(g.billing?.billedQty ?? 0) > 0
+                                  const flip = () => {
+                                    if (pulling) return
+                                    if (on) dropReceipt(g.grnNumber)
+                                    else void pullFromGrn(g.id)
+                                  }
+                                  return (
+                                    <tr
+                                      key={g.id}
+                                      onClick={flip}
+                                      className={`border-border/50 cursor-pointer border-b last:border-0 ${
+                                        on ? 'bg-primary/5' : n % 2 === 1 ? 'zebra-row' : ''
+                                      }`}
+                                    >
+                                      <td className="px-2 py-1.5">
+                                        <input
+                                          type="checkbox"
+                                          className="accent-primary size-3.5 align-middle"
+                                          checked={on}
+                                          disabled={pulling}
+                                          onChange={flip}
+                                          /* The whole row is the hit target.
+                                            Without this the click lands twice
+                                            — once on the box, once on the row
+                                            — and the receipt goes on and
+                                            straight back off again. */
+                                          onClick={(e) => e.stopPropagation()}
+                                          aria-label={`Bill ${g.grnNumber}${
+                                            g.challanNo ? `, challan ${g.challanNo}` : ''
+                                          }`}
+                                        />
+                                      </td>
+                                      <td className="text-foreground px-2 py-1.5 font-mono">
+                                        {g.po?.poNumber ?? '—'}
+                                        {/* Only while the bill has no supplier
+                                          — until then the list spans all of
+                                          them and a receipt number says
+                                          nothing about whose delivery it was. */}
+                                        {!supplierId && g.po?.supplier?.name && (
+                                          <span className="text-muted-foreground block max-w-[10rem] truncate font-sans text-[10px]">
+                                            {g.po.supplier.name}
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td
+                                        className={`px-2 py-1.5 font-mono ${
+                                          g.challanNo ? 'text-foreground' : 'text-muted-foreground'
+                                        }`}
+                                      >
+                                        {g.challanNo || '—'}
+                                      </td>
+                                      <td className="text-muted-foreground px-2 py-1.5 font-mono">
+                                        {g.grnNumber}
+                                      </td>
+                                      <td
+                                        className={`px-2 py-1.5 font-mono ${
+                                          g.supplierInvoiceNo
+                                            ? 'text-foreground'
+                                            : 'text-muted-foreground'
+                                        }`}
+                                      >
+                                        {g.supplierInvoiceNo || '—'}
+                                      </td>
+                                      <td className="text-muted-foreground whitespace-nowrap px-2 py-1.5">
+                                        {g.grnDate
+                                          ? new Date(g.grnDate).toLocaleDateString('en-IN', {
+                                              day: '2-digit',
+                                              month: 'short',
+                                              year: 'numeric',
+                                            })
+                                          : '—'}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right">
+                                        <span className="text-foreground tabular-nums">
+                                          {left.toLocaleString('en-IN')}
+                                        </span>
+                                        {/* Part-billed is the one that has
+                                          caught people out: the receipt is on
+                                          this list because something is still
+                                          owed on it, not because nothing has
+                                          been billed. Under the figure it
+                                          qualifies, rather than in a column of
+                                          its own that is empty on most rows. */}
+                                        {part && (
+                                          <span className="block text-[10px] text-amber-500">
+                                            part billed
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="text-muted-foreground px-2 py-1.5 text-right tabular-nums">
+                                        {worth > 0 ? `₹${inr(worth)}` : '—'}
+                                      </td>
+                                    </tr>
+                                  )
+                                })
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
+
+                    <div className="text-muted-foreground mt-1.5 space-y-1 text-[11px]">
+                      <p className="flex items-center gap-1.5">
+                        {pulling ? (
                           <>
-                            <Info size={11} className="shrink-0 opacity-70" />
-                            Quantities and rates came from the gate — change them only where their
-                            invoice differs.
+                            <Loader2 size={11} className="animate-spin" />
+                            Reading the delivery...
                           </>
-                        )
+                        ) : (
+                          billedReceipts.length > 0 && (
+                            <>
+                              <Info size={11} className="shrink-0 opacity-70" />
+                              Quantities and rates came from the gate — change them only where their
+                              invoice differs.
+                            </>
+                          )
+                        )}
+                      </p>
+                      {/* Said out loud rather than left to be discovered. The
+                        server pages at a hundred, and a picker quietly showing
+                        a subset of what is owed is how a delivery goes unbilled
+                        for a quarter. */}
+                      {receiptTotal > grns.length && (
+                        <p className="flex items-start gap-1.5 text-amber-500">
+                          <TriangleAlert size={11} className="mt-px shrink-0" />
+                          Showing the {grns.length} most recent receipts of {receiptTotal}
+                          {supplierId ? ' for this supplier' : ''}. Pick the supplier first, or
+                          start the bill from the delivery on the goods receipt screen.
+                        </p>
                       )}
-                    </p>
+                    </div>
                   </>
                 )}
               </Section>
@@ -1012,7 +1829,7 @@ export function PurchaseBillDialog({
                     id="bill-supplier"
                     className="form-input"
                     value={supplierId}
-                    onChange={(e) => setSupplierId(e.target.value)}
+                    onChange={(e) => chooseSupplier(e.target.value)}
                   >
                     <option value="">Select...</option>
                     {suppliers.map((s) => (
@@ -1104,13 +1921,17 @@ export function PurchaseBillDialog({
                     type="date"
                     className="form-input"
                     value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
+                    onChange={(e) => {
+                      // Theirs from here on. See `dueTyped`.
+                      dueTyped.current = true
+                      setDueDate(e.target.value)
+                    }}
                   />
-                  {supplier?.isMsme && (
-                    <p className="mt-1 text-xs text-amber-400">
-                      MSME supplier — payment is due within 45 days by law.
-                    </p>
-                  )}
+                  {/* The line under this box said which term the date was
+                    worked out from and, for a small supplier, that 45 days is
+                    the legal ceiling. Taken off on request. The date is still
+                    worked out the same way — see `termDays` — it simply no
+                    longer explains itself here. */}
                 </div>
 
                 <div className="col-span-full flex items-end md:col-span-2">
@@ -1249,24 +2070,35 @@ export function PurchaseBillDialog({
             {/* Lines */}
             <Section
               icon={Package}
-              title="Item Details"
+              title={expenseMode ? 'Expense Details' : 'Item Details'}
               actions={
                 <button
                   type="button"
-                  onClick={() => setLines((p) => [...p, emptyLine()])}
+                  onClick={() => setLines((p) => [...p, freshLine()])}
                   className="btn-secondary text-xs"
                 >
                   <Plus size={14} /> Add line
                 </button>
               }
             >
+              {expenseMode && categories.length > 0 && expenseHeads.length === 0 && (
+                <p className="text-muted-foreground mb-2 flex items-start gap-1.5 text-xs">
+                  <Info size={13} className="mt-px shrink-0" />
+                  <span>
+                    No expense heads yet. Add a category called &ldquo;Expenses&rdquo; in Masters →
+                    Item Categories and put heads under it — Electricity, Rent, Repairs &amp;
+                    Maintenance — or use &ldquo;+ Add a new expense head…&rdquo; in the list below.
+                    Until then every item is listed.
+                  </span>
+                </p>
+              )}
               <div className="border-border hidden overflow-x-auto rounded-lg border sm:block">
                 <table className="w-full min-w-[900px] text-sm">
                   <thead>
                     <tr className="border-border bg-secondary/70 border-b">
                       {[
                         'Item',
-                        'Against receipt',
+                        expenseMode ? 'Description' : 'Against receipt',
                         'Qty',
                         'Rate',
                         'Disc %',
@@ -1276,7 +2108,7 @@ export function PurchaseBillDialog({
                       ].map((h, i) => (
                         <th
                           key={h || i}
-                          className={`text-muted-foreground px-3 py-2 text-[10px] font-semibold uppercase tracking-wider ${
+                          className={`text-muted-foreground px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider ${
                             ['Qty', 'Rate', 'Disc %', 'GST %', 'Amount (₹)'].includes(h)
                               ? 'text-right'
                               : 'text-left'
@@ -1295,28 +2127,39 @@ export function PurchaseBillDialog({
                           key={i}
                           className="border-border/50 border-b last:border-0 [&>td]:align-top"
                         >
-                          <td className="min-w-[200px] px-3 py-2">
+                          <td className="min-w-[200px] px-3 py-1.5">
                             <select
-                              className="form-input h-9"
+                              className="form-input h-8"
                               value={line.itemId}
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
                             >
-                              <option value="">Select...</option>
-                              {items.map((it) => (
-                                <option key={it.id} value={it.id}>
-                                  {it.code ? `${it.code} — ${it.name}` : it.name}
-                                </option>
-                              ))}
+                              {itemChoices()}
                             </select>
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
-                                HSN {item.hsnCode}
+                                {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
                               </p>
                             )}
+                            {expenseMode &&
+                              item &&
+                              categories.length > 0 &&
+                              !isExpenseHead(item) && (
+                                <p className="mt-0.5 text-[10px] text-amber-500">
+                                  Not an expense head — goods should come in on a receipt
+                                </p>
+                              )}
                           </td>
-                          <td className="min-w-[130px] px-3 py-2">
-                            {line.grnNumber ? (
+                          <td className="min-w-[130px] px-3 py-1.5">
+                            {expenseMode ? (
+                              <input
+                                className="form-input h-8"
+                                value={line.description ?? ''}
+                                onChange={(e) => setLine(i, { description: e.target.value })}
+                                placeholder="e.g. Sept 2026, meter 40231"
+                                aria-label={`Line ${i + 1} description`}
+                              />
+                            ) : line.grnNumber ? (
                               <>
                                 <span className="badge-info">{line.grnNumber}</span>
                                 {line.pendingQty != null && (
@@ -1339,7 +2182,7 @@ export function PurchaseBillDialog({
                               <span className="text-muted-foreground text-xs">Not matched</span>
                             )}
                           </td>
-                          <td className="w-28 px-3 py-2">
+                          <td className="w-28 px-3 py-1.5">
                             {/* The wheel and the arrow keys move this by whole units.
                            Not 0.001, which moved it by a thousandth of a piece; and not 1,
                            which would refuse 1500.5 metres of fabric outright. "any" steps
@@ -1348,7 +2191,7 @@ export function PurchaseBillDialog({
                               type="number"
                               step="any"
                               min={0}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               value={String(line.qty)}
                               onChange={(e) => setLine(i, { qty: e.target.value })}
                               aria-label={`Line ${i + 1} quantity`}
@@ -1359,12 +2202,12 @@ export function PurchaseBillDialog({
                               </p>
                             )}
                           </td>
-                          <td className="w-28 px-3 py-2">
+                          <td className="w-28 px-3 py-1.5">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               value={String(line.unitPrice)}
                               onChange={(e) => setLineRate(i, e.target.value)}
                               aria-label={`Line ${i + 1} rate`}
@@ -1375,25 +2218,25 @@ export function PurchaseBillDialog({
                               </p>
                             )}
                           </td>
-                          <td className="w-20 px-3 py-2">
+                          <td className="w-20 px-3 py-1.5">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
                               max={100}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               value={String(line.discount)}
                               onChange={(e) => setLine(i, { discount: e.target.value })}
                               aria-label={`Line ${i + 1} discount`}
                             />
                           </td>
-                          <td className="w-20 px-3 py-2">
+                          <td className="w-20 px-3 py-1.5">
                             <input
                               type="number"
                               step="0.01"
                               min={0}
                               max={100}
-                              className="form-input h-9 text-right"
+                              className="form-input h-8 text-right"
                               disabled={taxMode === 'NONE'}
                               value={taxMode === 'NONE' ? '' : String(line.gstRate)}
                               onChange={(e) => setLine(i, { gstRate: e.target.value })}
@@ -1403,7 +2246,7 @@ export function PurchaseBillDialog({
                           <td className="w-32 px-3 py-2 text-right font-medium tabular-nums">
                             {inr(totals.lineGross[i] ?? 0)}
                           </td>
-                          <td className="w-12 px-3 py-2">
+                          <td className="w-12 px-3 py-1.5">
                             <button
                               type="button"
                               onClick={() =>
@@ -1459,23 +2302,33 @@ export function PurchaseBillDialog({
                           onChange={(e) => pickItem(i, e.target.value)}
                           aria-label={`Line ${i + 1} item`}
                         >
-                          <option value="">Select...</option>
-                          {items.map((it) => (
-                            <option key={it.id} value={it.id}>
-                              {it.code ? `${it.code} — ${it.name}` : it.name}
-                            </option>
-                          ))}
+                          {itemChoices()}
                         </select>
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
-                            HSN {item.hsnCode}
+                            {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
+                          </p>
+                        )}
+                        {expenseMode && item && categories.length > 0 && !isExpenseHead(item) && (
+                          <p className="text-[10px] text-amber-500">
+                            Not an expense head — goods should come in on a receipt
                           </p>
                         )}
                       </div>
 
                       <div className="mt-2">
-                        <p className={fieldLabel}>Against receipt</p>
-                        {line.grnNumber ? (
+                        <p className={fieldLabel}>
+                          {expenseMode ? 'Description' : 'Against receipt'}
+                        </p>
+                        {expenseMode ? (
+                          <input
+                            className="form-input h-9 w-full"
+                            value={line.description ?? ''}
+                            onChange={(e) => setLine(i, { description: e.target.value })}
+                            placeholder="e.g. Sept 2026, meter 40231"
+                            aria-label={`Line ${i + 1} description`}
+                          />
+                        ) : line.grnNumber ? (
                           <>
                             <span className="badge-info">{line.grnNumber}</span>
                             {line.pendingQty != null && (
@@ -1573,262 +2426,168 @@ export function PurchaseBillDialog({
               </div>
             </Section>
 
-            {/* What is typed on the left, what it comes to on the right. */}
-            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
-              <Section icon={MessageSquare} title="TDS &amp; Notes">
-                {(() => {
-                  const matched = tdsSections.find(
-                    (t) => t.section === tdsSection && Number(t.rate) === num(tdsRate)
-                  )
-                  const showManual = tdsCustomMode || (!!tdsSection && !matched)
-                  const selectValue = !tdsSection ? '' : matched ? matched.id : 'custom'
-                  return (
-                    <>
-                      <div>
-                        <label className="form-label" htmlFor="bill-tds-select">
-                          TDS section
-                        </label>
-                        <select
-                          id="bill-tds-select"
-                          className="form-input"
-                          value={selectValue}
-                          onChange={(e) => {
-                            const v = e.target.value
-                            if (v === '') {
-                              setTdsSection('')
-                              setTdsRate('')
-                              setTdsCustomMode(false)
-                            } else if (v === 'custom') {
-                              setTdsCustomMode(true)
-                            } else {
-                              const row = tdsSections.find((t) => t.id === v)
-                              if (row) {
-                                setTdsSection(row.section)
-                                setTdsRate(String(row.rate))
-                              }
-                              setTdsCustomMode(false)
-                            }
-                          }}
-                        >
-                          <option value="">No TDS</option>
-                          {tdsSections.map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {t.section} — {t.label} ({t.rate}%)
-                            </option>
-                          ))}
-                          <option value="custom">Other / not listed…</option>
-                        </select>
-                      </div>
-
-                      {showManual && (
-                        <div className="mt-2.5 grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5">
-                          <div>
-                            <label className="form-label" htmlFor="bill-tds-section">
-                              Section
-                            </label>
-                            <input
-                              id="bill-tds-section"
-                              className="form-input"
-                              placeholder="e.g. 194C"
-                              value={tdsSection}
-                              onChange={(e) => setTdsSection(e.target.value)}
-                            />
-                          </div>
-                          <div>
-                            <label className="form-label" htmlFor="bill-tds-rate">
-                              Rate %
-                            </label>
-                            <input
-                              id="bill-tds-rate"
-                              type="number"
-                              step="0.01"
-                              min={0}
-                              max={100}
-                              className="form-input"
-                              value={tdsRate}
-                              onChange={(e) => setTdsRate(e.target.value)}
-                            />
-                          </div>
-                        </div>
-                      )}
-                      <p className="text-muted-foreground mt-1 text-[11px]">
-                        Manage the list in Settings → Company → TDS sections.
-                      </p>
-                    </>
-                  )
-                })()}
-                <div>
-                  <label className="form-label" htmlFor="bill-notes">
-                    Notes
+            {/* TDS and the notes box used to sit to the left of this.
+              Taken off the form on request. Nothing was dropped from the
+              document: a bill already carrying a TDS section or a note keeps
+              both — the form still holds them and still sends them back
+              untouched — there is simply no longer anywhere to type a new
+              one. */}
+            <Section icon={Calculator} title="Totals">
+              <div className="border-border bg-secondary/40 h-fit space-y-1.5 rounded-lg border p-2.5 text-sm">
+                <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
+                <div className="flex items-center justify-between gap-4">
+                  <label htmlFor="bill-discount" className="text-muted-foreground">
+                    Discount on the whole bill
                   </label>
-                  <textarea
-                    id="bill-notes"
-                    rows={3}
-                    className="form-input"
-                    placeholder="Add any notes or remarks about this bill..."
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
+                  <input
+                    id="bill-discount"
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    className="form-input h-8 w-32 text-right"
+                    value={discountAmount}
+                    onChange={(e) => setDiscountAmount(e.target.value)}
                   />
                 </div>
-              </Section>
-
-              <Section icon={Calculator} title="Totals">
-                <div className="border-border bg-secondary/40 h-fit space-y-2 rounded-lg border p-3 text-sm">
-                  <Row label="Goods subtotal" value={totals.subtotal} />
-                  <div className="flex items-center justify-between gap-4">
-                    <label htmlFor="bill-discount" className="text-muted-foreground">
-                      Discount on the whole bill
-                    </label>
-                    <input
-                      id="bill-discount"
-                      type="number"
-                      step="0.01"
-                      min={0}
-                      className="form-input h-8 w-32 text-right"
-                      value={discountAmount}
-                      onChange={(e) => setDiscountAmount(e.target.value)}
-                    />
-                  </div>
-                  {chargeTypes.length > 0 && (
-                    <div className="space-y-1.5 py-0.5">
-                      {charges.map((c, i) => (
-                        <div key={i} className="flex items-center gap-1.5">
-                          <select
-                            className="form-input h-8 min-w-0 flex-1 text-xs"
-                            value={c.chargeTypeId}
-                            onChange={(e) => {
-                              const ct = chargeById.get(e.target.value)
-                              setCharges((p) =>
-                                p.map((x, y) =>
-                                  y === i
-                                    ? {
-                                        ...x,
-                                        chargeTypeId: e.target.value,
-                                        gstRate:
-                                          x.gstRate ||
-                                          (ct?.defaultGstRate != null
-                                            ? String(ct.defaultGstRate)
-                                            : ''),
-                                      }
-                                    : x
-                                )
+                {chargeTypes.length > 0 && (
+                  <div className="space-y-1.5 py-0.5">
+                    {charges.map((c, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <select
+                          className="form-input h-8 min-w-0 flex-1 text-xs"
+                          value={c.chargeTypeId}
+                          onChange={(e) => {
+                            const ct = chargeById.get(e.target.value)
+                            setCharges((p) =>
+                              p.map((x, y) =>
+                                y === i
+                                  ? {
+                                      ...x,
+                                      chargeTypeId: e.target.value,
+                                      gstRate:
+                                        x.gstRate ||
+                                        (ct?.defaultGstRate != null
+                                          ? String(ct.defaultGstRate)
+                                          : ''),
+                                    }
+                                  : x
                               )
-                            }}
-                            aria-label={`Charge ${i + 1} type`}
-                          >
-                            <option value="">Charge type…</option>
-                            {chargeTypes.map((ct) => (
-                              <option key={ct.id} value={ct.id}>
-                                {ct.name}
-                              </option>
-                            ))}
-                          </select>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            className="form-input h-8 w-24 shrink-0 text-right text-xs"
-                            placeholder="Amount"
-                            value={String(c.amount)}
-                            onChange={(e) =>
-                              setCharges((p) =>
-                                p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
-                              )
-                            }
-                            aria-label={`Charge ${i + 1} amount`}
-                          />
-                          <input
-                            type="number"
-                            step="0.01"
-                            min={0}
-                            max={100}
-                            className="form-input h-8 w-16 shrink-0 text-right text-xs"
-                            placeholder="GST%"
-                            disabled={taxMode === 'NONE'}
-                            value={taxMode === 'NONE' ? '' : String(c.gstRate)}
-                            onChange={(e) =>
-                              setCharges((p) =>
-                                p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
-                              )
-                            }
-                            aria-label={`Charge ${i + 1} GST rate`}
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
-                            className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
-                            aria-label={`Remove charge ${i + 1}`}
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        </div>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
-                        }
-                        className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
-                      >
-                        <Plus size={12} /> Add charge
-                      </button>
-                    </div>
-                  )}
-                  <Row label="Taxable value" value={totals.taxable} />
-                  {taxMode === 'CGST_SGST' && (
-                    <>
-                      <Row label="CGST" value={totals.tax / 2} />
-                      <Row label="SGST" value={totals.tax / 2} />
-                    </>
-                  )}
-                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                  {taxMode === 'NONE' && (
-                    <p className="text-muted-foreground py-1 text-xs">
-                      No GST — this supplier is not registered.
-                    </p>
-                  )}
-                  {taxMode === null && (
-                    <>
-                      <Row label="GST" value={totals.tax} />
-                      <p className="text-muted-foreground py-1 text-xs">
-                        Choose a supplier to see whether this splits into CGST + SGST or is IGST.
-                      </p>
-                    </>
-                  )}
-                  {isReverseCharge && totals.tax > 0 && (
-                    <p className="py-1 text-xs text-amber-400">
-                      Reverse charge — the ₹{inr(totals.tax)} of GST above is payable by us to the
-                      government and is not part of what the supplier is paid.
-                    </p>
-                  )}
-                  <Row label="Rounding" value={totals.roundOff} />
-                  <div className="border-border flex items-center justify-between border-t pt-2">
-                    <span className="text-foreground font-semibold">Bill total</span>
-                    <span className="text-foreground text-lg font-semibold tabular-nums">
-                      ₹{inr(totals.total)}
-                    </span>
-                  </div>
-                  {totals.tds > 0 && (
-                    <>
-                      <Row
-                        label={`TDS withheld${tdsSection ? ` (${tdsSection})` : ''}`}
-                        value={-totals.tds}
-                      />
-                      <div className="border-border flex items-center justify-between border-t pt-2">
-                        <span className="text-foreground font-medium">Payable to supplier</span>
-                        <span className="text-foreground font-semibold tabular-nums">
-                          ₹{inr(totals.balance)}
-                        </span>
+                            )
+                          }}
+                          aria-label={`Charge ${i + 1} type`}
+                        >
+                          <option value="">Charge type…</option>
+                          {chargeTypes.map((ct) => (
+                            <option key={ct.id} value={ct.id}>
+                              {ct.name}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          className="form-input h-8 w-24 shrink-0 text-right text-xs"
+                          placeholder="Amount"
+                          value={String(c.amount)}
+                          onChange={(e) =>
+                            setCharges((p) =>
+                              p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
+                            )
+                          }
+                          aria-label={`Charge ${i + 1} amount`}
+                        />
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          max={100}
+                          className="form-input h-8 w-16 shrink-0 text-right text-xs"
+                          placeholder="GST%"
+                          disabled={taxMode === 'NONE'}
+                          value={taxMode === 'NONE' ? '' : String(c.gstRate)}
+                          onChange={(e) =>
+                            setCharges((p) =>
+                              p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
+                            )
+                          }
+                          aria-label={`Charge ${i + 1} GST rate`}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
+                          className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
+                          aria-label={`Remove charge ${i + 1}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
                       </div>
-                      <p className="text-muted-foreground text-xs">
-                        Paying this smaller amount settles the bill in full — the TDS is accounted
-                        for rather than left outstanding against them.
-                      </p>
-                    </>
-                  )}
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
+                      }
+                      className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
+                    >
+                      <Plus size={12} /> Add charge
+                    </button>
+                  </div>
+                )}
+                <Row label="Taxable value" value={totals.taxable} />
+                {taxMode === 'CGST_SGST' && (
+                  <>
+                    <Row label="CGST" value={totals.tax / 2} />
+                    <Row label="SGST" value={totals.tax / 2} />
+                  </>
+                )}
+                {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                {taxMode === 'NONE' && (
+                  <p className="text-muted-foreground py-1 text-xs">
+                    No GST — this supplier is not registered.
+                  </p>
+                )}
+                {taxMode === null && (
+                  <>
+                    <Row label="GST" value={totals.tax} />
+                    <p className="text-muted-foreground py-1 text-xs">
+                      Choose a supplier to see whether this splits into CGST + SGST or is IGST.
+                    </p>
+                  </>
+                )}
+                {isReverseCharge && totals.tax > 0 && (
+                  <p className="py-1 text-xs text-amber-400">
+                    Reverse charge — the ₹{inr(totals.tax)} of GST above is payable by us to the
+                    government and is not part of what the supplier is paid.
+                  </p>
+                )}
+                <Row label="Rounding" value={totals.roundOff} />
+                <div className="border-border flex items-center justify-between border-t pt-2">
+                  <span className="text-foreground font-semibold">Bill total</span>
+                  <span className="text-foreground text-lg font-semibold tabular-nums">
+                    ₹{inr(totals.total)}
+                  </span>
                 </div>
-              </Section>
-            </div>
+                {totals.tds > 0 && (
+                  <>
+                    <Row
+                      label={`TDS withheld${tdsSection ? ` (${tdsSection})` : ''}`}
+                      value={-totals.tds}
+                    />
+                    <div className="border-border flex items-center justify-between border-t pt-2">
+                      <span className="text-foreground font-medium">Payable to supplier</span>
+                      <span className="text-foreground font-semibold tabular-nums">
+                        ₹{inr(totals.balance)}
+                      </span>
+                    </div>
+                    <p className="text-muted-foreground text-xs">
+                      Paying this smaller amount settles the bill in full — the TDS is accounted for
+                      rather than left outstanding against them.
+                    </p>
+                  </>
+                )}
+              </div>
+            </Section>
           </div>
 
           {/* Footer — stays put, so Save is always one press away. */}

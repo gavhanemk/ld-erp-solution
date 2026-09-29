@@ -823,3 +823,19 @@
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
+
+/* iPhone zooms the whole page in whenever a field under 16px is tapped, and
+   leaves it zoomed — every form in the app did it, because fields are 14px.
+   16px on touch-Safari phones only: `-webkit-touch-callout` is supported by
+   iOS Safari and nothing else, so Android and desktop keep the 14px they were
+   designed at. `!important` because many fields set their own size with a
+   utility class, and each one of those would otherwise still zoom. */
+@supports (-webkit-touch-callout: none) {
+  @media (max-width: 639px) {
+    input:not([type='checkbox']):not([type='radio']),
+    select,
+    textarea {
+      font-size: 16px !important;
+    }
+  }
+}
