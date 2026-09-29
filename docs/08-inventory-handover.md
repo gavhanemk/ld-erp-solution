@@ -208,6 +208,23 @@ node tools/check-job-work.mjs --write-test-data        # 29 checks, customer mat
 They are the fastest way to know you have not broken stock. Run all three after
 any change to `stock.service.ts`.
 
+### One of them is stale, and it is yours
+
+`check-grn.mjs` was written before you changed the goods receipt, and three of its
+assertions now test behaviour you deliberately replaced:
+
+- It expects a receipt of 60 with 5 rejected to put **55** into stock. The route
+  now pins `rejectedQty` to zero and books the full received quantity
+  (`purchase.routes.ts:2361-2366`), so it puts in 60.
+- It expects any over-receipt to be refused outright. It is now allowed within a
+  tolerance if a reason is given — `OVER_RECEIPT_NEEDS_REASON`.
+- The receipt count then follows from the first two.
+
+I fixed the part that was unambiguous — every call now sends the supplier challan
+number and date, which you made required — but left those three alone. They are
+assertions about how *your* module should behave, and guessing at your intent
+would be worse than a failing test that says exactly what changed.
+
 ---
 
 ## 7. Open questions for the business
