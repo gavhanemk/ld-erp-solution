@@ -505,6 +505,7 @@ function StockScreen() {
             <table className="data-table w-full">
               <thead>
                 <tr>
+                  <th>Code</th>
                   <th>Item</th>
                   <th>Store</th>
                   <th style={{ textAlign: 'right' }}>On hand</th>
@@ -515,6 +516,7 @@ function StockScreen() {
               <tbody>
                 {shown.map((r) => (
                   <tr key={`${r.itemId}-${r.warehouseId}-${r.ownerName ?? ''}`}>
+                    <td className="whitespace-nowrap font-mono text-xs text-teal-500">{r.itemCode}</td>
                     <td>
                       <Link
                         href={`/inventory/stock/${r.itemId}`}
@@ -522,8 +524,8 @@ function StockScreen() {
                       >
                         {r.itemName}
                       </Link>
-                      <div className="text-[10px] text-muted-foreground font-mono">
-                        {r.itemCode} · {r.categoryName}
+                      <div className="text-[11px] text-muted-foreground">
+                        {r.categoryName}
                         {r.departmentName ? ` · ${r.departmentName}` : ''}
                       </div>
                     </td>
