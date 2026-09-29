@@ -337,7 +337,9 @@ router.get('/ledger', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
-type LedgerGroup = { value: string; label: string | null; moves: number; inValue: number; outValue: number }
+type LedgerGroup = {
+  value: string; label: string | null; moves: number; ins: number; outs: number; inValue: number; outValue: number
+}
 
 /**
  * For the ledger's dashboard: what the filters leave, cut by store, category,
@@ -346,6 +348,8 @@ type LedgerGroup = { value: string; label: string | null; moves: number; inValue
 async function ledgerAnalysis(all: Prisma.Sql) {
   const sums = Prisma.sql`
     COUNT(*)::int AS moves,
+    COUNT(*) FILTER (WHERE s."inQty" > 0)::int AS ins,
+    COUNT(*) FILTER (WHERE s."inQty" <= 0)::int AS outs,
     COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
     COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue"`
   const moved = Prisma.sql`SUM((s."inQty" + s."outQty") * COALESCE(s."unitRate", 0))`

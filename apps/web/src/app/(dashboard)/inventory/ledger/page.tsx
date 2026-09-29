@@ -10,6 +10,9 @@ import {
 import { api, ApiError } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
+import {
+  CategoryTreemap, DepartmentRadar, DocumentBars, FlowChart, MovementDonut, StoreColumns,
+} from '@/components/inventory/LedgerCharts'
 
 /**
  * Every stock movement there has ever been.
@@ -70,6 +73,8 @@ interface Group {
   value: string
   label: string | null
   moves: number
+  ins: number
+  outs: number
   inValue: number
   outValue: number
 }
@@ -248,70 +253,23 @@ function buckets(series: Day[], from: string, to: string) {
   return [...map.values()].map((b) => ({ ...b, label: label(b), unit }))
 }
 
-/**
- * One cut of the movements — by store, by category — as a row each, with the
- * value in and out drawn against the biggest row. Clicking a row filters by it.
- */
-function GroupPanel({
+/** A titled card around one chart, with a line on how to read it. */
+function ChartCard({
   title,
-  rows,
-  nameOf,
-  picked,
-  onPick,
-  top = 8,
+  hint,
+  className = '',
+  children,
 }: {
   title: string
-  rows: Group[] | undefined
-  nameOf: (g: Group) => string
-  picked: string[]
-  onPick: (value: string) => void
-  top?: number
+  hint: string
+  className?: string
+  children: ReactNode
 }) {
-  const list = rows ?? []
-  const peak = Math.max(1, ...list.map((g) => Math.max(g.inValue, g.outValue)))
   return (
-    <div className="glass-card p-4">
-      <div className="flex items-baseline justify-between">
-        <p className="text-sm font-medium text-foreground">{title}</p>
-        <p className="text-[11px] text-muted-foreground">in · out</p>
-      </div>
-      {!rows ? (
-        <p className="py-8 text-center text-xs text-muted-foreground">Loading...</p>
-      ) : list.length === 0 ? (
-        <p className="py-8 text-center text-xs text-muted-foreground">Nothing to show.</p>
-      ) : (
-        <div className="mt-2 space-y-0.5">
-          {list.slice(0, top).map((g) => {
-            const on = picked.includes(g.value)
-            return (
-              <button
-                key={g.value}
-                type="button"
-                onClick={() => onPick(g.value)}
-                title={`${nameOf(g)}\nIn ${rupees(g.inValue)} · Out ${rupees(g.outValue)} · ${g.moves} movements\n${on ? 'Click to stop showing only these' : 'Click to show only these'}`}
-                className={`grid w-full grid-cols-[minmax(0,9rem)_1fr_auto] items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-primary/5 ${on ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
-              >
-                <span className="truncate text-foreground">{nameOf(g)}</span>
-                <span className="space-y-0.5">
-                  <span className="block h-1.5 rounded-full bg-secondary">
-                    <span className="block h-1.5 rounded-full bg-emerald-500/70" style={{ width: `${(g.inValue / peak) * 100}%` }} />
-                  </span>
-                  <span className="block h-1.5 rounded-full bg-secondary">
-                    <span className="block h-1.5 rounded-full bg-red-400/70" style={{ width: `${(g.outValue / peak) * 100}%` }} />
-                  </span>
-                </span>
-                <span className="w-28 text-right tabular-nums leading-tight">
-                  <span className="block text-emerald-500">{rupees(g.inValue)}</span>
-                  <span className="block text-red-400">{g.outValue > 0 ? rupees(g.outValue) : '—'}</span>
-                </span>
-              </button>
-            )
-          })}
-          {list.length > top && (
-            <p className="px-2 pt-1 text-[11px] text-muted-foreground">and {list.length - top} more</p>
-          )}
-        </div>
-      )}
+    <div className={`glass-card p-4 ${className}`}>
+      <p className="text-sm font-medium text-foreground">{title}</p>
+      <p className="mb-2 text-[11px] text-muted-foreground">{hint}</p>
+      {children}
     </div>
   )
 }
@@ -460,16 +418,17 @@ function LedgerScreen() {
   const customerCount = res?.facets?.owner?.find((f) => f.value === 'CUSTOMER_OWNED')?.count ?? 0
 
   const bars = useMemo(() => buckets(res?.series ?? [], from, to), [res?.series, from, to])
-  const peak = Math.max(1, ...bars.map((b) => Math.max(b.inValue, b.outValue)))
   const byDay = useMemo(() => new Map((res?.series ?? []).map((d) => [d.day, d])), [res?.series])
 
   const movementMix = useMemo(() => {
     const list = (res?.facets?.movement ?? []).map((m) => ({ ...m, label: MOVEMENT[m.value]?.label ?? m.value }))
     return list.sort((a, b) => b.count - a.count)
   }, [res?.facets?.movement])
-  const mixPeak = Math.max(1, ...movementMix.map((m) => m.count))
 
   const analysis = res?.analysis
+  /** A breakdown from the server, each with the name to show. */
+  const groups = (rows: Group[] | undefined, nameOf?: (g: Group) => string | null) =>
+    (rows ?? []).map((g) => ({ ...g, label: nameOf?.(g) ?? g.label ?? g.value }))
   const insight = useMemo(() => {
     const days = res?.series ?? []
     const busiest = days.reduce<Day | null>((b, d) => (!b || d.moves > b.moves ? d : b), null)
@@ -830,127 +789,38 @@ function LedgerScreen() {
           </div>
 
           {/* The shape of it: value in and out over the period, and what kind of movements they were. */}
+          {/* A chart of its own kind for each question. Clicking a part filters by it. */}
           <div className="grid gap-3 lg:grid-cols-3">
-            <div className="glass-card flex flex-col p-4 lg:col-span-2">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <p className="text-sm font-medium text-foreground">
-                  Flow {bars[0] ? `by ${bars[0].unit}` : ''}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Net change{' '}
-                  <span className={`font-semibold tabular-nums ${net >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
-                    {net >= 0 ? '+' : ''}
-                    {rupees(net)}
-                  </span>
-                </p>
-              </div>
-              {bars.length === 0 ? (
-                <p className="py-10 text-center text-xs text-muted-foreground">No movements in this period.</p>
-              ) : (
-                <>
-                  <div className="mt-3 flex h-36 flex-1 items-stretch gap-[2px] lg:h-auto lg:min-h-[9rem]" role="img" aria-label="Value in and out over the period">
-                    {bars.map((b) => (
-                      <button
-                        key={b.key}
-                        type="button"
-                        onClick={() => {
-                          setFrom(b.from)
-                          setTo(b.to)
-                          setPreset('custom')
-                        }}
-                        title={`${b.from === b.to ? dayTitle(b.from) : `${dayTitle(b.from)} – ${dayTitle(b.to)}`}\nIn ${rupees(b.inValue)} · Out ${rupees(b.outValue)} · ${b.moves} movements\nClick to see only these`}
-                        className="group flex min-w-0 flex-1 flex-col rounded-sm hover:bg-primary/5"
-                      >
-                        <div className="flex flex-1 items-end justify-center">
-                          <div
-                            className="w-full max-w-[22px] rounded-t-sm bg-emerald-500/70 group-hover:bg-emerald-500"
-                            style={{ height: `${(b.inValue / peak) * 100}%`, minHeight: b.inValue > 0 ? 2 : 0 }}
-                          />
-                        </div>
-                        <div className="h-px w-full bg-border" />
-                        <div className="flex flex-1 items-start justify-center">
-                          <div
-                            className="w-full max-w-[22px] rounded-b-sm bg-red-400/70 group-hover:bg-red-400"
-                            style={{ height: `${(b.outValue / peak) * 100}%`, minHeight: b.outValue > 0 ? 2 : 0 }}
-                          />
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
-                    <span>{bars[0].label}</span>
-                    {bars.length > 2 && <span>{bars[Math.floor(bars.length / 2)].label}</span>}
-                    <span>{bars[bars.length - 1].label}</span>
-                  </div>
-                  <div className="mt-2 flex gap-4 text-[11px] text-muted-foreground">
-                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-emerald-500" /> in, above the line</span>
-                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-red-400" /> out, below it</span>
-                    <span className="ml-auto hidden sm:inline">click a bar to see just that {bars[0].unit}</span>
-                  </div>
-                </>
-              )}
-            </div>
-
-            <div className="glass-card p-4">
-              <p className="text-sm font-medium text-foreground">By movement</p>
-              {movementMix.length === 0 ? (
-                <p className="py-10 text-center text-xs text-muted-foreground">Nothing to show.</p>
-              ) : (
-                <div className="mt-2 space-y-0.5">
-                  {movementMix.map((m) => {
-                    const on = picked.movement?.includes(m.value) ?? false
-                    return (
-                      <button
-                        key={m.value}
-                        type="button"
-                        onClick={() => toggleOne('movement', m.value)}
-                        title={on ? 'Click to stop showing only these' : 'Click to show only these'}
-                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-primary/5 ${on ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
-                      >
-                        <span className="w-32 shrink-0 truncate">
-                          <span className={MOVEMENT[m.value]?.cls ?? 'badge-neutral'}>{m.label}</span>
-                        </span>
-                        <span className="h-1.5 flex-1 rounded-full bg-secondary">
-                          <span className="block h-1.5 rounded-full bg-primary/60" style={{ width: `${(m.count / mixPeak) * 100}%` }} />
-                        </span>
-                        <span className="w-8 shrink-0 text-right tabular-nums text-muted-foreground">{m.count}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
+            <ChartCard
+              className="lg:col-span-2"
+              title={`Flow ${bars[0] ? `by ${bars[0].unit}` : ''}`}
+              hint="value in above the line, out below it; the line is how many movements · click a bar to see that period"
+            >
+              <FlowChart data={bars} onPick={(f, t) => { setFrom(f); setTo(t); setPreset('custom') }} />
+            </ChartCard>
+            <ChartCard title="Mix of movements" hint="click a slice to show only those">
+              <MovementDonut data={movementMix} picked={picked.movement ?? []} onPick={(v) => toggleOne('movement', v)} />
+            </ChartCard>
           </div>
 
           <div className="grid gap-3 lg:grid-cols-2">
-            <GroupPanel
-              title="By store"
-              rows={analysis?.byStore}
-              nameOf={(g) => g.label ?? g.value}
-              picked={picked.store ?? []}
-              onPick={(v) => toggleOne('store', v)}
-            />
-            <GroupPanel
-              title="By category"
-              rows={analysis?.byCategory}
-              nameOf={(g) => g.label ?? g.value}
-              picked={picked.category ?? []}
-              onPick={(v) => toggleOne('category', v)}
-            />
-            <GroupPanel
-              title="By department"
-              rows={analysis?.byDepartment}
-              nameOf={(g) => (g.value === 'none' ? 'No department' : (g.label ?? g.value))}
-              picked={picked.department ?? []}
-              onPick={(v) => toggleOne('department', v)}
-            />
-            <GroupPanel
-              title="By document"
-              rows={analysis?.byDocument}
-              nameOf={(g) => (g.value === 'none' ? 'No document' : docLabel(g.value))}
-              picked={picked.document ?? []}
-              onPick={(v) => toggleOne('document', v)}
-            />
+            <ChartCard title="By store" hint="value in and out of each store · click a store to filter">
+              <StoreColumns data={groups(analysis?.byStore)} onPick={(v) => toggleOne('store', v)} />
+            </ChartCard>
+            <ChartCard title="By category" hint="the bigger the box, the more value moved · click one to filter">
+              <CategoryTreemap data={groups(analysis?.byCategory)} onPick={(v) => toggleOne('category', v)} />
+            </ChartCard>
+            <ChartCard title="By department" hint="how many movements in and out for each department's items">
+              <DepartmentRadar
+                data={groups(analysis?.byDepartment, (g) => (g.value === 'none' ? 'No department' : null))}
+              />
+            </ChartCard>
+            <ChartCard title="By document" hint="what caused the movements · click one to filter">
+              <DocumentBars
+                data={groups(analysis?.byDocument, (g) => (g.value === 'none' ? 'No document' : docLabel(g.value)))}
+                onPick={(v) => toggleOne('document', v)}
+              />
+            </ChartCard>
           </div>
 
           {/* The items that moved the most money, in and out together. */}
