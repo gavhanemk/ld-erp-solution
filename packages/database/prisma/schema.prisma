@@ -646,7 +646,7 @@ model BOM {
   updatedAt    DateTime  @updatedAt
 
   lines  BOMLine[]
-  copies BOM[]     @relation("BOMCopy")
+  copies BOM[]    @relation("BOMCopy")
 
   // White v1.0 and Dusty Blue v1.0 of the same style are two different BOMs.
   // Postgres counts two blank colours as different, so two colourless BOMs at
@@ -657,11 +657,11 @@ model BOM {
 }
 
 model BOMLine {
-  id              String      @id @default(cuid())
+  id              String   @id @default(cuid())
   bomId           String
-  bom             BOM         @relation(fields: [bomId], references: [id], onDelete: Cascade)
+  bom             BOM      @relation(fields: [bomId], references: [id], onDelete: Cascade)
   componentItemId String
-  componentItem   Item        @relation("ComponentItem", fields: [componentItemId], references: [id])
+  componentItem   Item     @relation("ComponentItem", fields: [componentItemId], references: [id])
   /// Which part of the garment this goes into, such as "Body", "Collar" or
   /// "Cuff". The same self fabric legitimately appears twice on one BOM at two
   /// different wastages, because the parts are cut differently. Without this
@@ -676,13 +676,13 @@ model BOMLine {
   department      Department? @relation(fields: [departmentId], references: [id])
   /// Consumption for one garment at the BOM base size. Sizes that differ carry
   /// their own row in BOMLineSize; every other size falls back to this.
-  qtyPerUnit      Decimal     @db.Decimal(10, 4)
-  wastagePercent  Decimal     @default(0) @db.Decimal(5, 2)
-  effectiveQty    Decimal     @db.Decimal(10, 4)
-  unitCost        Decimal?    @db.Decimal(10, 4)
-  totalCost       Decimal?    @db.Decimal(10, 4)
+  qtyPerUnit      Decimal  @db.Decimal(10, 4)
+  wastagePercent  Decimal  @default(0) @db.Decimal(5, 2)
+  effectiveQty    Decimal  @db.Decimal(10, 4)
+  unitCost        Decimal? @db.Decimal(10, 4)
+  totalCost       Decimal? @db.Decimal(10, 4)
   notes           String?
-  sortOrder       Int         @default(0)
+  sortOrder       Int      @default(0)
 
   sizes BOMLineSize[]
 
