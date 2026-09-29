@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs'
-import { Readable } from 'stream'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
+import { addDropdowns, addHowToSheet, addTemplateSheet, readSheetRows, type SheetColumn } from '../lib/sheet'
 import { createItemSchema } from '../schemas/master.schemas'
 import { itemPrefix } from '../lib/masterCode'
 import { balanceOf, lockedBalanceOf, recordMovement } from './stock.service'
@@ -111,15 +111,7 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
   const wb = new ExcelJS.Workbook()
   wb.creator = 'LD ERP'
 
-  const sheet = wb.addWorksheet('Items', { views: [{ state: 'frozen', ySplit: 1 }] })
-  sheet.columns = COLUMNS.map((c) => ({ header: c.head, key: c.key, width: c.width }))
-  const head = sheet.getRow(1)
-  head.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-  head.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF173A6C' } }
-  head.height = 20
-  COLUMNS.forEach((c, i) => {
-    if ('note' in c && c.note) sheet.getCell(1, i + 1).note = c.note
-  })
+  const sheet = addTemplateSheet(wb, 'Items', COLUMNS as unknown as SheetColumn[])
 
   if (withItems) {
     for (const it of m.items.filter((i) => i.isActive).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -136,56 +128,35 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
     }
   }
 
-  // Lists for the dropdowns, on a sheet of their own.
-  const lists = wb.addWorksheet('Lists')
+  // Dropdowns on the first 2000 rows, so a pasted list still gets them.
   const mains = m.categories.filter((c) => !c.parentId)
   const subs = m.categories.filter((c) => c.parentId)
-  const columns: Record<string, string[]> = {
-    types: TYPE_LABELS,
-    categories: mains.map((c) => c.name).sort(),
-    subCategories: [...new Set(subs.map((c) => c.name))].sort(),
-    departments: m.departments.map((d) => d.name).sort(),
-    units: m.units.map((u) => u.name).sort(),
-    stores: m.stores.map((s) => s.name).sort(),
-  }
-  const where: Record<string, string> = {}
-  Object.entries(columns).forEach(([key, values], i) => {
-    const col = lists.getColumn(i + 1)
-    col.width = 26
-    lists.getCell(1, i + 1).value = key
-    lists.getCell(1, i + 1).font = { bold: true }
-    values.forEach((v, r) => (lists.getCell(r + 2, i + 1).value = v))
-    const letter = col.letter
-    where[key] = `Lists!$${letter}$2:$${letter}$${Math.max(2, values.length + 1)}`
-  })
+  addDropdowns(
+    wb,
+    sheet,
+    COLUMNS as unknown as SheetColumn[],
+    {
+      types: TYPE_LABELS,
+      categories: mains.map((c) => c.name).sort(),
+      subCategories: [...new Set(subs.map((c) => c.name))].sort(),
+      departments: m.departments.map((d) => d.name).sort(),
+      units: m.units.map((u) => u.name).sort(),
+      stores: m.stores.map((s) => s.name).sort(),
+    },
+    MAX_ROWS,
+  )
 
-  // Dropdowns on the first 2000 rows, so a pasted list still gets them.
-  COLUMNS.forEach((c, i) => {
-    if (!('list' in c) || !c.list) return
-    const letter = sheet.getColumn(i + 1).letter
-    for (let r = 2; r <= MAX_ROWS + 1; r++) {
-      sheet.getCell(`${letter}${r}`).dataValidation = {
-        type: 'list',
-        allowBlank: true,
-        formulae: [where[c.list]],
-        showErrorMessage: false,
-      }
-    }
-  })
-
-  // How to fill it, for whoever opens it cold.
-  const how = wb.addWorksheet('How to fill')
-  how.getColumn(1).width = 110
-  ;[
+  addHowToSheet(wb, [
     'One row per item. Required: Item Name, Item Type, Category, Unit, Department; Sub Category when the category has sub-categories.',
     'Pick Type, Category, Sub Category, Department, Unit and Store from the dropdowns, so they match what is in the system.',
+    "Department can be left empty: the item then takes its sub-category's department.",
     'A new item gets its code when it is saved. Put a code in Item Code only to point at an item already in the system.',
     'An item already in the system (same code, or same name) is not changed. Only its stock is added.',
     'Stock on hand today: fill Store, Stock Qty and Stock Rate. Empty Stock Rate takes the Standard Rate. Leave all three empty for no stock.',
     'The same item in two stores: two rows with the same name, one per store.',
     'Opening stock can only be entered once for an item in a store. After that, correct it with a stock count.',
     'Nothing is saved until you have seen what each row will do and pressed Import. If any row has a problem, nothing is imported.',
-  ].forEach((t, i) => (how.getCell(i + 1, 1).value = `${i + 1}. ${t}`))
+  ])
 
   return Buffer.from(await wb.xlsx.writeBuffer())
 }
@@ -194,60 +165,15 @@ export async function buildTemplate(withItems: boolean): Promise<Buffer> {
 // Reading a filled sheet
 // ─────────────────────────────────────────────────────────────
 
-/** A cell as text, whatever Excel stored: a number, rich text, a formula's result. */
-function cellText(v: ExcelJS.CellValue): string {
-  if (v === null || v === undefined) return ''
-  if (typeof v === 'number') return String(v)
-  if (typeof v === 'string') return v.trim()
-  if (typeof v === 'boolean') return v ? 'true' : 'false'
-  if (v instanceof Date) return v.toISOString().slice(0, 10)
-  if (typeof v === 'object') {
-    if ('richText' in v) return v.richText.map((r) => r.text).join('').trim()
-    if ('result' in v) return cellText(v.result as ExcelJS.CellValue)
-    if ('text' in v) return String(v.text).trim()
-  }
-  return String(v).trim()
-}
-
-/** The rows of the first sheet, keyed by the template's columns, matched on header text. */
-export async function readSheet(file: Buffer, fileName: string): Promise<Array<{ row: number; raw: Raw }>> {
-  const wb = new ExcelJS.Workbook()
-  try {
-    if (/\.csv$/i.test(fileName)) await wb.csv.read(Readable.from(file))
-    // exceljs types its own Buffer; Node's is the same bytes.
-    else await wb.xlsx.load(file as unknown as ExcelJS.Buffer)
-  } catch {
-    throw new AppError('That file could not be read. Save it as .xlsx (or .csv) and try again.', 400, 'BAD_FILE')
-  }
-  const sheet = wb.getWorksheet('Items') ?? wb.worksheets[0]
-  if (!sheet) throw new AppError('That file has no sheet in it.', 400, 'BAD_FILE')
-
-  const norm = (s: string) => s.replace(/\*/g, '').trim().toLowerCase()
-  const byHead = new Map(COLUMNS.map((c) => [norm(c.head), c.key]))
-  const colKey = new Map<number, Key>()
-  sheet.getRow(1).eachCell((cell, col) => {
-    const key = byHead.get(norm(cellText(cell.value)))
-    if (key) colKey.set(col, key)
+/** The rows of the Items sheet, keyed by the template's columns. */
+export function readSheet(file: Buffer, fileName: string): Promise<Array<{ row: number; raw: Raw }>> {
+  return readSheetRows(file, fileName, {
+    columns: COLUMNS as unknown as SheetColumn<Key>[],
+    sheetName: 'Items',
+    mustHave: 'name',
+    mustHaveLabel: 'Item Name',
+    maxRows: MAX_ROWS,
   })
-  if (![...colKey.values()].includes('name')) {
-    throw new AppError('The first row has no "Item Name" column. Start from the template.', 400, 'BAD_FILE')
-  }
-
-  const rows: Array<{ row: number; raw: Raw }> = []
-  sheet.eachRow((r, n) => {
-    if (n === 1) return
-    const raw: Raw = {}
-    r.eachCell((cell, col) => {
-      const key = colKey.get(col)
-      if (key) raw[key] = cellText(cell.value)
-    })
-    if (Object.values(raw).some((v) => v)) rows.push({ row: n, raw })
-  })
-  if (rows.length === 0) throw new AppError('The sheet has no rows filled in.', 400, 'EMPTY_FILE')
-  if (rows.length > MAX_ROWS) {
-    throw new AppError(`That is ${rows.length} rows. Import at most ${MAX_ROWS} at a time.`, 400, 'TOO_MANY_ROWS')
-  }
-  return rows
 }
 
 // ─────────────────────────────────────────────────────────────

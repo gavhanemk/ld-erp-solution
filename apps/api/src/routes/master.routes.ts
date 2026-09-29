@@ -3,6 +3,7 @@ import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
+import * as categoryImport from '../services/categoryImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
@@ -649,6 +650,69 @@ async function checkCategoryParent(req: AuthRequest, _res: unknown, next: (err?:
 }
 router.post('/item-categories', requirePermission(MODULE, 'create'), checkCategoryParent)
 router.patch('/item-categories/:id', requirePermission(MODULE, 'edit'), checkCategoryParent)
+
+/*
+ * Categories from a spreadsheet, the same way as items: check first, then all
+ * or nothing. It makes categories and sets their departments; it never
+ * touches an item. Ahead of the CRUD, for the same reason as the items one.
+ */
+router.get('/item-categories/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await categoryImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'categories-with-current-list.xlsx' : 'categories-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/item-categories/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await categoryImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await categoryImport.planImport(rows)
+
+  // Changing the department of a category already there is an edit.
+  if (plans.some((p) => p.setDepartment) && !userCan(req.user, MODULE, 'edit')) {
+    throw new AppError(
+      'This sheet changes the department of categories already in the system, and your role cannot edit them. Leave Department empty on those rows.',
+      403,
+      'NO_EDIT_RIGHT',
+    )
+  }
+
+  const summary = {
+    rows: plans.length,
+    newMains: plans.filter((p) => p.newMain).length,
+    newSubs: plans.filter((p) => p.newSub).length,
+    departmentsSet: plans.filter((p) => p.setDepartment).length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const done = await categoryImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'ItemCategoryImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created: done.made, departmentsSet: done.departmentsSet },
+  })
+  const parts = [
+    done.mains ? `${done.mains} new ${done.mains === 1 ? 'category' : 'categories'}` : '',
+    done.subs ? `${done.subs} new ${done.subs === 1 ? 'sub-category' : 'sub-categories'}` : '',
+    done.departmentsSet ? `${done.departmentsSet} ${done.departmentsSet === 1 ? 'department' : 'departments'} set` : '',
+  ].filter(Boolean)
+  res.status(201).json({
+    success: true,
+    message: parts.length
+      ? `Imported ${parts.slice(0, -1).join(', ')}${parts.length > 1 ? ' and ' : ''}${parts[parts.length - 1]}.`
+      : 'Nothing to import: every row is already in the system.',
+    data: { summary, created: done.made, departmentsSet: done.departmentsSet },
+  })
+})
 
 router.use(
   '/item-categories',

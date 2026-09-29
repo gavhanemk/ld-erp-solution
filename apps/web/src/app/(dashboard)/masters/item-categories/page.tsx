@@ -1,7 +1,10 @@
 'use client'
 
+import { useState } from 'react'
+import { FileSpreadsheet } from 'lucide-react'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { ImportCategoriesDialog } from '@/components/masters/ImportCategoriesDialog'
 
 /**
  * Item categories, and the subcategories under them.
@@ -172,17 +175,35 @@ const filterDefs: FilterDef[] = [
 ]
 
 export default function ItemCategoriesPage() {
+  const [importing, setImporting] = useState(false)
+  // Bumped after an import, so the list and its filter counts reload.
+  const [refreshKey, setRefreshKey] = useState(0)
+
   return (
-    <MasterTable<ItemCategory>
-      title="Item Categories"
-      entityName="Category"
-      resource="item-categories"
-      columns={columns}
-      formFields={formFields}
-      filterDefs={filterDefs}
-      defaultSort="name"
-      searchPlaceholder="Search categories..."
-      emptyMessage="No categories yet. Add one, then add subcategories beneath it."
-    />
+    <>
+      <MasterTable<ItemCategory>
+        title="Item Categories"
+        entityName="Category"
+        resource="item-categories"
+        columns={columns}
+        formFields={formFields}
+        filterDefs={filterDefs}
+        defaultSort="name"
+        searchPlaceholder="Search categories..."
+        emptyMessage="No categories yet. Add one, then add subcategories beneath it."
+        refreshKey={refreshKey}
+        actions={
+          <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+            <FileSpreadsheet size={16} /> Import
+          </button>
+        }
+      />
+      {importing && (
+        <ImportCategoriesDialog
+          onClose={() => setImporting(false)}
+          onImported={() => setRefreshKey((k) => k + 1)}
+        />
+      )}
+    </>
   )
 }
