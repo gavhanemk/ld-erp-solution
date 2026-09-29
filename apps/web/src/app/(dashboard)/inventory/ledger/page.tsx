@@ -157,7 +157,7 @@ const FILTERS: Array<{
   { key: 'store', label: 'Store' },
   { key: 'movement', label: 'Movement', labelOf: (v) => MOVEMENT[v]?.label ?? v },
   { key: 'document', label: 'Document', labelOf: docLabel, noneLabel: 'No document', menu: false },
-  { key: 'direction', label: 'In / Out', labelOf: (v) => (v === 'in' ? 'Came in' : 'Went out'), menu: false },
+  { key: 'direction', label: 'In / Out', labelOf: (v) => (v === 'in' ? 'Came in' : 'Went out') },
   { key: 'owner', label: 'Whose', labelOf: (v) => (v === 'OWNED' ? 'Our own stock' : "Customers' material"), menu: false },
   { key: 'category', label: 'Category' },
   { key: 'sub', label: 'Sub-category', noneLabel: 'No sub-category', menu: false },
@@ -220,7 +220,7 @@ const PRESETS = [
   { key: '30d', label: '30 days' },
   { key: 'month', label: 'This month' },
   { key: 'fy', label: 'This FY' },
-  { key: 'custom', label: 'Custom range' },
+  { key: 'custom', label: 'Custom dates' },
 ]
 
 /**
@@ -520,7 +520,7 @@ function LedgerScreen() {
   const filterBar = (
     <div className="space-y-2 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex h-10 min-w-[180px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+        <div className="flex h-10 min-w-[160px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
           <Search size={14} className="text-muted-foreground" />
           <input
             className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
@@ -535,42 +535,47 @@ function LedgerScreen() {
             </button>
           )}
         </div>
-        <div className="flex h-10 items-center gap-2 rounded-lg border border-border bg-secondary pl-3 pr-1">
-          <CalendarDays size={14} className="text-muted-foreground" />
-          <select
-            className="h-full cursor-pointer bg-transparent pr-1 text-sm text-foreground outline-none"
-            value={preset}
-            onChange={(e) => pickPreset(e.target.value)}
-            aria-label="Period"
-          >
-            {PRESETS.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+        {/* The dates, always to hand; the period beside them fills both in at once. */}
+        <div className="flex h-10 items-center gap-1 rounded-lg border border-border bg-secondary px-2">
+          <CalendarDays size={14} className="shrink-0 text-muted-foreground" />
+          <input
+            type="date"
+            className="w-[118px] bg-transparent text-sm text-foreground outline-none"
+            value={from}
+            max={to || undefined}
+            onChange={(e) => {
+              setFrom(e.target.value)
+              setPreset('custom')
+            }}
+            aria-label="From"
+            title="From"
+          />
+          <span className="text-xs text-muted-foreground">to</span>
+          <input
+            type="date"
+            className="w-[118px] bg-transparent text-sm text-foreground outline-none"
+            value={to}
+            min={from || undefined}
+            onChange={(e) => {
+              setTo(e.target.value)
+              setPreset('custom')
+            }}
+            aria-label="To"
+            title="To"
+          />
         </div>
-        {preset === 'custom' && (
-          <div className="flex items-center gap-1.5">
-            <input
-              type="date"
-              className="form-input h-10 w-[140px] text-sm"
-              value={from}
-              max={to || undefined}
-              onChange={(e) => setFrom(e.target.value)}
-              aria-label="From"
-            />
-            <span className="text-xs text-muted-foreground">to</span>
-            <input
-              type="date"
-              className="form-input h-10 w-[140px] text-sm"
-              value={to}
-              min={from || undefined}
-              onChange={(e) => setTo(e.target.value)}
-              aria-label="To"
-            />
-          </div>
-        )}
+        <select
+          className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
+          value={preset}
+          onChange={(e) => pickPreset(e.target.value)}
+          aria-label="Period"
+        >
+          {PRESETS.map((p) => (
+            <option key={p.key} value={p.key}>
+              {p.label}
+            </option>
+          ))}
+        </select>
         {FILTERS.filter((f) => f.menu !== false).map((f) => (
           <FilterMenu
             key={f.key}

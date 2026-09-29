@@ -1,7 +1,7 @@
 'use client'
 
 import {
-  Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, Pie, PieChart, PolarAngleAxis,
+  Bar, BarChart, CartesianGrid, Cell, ComposedChart, LabelList, Legend, Line, Pie, PieChart, PolarAngleAxis,
   PolarGrid, PolarRadiusAxis, Radar, RadarChart, ReferenceLine, ResponsiveContainer, Tooltip, Treemap,
   XAxis, YAxis,
 } from 'recharts'
@@ -40,6 +40,31 @@ export const shortRupees = (v: number) => {
 
 const axis = { fontSize: 11, fill: 'currentColor' }
 
+/** A value label that says nothing for a zero, so empty bars stay unlabelled. */
+const count0 = (v: unknown) => (Number(v) ? Number(v).toLocaleString('en-IN') : '')
+const labelStyle = { fontSize: 10, fontWeight: 600 }
+
+/**
+ * A bar's value above it (or below, for a bar hanging down), on one line.
+ * Values under `floor` are left bare: a sliver of a bar with a label on it
+ * only collides with its neighbours.
+ */
+function barLabel(colour: string, format: (v: number) => string, floor = 0, below = false) {
+  return function BarValue(props: any) {
+    const { x, y, width, height, value } = props
+    const v = Math.abs(Number(value))
+    if (!v || v < floor) return null
+    const cx = Number(x) + Number(width) / 2
+    const top = Math.min(Number(y), Number(y) + Number(height))
+    const bottom = Math.max(Number(y), Number(y) + Number(height))
+    return (
+      <text x={cx} y={below ? bottom + 11 : top - 5} textAnchor="middle" fill={colour} fontSize={10} fontWeight={600}>
+        {format(v)}
+      </text>
+    )
+  }
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function Tip({ active, payload, label, money = true }: any) {
   if (!active || !payload?.length) return null
@@ -77,12 +102,16 @@ export function FlowChart({
 }) {
   if (!data.length) return <Empty h={240} />
   const rows = data.map((b) => ({ ...b, out: -b.outValue }))
+  // Labels read while the bars that have any are few; past that they collide.
+  // Empty days carry no label, so a month with five busy days is labelled.
+  const labelled = rows.filter((b) => b.inValue || b.outValue || b.moves).length <= 20
+  const floor = Math.max(...rows.map((b) => Math.max(b.inValue, b.outValue))) * 0.03
   return (
     <div className="text-muted-foreground">
       <ResponsiveContainer width="100%" height={240}>
         <ComposedChart
           data={rows}
-          margin={{ top: 8, right: 4, left: 4, bottom: 0 }}
+          margin={{ top: 20, right: 4, left: 4, bottom: 0 }}
           stackOffset="sign"
           onClick={(e: any) => {
             const b = e?.activePayload?.[0]?.payload
@@ -96,9 +125,15 @@ export function FlowChart({
           <ReferenceLine yAxisId="v" y={0} stroke="currentColor" strokeOpacity={0.4} />
           <Tooltip content={<Tip />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
           <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
-          <Bar yAxisId="v" dataKey="inValue" name="Value in" stackId="f" fill={IN_COLOUR} radius={[3, 3, 0, 0]} maxBarSize={28} cursor="pointer" />
-          <Bar yAxisId="v" dataKey="out" name="Value out" stackId="f" fill={OUT_COLOUR} radius={[0, 0, 3, 3]} maxBarSize={28} cursor="pointer" />
-          <Line yAxisId="n" type="monotone" dataKey="moves" name="Movements" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }} />
+          <Bar yAxisId="v" dataKey="inValue" name="Value in" stackId="f" fill={IN_COLOUR} radius={[3, 3, 0, 0]} maxBarSize={28} cursor="pointer">
+            {labelled && <LabelList dataKey="inValue" content={barLabel(IN_COLOUR, shortRupees, floor)} />}
+          </Bar>
+          <Bar yAxisId="v" dataKey="out" name="Value out" stackId="f" fill={OUT_COLOUR} radius={[0, 0, 3, 3]} maxBarSize={28} cursor="pointer">
+            {labelled && <LabelList dataKey="out" content={barLabel(OUT_COLOUR, shortRupees, floor, true)} />}
+          </Bar>
+          <Line yAxisId="n" type="monotone" dataKey="moves" name="Movements" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }}>
+            {labelled && <LabelList dataKey="moves" position="top" offset={8} formatter={count0} style={{ ...labelStyle, fill: '#d97706' }} />}
+          </Line>
         </ComposedChart>
       </ResponsiveContainer>
     </div>
@@ -131,6 +166,18 @@ export function MovementDonut({
             onClick={(d: any) => onPick(d.value)}
             cursor="pointer"
             stroke="none"
+            labelLine={false}
+            isAnimationActive={false}
+            label={(p: any) => {
+              if (p.percent < 0.04) return null
+              const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
+              const a = (-p.midAngle * Math.PI) / 180
+              return (
+                <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={11} fontWeight={700} textAnchor="middle" dominantBaseline="central">
+                  {p.count}
+                </text>
+              )
+            }}
           >
             {data.map((d, n) => (
               <Cell
@@ -156,7 +203,10 @@ export function MovementDonut({
             className={`flex items-center gap-1.5 text-[11px] ${picked.includes(d.value) ? 'font-semibold text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
           >
             <span className="h-2 w-2 rounded-full" style={{ background: PALETTE[n % PALETTE.length] }} />
-            {d.label} <span className="tabular-nums">{d.count}</span>
+            {d.label}{' '}
+            <span className="tabular-nums">
+              {d.count} · {total ? Math.round((d.count / total) * 100) : 0}%
+            </span>
           </button>
         ))}
       </div>
@@ -172,7 +222,7 @@ export function StoreColumns({ data, onPick }: { data: LedgerGroup[]; onPick: (v
       <ResponsiveContainer width="100%" height={260}>
         <BarChart
           data={data}
-          margin={{ top: 8, right: 4, left: 4, bottom: 0 }}
+          margin={{ top: 20, right: 4, left: 4, bottom: 0 }}
           onClick={(e: any) => {
             const g = e?.activePayload?.[0]?.payload
             if (g) onPick(g.value)
@@ -183,8 +233,12 @@ export function StoreColumns({ data, onPick }: { data: LedgerGroup[]; onPick: (v
           <YAxis tick={axis} tickLine={false} axisLine={false} tickFormatter={shortRupees} width={64} />
           <Tooltip content={<Tip />} cursor={{ fill: 'currentColor', fillOpacity: 0.06 }} />
           <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
-          <Bar dataKey="inValue" name="Value in" fill={IN_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer" />
-          <Bar dataKey="outValue" name="Value out" fill={OUT_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer" />
+          <Bar dataKey="inValue" name="Value in" fill={IN_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer">
+            <LabelList dataKey="inValue" content={barLabel(IN_COLOUR, shortRupees)} />
+          </Bar>
+          <Bar dataKey="outValue" name="Value out" fill={OUT_COLOUR} radius={[4, 4, 0, 0]} maxBarSize={36} cursor="pointer">
+            <LabelList dataKey="outValue" content={barLabel(OUT_COLOUR, shortRupees)} />
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -197,6 +251,7 @@ export function CategoryTreemap({ data, onPick }: { data: LedgerGroup[]; onPick:
     .map((g, n) => ({ ...g, gid: g.value, name: g.label, size: g.inValue + g.outValue, fill: PALETTE[n % PALETTE.length] }))
     .filter((g) => g.size > 0)
   if (!rows.length) return <Empty h={260} />
+  const whole = rows.reduce((t, g) => t + g.size, 0)
   const Box = (props: any) => {
     // The treemap writes its own `value` onto each box, so the id travels as gid.
     const { x, y, width, height, name, size, fill, gid } = props
@@ -204,13 +259,13 @@ export function CategoryTreemap({ data, onPick }: { data: LedgerGroup[]; onPick:
     return (
       <g style={{ cursor: 'pointer' }} onClick={() => onPick(gid)}>
         <rect x={x} y={y} width={width} height={height} rx={6} fill={fill} fillOpacity={0.85} stroke="hsl(var(--card))" strokeWidth={3} />
-        {width > 70 && height > 34 && (
+        {width > 60 && height > 34 && (
           <>
             <text x={x + 8} y={y + 18} fill="#fff" fontSize={12} fontWeight={600}>
               {name.length > width / 7 ? `${name.slice(0, Math.max(3, Math.floor(width / 7) - 1))}…` : name}
             </text>
-            <text x={x + 8} y={y + 33} fill="#fff" fillOpacity={0.9} fontSize={11}>
-              {shortRupees(size)}
+            <text x={x + 8} y={y + 33} fill="#fff" fillOpacity={0.95} fontSize={11}>
+              {shortRupees(size)} · {Math.round((size / whole) * 100)}%
             </text>
           </>
         )}
@@ -243,12 +298,12 @@ export function DepartmentRadar({ data }: { data: Array<LedgerGroup & { ins: num
   return (
     <div className="text-muted-foreground">
       <ResponsiveContainer width="100%" height={280}>
-        <RadarChart data={data} outerRadius="72%">
+        <RadarChart data={data.map((d) => ({ ...d, name: `${d.label} (${d.ins} in · ${d.outs} out)` }))} outerRadius="68%">
           <PolarGrid stroke="currentColor" strokeOpacity={0.2} />
-          <PolarAngleAxis dataKey="label" tick={axis} />
+          <PolarAngleAxis dataKey="name" tick={axis} />
           <PolarRadiusAxis tick={false} axisLine={false} />
-          <Radar name="Movements in" dataKey="ins" stroke={IN_COLOUR} fill={IN_COLOUR} fillOpacity={0.35} />
-          <Radar name="Movements out" dataKey="outs" stroke={OUT_COLOUR} fill={OUT_COLOUR} fillOpacity={0.3} />
+          <Radar name="Movements in" dataKey="ins" stroke={IN_COLOUR} fill={IN_COLOUR} fillOpacity={0.35} dot={{ r: 3, fill: IN_COLOUR }} />
+          <Radar name="Movements out" dataKey="outs" stroke={OUT_COLOUR} fill={OUT_COLOUR} fillOpacity={0.3} dot={{ r: 3, fill: OUT_COLOUR }} />
           <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
           <Tooltip content={<Tip money={false} />} />
         </RadarChart>
@@ -267,8 +322,12 @@ function DepartmentFallback({ data }: { data: Array<LedgerGroup & { ins: number;
           <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} />
           <YAxis tick={axis} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
           <Tooltip content={<Tip money={false} />} />
-          <Bar dataKey="ins" name="Movements in" fill={IN_COLOUR} radius={[4, 4, 0, 0]} />
-          <Bar dataKey="outs" name="Movements out" fill={OUT_COLOUR} radius={[4, 4, 0, 0]} />
+          <Bar dataKey="ins" name="Movements in" fill={IN_COLOUR} radius={[4, 4, 0, 0]}>
+            <LabelList dataKey="ins" position="top" formatter={count0} style={{ ...labelStyle, fill: IN_COLOUR }} />
+          </Bar>
+          <Bar dataKey="outs" name="Movements out" fill={OUT_COLOUR} radius={[4, 4, 0, 0]}>
+            <LabelList dataKey="outs" position="top" formatter={count0} style={{ ...labelStyle, fill: OUT_COLOUR }} />
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -285,7 +344,7 @@ export function DocumentBars({ data, onPick }: { data: LedgerGroup[]; onPick: (v
         <BarChart
           data={rows}
           layout="vertical"
-          margin={{ top: 0, right: 16, left: 0, bottom: 0 }}
+          margin={{ top: 0, right: 40, left: 0, bottom: 0 }}
           onClick={(e: any) => {
             const g = e?.activePayload?.[0]?.payload
             if (g) onPick(g.value)
@@ -299,6 +358,7 @@ export function DocumentBars({ data, onPick }: { data: LedgerGroup[]; onPick: (v
             {rows.map((r, n) => (
               <Cell key={r.value} fill={PALETTE[n % PALETTE.length]} />
             ))}
+            <LabelList dataKey="moves" position="right" formatter={count0} style={{ ...labelStyle, fill: 'currentColor' }} />
           </Bar>
         </BarChart>
       </ResponsiveContainer>
