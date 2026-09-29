@@ -1,12 +1,15 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import { AlertCircle, RefreshCw } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import {
+  AlertCircle, RefreshCw, Search, X, Download, Loader2, Activity, ArrowDownToLine,
+  ArrowUpFromLine, Users, CalendarDays,
+} from 'lucide-react'
+import { api, ApiError } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
-import { formatDate } from '@/lib/utils'
+import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 
 /**
  * Every stock movement there has ever been.
@@ -14,6 +17,10 @@ import { formatDate } from '@/lib/utils'
  * Read only, permanently. The balance on the stock screen is the sum of these
  * rows, so a ledger anybody could edit would make that figure meaningless —
  * and a stock figure nobody trusts is worse than no stock figure at all.
+ *
+ * The filtering is done by the server, since the ledger only grows. With each
+ * page it sends what the filters leave in total, the value in and out by day,
+ * and for every dropdown how many movements each choice would leave.
  */
 
 interface Row {
@@ -26,14 +33,51 @@ interface Row {
   unitRate: string | number | null
   transactionDate: string
   notes: string | null
+  ownership: 'OWNED' | 'CUSTOMER_OWNED'
   item: { id: string; code: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
   ownerCustomer: { id: string; name: string } | null
+  itemType: string
+  mainCategoryName: string
+  subCategoryName: string | null
+  departmentName: string | null
+  value: number | null
+}
+
+interface Summary {
+  total: number
+  ins: number
+  outs: number
+  inValue: number
+  outValue: number
+  items: number
+  stores: number
+  first: string | null
+  last: string | null
+}
+
+interface Day {
+  day: string
+  inValue: number
+  outValue: number
+  moves: number
+}
+
+type FilterKey =
+  | 'store' | 'movement' | 'document' | 'direction' | 'owner' | 'category' | 'sub' | 'department' | 'itemType'
+
+interface LedgerResponse {
+  data: Row[]
+  pagination: { page: number; pages: number; total: number }
+  summary: Summary
+  series: Day[]
+  facets: Record<FilterKey, Array<{ value: string; label: string | null; count: number }>>
 }
 
 const MOVEMENT: Record<string, { label: string; cls: string }> = {
   OPENING: { label: 'Opening', cls: 'badge-neutral' },
   PURCHASE: { label: 'Received', cls: 'badge-success' },
+  CUSTOMER_MATERIAL: { label: "Customer's material", cls: 'badge-info' },
   SALE: { label: 'Sold', cls: 'badge-info' },
   ISSUE: { label: 'Issued', cls: 'badge-warning' },
   PRODUCTION: { label: 'Produced', cls: 'badge-success' },
@@ -42,49 +86,198 @@ const MOVEMENT: Record<string, { label: string; cls: string }> = {
   RETURN: { label: 'Returned', cls: 'badge-neutral' },
 }
 
+/** The document behind a movement, in words. */
+const DOCUMENT: Record<string, string> = {
+  OPENING_STOCK: 'Opening stock',
+  GRN: 'Goods receipt',
+  GRN_EDITED: 'Goods receipt edited',
+  GRN_CANCELLED: 'Goods receipt cancelled',
+  GRN_QC: 'Quality check',
+  GRN_QC_CANCELLED: 'Quality check undone',
+  CUSTOMER_GRN: "Customer's material in",
+  CUSTOMER_GRN_CANCELLED: "Customer's receipt cancelled",
+  JOB_WORK_CHALLAN: 'Job work challan',
+  JOB_WORK_CHALLAN_CANCELLED: 'Job work challan cancelled',
+  JOB_WORK_RETURN: 'Back from job work',
+  PurchaseReturn: 'Purchase return',
+  PurchaseNote: 'Purchase note',
+  STOCK_ADJUSTMENT: 'Stock count',
+  STOCK_TRANSFER: 'Store transfer',
+  STOCK_TRANSFER_CANCELLED: 'Store transfer cancelled',
+  MATERIAL_REQUISITION: 'Material requisition',
+}
+
+const docLabel = (v: string) =>
+  DOCUMENT[v] ??
+  v.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase())
+
+const TYPE_LABEL: Record<string, string> = {
+  RAW_MATERIAL: 'Raw Material',
+  SEMI_FINISHED: 'Semi Finished',
+  FINISHED_GOOD: 'Finished Good',
+  CONSUMABLE: 'Consumable',
+  PACKING_MATERIAL: 'Packing',
+  TRIM: 'Trim',
+}
+
+const FILTERS: Array<{ key: FilterKey; label: string; labelOf?: (v: string) => string; noneLabel?: string }> = [
+  { key: 'store', label: 'Store' },
+  { key: 'movement', label: 'Movement', labelOf: (v) => MOVEMENT[v]?.label ?? v },
+  { key: 'document', label: 'Document', labelOf: docLabel, noneLabel: 'No document' },
+  { key: 'direction', label: 'In / Out', labelOf: (v) => (v === 'in' ? 'Came in' : 'Went out') },
+  { key: 'owner', label: 'Whose', labelOf: (v) => (v === 'OWNED' ? 'Our own stock' : "Customers' material") },
+  { key: 'category', label: 'Category' },
+  { key: 'sub', label: 'Sub-category', noneLabel: 'No sub-category' },
+  { key: 'department', label: 'Department', noneLabel: 'No department' },
+  { key: 'itemType', label: 'Type', labelOf: (v) => TYPE_LABEL[v] ?? v },
+]
+
 const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
+const money = (v: number) =>
+  v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+/** ₹ in lakh and crore once it is big enough that the paise are noise. */
+const rupees = (v: number) => {
+  const a = Math.abs(v)
+  const sign = v < 0 ? '−' : ''
+  if (a >= 1e7) return `${sign}₹${(a / 1e7).toFixed(2)} Cr`
+  if (a >= 1e5) return `${sign}₹${(a / 1e5).toFixed(2)} L`
+  return `${sign}₹${money(a)}`
+}
 
-function LedgerTable() {
+// Days are India's days, on the screen as on the server.
+const TZ = 'Asia/Kolkata'
+const dayKey = (d: Date | string) => new Date(d).toLocaleDateString('en-CA', { timeZone: TZ })
+const dayTitle = (key: string) =>
+  new Date(`${key}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+const timeOf = (d: string) => new Date(d).toLocaleTimeString('en-IN', { timeZone: TZ, hour: '2-digit', minute: '2-digit' })
+const iso = (d: Date) => dayKey(d)
+/** A calendar date as the browser holds it, for stepping through days. */
+const localIso = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+/** The quick date ranges. */
+function presetRange(p: string): { from: string; to: string } {
+  const now = new Date()
+  const today = iso(now)
+  const back = (days: number) => iso(new Date(now.getTime() - days * 86400000))
+  switch (p) {
+    case 'today':
+      return { from: today, to: today }
+    case '7d':
+      return { from: back(6), to: today }
+    case '30d':
+      return { from: back(29), to: today }
+    case 'month':
+      return { from: `${today.slice(0, 8)}01`, to: today }
+    case 'fy': {
+      // The financial year starts on 1 April.
+      const y = Number(today.slice(0, 4)) - (Number(today.slice(5, 7)) < 4 ? 1 : 0)
+      return { from: `${y}-04-01`, to: today }
+    }
+    default:
+      return { from: '', to: '' }
+  }
+}
+
+const PRESETS = [
+  { key: 'all', label: 'All time' },
+  { key: 'today', label: 'Today' },
+  { key: '7d', label: '7 days' },
+  { key: '30d', label: '30 days' },
+  { key: 'month', label: 'This month' },
+  { key: 'fy', label: 'This FY' },
+]
+
+/**
+ * The value in and out by day, bunched into weeks or months when the range is
+ * too long for a bar a day to be seen.
+ */
+function buckets(series: Day[], from: string, to: string) {
+  if (!series.length) return []
+  const start = new Date(`${from || series[0].day}T00:00:00`)
+  const end = new Date(`${to || series[series.length - 1].day}T00:00:00`)
+  const span = Math.round((end.getTime() - start.getTime()) / 86400000) + 1
+  const unit: 'day' | 'week' | 'month' = span <= 45 ? 'day' : span <= 200 ? 'week' : 'month'
+
+  const keyOf = (d: Date) => {
+    if (unit === 'day') return localIso(d)
+    if (unit === 'month') return localIso(d).slice(0, 7)
+    // Weeks start on Monday.
+    const m = new Date(d)
+    m.setDate(m.getDate() - ((m.getDay() + 6) % 7))
+    return localIso(m)
+  }
+  const map = new Map<string, { key: string; from: string; to: string; inValue: number; outValue: number; moves: number }>()
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const k = keyOf(d)
+    const cur = map.get(k)
+    if (cur) cur.to = localIso(d)
+    else map.set(k, { key: k, from: localIso(d), to: localIso(d), inValue: 0, outValue: 0, moves: 0 })
+  }
+  for (const s of series) {
+    const b = map.get(keyOf(new Date(`${s.day}T00:00:00`)))
+    if (!b) continue
+    b.inValue += s.inValue
+    b.outValue += s.outValue
+    b.moves += s.moves
+  }
+  const label = (b: { from: string; to: string }) => {
+    const f = new Date(`${b.from}T00:00:00`)
+    if (unit === 'month') return f.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' })
+    return f.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+  }
+  return [...map.values()].map((b) => ({ ...b, label: label(b), unit }))
+}
+
+function LedgerScreen() {
   const params = useSearchParams()
-
-  const [rows, setRows] = useState<Row[]>([])
-  const [total, setTotal] = useState(0)
-  const [page, setPage] = useState(1)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([])
-  const [warehouseId, setWarehouseId] = useState('')
-  const [type, setType] = useState('')
-  const [from, setFrom] = useState('')
-  const [to, setTo] = useState('')
-
-  // Arriving from an item page should land already filtered to that item.
+  // Arriving from an item page lands already filtered to that item.
   const itemId = params.get('itemId') ?? ''
 
-  useEffect(() => {
-    void masterResource<{ id: string; name: string }>('warehouses')
-      .list({ limit: 100 })
-      .then((r) => setWarehouses(r.data))
-      .catch(() => undefined)
-  }, [])
+  const [res, setRes] = useState<LedgerResponse | null>(null)
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(true)
+  const [exporting, setExporting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
+  const [search, setSearch] = useState('')
+  const [query, setQuery] = useState('')
+  const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({})
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [preset, setPreset] = useState('all')
+
+  // The search waits for a pause in typing rather than asking on every key.
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), 300)
+    return () => clearTimeout(t)
+  }, [search])
+
+  const filterQs = useCallback(() => {
+    const qs = new URLSearchParams()
+    if (itemId) qs.set('itemId', itemId)
+    if (query) qs.set('search', query)
+    if (from) qs.set('from', from)
+    if (to) qs.set('to', to)
+    for (const [k, v] of Object.entries(picked)) if (v?.length) qs.set(k, v.join(','))
+    return qs
+  }, [itemId, query, from, to, picked])
+
+  // Replies can arrive out of order; only the newest counts.
+  const latest = useRef(0)
   const load = useCallback(async () => {
+    const id = ++latest.current
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ page: String(page), limit: '50' })
-      if (itemId) qs.set('itemId', itemId)
-      if (warehouseId) qs.set('warehouseId', warehouseId)
-      if (type) qs.set('type', type)
-      if (from) qs.set('from', from)
-      if (to) qs.set('to', to)
-
-      const res = await api.get<Paginated<Row>>(`/inventory/ledger?${qs}`)
-      setRows(res.data)
-      setTotal(res.pagination.total)
+      const qs = filterQs()
+      qs.set('page', String(page))
+      qs.set('limit', '50')
+      const r = await api.get<LedgerResponse>(`/inventory/ledger?${qs}`)
+      if (id === latest.current) setRes(r)
     } catch (err) {
+      if (id !== latest.current) return
       setError(
         err instanceof ApiError
           ? err.status === 403
@@ -92,11 +285,11 @@ function LedgerTable() {
             : err.message
           : 'Could not reach the server. Is the API running?',
       )
-      setRows([])
+      setRes(null)
     } finally {
-      setLoading(false)
+      if (id === latest.current) setLoading(false)
     }
-  }, [page, itemId, warehouseId, type, from, to])
+  }, [filterQs, page])
 
   useEffect(() => {
     void load()
@@ -106,9 +299,131 @@ function LedgerTable() {
   // list, which reads as "no results" rather than "you moved".
   useEffect(() => {
     setPage(1)
-  }, [warehouseId, type, from, to, itemId])
+  }, [itemId, query, from, to, picked])
 
-  const pages = Math.ceil(total / 50) || 1
+  // A picked choice can drop out of the counts when other filters leave it
+  // nothing; its name is remembered so the dropdown and its chip still say it.
+  const seen = useRef(new Map<string, string>())
+  const choicesFor = (key: FilterKey): FilterChoice[] | undefined => {
+    const rows = res?.facets?.[key]
+    if (!rows) return undefined
+    const def = FILTERS.find((f) => f.key === key)!
+    const nameOf = (value: string, label: string | null) =>
+      value === 'none' ? (def.noneLabel ?? 'Not set') : (def.labelOf?.(value) ?? label ?? value)
+    const list = rows.map((r) => {
+      const label = nameOf(r.value, r.label)
+      seen.current.set(`${key}:${r.value}`, label)
+      return { value: r.value, label, count: r.count }
+    })
+    for (const v of picked[key] ?? [])
+      if (!list.some((c) => c.value === v)) list.push({ value: v, label: seen.current.get(`${key}:${v}`) ?? nameOf(v, null), count: 0 })
+    return list.sort((a, b) => (a.value === 'none' ? 1 : b.value === 'none' ? -1 : a.label.localeCompare(b.label)))
+  }
+
+  const setFilter = (key: FilterKey, values: string[]) => setPicked((p) => ({ ...p, [key]: values }))
+  const toggleOnly = (key: FilterKey, value: string) =>
+    setPicked((p) => ({ ...p, [key]: p[key]?.length === 1 && p[key]![0] === value ? [] : [value] }))
+  const isOnly = (key: FilterKey, value: string) => picked[key]?.length === 1 && picked[key]![0] === value
+  const toggleOne = (key: FilterKey, value: string) =>
+    setPicked((p) => {
+      const cur = p[key] ?? []
+      return { ...p, [key]: cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value] }
+    })
+
+  const chips = FILTERS.flatMap((f) =>
+    (picked[f.key] ?? []).map((v) => ({
+      key: f.key,
+      value: v,
+      text: `${f.label}: ${choicesFor(f.key)?.find((c) => c.value === v)?.label ?? seen.current.get(`${f.key}:${v}`) ?? '…'}`,
+    })),
+  )
+  const narrowed = chips.length > 0 || !!query || !!from || !!to
+  const clearAll = () => {
+    setPicked({})
+    setSearch('')
+    setQuery('')
+    setFrom('')
+    setTo('')
+    setPreset('all')
+  }
+
+  const pickPreset = (key: string) => {
+    const r = presetRange(key)
+    setPreset(key)
+    setFrom(r.from)
+    setTo(r.to)
+  }
+
+  const summary = res?.summary
+  const rows = res?.data ?? []
+  const net = (summary?.inValue ?? 0) - (summary?.outValue ?? 0)
+  const customerCount = res?.facets?.owner?.find((f) => f.value === 'CUSTOMER_OWNED')?.count ?? 0
+
+  const bars = useMemo(() => buckets(res?.series ?? [], from, to), [res?.series, from, to])
+  const peak = Math.max(1, ...bars.map((b) => Math.max(b.inValue, b.outValue)))
+  const byDay = useMemo(() => new Map((res?.series ?? []).map((d) => [d.day, d])), [res?.series])
+
+  const movementMix = useMemo(() => {
+    const list = (res?.facets?.movement ?? []).map((m) => ({ ...m, label: MOVEMENT[m.value]?.label ?? m.value }))
+    return list.sort((a, b) => b.count - a.count)
+  }, [res?.facets?.movement])
+  const mixPeak = Math.max(1, ...movementMix.map((m) => m.count))
+
+  /** Every movement the filters leave, as a spreadsheet. */
+  const exportRows = async () => {
+    setExporting(true)
+    try {
+      const qs = filterQs()
+      qs.set('export', '1')
+      const [r, XLSX] = await Promise.all([
+        api.get<{ data: Row[]; summary: Summary }>(`/inventory/ledger?${qs}`),
+        import('xlsx'),
+      ])
+      const sheet = XLSX.utils.json_to_sheet(
+        r.data.map((m) => {
+          const inQty = Number(m.inQty)
+          const outQty = Number(m.outQty)
+          return {
+            Date: dayKey(m.transactionDate),
+            Time: timeOf(m.transactionDate),
+            Movement: MOVEMENT[m.transactionType]?.label ?? m.transactionType,
+            Document: m.referenceType ? docLabel(m.referenceType) : '',
+            'Item Code': m.item.code,
+            'Item Name': m.item.name,
+            Type: TYPE_LABEL[m.itemType] ?? m.itemType,
+            Category: m.mainCategoryName,
+            'Sub Category': m.subCategoryName ?? '',
+            Department: m.departmentName ?? '',
+            Store: m.warehouse.name,
+            Whose: m.ownerCustomer ? `${m.ownerCustomer.name} (customer)` : 'Our own',
+            In: inQty > 0 ? inQty : '',
+            Out: outQty > 0 ? outQty : '',
+            Unit: m.item.uom.symbol,
+            Balance: Number(m.closingStock),
+            Rate: m.unitRate === null ? '' : Number(m.unitRate),
+            Value: m.value ?? '',
+            Note: m.notes ?? '',
+          }
+        }),
+      )
+      sheet['!cols'] = [11, 7, 14, 24, 14, 32, 13, 18, 18, 14, 22, 20, 9, 9, 7, 10, 10, 12, 50].map((wch) => ({ wch }))
+      const book = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(book, sheet, 'Stock Ledger')
+      XLSX.writeFile(book, `stock-ledger-${iso(new Date())}.xlsx`)
+      if (r.summary.total > r.data.length)
+        setError(`The export holds the newest ${r.data.length.toLocaleString('en-IN')} of ${r.summary.total.toLocaleString('en-IN')} movements. Narrow the dates for the rest.`)
+    } catch {
+      setError('The export could not be made.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const card = (active: boolean) =>
+    `glass-card p-4 text-left transition-colors hover:border-primary/50 ${active ? 'border-primary ring-2 ring-primary/30' : ''}`
+
+  // The table, with a line at the top of each day saying what that day did.
+  let lastDay = ''
 
   return (
     <div className="space-y-5">
@@ -119,22 +434,39 @@ function LedgerTable() {
             Every movement, newest first. This is the answer to &ldquo;why does it say that&rdquo;.
           </p>
         </div>
-        <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
-          <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
+            <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
+          </button>
+          <Link href="/inventory/stock" className="btn-ghost">
+            Stock on hand
+          </Link>
+          <button
+            className="btn-secondary"
+            onClick={() => void exportRows()}
+            disabled={exporting || !summary?.total}
+            title={narrowed ? 'Export the movements the filters leave' : 'Export every movement'}
+          >
+            {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
+          </button>
+        </div>
       </div>
 
       {error && (
         <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
           <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-          <p className="text-sm text-red-400">{error}</p>
+          <p className="text-sm text-red-400 flex-1">{error}</p>
+          <button type="button" onClick={() => setError(null)} className="text-red-400" aria-label="Dismiss">
+            <X size={14} />
+          </button>
         </div>
       )}
 
       {itemId && rows.length > 0 && (
         <div className="flex items-center justify-between p-3 rounded-lg border border-border bg-secondary">
           <p className="text-sm text-foreground">
-            Showing only <span className="font-medium">{rows[0].item.name}</span>
+            Showing only <span className="font-medium">{rows[0].item.name}</span>{' '}
+            <span className="font-mono text-xs text-muted-foreground">{rows[0].item.code}</span>
           </p>
           <Link href="/inventory/ledger" className="text-xs text-teal-400 hover:underline">
             Show everything
@@ -142,132 +474,366 @@ function LedgerTable() {
         </div>
       )}
 
-      <div className="glass-card p-0 overflow-hidden">
-        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-border">
-          <select
-            className="form-input h-9 w-48"
-            value={warehouseId}
-            onChange={(e) => setWarehouseId(e.target.value)}
-            aria-label="Filter by store"
+      {/* The period. Everything below — figures, chart, dropdowns — is for it. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <CalendarDays size={15} className="text-muted-foreground" />
+        {PRESETS.map((p) => (
+          <button
+            key={p.key}
+            type="button"
+            onClick={() => pickPreset(p.key)}
+            className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+              preset === p.key
+                ? 'border-primary bg-primary/10 text-foreground'
+                : 'border-border text-muted-foreground hover:border-primary/50 hover:text-foreground'
+            }`}
           >
-            <option value="">All stores</option>
-            {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="form-input h-9 w-40"
-            value={type}
-            onChange={(e) => setType(e.target.value)}
-            aria-label="Filter by movement"
-          >
-            <option value="">Every movement</option>
-            {Object.entries(MOVEMENT).map(([v, m]) => (
-              <option key={v} value={v}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            {p.label}
+          </button>
+        ))}
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             From
             <input
               type="date"
-              className="form-input h-9"
+              className="form-input h-8 text-xs"
               value={from}
-              onChange={(e) => setFrom(e.target.value)}
+              max={to || undefined}
+              onChange={(e) => {
+                setFrom(e.target.value)
+                setPreset('custom')
+              }}
             />
           </label>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
             To
             <input
               type="date"
-              className="form-input h-9"
+              className="form-input h-8 text-xs"
               value={to}
-              onChange={(e) => setTo(e.target.value)}
+              min={from || undefined}
+              onChange={(e) => {
+                setTo(e.target.value)
+                setPreset('custom')
+              }}
             />
           </label>
-          <span className="text-xs text-muted-foreground ml-auto">
-            {total.toLocaleString('en-IN')} movements
-          </span>
+        </div>
+      </div>
+
+      {/* Four figures for what the filters leave, each a filter itself. */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <button type="button" className={card(false)} onClick={clearAll} title="Clear every filter">
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Activity size={13} /> Movements
+          </p>
+          <p className="mt-1 text-lg font-bold text-foreground tabular-nums sm:text-2xl">
+            {(summary?.total ?? 0).toLocaleString('en-IN')}
+          </p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {summary ? `${summary.items} items · ${summary.stores} stores` : '…'}
+            {narrowed ? ' · click to show all' : ''}
+          </p>
+        </button>
+        <button type="button" className={card(isOnly('direction', 'in'))} onClick={() => toggleOnly('direction', 'in')}>
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ArrowDownToLine size={13} className="text-emerald-400" /> Came in
+          </p>
+          <p className="mt-1 text-lg font-bold text-emerald-500 tabular-nums sm:text-2xl">{rupees(summary?.inValue ?? 0)}</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {isOnly('direction', 'in') ? 'showing only these · click to show all' : `${summary?.ins ?? 0} movements in`}
+          </p>
+        </button>
+        <button type="button" className={card(isOnly('direction', 'out'))} onClick={() => toggleOnly('direction', 'out')}>
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <ArrowUpFromLine size={13} className="text-red-400" /> Went out
+          </p>
+          <p className="mt-1 text-lg font-bold text-red-400 tabular-nums sm:text-2xl">{rupees(summary?.outValue ?? 0)}</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {isOnly('direction', 'out') ? 'showing only these · click to show all' : `${summary?.outs ?? 0} movements out`}
+          </p>
+        </button>
+        <button
+          type="button"
+          className={card(isOnly('owner', 'CUSTOMER_OWNED'))}
+          onClick={() => toggleOnly('owner', 'CUSTOMER_OWNED')}
+        >
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Users size={13} /> Customers&apos; material
+          </p>
+          <p className="mt-1 text-lg font-bold text-sky-400 tabular-nums sm:text-2xl">{customerCount}</p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            {isOnly('owner', 'CUSTOMER_OWNED') ? 'showing only these · click to show all' : 'movements of job-work material'}
+          </p>
+        </button>
+      </div>
+
+      {/* The shape of it: value in and out over the period, and what kind of movements they were. */}
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="glass-card flex flex-col p-4 lg:col-span-2">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-sm font-medium text-foreground">
+              Flow {bars[0] ? `by ${bars[0].unit}` : ''}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Net change{' '}
+              <span className={`font-semibold tabular-nums ${net >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
+                {net >= 0 ? '+' : ''}
+                {rupees(net)}
+              </span>
+            </p>
+          </div>
+          {bars.length === 0 ? (
+            <p className="py-10 text-center text-xs text-muted-foreground">No movements in this period.</p>
+          ) : (
+            <>
+              <div className="mt-3 flex h-36 flex-1 items-stretch gap-[2px] lg:h-auto lg:min-h-[9rem]" role="img" aria-label="Value in and out over the period">
+                {bars.map((b) => (
+                  <button
+                    key={b.key}
+                    type="button"
+                    onClick={() => {
+                      setFrom(b.from)
+                      setTo(b.to)
+                      setPreset('custom')
+                    }}
+                    title={`${b.from === b.to ? dayTitle(b.from) : `${dayTitle(b.from)} – ${dayTitle(b.to)}`}\nIn ${rupees(b.inValue)} · Out ${rupees(b.outValue)} · ${b.moves} movements\nClick to see only these`}
+                    className="group flex min-w-0 flex-1 flex-col rounded-sm hover:bg-primary/5"
+                  >
+                    <div className="flex flex-1 items-end justify-center">
+                      <div
+                        className="w-full max-w-[22px] rounded-t-sm bg-emerald-500/70 group-hover:bg-emerald-500"
+                        style={{ height: `${(b.inValue / peak) * 100}%`, minHeight: b.inValue > 0 ? 2 : 0 }}
+                      />
+                    </div>
+                    <div className="h-px w-full bg-border" />
+                    <div className="flex flex-1 items-start justify-center">
+                      <div
+                        className="w-full max-w-[22px] rounded-b-sm bg-red-400/70 group-hover:bg-red-400"
+                        style={{ height: `${(b.outValue / peak) * 100}%`, minHeight: b.outValue > 0 ? 2 : 0 }}
+                      />
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+                <span>{bars[0].label}</span>
+                {bars.length > 2 && <span>{bars[Math.floor(bars.length / 2)].label}</span>}
+                <span>{bars[bars.length - 1].label}</span>
+              </div>
+              <div className="mt-2 flex gap-4 text-[11px] text-muted-foreground">
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-emerald-500" /> in, above the line</span>
+                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-red-400" /> out, below it</span>
+                <span className="ml-auto hidden sm:inline">click a bar to see just that {bars[0].unit}</span>
+              </div>
+            </>
+          )}
         </div>
 
-        {loading && rows.length === 0 ? (
+        <div className="glass-card p-4">
+          <p className="text-sm font-medium text-foreground">By movement</p>
+          {movementMix.length === 0 ? (
+            <p className="py-10 text-center text-xs text-muted-foreground">Nothing to show.</p>
+          ) : (
+            <div className="mt-2 space-y-0.5">
+              {movementMix.map((m) => {
+                const on = picked.movement?.includes(m.value) ?? false
+                return (
+                  <button
+                    key={m.value}
+                    type="button"
+                    onClick={() => toggleOne('movement', m.value)}
+                    title={on ? 'Click to stop showing only these' : 'Click to show only these'}
+                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-primary/5 ${on ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
+                  >
+                    <span className="w-32 shrink-0 truncate">
+                      <span className={MOVEMENT[m.value]?.cls ?? 'badge-neutral'}>{m.label}</span>
+                    </span>
+                    <span className="h-1.5 flex-1 rounded-full bg-secondary">
+                      <span className="block h-1.5 rounded-full bg-primary/60" style={{ width: `${(m.count / mixPeak) * 100}%` }} />
+                    </span>
+                    <span className="w-8 shrink-0 text-right tabular-nums text-muted-foreground">{m.count}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="glass-card p-0 overflow-hidden">
+        {/* Raised so an open dropdown lies over the table below. */}
+        <div className="relative z-20 space-y-2 px-4 py-3 border-b border-border">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex h-10 min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+              <Search size={14} className="text-muted-foreground" />
+              <input
+                className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+                placeholder="Search item, code, store, note, customer..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search the ledger"
+              />
+              {search && (
+                <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            {FILTERS.map((f) => (
+              <FilterMenu
+                key={f.key}
+                label={f.label}
+                choices={choicesFor(f.key)}
+                selected={picked[f.key] ?? []}
+                onChange={(next) => setFilter(f.key, next)}
+              />
+            ))}
+          </div>
+          {narrowed && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {chips.map((c) => (
+                <button
+                  key={`${c.key}-${c.value}`}
+                  type="button"
+                  onClick={() => setFilter(c.key, (picked[c.key] ?? []).filter((v) => v !== c.value))}
+                  className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+                >
+                  {c.text} <X size={11} />
+                </button>
+              ))}
+              {(from || to) && (
+                <button
+                  type="button"
+                  onClick={() => pickPreset('all')}
+                  className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+                >
+                  {from === to ? dayTitle(from) : `${from ? dayTitle(from) : 'start'} – ${to ? dayTitle(to) : 'today'}`} <X size={11} />
+                </button>
+              )}
+              <button type="button" onClick={clearAll} className="text-xs text-teal-500 hover:underline">
+                Clear all
+              </button>
+              <span className="ml-auto text-xs text-muted-foreground">
+                {(summary?.total ?? 0).toLocaleString('en-IN')} movements
+              </span>
+            </div>
+          )}
+        </div>
+
+        {loading && !res ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
         ) : rows.length === 0 ? (
           <div className="px-4 py-10 text-center">
             <p className="text-sm text-muted-foreground">
-              Nothing here yet. Movements appear the moment stock is received, issued or counted.
+              {narrowed
+                ? 'No movements match that.'
+                : 'Nothing here yet. Movements appear the moment stock is received, issued or counted.'}
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
+          <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`}>
+            <table className="data-table w-full [&>tbody>tr>td]:px-2.5 [&>thead>tr>th]:px-2.5">
               <thead>
                 <tr>
-                  <th>Date</th>
+                  <th>Time</th>
                   <th>What</th>
+                  <th>Code</th>
                   <th>Item</th>
+                  <th>Category</th>
+                  <th>Sub-cat.</th>
+                  <th>Dept.</th>
                   <th>Store</th>
                   <th style={{ textAlign: 'right' }}>In</th>
                   <th style={{ textAlign: 'right' }}>Out</th>
                   <th style={{ textAlign: 'right' }}>Balance</th>
+                  <th style={{ textAlign: 'right' }}>Rate</th>
+                  <th style={{ textAlign: 'right' }}>Value</th>
                   <th>Note</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
-                  const m = MOVEMENT[r.transactionType] ?? {
-                    label: r.transactionType,
-                    cls: 'badge-neutral',
-                  }
+                {rows.flatMap((r) => {
+                  const m = MOVEMENT[r.transactionType] ?? { label: r.transactionType, cls: 'badge-neutral' }
                   const inQty = Number(r.inQty)
                   const outQty = Number(r.outQty)
-                  return (
+                  const day = dayKey(r.transactionDate)
+                  const out: ReactNode[] = []
+                  if (day !== lastDay) {
+                    lastDay = day
+                    const d = byDay.get(day)
+                    out.push(
+                      <tr key={`day-${day}`} className="bg-secondary/60">
+                        <td colSpan={14} className="py-1.5">
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs">
+                            <span className="font-semibold text-foreground">{dayTitle(day)}</span>
+                            {d && (
+                              <>
+                                <span className="text-muted-foreground">{d.moves} movements</span>
+                                {d.inValue > 0 && <span className="text-emerald-500">in {rupees(d.inValue)}</span>}
+                                {d.outValue > 0 && <span className="text-red-400">out {rupees(d.outValue)}</span>}
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>,
+                    )
+                  }
+                  out.push(
                     <tr key={r.id}>
-                      <td className="text-xs whitespace-nowrap">{formatDate(r.transactionDate)}</td>
-                      <td>
+                      <td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">{timeOf(r.transactionDate)}</td>
+                      <td className="whitespace-nowrap">
                         <span className={m.cls}>{m.label}</span>
+                        {r.referenceType && (
+                          <div className="mt-0.5 text-[10px] text-muted-foreground">{docLabel(r.referenceType)}</div>
+                        )}
                       </td>
-                      <td>
+                      <td className="whitespace-nowrap font-mono text-xs text-teal-500">{r.item.code}</td>
+                      <td className="min-w-[170px]">
                         <Link
                           href={`/inventory/stock/${r.item.id}`}
-                          className="text-sm text-foreground hover:text-teal-400"
+                          className="text-sm font-medium text-foreground hover:text-teal-400"
                         >
                           {r.item.name}
                         </Link>
-                        <div className="text-[10px] text-muted-foreground font-mono">
-                          {r.item.code}
-                        </div>
                       </td>
-                      <td className="text-xs">
+                      <td className="text-xs">{r.mainCategoryName}</td>
+                      <td className="text-xs">{r.subCategoryName ?? <span className="text-muted-foreground">—</span>}</td>
+                      <td className="text-xs">{r.departmentName ?? <span className="text-muted-foreground">—</span>}</td>
+                      <td className="min-w-[110px] text-xs">
                         {r.warehouse.name}
                         {r.ownerCustomer && (
-                          <div className="text-[10px] text-sky-400">{r.ownerCustomer.name}</div>
+                          <div className="text-[10px] text-sky-400">{r.ownerCustomer.name}&apos;s material</div>
                         )}
                       </td>
-                      <td className="text-right tabular-nums text-emerald-400">
-                        {inQty > 0 ? `${qtyFmt(inQty)} ${r.item.uom.symbol}` : ''}
+                      <td className="whitespace-nowrap text-right tabular-nums text-emerald-500">
+                        {inQty > 0 ? `+${qtyFmt(inQty)} ${r.item.uom.symbol}` : ''}
                       </td>
-                      <td className="text-right tabular-nums text-red-400">
-                        {outQty > 0 ? `${qtyFmt(outQty)} ${r.item.uom.symbol}` : ''}
+                      <td className="whitespace-nowrap text-right tabular-nums text-red-400">
+                        {outQty > 0 ? `−${qtyFmt(outQty)} ${r.item.uom.symbol}` : ''}
                       </td>
-                      <td className="text-right tabular-nums font-semibold">
-                        {qtyFmt(Number(r.closingStock))}
+                      <td className="text-right tabular-nums font-semibold">{qtyFmt(Number(r.closingStock))}</td>
+                      <td className="whitespace-nowrap text-right tabular-nums text-muted-foreground">
+                        {r.unitRate === null ? '—' : `₹${money(Number(r.unitRate))}`}
                       </td>
-                      <td className="text-xs text-muted-foreground max-w-[220px] truncate">
+                      <td
+                        className={`whitespace-nowrap text-right tabular-nums font-medium ${inQty > 0 ? 'text-emerald-500' : 'text-red-400'}`}
+                      >
+                        {r.value === null ? '—' : `₹${money(r.value)}`}
+                      </td>
+                      <td className="text-xs text-muted-foreground min-w-[140px] max-w-[200px] truncate" title={r.notes ?? undefined}>
                         {r.notes ?? ''}
                       </td>
-                    </tr>
+                    </tr>,
                   )
+                  return out
                 })}
               </tbody>
             </table>
           </div>
         )}
 
-        <Pagination page={page} pages={pages} onPageChange={setPage} busy={loading} />
+        <Pagination page={page} pages={res?.pagination.pages ?? 1} onPageChange={setPage} busy={loading} />
       </div>
     </div>
   )
@@ -278,7 +844,7 @@ export default function LedgerPage() {
   // static rendering and Next refuses to build.
   return (
     <Suspense fallback={<p className="text-sm text-muted-foreground">Loading...</p>}>
-      <LedgerTable />
+      <LedgerScreen />
     </Suspense>
   )
 }

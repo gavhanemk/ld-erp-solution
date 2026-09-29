@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { prisma, type Prisma } from '@ld-erp/database'
+import { prisma, Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -158,52 +158,221 @@ router.get('/stock/:itemId', requirePermission(MODULE, 'view'), async (req, res)
 
 // ── The ledger ──────────────────────────────────────────────────────────────
 
+/*
+ * The ledger's filters. Each is a column of the movement, or of the item it
+ * moved, and several values of one mean "any of these". They are applied in
+ * SQL rather than in the browser: the ledger only ever grows, and a year of a
+ * running mill is far more rows than a page should ever read.
+ */
+const LEDGER_FILTERS = [
+  'store', 'movement', 'document', 'direction', 'owner', 'category', 'sub', 'department', 'itemType',
+] as const
+type LedgerFilter = (typeof LEDGER_FILTERS)[number]
+
+/** What a movement is, for each filter. 'none' stands for "not set". */
+const LEDGER_VALUE: Record<LedgerFilter, Prisma.Sql> = {
+  store: Prisma.sql`s."warehouseId"`,
+  movement: Prisma.sql`s."transactionType"::text`,
+  document: Prisma.sql`COALESCE(s."referenceType", 'none')`,
+  direction: Prisma.sql`CASE WHEN s."inQty" > 0 THEN 'in' ELSE 'out' END`,
+  owner: Prisma.sql`s.ownership::text`,
+  // An item filed under a sub-category belongs to that one's main category.
+  category: Prisma.sql`COALESCE(c."parentId", c.id)`,
+  sub: Prisma.sql`CASE WHEN c."parentId" IS NULL THEN 'none' ELSE c.id END`,
+  department: Prisma.sql`COALESCE(i."departmentId", 'none')`,
+  itemType: Prisma.sql`i.type::text`,
+}
+
+/** The name to show for a value, where the database holds it. */
+const LEDGER_LABEL: Partial<Record<LedgerFilter, Prisma.Sql>> = {
+  store: Prisma.sql`w.name`,
+  category: Prisma.sql`COALESCE(pc.name, c.name)`,
+  sub: Prisma.sql`CASE WHEN c."parentId" IS NULL THEN NULL ELSE c.name END`,
+  department: Prisma.sql`d.name`,
+}
+
+const LEDGER_FROM = Prisma.sql`
+  FROM ld_erp.stock_ledger s
+  JOIN ld_erp.items i            ON i.id = s."itemId"
+  JOIN ld_erp.item_categories c  ON c.id = i."categoryId"
+  LEFT JOIN ld_erp.item_categories pc ON pc.id = c."parentId"
+  LEFT JOIN ld_erp.departments d ON d.id = i."departmentId"
+  JOIN ld_erp.warehouses w       ON w.id = s."warehouseId"
+  LEFT JOIN ld_erp.customers oc  ON oc.id = s."ownerCustomerId"`
+
+/** A filter's picked values from the query string: `store=a,b` or `store=a&store=b`. */
+const pickedOf = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : [v])
+    .filter((x): x is string => typeof x === 'string')
+    .flatMap((x) => x.split(','))
+    .map((x) => x.trim())
+    .filter(Boolean)
+
+function ledgerQuery(query: Record<string, unknown>) {
+  const base: Prisma.Sql[] = []
+  const itemId = str(query.itemId)
+  if (itemId) base.push(Prisma.sql`s."itemId" = ${itemId}`)
+  // The old single-value names still work, for links made before the filters.
+  const legacy: Partial<Record<LedgerFilter, unknown>> = { store: query.warehouseId, movement: query.type }
+
+  const from = str(query.from)
+  const to = str(query.to)
+  if (from && !Number.isNaN(Date.parse(from))) base.push(Prisma.sql`s."transactionDate" >= ${new Date(from)}`)
+  // An end date means the whole of that day, not midnight at its start.
+  if (to && !Number.isNaN(Date.parse(to)))
+    base.push(Prisma.sql`s."transactionDate" <= ${new Date(new Date(to).setHours(23, 59, 59, 999))}`)
+
+  // Every word has to be somewhere: "tape fabric" finds tape in the fabric godown.
+  for (const word of (str(query.search) ?? '').toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8)) {
+    const like = `%${word}%`
+    base.push(Prisma.sql`(
+      i.name ILIKE ${like} OR i.code ILIKE ${like} OR w.name ILIKE ${like}
+      OR COALESCE(s.notes, '') ILIKE ${like} OR COALESCE(oc.name, '') ILIKE ${like}
+      OR c.name ILIKE ${like} OR COALESCE(pc.name, '') ILIKE ${like} OR COALESCE(d.name, '') ILIKE ${like})`)
+  }
+
+  const picked = Object.fromEntries(
+    LEDGER_FILTERS.map((k) => [k, pickedOf(query[k] ?? legacy[k])]),
+  ) as Record<LedgerFilter, string[]>
+
+  /** Every condition, bar the one filter a dropdown is counting for. */
+  const where = (skip?: LedgerFilter) => {
+    const parts = [...base]
+    for (const k of LEDGER_FILTERS) {
+      if (k === skip || !picked[k].length) continue
+      parts.push(Prisma.sql`${LEDGER_VALUE[k]} IN (${Prisma.join(picked[k])})`)
+    }
+    return parts.length ? Prisma.sql`WHERE ${Prisma.join(parts, ' AND ')}` : Prisma.empty
+  }
+  return { where, picked }
+}
+
 /**
  * Every movement, newest first.
  *
  * This is the answer to "why does it say 340 when I counted 300". It is read
  * only and always will be: a ledger somebody can edit is not a ledger.
+ *
+ * Alongside the page it returns what the filters leave in total (movements,
+ * value in and out), the value in and out by day, and for each filter how many
+ * movements each of its values would leave given the others.
  */
 router.get('/ledger', requirePermission(MODULE, 'view'), async (req, res) => {
-  const page = Math.max(1, Number(req.query.page) || 1)
-  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  // An export takes every row at once, up to a sensible ceiling.
+  const exporting = req.query.export === '1'
+  const page = exporting ? 1 : Math.max(1, Number(req.query.page) || 1)
+  const limit = exporting ? 10000 : Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  const { where, picked } = ledgerQuery(req.query as Record<string, unknown>)
+  const all = where()
 
-  const where: Record<string, unknown> = {}
-  if (str(req.query.itemId)) where.itemId = str(req.query.itemId)
-  if (str(req.query.warehouseId)) where.warehouseId = str(req.query.warehouseId)
-  if (str(req.query.type)) where.transactionType = str(req.query.type)
+  const idsQuery = prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT s.id ${LEDGER_FROM} ${all}
+    ORDER BY s."transactionDate" DESC, s."createdAt" DESC
+    LIMIT ${limit} OFFSET ${(page - 1) * limit}`
 
-  const from = str(req.query.from)
-  const to = str(req.query.to)
-  if (from || to) {
-    where.transactionDate = {
-      ...(from ? { gte: new Date(from) } : {}),
-      // An end date means the whole of that day, not midnight at its start.
-      ...(to ? { lte: new Date(new Date(to).setHours(23, 59, 59, 999)) } : {}),
-    }
+  /*
+   * In and out are counted leaving the in/out filter aside, so picking "came
+   * in" still says what went out; everything else is for what is on screen.
+   */
+  const dir = picked.direction.length
+    ? Prisma.sql`${LEDGER_VALUE.direction} IN (${Prisma.join(picked.direction)})`
+    : Prisma.sql`TRUE`
+  const summaryQuery = prisma.$queryRaw<
+    Array<{
+      total: number; ins: number; outs: number; inValue: number; outValue: number
+      items: number; stores: number; first: Date | null; last: Date | null
+    }>
+  >`
+    SELECT
+      COUNT(*) FILTER (WHERE ${dir})::int                            AS total,
+      COUNT(*) FILTER (WHERE s."inQty" > 0)::int                     AS ins,
+      COUNT(*) FILTER (WHERE s."inQty" <= 0)::int                    AS outs,
+      COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
+      COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue",
+      COUNT(DISTINCT s."itemId") FILTER (WHERE ${dir})::int          AS items,
+      COUNT(DISTINCT s."warehouseId") FILTER (WHERE ${dir})::int     AS stores,
+      MIN(s."transactionDate") FILTER (WHERE ${dir})                 AS first,
+      MAX(s."transactionDate") FILTER (WHERE ${dir})                 AS last
+    ${LEDGER_FROM} ${where('direction')}`
+
+  if (exporting) {
+    const [ids, [summary]] = await Promise.all([idsQuery, summaryQuery])
+    res.json({ success: true, data: await ledgerRows(ids.map((r) => r.id)), summary })
+    return
   }
 
-  const [rows, total] = await Promise.all([
-    prisma.stockLedger.findMany({
-      where,
-      include: {
-        item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
-        warehouse: { select: { id: true, name: true } },
-        ownerCustomer: { select: { id: true, name: true } },
-      },
-      orderBy: [{ transactionDate: 'desc' }, { createdAt: 'desc' }],
-      skip: (page - 1) * limit,
-      take: limit,
-    }),
-    prisma.stockLedger.count({ where }),
+  // By day, in India's day rather than the server's: a receipt at 1 am IST is
+  // that day's receipt, not the day before's.
+  const seriesQuery = prisma.$queryRaw<Array<{ day: string; inValue: number; outValue: number; moves: number }>>`
+    SELECT
+      to_char((s."transactionDate" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS day,
+      COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
+      COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue",
+      COUNT(*)::int AS moves
+    ${LEDGER_FROM} ${all}
+    GROUP BY 1 ORDER BY 1`
+
+  const facetQueries = LEDGER_FILTERS.map(
+    (k) => prisma.$queryRaw<Array<{ value: string; label: string | null; count: number }>>`
+      SELECT ${LEDGER_VALUE[k]} AS value, MAX(${LEDGER_LABEL[k] ?? Prisma.sql`NULL::text`}) AS label, COUNT(*)::int AS count
+      ${LEDGER_FROM} ${where(k)}
+      GROUP BY 1`,
+  )
+
+  const [ids, [summary], series, ...facetRows] = await Promise.all([
+    idsQuery, summaryQuery, seriesQuery, ...facetQueries,
   ])
+  const facets = Object.fromEntries(LEDGER_FILTERS.map((k, n) => [k, facetRows[n]]))
 
   res.json({
     success: true,
-    data: rows,
-    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+    data: await ledgerRows(ids.map((r) => r.id)),
+    pagination: { page, limit, total: summary.total, pages: Math.ceil(summary.total / limit) || 1 },
+    summary,
+    series,
+    facets,
   })
 })
+
+/** The movements with these ids, in that order, with what each item is. */
+async function ledgerRows(ids: string[]) {
+  if (!ids.length) return []
+  const rows = await prisma.stockLedger.findMany({
+    where: { id: { in: ids } },
+    include: {
+      item: {
+        select: {
+          id: true, code: true, name: true, type: true,
+          uom: { select: { symbol: true } },
+          category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+          department: { select: { id: true, name: true } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      ownerCustomer: { select: { id: true, name: true } },
+    },
+  })
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  return ids.flatMap((id) => {
+    const r = byId.get(id)
+    if (!r) return []
+    const cat = r.item.category
+    const rate = r.unitRate === null ? null : Number(r.unitRate)
+    const qty = Number(r.inQty) > 0 ? Number(r.inQty) : Number(r.outQty)
+    return [{
+      ...r,
+      itemType: r.item.type,
+      mainCategoryId: cat.parent?.id ?? cat.id,
+      mainCategoryName: cat.parent?.name ?? cat.name,
+      subCategoryId: cat.parent ? cat.id : null,
+      subCategoryName: cat.parent ? cat.name : null,
+      departmentId: r.item.department?.id ?? null,
+      departmentName: r.item.department?.name ?? null,
+      // What the movement was worth, at the rate it moved at.
+      value: rate === null ? null : round2(qty * rate),
+    }]
+  })
+}
 
 /** Stock value, cut by warehouse and by category, for the accounts side. */
 router.get('/valuation', requirePermission(MODULE, 'view'), async (_req, res) => {
