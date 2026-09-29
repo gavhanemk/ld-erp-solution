@@ -57,7 +57,8 @@ const qtyFmt = (v: number) =>
  */
 function stage(
   mr: Requisition,
-  isMine: boolean
+  isMine: boolean,
+  iApproved = false
 ): { label: string; cls: string; next?: string } {
   if (mr.status === 'REJECTED') return { label: 'Refused', cls: 'badge-danger' }
 
@@ -75,7 +76,13 @@ function stage(
     return {
       label: 'Approved — not collected',
       cls: 'badge-info',
-      next: 'Nothing has moved yet. Press issue when the store hands the material over.',
+      // Raised, approved and issued by three different people, so the two
+      // who have had their say are told it is somebody else's turn.
+      next: isMine
+        ? 'You raised it, so somebody else in the store hands the material over.'
+        : iApproved
+          ? 'You approved it, so somebody else in the store hands the material over.'
+          : 'Nothing has moved yet. Press issue when the store hands the material over.',
     }
   }
 
@@ -325,7 +332,8 @@ export default function RequisitionsPage() {
                   // The server refuses this too; hiding the button just avoids
                   // offering somebody a door that is certain to be shut.
                   const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
-                  const s = stage(mr, isMine)
+                  const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
+                  const s = stage(mr, isMine, iApproved)
 
                   return (
                     <Fragment key={mr.id}>
@@ -387,7 +395,7 @@ export default function RequisitionsPage() {
                                 </button>
                               </>
                             )}
-                            {mr.status === 'APPROVED' && !mr.issuedAt && (
+                            {mr.status === 'APPROVED' && !mr.issuedAt && !isMine && !iApproved && (
                               <button
                                 className="btn-ghost p-1.5 hover:text-teal-400"
                                 onClick={() => void act(mr, 'issue')}

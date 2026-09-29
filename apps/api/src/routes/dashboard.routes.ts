@@ -372,6 +372,9 @@ router.get('/pending-approvals', async (req, res) => {
       amount: null,
       date: mr.createdAt,
       urgent: isUrgent(mr.createdAt),
+      // So the dashboard does not offer Approve to the person who raised it,
+      // which the server would only refuse.
+      raisedById: mr.raisedById,
     })),
   ]
     .sort((a, b) => b.date.getTime() - a.date.getTime())

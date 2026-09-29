@@ -5,6 +5,7 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, onHand, recordMovement, transferStock } from '../services/stock.service'
+import { decidePending } from '../services/requisition.service'
 import {
   adjustmentSchema,
   cancelTransferSchema,
@@ -845,9 +846,16 @@ router.patch(
       )
     }
 
-    const after = await prisma.materialRequisition.update({
+    // Only a requisition still pending is approved, checked in the same
+    // statement that approves it, so an approve and a refuse arriving
+    // together cannot both land.
+    await decidePending(before.id, before.mrNumber, {
+      status: 'APPROVED',
+      approvedById: req.user!.id,
+      approvedAt: new Date(),
+    })
+    const after = await prisma.materialRequisition.findUniqueOrThrow({
       where: { id: before.id },
-      data: { status: 'APPROVED', approvedById: req.user!.id, approvedAt: new Date() },
       include: mrInclude,
     })
 
@@ -883,14 +891,14 @@ router.patch(
       )
     }
 
-    const after = await prisma.materialRequisition.update({
+    await decidePending(before.id, before.mrNumber, {
+      status: 'REJECTED',
+      approvedById: req.user!.id,
+      approvedAt: new Date(),
+      rejectionReason: reason,
+    })
+    const after = await prisma.materialRequisition.findUniqueOrThrow({
       where: { id: before.id },
-      data: {
-        status: 'REJECTED',
-        approvedById: req.user!.id,
-        approvedAt: new Date(),
-        rejectionReason: reason,
-      },
       include: mrInclude,
     })
 
@@ -946,6 +954,49 @@ router.post(
         )
       }
 
+      // docs/04-business-rules.md, section 7: raised, approved and issued by
+      // three different people. The approve route held the first two apart;
+      // nothing held the third, so a keeper could raise, get it signed, and
+      // hand the material to themselves.
+      if (mr.raisedById && mr.raisedById === req.user!.id) {
+        throw new AppError(
+          'You raised this requisition, so somebody else in the store has to hand the material over.',
+          403,
+          'SELF_ISSUE',
+        )
+      }
+      if (mr.approvedById && mr.approvedById === req.user!.id) {
+        throw new AppError(
+          'You approved this requisition, so somebody else in the store has to hand the material over.',
+          403,
+          'SELF_ISSUE',
+        )
+      }
+
+      /*
+       * Claim the requisition before a single metre moves.
+       *
+       * The checks above read it; they do not hold it. Three clicks at once
+       * (a double-click, two tabs, a retried request) all read "not issued
+       * yet" and all went on to take stock: 2 metres asked for, 6 left the
+       * store. This update only matches a requisition still unissued, and it
+       * locks the row until this transaction ends, so a second issue waits
+       * here, then finds it issued and matches nothing. If this one fails
+       * part-way (a line short on the rack) the claim rolls back with it and
+       * the requisition can be issued again.
+       */
+      const claimed = await tx.materialRequisition.updateMany({
+        where: { id: mr.id, status: 'APPROVED', issuedAt: null },
+        data: { issuedById: req.user!.id, issuedAt: when },
+      })
+      if (claimed.count === 0) {
+        throw new AppError(
+          `${mr.mrNumber} was issued a moment ago by somebody else. Refresh to see it.`,
+          409,
+          'ALREADY_ISSUED',
+        )
+      }
+
       const askedFor = new Map(body.lines?.map((l) => [l.lineId, l.issueQty]) ?? [])
 
       for (const line of mr.lines) {
@@ -995,9 +1046,9 @@ router.post(
         })
       }
 
-      return tx.materialRequisition.update({
+      // Already stamped by the claim above; read back for the response.
+      return tx.materialRequisition.findUniqueOrThrow({
         where: { id: mr.id },
-        data: { issuedById: req.user!.id, issuedAt: when },
         include: mrInclude,
       })
     })
