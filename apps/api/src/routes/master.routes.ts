@@ -1,11 +1,18 @@
 import { Router } from 'express'
-import { z } from 'zod'
-import { prisma, Prisma } from '@ld-erp/database'
-import { crudRouter } from '../lib/crud'
+import { z, ZodError } from 'zod'
+import { prisma } from '@ld-erp/database'
+import { crudRouter, type DeleteUse } from '../lib/crud'
+import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
+import * as categoryImport from '../services/categoryImport.service'
+import * as styleImport from '../services/styleImport.service'
+import * as customerImport from '../services/customerImport.service'
+import * as supplierImport from '../services/supplierImport.service'
+import * as brokerImport from '../services/brokerImport.service'
+import * as workstationImport from '../services/workstationImport.service'
+import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
-import { isGeneratedCode, withGeneratedCode } from '../lib/masterCode'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
 import {
   bomPriceSchema,
@@ -49,10 +56,79 @@ import {
   updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
+  gstin,
+  stateCode,
 } from '../schemas/master.schemas'
+
+const ITEM_TYPES = new Set([
+  'RAW_MATERIAL',
+  'SEMI_FINISHED',
+  'FINISHED_GOOD',
+  'CONSUMABLE',
+  'PACKING_MATERIAL',
+  'TRIM',
+])
+
+/** A filter on an optional link, where the choice 'none' means "not set". */
+const noneOr = (field: string) => (values: string[]) => {
+  const ids = values.filter((v) => v !== 'none')
+  const or: Record<string, unknown>[] = []
+  if (ids.length) or.push({ [field]: { in: ids } })
+  if (values.includes('none')) or.push({ [field]: null })
+  return { OR: or }
+}
+
+/**
+ * Everything that can point at a department, and what deleting the
+ * department does to it. An item or a BOM line may have no department, so
+ * it is left blank. The rest must have one (a requisition has to say who
+ * asked), so they move to the department the person picks.
+ */
+const DEPARTMENT_USES: Record<string, DeleteUse> = {
+  items: { one: 'item', many: 'items', model: 'item', field: 'departmentId', then: 'blank' },
+  itemCategories: { one: 'item category', many: 'item categories', model: 'itemCategory', field: 'departmentId', then: 'blank' },
+  bomLines: { one: 'BOM line', many: 'BOM lines', model: 'bOMLine', field: 'departmentId', then: 'blank' },
+  workstations: { one: 'workstation', many: 'workstations', model: 'workstation', field: 'departmentId', then: 'move' },
+  operations: { one: 'operation', many: 'operations', model: 'operation', field: 'departmentId', then: 'move' },
+  requisitions: { one: 'requisition', many: 'requisitions', model: 'materialRequisition', field: 'departmentId', then: 'move' },
+  employees: { one: 'employee', many: 'employees', model: 'employee', field: 'departmentId', then: 'move' },
+  machines: { one: 'machine', many: 'machines', model: 'machine', field: 'departmentId', then: 'move' },
+  routingSteps: { one: 'routing step', many: 'routing steps', model: 'routingStep', field: 'departmentId', then: 'move' },
+  productionEntries: { one: 'production entry', many: 'production entries', model: 'productionEntry', field: 'departmentId', then: 'move' },
+}
 
 const router = Router()
 const MODULE = 'masters'
+
+/**
+ * A filter on a typed-in column (a style's season, a customer's state): the
+ * exact values picked, and 'none' for the records with nothing typed.
+ */
+const textFilter = (field: string) => ({
+  where: (v: string[]) => {
+    const values = v.filter((x) => x !== 'none')
+    const or: Record<string, unknown>[] = []
+    if (values.length) or.push({ [field]: { in: values } })
+    if (v.includes('none')) or.push({ [field]: null }, { [field]: '' })
+    return { OR: or }
+  },
+  facets: [field],
+})
+
+/** A yes/no filter on a boolean column, counted by the same group-by. */
+const flagFilter = (field: string) => ({
+  where: (v: string[]) =>
+    v.includes('true') && v.includes('false') ? {} : { [field]: v.includes('true') },
+  facets: [field],
+})
+
+/** The body every spreadsheet import posts: the file, and whether to go ahead. */
+const importBody = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  confirm: z.boolean().optional(),
+})
 
 /**
  * Warehouses, departments and brands all hang off the company. There is exactly
@@ -75,6 +151,52 @@ async function currentCompanyId(): Promise<Record<string, unknown>> {
 // Straightforward masters — the factory covers list/get/create/update/delete
 // ─────────────────────────────────────────────────────────────
 
+/*
+ * Customers from a spreadsheet, as items and styles: check first, then all
+ * or nothing. New customers only; one already there is skipped. Ahead of the
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/customers/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await customerImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'customers-with-current-list.xlsx' : 'customers-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/customers/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await customerImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await customerImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newCustomers: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.customer === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await customerImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'CustomerImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'customer' : 'customers'}.`
+      : 'Nothing to import: every customer is already in the system.',
+    data: { summary, created },
+  })
+})
+
 router.use(
   '/customers',
   crudRouter({
@@ -83,9 +205,56 @@ router.use(
     entityType: 'Customer',
     createSchema: createCustomerSchema,
     updateSchema: updateCustomerSchema,
-    searchFields: ['name', 'code', 'gstin', 'phone', 'email'],
+    // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
+    uniqueFields: ['name', 'gstin'],
+    searchFields: ['name', 'code', 'gstin', 'phone', 'email', 'billingCity'],
     sortableFields: ['name', 'code', 'createdAt', 'creditLimit'],
     defaultSort: { field: 'name', order: 'asc' },
+    include: { broker: { select: { id: true, name: true } } },
+    filters: {
+      type: { where: (v) => ({ type: { in: v } }), facets: ['type'] },
+      billingState: textFilter('billingState'),
+      billingCity: textFilter('billingCity'),
+      creditDays: {
+        where: (v) => ({ creditDays: { in: v.map(Number).filter(Number.isFinite) } }),
+        facets: ['creditDays'],
+      },
+      // Registered for GST or not: decides whether an invoice carries a GSTIN.
+      gst: {
+        where: (v) =>
+          v.includes('registered') && v.includes('unregistered')
+            ? {}
+            : v.includes('registered')
+              ? { AND: [{ gstin: { not: null } }, { gstin: { not: '' } }] }
+              : { OR: [{ gstin: null }, { gstin: '' }] },
+        facets: ['gst'],
+      },
+      brokerId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) or.push({ brokerId: { in: ids } })
+          if (v.includes('none')) or.push({ brokerId: null })
+          return { OR: or }
+        },
+        facets: ['brokerId'],
+      },
+      isBlacklisted: flagFilter('isBlacklisted'),
+    },
+    facets: ['type', 'billingState', 'billingCity', 'creditDays', 'gst', 'brokerId', 'isBlacklisted'],
+    customFacets: {
+      gst: async (where) => {
+        const [registered, unregistered] = await Promise.all([
+          prisma.customer.count({ where: { AND: [where, { gstin: { not: null } }, { gstin: { not: '' } }] } }),
+          prisma.customer.count({ where: { AND: [where, { OR: [{ gstin: null }, { gstin: '' }] }] } }),
+        ])
+        return { registered, unregistered }
+      },
+    },
+    exportSheet: {
+      fileName: 'customers',
+      build: (rows) => customerImport.customerWorkbook(rows, false),
+    },
   }),
 )
 
@@ -97,18 +266,33 @@ router.use(
 // router, which would read "cmxyz/addresses" as an id and answer 404.
 // ─────────────────────────────────────────────────────────────
 
-const supplierAddressSchema = z.object({
+const supplierAddressFields = z.object({
   label: z.string().max(60).optional().nullable(),
   address: z.string().min(1, 'The address cannot be empty').max(400),
   city: z.string().max(80).optional().nullable(),
   state: z.string().max(80).optional().nullable(),
-  stateCode: z.string().max(2).optional().nullable(),
+  stateCode,
   pincode: z.string().max(10).optional().nullable(),
   country: z.string().max(60).optional().nullable(),
-  gstin: z.string().max(15).optional().nullable(),
+  // Validated like the supplier's own, because the default address's GSTIN
+  // is copied onto the supplier: "JUNK" used to get there this way.
+  gstin: gstin.optional().nullable(),
   /** Makes this the one a new order is offered first, and demotes the others. */
   isDefault: z.boolean().optional(),
 })
+
+type AddressIn = Partial<z.infer<typeof supplierAddressFields>>
+const checkAddress = (v: AddressIn, ctx: z.RefinementCtx) =>
+  checkRegistration({ gstin: v.gstin, stateCode: v.stateCode }, { stateCode: 'stateCode' }, ctx)
+const fillAddress = <T extends AddressIn>(v: T): T => {
+  const stateCode = v.stateCode || fromGstin(v.gstin)?.stateCode || v.stateCode
+  return stateCode ? { ...v, stateCode, state: stateName(stateCode) ?? v.state } : v
+}
+const supplierAddressSchema = supplierAddressFields.superRefine(checkAddress).transform(fillAddress)
+const supplierAddressUpdateSchema = supplierAddressFields
+  .partial()
+  .superRefine(checkAddress)
+  .transform(fillAddress)
 
 router.get(
   '/suppliers/:id/addresses',
@@ -234,7 +418,7 @@ router.patch(
       throw new AppError('Address not found', 404, 'NOT_FOUND')
     }
 
-    const data = supplierAddressSchema.partial().parse(req.body)
+    const data = supplierAddressUpdateSchema.parse(req.body)
 
     const after = await prisma.$transaction(async (tx) => {
       if (data.isDefault === true) {
@@ -289,6 +473,52 @@ router.patch(
   }
 )
 
+/*
+ * Suppliers from a spreadsheet, as customers: check first, then all or
+ * nothing. New suppliers only; one already there is skipped. Ahead of the
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/suppliers/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await supplierImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'suppliers-with-current-list.xlsx' : 'suppliers-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/suppliers/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await supplierImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await supplierImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newSuppliers: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.supplier === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await supplierImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'SupplierImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'supplier' : 'suppliers'}.`
+      : 'Nothing to import: every supplier is already in the system.',
+    data: { summary, created },
+  })
+})
+
 router.use(
   '/suppliers',
   crudRouter({
@@ -297,107 +527,139 @@ router.use(
     entityType: 'Supplier',
     createSchema: createSupplierSchema,
     updateSchema: updateSupplierSchema,
-    searchFields: ['name', 'code', 'gstin', 'phone', 'email'],
+    // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
+    uniqueFields: ['name', 'gstin'],
+    searchFields: ['name', 'code', 'gstin', 'phone', 'email', 'city'],
     sortableFields: ['name', 'code', 'createdAt', 'rating', 'leadTimeDays'],
     defaultSort: { field: 'name', order: 'asc' },
+    filters: {
+      category: { where: (v) => ({ category: { in: v } }), facets: ['category'] },
+      state: textFilter('state'),
+      city: textFilter('city'),
+      creditDays: {
+        where: (v) => ({ creditDays: { in: v.map(Number).filter(Number.isFinite) } }),
+        facets: ['creditDays'],
+      },
+      rating: {
+        where: (v) => {
+          const stars = v.filter((x) => x !== 'none').map(Number).filter(Number.isFinite)
+          const or: Record<string, unknown>[] = []
+          if (stars.length) or.push({ rating: { in: stars } })
+          if (v.includes('none')) or.push({ rating: null })
+          return { OR: or }
+        },
+        facets: ['rating'],
+      },
+      // Registered for GST or not: an unregistered supplier's order carries no GST.
+      gst: {
+        where: (v) =>
+          v.includes('registered') && v.includes('unregistered')
+            ? {}
+            : v.includes('registered')
+              ? { AND: [{ gstin: { not: null } }, { gstin: { not: '' } }] }
+              : { OR: [{ gstin: null }, { gstin: '' }] },
+        facets: ['gst'],
+      },
+      isPreferred: flagFilter('isPreferred'),
+      isMsme: flagFilter('isMsme'),
+    },
+    facets: ['category', 'state', 'city', 'creditDays', 'rating', 'gst', 'isPreferred', 'isMsme'],
+    customFacets: {
+      gst: async (where) => {
+        const [registered, unregistered] = await Promise.all([
+          prisma.supplier.count({ where: { AND: [where, { gstin: { not: null } }, { gstin: { not: '' } }] } }),
+          prisma.supplier.count({ where: { AND: [where, { OR: [{ gstin: null }, { gstin: '' }] }] } }),
+        ])
+        return { registered, unregistered }
+      },
+    },
+    exportSheet: {
+      fileName: 'suppliers',
+      build: (rows) => supplierImport.supplierWorkbook(rows, false),
+    },
   }),
 )
 
+/**
+ * What an item is sent back with.
+ *
+ * - taxRate travels with the item so an order form can fill the GST in from
+ *   the item itself. Without it the purchase order screen read
+ *   `item.taxRate.rate`, found nothing, and left the field blank for someone
+ *   to type from memory — and a rate typed from memory is the one thing the
+ *   business rules say must never happen. The alternative source, the tax
+ *   rate list in Settings, needs a permission a purchase clerk does not have.
+ * - The category's parent too, so the form can show a sub-category under the
+ *   main one it belongs to.
+ * - The style, for a finished good: which garment it is, with the colours it
+ *   comes in.
+ */
 const itemInclude = {
-  category: true,
+  category: { include: { parent: true } },
   uom: true,
-  style: { select: { id: true, code: true, name: true, colors: true } },
-  // taxRate travels with the item so an order form can fill the GST in from
-  // the item itself. Without it the purchase order screen read
-  // `item.taxRate.rate`, found nothing, and left the field blank for someone
-  // to type from memory — and a rate typed from memory is the one thing the
-  // business rules say must never happen. The alternative source, the tax
-  // rate list in Settings, needs a permission a purchase clerk does not have.
   taxRate: true,
+  department: { select: { id: true, name: true, code: true } },
+  style: { select: { id: true, code: true, name: true, colors: true } },
 }
 
-/**
- * crudRouter has no hook a check like "this colour must be one of the
- * style's own colours" could run from — its POST/PATCH are exactly
- * parse → save → audit, with no database lookup in between. So /items gets
- * two routes ahead of the crudRouter mount below: POST and PATCH/:id, which
- * Express matches first and crudRouter never sees. GET (list, detail) and
- * DELETE aren't declared here, so they fall straight through to crudRouter
- * unchanged — this only duplicates the few lines that genuinely need the
- * extra check, not the pagination/search/sort machinery around them.
+/*
+ * Items from a spreadsheet: the template to fill, and the filled sheet read
+ * back. Posting without `confirm` only checks the sheet and says what each row
+ * would do; with it, the whole sheet is written in one go. Ahead of the items
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
  */
-router.post('/items', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const data = createItemSchema.parse(req.body)
-  const { styleId, color, styleName } = await assertItemStyleColorValid(data.type, data.styleId, data.color)
-  const toSave = { ...data, styleId, color }
+router.get('/items/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withItems = req.query.withItems === 'true'
+  const buffer = await buildTemplate(withItems)
+  const name = withItems ? 'items-with-current-list.xlsx' : 'items-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
 
-  let created
-  try {
-    if (isGeneratedCode('item') && !toSave.code) {
-      created = await withGeneratedCode('item', toSave, (withCode) =>
-        prisma.item.create({ data: withCode as Prisma.ItemUncheckedCreateInput, include: itemInclude }),
-      )
-    } else {
-      created = await prisma.item.create({
-        data: toSave as Prisma.ItemUncheckedCreateInput,
-        include: itemInclude,
-      })
-    }
-  } catch (err) {
-    if (styleName && color) rethrowItemStyleColorClash(err, styleName, color)
-    throw err
+router.post('/items/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await planImport(rows)
+
+  // Stock is the inventory's, so bringing it in needs the inventory's right too.
+  const withStock = plans.some((p) => p.stock)
+  if (withStock && !userCan(req.user, 'inventory', 'create')) {
+    throw new AppError(
+      'This sheet brings in stock, and your role cannot enter stock. Remove the stock columns, or ask someone from the store.',
+      403,
+      'NO_STOCK_RIGHT',
+    )
   }
 
+  const summary = {
+    rows: plans.length,
+    newItems: new Set(plans.filter((p) => p.plan.item === 'new').map((p) => p.itemKey)).size,
+    existingItems: new Set(plans.filter((p) => p.plan.item === 'existing' && !p.plan.skipped).map((p) => p.itemKey)).size,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    stockLines: plans.filter((p) => p.stock).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const done = await runImport(plans)
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
-    entityType: 'Item',
-    entityId: created.id,
-    after: created,
+    entityType: 'ItemImport',
+    entityId: done.reference,
+    after: { fileName, created: done.created, stockLines: done.stockLines },
   })
-
-  res.status(201).json({ success: true, data: created })
-})
-
-router.patch('/items/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const data = updateItemSchema.parse(req.body)
-
-  const before = await prisma.item.findUnique({ where: { id: req.params.id } })
-  if (!before) throw new AppError('Item not found', 404, 'NOT_FOUND')
-
-  const effectiveType = data.type ?? before.type
-  const effectiveStyleId = data.styleId !== undefined ? data.styleId : before.styleId
-  const effectiveColor = data.color !== undefined ? data.color : before.color
-  const { styleId, color, styleName } = await assertItemStyleColorValid(
-    effectiveType,
-    effectiveStyleId,
-    effectiveColor,
-    before.id,
-  )
-  const toSave = { ...data, styleId, color }
-
-  let updated
-  try {
-    updated = await prisma.item.update({
-      where: { id: req.params.id },
-      data: toSave as Prisma.ItemUncheckedUpdateInput,
-      include: itemInclude,
-    })
-  } catch (err) {
-    if (styleName && color) rethrowItemStyleColorClash(err, styleName, color)
-    throw err
-  }
-
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'Item',
-    entityId: updated.id,
-    before,
-    after: updated,
+  res.status(201).json({
+    success: true,
+    message: `Imported ${done.created.length} new ${done.created.length === 1 ? 'item' : 'items'}${
+      done.stockLines ? ` and ${done.stockLines} ${done.stockLines === 1 ? 'line' : 'lines'} of opening stock` : ''
+    }.`,
+    data: { summary, created: done.created, stockLines: done.stockLines },
   })
-
-  res.json({ success: true, data: updated })
 })
 
 router.use(
@@ -408,12 +670,165 @@ router.use(
     entityType: 'Item',
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
-    searchFields: ['name', 'code', 'description', 'hsnCode'],
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
+    // Typing "linen" finds linen items by their category as well as their
+    // name; "cutting" finds what the cutting floor uses.
+    searchFields: [
+      'name',
+      'code',
+      'description',
+      'hsnCode',
+      'category.name',
+      'category.parent.name',
+      'department.name',
+      'uom.name',
+    ],
     sortableFields: ['name', 'code', 'createdAt', 'standardRate'],
+    filters: {
+      type: {
+        // Only real item types reach Prisma; anything else would be a 500.
+        where: (v) => ({ type: { in: v.filter((t) => ITEM_TYPES.has(t)) } }),
+        facets: ['type'],
+      },
+      // A main category takes in everything filed under its sub-categories.
+      categoryId: {
+        where: (v) => ({ OR: [{ categoryId: { in: v } }, { category: { parentId: { in: v } } }] }),
+        facets: ['categoryId'],
+      },
+      subCategoryId: { where: (v) => ({ categoryId: { in: v } }), facets: ['categoryId'] },
+      departmentId: { where: noneOr('departmentId'), facets: ['departmentId'] },
+      uomId: { where: (v) => ({ uomId: { in: v } }), facets: ['uomId'] },
+    },
+    facets: ['type', 'categoryId', 'departmentId', 'uomId'],
     defaultSort: { field: 'name', order: 'asc' },
     include: itemInclude,
+    // A finished good is one style in one colour, and the colour must be one
+    // of that style's own. Checked here because it needs the style looked up,
+    // which a schema cannot do. On an edit the saved type, style and colour
+    // stand in for whatever the edit leaves out.
+    beforeSave: async (data, before) => {
+      const checked = await assertItemStyleColorValid(
+        String(data.type ?? before?.type ?? ''),
+        (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,
+        (data.color !== undefined ? data.color : before?.color) as string | null | undefined,
+        before?.id as string | undefined,
+      )
+      return {
+        data: { ...data, styleId: checked.styleId, color: checked.color },
+        // Two people saving the same style and colour at once: the database
+        // catches the second, and this says so in words.
+        onSaveError: (err) => {
+          if (checked.styleName && checked.color) {
+            rethrowItemStyleColorClash(err, checked.styleName, checked.color)
+          }
+        },
+      }
+    },
   }),
 )
+
+/*
+ * Styles from a spreadsheet, as items and categories: check first, then all
+ * or nothing. New styles only; one already there is skipped. Ahead of the
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/styles/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await styleImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'styles-with-current-list.xlsx' : 'styles-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/styles/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await styleImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await styleImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newStyles: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.style === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await styleImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'StyleImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'style' : 'styles'}.`
+      : 'Nothing to import: every style is already in the system.',
+    data: { summary, created },
+  })
+})
+
+/*
+ * What a style's BOMs stand on, checked before the style is saved.
+ *
+ * A BOM gives quantities per size of the style's size run, and is made for one
+ * of the style's colours. Changing the size run left every such BOM pointing at
+ * sizes the style no longer has, and the next save of any of them failed with
+ * "Size 40 is not in the size run"; taking a colour off left its BOM for a
+ * colour that no longer existed. Both are refused while a live BOM relies on
+ * them. Ahead of the CRUD router, so the shared CRUD code is left alone.
+ */
+router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, _res, next) => {
+  const style = await prisma.style.findUnique({
+    where: { id: req.params.id },
+    select: { code: true, sizeGroupId: true, colors: true },
+  })
+  if (!style) return next()
+  const body = (req.body ?? {}) as { sizeGroupId?: string | null; colors?: unknown }
+  const live = { styleId: req.params.id, status: { not: 'OBSOLETE' as const } }
+
+  if (body.sizeGroupId !== undefined && (body.sizeGroupId || null) !== style.sizeGroupId) {
+    const sized = await prisma.bOM.count({
+      where: {
+        ...live,
+        OR: [{ baseSizeId: { not: null } }, { lines: { some: { sizes: { some: {} } } } }],
+      },
+    })
+    if (sized > 0) {
+      throw new AppError(
+        `${sized} ${sized === 1 ? 'BOM' : 'BOMs'} for ${style.code} ${sized === 1 ? 'gives' : 'give'} quantities by size in the current size run. Changing the run would leave them pointing at sizes the style no longer has. Clear their per-size quantities first, or make a new style for the new run.`,
+        409,
+        'STYLE_SIZE_RUN_IN_USE',
+      )
+    }
+  }
+
+  if (Array.isArray(body.colors)) {
+    const kept = new Set(body.colors.map((c) => String(c).trim().toLowerCase()))
+    const removed = style.colors.filter((c) => !kept.has(c.trim().toLowerCase()))
+    if (removed.length > 0) {
+      const boms = await prisma.bOM.findMany({
+        where: { ...live, color: { in: removed } },
+        select: { color: true, version: true },
+      })
+      if (boms.length > 0) {
+        const named = [...new Set(boms.map((b) => b.color))].join(', ')
+        throw new AppError(
+          `${style.code} has a BOM for ${named}. Retire that BOM before taking the colour off the style.`,
+          409,
+          'STYLE_COLOUR_IN_USE',
+        )
+      }
+    }
+  }
+  next()
+})
 
 router.use(
   '/styles',
@@ -427,6 +842,48 @@ router.use(
     sortableFields: ['name', 'code', 'createdAt', 'season'],
     defaultSort: { field: 'code', order: 'asc' },
     include: { sizeGroup: { select: { id: true, name: true } } },
+    filters: {
+      brandType: { where: (v) => ({ brandType: { in: v } }), facets: ['brandType'] },
+      category: textFilter('category'),
+      season: textFilter('season'),
+      fabricType: textFilter('fabricType'),
+      fit: textFilter('fit'),
+      sizeGroupId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) or.push({ sizeGroupId: { in: ids } })
+          if (v.includes('none')) or.push({ sizeGroupId: null })
+          return { OR: or }
+        },
+        facets: ['sizeGroupId'],
+      },
+      // Styles made in any of the colours picked.
+      colour: {
+        where: (v) => {
+          const colours = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (colours.length) or.push({ colors: { hasSome: colours } })
+          if (v.includes('none')) or.push({ colors: { isEmpty: true } })
+          return { OR: or }
+        },
+        facets: ['colour'],
+      },
+    },
+    facets: ['brandType', 'category', 'season', 'fabricType', 'fit', 'sizeGroupId', 'colour'],
+    // Colours are a list on each style, so they are counted one by one: a
+    // style in White and Navy counts once under each.
+    customFacets: {
+      colour: async (where) => {
+        const rows = await prisma.style.findMany({ where, select: { colors: true } })
+        const counts: Record<string, number> = {}
+        for (const r of rows) {
+          for (const c of new Set(r.colors.map((x) => x.trim()).filter(Boolean))) counts[c] = (counts[c] ?? 0) + 1
+          if (r.colors.length === 0) counts.none = (counts.none ?? 0) + 1
+        }
+        return counts
+      },
+    },
   }),
 )
 
@@ -446,6 +903,94 @@ router.use(
   }),
 )
 
+/*
+ * What else points at a store, beyond the relations this schema declares.
+ * Other branches' tables (customer GRNs, job-work challans, purchase
+ * returns, enquiries) hold store ids in the one shared database, and an
+ * enquiry's would even be cleared without a word. Each is counted by name,
+ * and a table not in this database is simply passed over.
+ */
+const WAREHOUSE_OTHER_USES: Array<{ table: string; columns: string[]; one: string; many: string }> = [
+  { table: 'customer_grn', columns: ['warehouseId'], one: 'customer goods receipt', many: 'customer goods receipts' },
+  { table: 'job_work_challans', columns: ['fromWarehouseId', 'toWarehouseId'], one: 'job-work challan', many: 'job-work challans' },
+  { table: 'job_work_return_lines', columns: ['warehouseId'], one: 'job-work return line', many: 'job-work return lines' },
+  { table: 'purchase_return_lines', columns: ['warehouseId'], one: 'purchase return line', many: 'purchase return lines' },
+  { table: 'purchase_enquiries', columns: ['locationId'], one: 'purchase enquiry', many: 'purchase enquiries' },
+]
+
+async function warehouseOtherUses(id: string): Promise<string[]> {
+  // Which of the tables this database has, asked once; then all counted together.
+  const present = await prisma.$queryRawUnsafe<Array<{ t: string }>>(
+    `select table_name as t from information_schema.tables where table_schema = 'ld_erp' and table_name = any($1)`,
+    WAREHOUSE_OTHER_USES.map((u) => u.table),
+  )
+  const have = new Set(present.map((r) => r.t))
+  const counts = await Promise.all(
+    WAREHOUSE_OTHER_USES.filter((u) => have.has(u.table)).map(async (use) => {
+      const where = use.columns.map((c) => `"${c}" = $1`).join(' or ')
+      const [row] = await prisma.$queryRawUnsafe<Array<{ n: bigint }>>(
+        `select count(*) as n from ld_erp."${use.table}" where ${where}`,
+        id,
+      )
+      const n = Number(row?.n ?? 0)
+      return n > 0 ? `${n} ${n === 1 ? use.one : use.many}` : null
+    }),
+  )
+  return counts.filter((c): c is string => Boolean(c))
+}
+
+const WAREHOUSE_REFUSE = (one: string, many: string): DeleteUse => ({ one, many, then: 'refuse' })
+/** Everything that records goods in, out of or held at a store: none of it can lose its store. */
+const WAREHOUSE_USES: Record<string, DeleteUse> = {
+  stockLedger: WAREHOUSE_REFUSE('stock entry', 'stock entries'),
+  grnLines: WAREHOUSE_REFUSE('goods receipt line', 'goods receipt lines'),
+  mrLines: WAREHOUSE_REFUSE('material requisition line', 'material requisition lines'),
+  transfersOut: WAREHOUSE_REFUSE('transfer out', 'transfers out'),
+  transfersIn: WAREHOUSE_REFUSE('transfer in', 'transfers in'),
+  adjustments: WAREHOUSE_REFUSE('stock adjustment', 'stock adjustments'),
+  purchaseOrders: WAREHOUSE_REFUSE('purchase order delivering here', 'purchase orders delivering here'),
+  purchaseNotes: WAREHOUSE_REFUSE('purchase note', 'purchase notes'),
+  supplierPayments: WAREHOUSE_REFUSE('supplier payment', 'supplier payments'),
+}
+
+/*
+ * Deleting a store for good. Its stock history says where goods physically
+ * were, so nothing that uses it is ever moved or cleared: moving the ledger
+ * to another store would make both stores' stock wrong. A store is deleted
+ * only when nothing at all uses it; otherwise it is deactivated instead.
+ * These two run ahead of the CRUD to add the other branches' tables to what
+ * the CRUD counts itself.
+ */
+router.get('/warehouses/:id/delete-check', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
+  const [store, others] = await Promise.all([
+    prisma.warehouse.findUnique({
+      where: { id: req.params.id },
+      select: { _count: { select: Object.fromEntries(Object.keys(WAREHOUSE_USES).map((k) => [k, true])) } },
+    }),
+    warehouseOtherUses(req.params.id),
+  ])
+  if (!store) throw new AppError('Warehouse not found', 404, 'NOT_FOUND')
+  const counts = store._count as Record<string, number>
+  const own = Object.entries(WAREHOUSE_USES)
+    .filter(([key]) => counts[key] > 0)
+    .map(([key, use]) => `${counts[key]} ${counts[key] === 1 ? use.one : use.many}`)
+  res.json({ success: true, data: { move: [], blank: [], refuse: [...own, ...others] } })
+})
+router.delete('/warehouses/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, _res, next) => {
+  if (req.query.permanent !== 'true') return next()
+  const others = await warehouseOtherUses(req.params.id)
+  if (others.length) {
+    const store = await prisma.warehouse.findUnique({ where: { id: req.params.id }, select: { name: true } })
+    throw new AppError(
+      `${store?.name ?? 'This store'} is used by ${others.join(', ')}, so it cannot be deleted. Deactivate it instead.`,
+      409,
+      'IN_USE',
+    )
+  }
+  next()
+})
+
+
 router.use(
   '/warehouses',
   crudRouter({
@@ -454,10 +999,14 @@ router.use(
     entityType: 'Warehouse',
     createSchema: createWarehouseSchema,
     updateSchema: updateWarehouseSchema,
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
     injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
+    // Any of it stops a delete; nothing is moved or cleared.
+    permanentDelete: WAREHOUSE_USES,
   }),
 )
 
@@ -469,11 +1018,20 @@ router.use(
     entityType: 'Department',
     createSchema: createDepartmentSchema,
     updateSchema: updateDepartmentSchema,
+    uniqueFields: ['name'],
+    permanentDelete: DEPARTMENT_USES,
     injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { operations: true },
+    // The counts say what a department is holding up before anyone renames or
+    // deactivates it.
+    include: {
+      operations: true,
+      _count: {
+        select: Object.fromEntries(Object.keys(DEPARTMENT_USES).map((k) => [k, true])),
+      },
+    },
   }),
 )
 
@@ -521,6 +1079,118 @@ router.use(
   }),
 )
 
+/*
+ * Two levels, main category and sub-category, and never a loop.
+ *
+ * A category could be made its own parent, or A put under B under A, and the
+ * list then read "Cat A / Cat A"; a sub-category could go under another
+ * sub-category, which no item picker offers. So the parent has to be a main
+ * category, not the category itself, and a main category that has
+ * sub-categories cannot itself be moved under another. Ahead of the CRUD.
+ */
+async function checkCategoryParent(req: AuthRequest, _res: unknown, next: (err?: unknown) => void) {
+  const parentId = (req.body ?? {}).parentId as string | null | undefined
+  if (!parentId) return next()
+  const selfId = req.params.id as string | undefined
+  if (selfId && parentId === selfId) {
+    throw new ZodError([{ code: 'custom', path: ['parentId'], message: 'A category cannot sit under itself.' }])
+  }
+  const parent = await prisma.itemCategory.findUnique({
+    where: { id: parentId },
+    select: { name: true, parentId: true },
+  })
+  if (!parent) {
+    throw new ZodError([{ code: 'custom', path: ['parentId'], message: 'That category no longer exists.' }])
+  }
+  if (parent.parentId) {
+    throw new ZodError([
+      {
+        code: 'custom',
+        path: ['parentId'],
+        message: `${parent.name} is itself a sub-category. Pick a main category.`,
+      },
+    ])
+  }
+  if (selfId) {
+    const children = await prisma.itemCategory.count({ where: { parentId: selfId } })
+    if (children > 0) {
+      throw new ZodError([
+        {
+          code: 'custom',
+          path: ['parentId'],
+          message: `This category has ${children} sub-${children === 1 ? 'category' : 'categories'} of its own, so it has to stay a main category.`,
+        },
+      ])
+    }
+  }
+  next()
+}
+router.post('/item-categories', requirePermission(MODULE, 'create'), checkCategoryParent)
+router.patch('/item-categories/:id', requirePermission(MODULE, 'edit'), checkCategoryParent)
+
+/*
+ * Categories from a spreadsheet, the same way as items: check first, then all
+ * or nothing. It makes categories and sets their departments; it never
+ * touches an item. Ahead of the CRUD, for the same reason as the items one.
+ */
+router.get('/item-categories/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await categoryImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'categories-with-current-list.xlsx' : 'categories-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/item-categories/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await categoryImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await categoryImport.planImport(rows)
+
+  // Changing the department of a category already there is an edit.
+  if (plans.some((p) => p.setDepartment) && !userCan(req.user, MODULE, 'edit')) {
+    throw new AppError(
+      'This sheet changes the department of categories already in the system, and your role cannot edit them. Leave Department empty on those rows.',
+      403,
+      'NO_EDIT_RIGHT',
+    )
+  }
+
+  const summary = {
+    rows: plans.length,
+    newMains: plans.filter((p) => p.newMain).length,
+    newSubs: plans.filter((p) => p.newSub).length,
+    departmentsSet: plans.filter((p) => p.setDepartment).length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const done = await categoryImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'ItemCategoryImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created: done.made, departmentsSet: done.departmentsSet },
+  })
+  const parts = [
+    done.mains ? `${done.mains} new ${done.mains === 1 ? 'category' : 'categories'}` : '',
+    done.subs ? `${done.subs} new ${done.subs === 1 ? 'sub-category' : 'sub-categories'}` : '',
+    done.departmentsSet ? `${done.departmentsSet} ${done.departmentsSet === 1 ? 'department' : 'departments'} set` : '',
+  ].filter(Boolean)
+  res.status(201).json({
+    success: true,
+    message: parts.length
+      ? `Imported ${parts.slice(0, -1).join(', ')}${parts.length > 1 ? ' and ' : ''}${parts[parts.length - 1]}.`
+      : 'Nothing to import: every row is already in the system.',
+    data: { summary, created: done.made, departmentsSet: done.departmentsSet },
+  })
+})
+
 router.use(
   '/item-categories',
   crudRouter({
@@ -529,10 +1199,78 @@ router.use(
     entityType: 'ItemCategory',
     createSchema: createItemCategorySchema,
     updateSchema: updateItemCategorySchema,
-    searchFields: ['name'],
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
+    // "fabric" finds Fabric's sub-categories too.
+    searchFields: ['name', 'parent.name'],
+    filters: {
+      // A main category, with everything under it.
+      categoryId: {
+        where: (v) => ({ OR: [{ id: { in: v } }, { parentId: { in: v } }] }),
+        facets: ['parentId'],
+      },
+      level: {
+        where: (v) =>
+          v.includes('main') && v.includes('sub')
+            ? {}
+            : v.includes('main')
+              ? { parentId: null }
+              : { parentId: { not: null } },
+        facets: ['parentId'],
+      },
+      // A category's own department, or, for a main category, any of its
+      // sub-categories'. 'none' is a category with none set.
+      departmentId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) {
+            or.push({ departmentId: { in: ids } }, { children: { some: { departmentId: { in: ids } } } })
+          }
+          if (v.includes('none')) or.push({ departmentId: null, children: { none: { departmentId: { not: null } } } })
+          return { OR: or }
+        },
+        facets: ['departmentId'],
+      },
+    },
+    facets: ['parentId', 'departmentId'],
+    /*
+     * Deleting for good. An item must have a category, so its items move to
+     * the one the person picks. A main category with sub-categories under it
+     * is refused until they are deleted or moved: taking them along to another
+     * category, unasked, would re-file every item beneath them.
+     */
+    permanentDelete: {
+      children: { one: 'sub-category', many: 'sub-categories', then: 'refuse' },
+      items: { one: 'item', many: 'items', model: 'item', field: 'categoryId', then: 'move' },
+    },
+    // Counted the way the filter matches: a category counts once for its own
+    // department and each of its sub-categories', so "Cutting 9" is Fabric
+    // and its eight sub-categories, the nine rows the filter then shows.
+    customFacets: {
+      departmentId: async (where) => {
+        const rows = await prisma.itemCategory.findMany({
+          where,
+          select: { departmentId: true, children: { select: { departmentId: true } } },
+        })
+        const counts: Record<string, number> = {}
+        for (const r of rows) {
+          const depts = new Set(
+            [r.departmentId, ...r.children.map((c) => c.departmentId)].filter((d): d is string => Boolean(d)),
+          )
+          if (depts.size === 0) counts.none = (counts.none ?? 0) + 1
+          for (const d of depts) counts[d] = (counts[d] ?? 0) + 1
+        }
+        return counts
+      },
+    },
     sortableFields: ['name'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { parent: true, children: true },
+    include: {
+      parent: true,
+      department: { select: { id: true, name: true } },
+      children: { include: { department: { select: { id: true, name: true } } } },
+    },
   }),
 )
 
@@ -563,10 +1301,51 @@ router.use(
     entityType: 'SizeGroup',
     createSchema: createSizeGroupSchema,
     updateSchema: updateSizeGroupSchema,
-    searchFields: ['name'],
+    // "xl" finds every run with an XL in it.
+    searchFields: ['name', 'sizes.some.label'],
     sortableFields: ['name'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { sizes: { orderBy: { sequence: 'asc' } } },
+    include: { sizes: { orderBy: { sequence: 'asc' } }, _count: { select: { styles: true } } },
+    filters: {
+      gender: {
+        where: (v) => {
+          const values = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (values.length) or.push({ gender: { in: values } })
+          if (v.includes('none')) or.push({ gender: null })
+          return { OR: or }
+        },
+        facets: ['gender'],
+      },
+      // Runs holding any of the sizes picked.
+      size: { where: (v) => ({ sizes: { some: { label: { in: v } } } }), facets: ['size'] },
+      // Whether any style is cut in it.
+      use: {
+        where: (v) =>
+          v.includes('used') && v.includes('unused')
+            ? {}
+            : v.includes('used')
+              ? { styles: { some: {} } }
+              : { styles: { none: {} } },
+        facets: ['use'],
+      },
+    },
+    facets: ['gender', 'size', 'use'],
+    customFacets: {
+      size: async (where) => {
+        const rows = await prisma.sizeGroup.findMany({ where, select: { sizes: { select: { label: true } } } })
+        const counts: Record<string, number> = {}
+        for (const r of rows) for (const l of new Set(r.sizes.map((x) => x.label))) counts[l] = (counts[l] ?? 0) + 1
+        return counts
+      },
+      use: async (where) => {
+        const [used, unused] = await Promise.all([
+          prisma.sizeGroup.count({ where: { AND: [where, { styles: { some: {} } }] } }),
+          prisma.sizeGroup.count({ where: { AND: [where, { styles: { none: {} } }] } }),
+        ])
+        return { used, unused }
+      },
+    },
   }),
 )
 
@@ -581,12 +1360,95 @@ router.use(
     searchFields: ['code', 'label'],
     sortableFields: ['sequence', 'code'],
     defaultSort: { field: 'sequence', order: 'asc' },
-    // Sizes are never referenced by history in their own right; the order line
-    // that used one keeps its own quantity, so a hard delete is safe.
+    // Sizes have no active flag: one is deleted, never deactivated. But order,
+    // manufacturing order and BOM lines point at the size itself, so one in
+    // use cannot go: its lines would lose their size (or a BOM its base size,
+    // silently). The delete says what uses it instead.
     softDelete: false,
+    permanentDelete: {
+      soLineSizes: { one: 'sales order line', many: 'sales order lines', then: 'refuse' },
+      moLineSizes: { one: 'manufacturing order line', many: 'manufacturing order lines', then: 'refuse' },
+      bomLineSizes: { one: 'BOM line', many: 'BOM lines', then: 'refuse' },
+      baseSizeBoms: { one: 'BOM as its base size', many: 'BOMs as their base size', then: 'refuse' },
+    },
+    filters: {
+      sizeGroupId: { where: (v) => ({ sizeGroupId: { in: v } }), facets: ['sizeGroupId'] },
+    },
+    facets: ['sizeGroupId'],
     include: { sizeGroup: { select: { id: true, name: true } } },
   }),
 )
+
+/*
+ * Workstations from a spreadsheet, as the other masters: check first, then
+ * all or nothing. New stations only; one already there is skipped. Ahead of
+ * the CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/workstations/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await workstationImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'workstations-with-current-list.xlsx' : 'workstations-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/workstations/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await workstationImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await workstationImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newWorkstations: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.workstation === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await workstationImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'WorkstationImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'workstation' : 'workstations'}.`
+      : 'Nothing to import: every workstation is already in the system.',
+    data: { summary, created },
+  })
+})
+
+/*
+ * An outside unit has to name the supplier we pay, or its job-work bill can
+ * never be totalled. The form for a new one checks it; an edit sends only
+ * what changed, so here the change is read together with what is on file:
+ * switching a station to an outside unit, or clearing its supplier, is
+ * refused unless a supplier is left on it. Ahead of the CRUD.
+ */
+router.patch('/workstations/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, _res, next) => {
+  const body = (req.body ?? {}) as { type?: string; supplierId?: string | null }
+  if (!('type' in body) && !('supplierId' in body)) return next()
+  const before = await prisma.workstation.findUnique({
+    where: { id: req.params.id },
+    select: { type: true, supplierId: true },
+  })
+  if (!before) return next()
+  const type = body.type ?? before.type
+  const supplierId = 'supplierId' in body ? body.supplierId : before.supplierId
+  if (type === 'JOB_WORK' && !supplierId) {
+    throw new ZodError([
+      { code: 'custom', path: ['supplierId'], message: 'A job-work unit must be linked to the supplier you pay for it' },
+    ])
+  }
+  next()
+})
 
 router.use(
   '/workstations',
@@ -596,15 +1458,118 @@ router.use(
     entityType: 'Workstation',
     createSchema: createWorkstationSchema,
     updateSchema: updateWorkstationSchema,
-    searchFields: ['name', 'code', 'contactPerson'],
-    sortableFields: ['name', 'code', 'createdAt'],
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
+    searchFields: ['name', 'code', 'contactPerson', 'department.name', 'supplier.name'],
+    sortableFields: ['name', 'code', 'createdAt', 'capacityPerDay'],
     defaultSort: { field: 'code', order: 'asc' },
     include: {
       department: { select: { id: true, name: true } },
       supplier: { select: { id: true, name: true } },
+      _count: { select: { routingSteps: true } },
+    },
+    filters: {
+      departmentId: { where: (v) => ({ departmentId: { in: v } }), facets: ['departmentId'] },
+      type: { where: (v) => ({ type: { in: v } }), facets: ['type'] },
+      supplierId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) or.push({ supplierId: { in: ids } })
+          if (v.includes('none')) or.push({ supplierId: null })
+          return { OR: or }
+        },
+        facets: ['supplierId'],
+      },
+      capacity: {
+        where: (v) =>
+          v.includes('set') && v.includes('unset')
+            ? {}
+            : v.includes('set')
+              ? { capacityPerDay: { not: null } }
+              : { capacityPerDay: null },
+        facets: ['capacity'],
+      },
+      // Whether any routing sends work to it.
+      routings: {
+        where: (v) =>
+          v.includes('used') && v.includes('unused')
+            ? {}
+            : v.includes('used')
+              ? { routingSteps: { some: {} } }
+              : { routingSteps: { none: {} } },
+        facets: ['routings'],
+      },
+    },
+    facets: ['departmentId', 'type', 'supplierId', 'capacity', 'routings'],
+    customFacets: {
+      capacity: async (where) => {
+        const [set, unset] = await Promise.all([
+          prisma.workstation.count({ where: { AND: [where, { capacityPerDay: { not: null } }] } }),
+          prisma.workstation.count({ where: { AND: [where, { capacityPerDay: null }] } }),
+        ])
+        return { set, unset }
+      },
+      routings: async (where) => {
+        const [used, unused] = await Promise.all([
+          prisma.workstation.count({ where: { AND: [where, { routingSteps: { some: {} } }] } }),
+          prisma.workstation.count({ where: { AND: [where, { routingSteps: { none: {} } }] } }),
+        ])
+        return { used, unused }
+      },
+    },
+    exportSheet: {
+      fileName: 'workstations',
+      build: (rows) => workstationImport.workstationWorkbook(rows, false),
     },
   }),
 )
+
+/*
+ * Agents from a spreadsheet, as customers and suppliers: check first, then
+ * all or nothing. New agents only; one already there is skipped. Ahead of
+ * the CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/brokers/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await brokerImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'agents-with-current-list.xlsx' : 'agents-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/brokers/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await brokerImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await brokerImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newAgents: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.broker === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await brokerImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'BrokerImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'agent' : 'agents'}.`
+      : 'Nothing to import: every agent is already in the system.',
+    data: { summary, created },
+  })
+})
 
 router.use(
   '/brokers',
@@ -614,9 +1579,65 @@ router.use(
     entityType: 'Broker',
     createSchema: createBrokerSchema,
     updateSchema: updateBrokerSchema,
-    searchFields: ['name', 'code', 'phone', 'email'],
+    // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
+    uniqueFields: ['name', 'gstin'],
+    searchFields: ['name', 'code', 'phone', 'email', 'city'],
     sortableFields: ['name', 'code', 'brokeragePercent'],
     defaultSort: { field: 'name', order: 'asc' },
+    // How many customers each one brings, for the list and its filter.
+    include: { _count: { select: { customers: true } } },
+    filters: {
+      // By the GST state code, not the typed name: the agents on file have the
+      // code but were saved before the name was filled in from it.
+      stateCode: textFilter('stateCode'),
+      city: textFilter('city'),
+      brokeragePercent: {
+        where: (v) => ({ brokeragePercent: { in: v.map(Number).filter(Number.isFinite) } }),
+        facets: ['brokeragePercent'],
+      },
+      tdsSection: textFilter('tdsSection'),
+      // Registered for GST or not: a registered agent bills GST on the commission.
+      gst: {
+        where: (v) =>
+          v.includes('registered') && v.includes('unregistered')
+            ? {}
+            : v.includes('registered')
+              ? { AND: [{ gstin: { not: null } }, { gstin: { not: '' } }] }
+              : { OR: [{ gstin: null }, { gstin: '' }] },
+        facets: ['gst'],
+      },
+      // Whether any customer comes through them.
+      customers: {
+        where: (v) =>
+          v.includes('with') && v.includes('without')
+            ? {}
+            : v.includes('with')
+              ? { customers: { some: {} } }
+              : { customers: { none: {} } },
+        facets: ['customers'],
+      },
+    },
+    facets: ['stateCode', 'city', 'brokeragePercent', 'tdsSection', 'gst', 'customers'],
+    customFacets: {
+      gst: async (where) => {
+        const [registered, unregistered] = await Promise.all([
+          prisma.broker.count({ where: { AND: [where, { gstin: { not: null } }, { gstin: { not: '' } }] } }),
+          prisma.broker.count({ where: { AND: [where, { OR: [{ gstin: null }, { gstin: '' }] }] } }),
+        ])
+        return { registered, unregistered }
+      },
+      customers: async (where) => {
+        const [withCustomers, without] = await Promise.all([
+          prisma.broker.count({ where: { AND: [where, { customers: { some: {} } }] } }),
+          prisma.broker.count({ where: { AND: [where, { customers: { none: {} } }] } }),
+        ])
+        return { with: withCustomers, without }
+      },
+    },
+    exportSheet: {
+      fileName: 'agents',
+      build: (rows) => brokerImport.brokerWorkbook(rows, false),
+    },
   }),
 )
 
@@ -628,6 +1649,8 @@ router.use(
     entityType: 'ChargeType',
     createSchema: createChargeTypeSchema,
     updateSchema: updateChargeTypeSchema,
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
     searchFields: ['name'],
     sortableFields: ['name', 'defaultGstRate', 'percentOfValue'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -803,10 +1826,16 @@ async function assertRoutingRefsExist(
   const workstationIds = [...new Set(steps.map((s) => s.workstationId).filter(Boolean))] as string[]
 
   const [operations, departments, workstations] = await Promise.all([
-    prisma.operation.findMany({ where: { id: { in: operationIds } }, select: { id: true } }),
-    prisma.department.findMany({ where: { id: { in: departmentIds } }, select: { id: true } }),
+    prisma.operation.findMany({
+      where: { id: { in: operationIds } },
+      select: { id: true, name: true, departmentId: true },
+    }),
+    prisma.department.findMany({ where: { id: { in: departmentIds } }, select: { id: true, name: true } }),
     workstationIds.length
-      ? prisma.workstation.findMany({ where: { id: { in: workstationIds } }, select: { id: true } })
+      ? prisma.workstation.findMany({
+          where: { id: { in: workstationIds } },
+          select: { id: true, name: true, departmentId: true },
+        })
       : Promise.resolve([]),
   ])
 
@@ -819,6 +1848,37 @@ async function assertRoutingRefsExist(
   if (workstations.length !== workstationIds.length) {
     throw new AppError('One of the workstations no longer exists', 400, 'INVALID_WORKSTATION')
   }
+
+  // A step is done by one department, with that department's operation on
+  // that department's machine. A cutting operation booked to Accounts, on a
+  // stitching workstation, used to save, and the floor's piece-rates and
+  // loading were then worked out against the wrong department.
+  // Names for every department involved, the operations' and workstations'
+  // own as well as the steps', so a message can say which one it should be.
+  const involved = [...new Set([...operations.map((o) => o.departmentId), ...workstations.map((w) => w.departmentId)])]
+  const named = await prisma.department.findMany({ where: { id: { in: involved } }, select: { id: true, name: true } })
+  const deptName = new Map([...departments, ...named].map((d) => [d.id, d.name]))
+  const op = new Map(operations.map((o) => [o.id, o]))
+  const ws = new Map(workstations.map((w) => [w.id, w]))
+  steps.forEach((step, i) => {
+    const here = deptName.get(step.departmentId) ?? 'this department'
+    const o = op.get(step.operationId)!
+    if (o.departmentId !== step.departmentId) {
+      throw new AppError(
+        `Step ${i + 1}: ${o.name} is a ${deptName.get(o.departmentId) ?? 'different department'} operation, not ${here}. Pick the department it belongs to, or another operation.`,
+        400,
+        'STEP_DEPARTMENT_MISMATCH',
+      )
+    }
+    const w = step.workstationId ? ws.get(step.workstationId) : undefined
+    if (w && w.departmentId !== step.departmentId) {
+      throw new AppError(
+        `Step ${i + 1}: ${w.name} is not a ${here} workstation. Pick one of ${here}'s, or leave it empty.`,
+        400,
+        'STEP_WORKSTATION_MISMATCH',
+      )
+    }
+  })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1170,6 +2230,49 @@ function toLineCreate(line: PricedLine) {
 }
 
 /**
+ * A BOM is built from things still in use.
+ *
+ * A new BOM needs an active style, and any component not already on the BOM
+ * has to be an active item: a deactivated style and a deactivated item both
+ * used to be accepted, and approved. Components already on a BOM are left
+ * alone, so a draft whose item was retired later can still be opened and the
+ * item replaced.
+ */
+async function assertActiveForBom(
+  styleId: string,
+  lines: IncomingBomLine[] | undefined,
+  alreadyOn: Set<string>,
+  isNew: boolean,
+): Promise<void> {
+  if (isNew) {
+    const style = await prisma.style.findUnique({
+      where: { id: styleId },
+      select: { code: true, isActive: true },
+    })
+    if (style && !style.isActive) {
+      throw new AppError(
+        `${style.code} is deactivated, so no new BOM can be made for it. Reactivate the style first.`,
+        400,
+        'BOM_STYLE_INACTIVE',
+      )
+    }
+  }
+  const added = [...new Set((lines ?? []).map((l) => l.componentItemId))].filter((id) => !alreadyOn.has(id))
+  if (added.length === 0) return
+  const retired = await prisma.item.findMany({
+    where: { id: { in: added }, isActive: false },
+    select: { name: true },
+  })
+  if (retired.length > 0) {
+    throw new AppError(
+      `${retired.map((i) => i.name).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated, so ${retired.length === 1 ? 'it' : 'they'} cannot go on a BOM.`,
+      400,
+      'BOM_COMPONENT_INACTIVE',
+    )
+  }
+}
+
+/**
  * Checks the things a foreign key cannot: that the colour, the routing and the
  * sizes named on the lines all belong to the same style as the BOM. Postgres
  * would accept a trouser routing on a shirt BOM quite happily, and nobody would
@@ -1431,6 +2534,7 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
     required: true,
   })
   await assertCostDepartmentsExist(costLines)
+  await assertActiveForBom(styleId, lines, new Set(), true)
 
   const useVersion = version ?? '1.0'
   const typedVersion = version !== undefined
@@ -1510,6 +2614,12 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   if (changesCosting) {
     await assertBomRefsExist(before.styleId, nextRoutingId, lines, nextBaseSizeId)
     await assertCostDepartmentsExist(costLines)
+    await assertActiveForBom(
+      before.styleId,
+      lines,
+      new Set(before.lines.map((l) => l.componentItemId)),
+      false,
+    )
   }
   // A draft renamed to a version its colour already has. Colour itself cannot be
   // changed here — that is what copying to another colour is for — so the check
@@ -1635,6 +2745,31 @@ router.patch(
     }
     if (before.lines.length === 0) {
       throw new AppError('Add at least one component before approving this BOM.', 409, 'BOM_EMPTY')
+    }
+
+    // Orders are costed against an approved BOM, so it may not rest on a style
+    // or a component that has been retired.
+    const retired = await prisma.item.findMany({
+      where: { id: { in: before.lines.map((l) => l.componentItemId) }, isActive: false },
+      select: { name: true },
+    })
+    const styleNow = await prisma.style.findUnique({
+      where: { id: before.styleId },
+      select: { isActive: true, code: true },
+    })
+    if (styleNow && !styleNow.isActive) {
+      throw new AppError(
+        `${styleNow.code} is deactivated, so a BOM for it cannot be approved.`,
+        409,
+        'BOM_STYLE_INACTIVE',
+      )
+    }
+    if (retired.length > 0) {
+      throw new AppError(
+        `${retired.map((i) => i.name).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated. Replace ${retired.length === 1 ? 'it' : 'them'} on the BOM before approving.`,
+        409,
+        'BOM_COMPONENT_INACTIVE',
+      )
     }
 
     // A rate of zero prints as confidently as a real one, so an approval is

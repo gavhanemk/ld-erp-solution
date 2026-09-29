@@ -683,6 +683,8 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
       ...(itemId ? { itemId } : {}),
       mr: {
         status: 'APPROVED',
+        // A cancelled or closed requisition is no longer asking for anything.
+        closedAt: null,
         ...(mrNumber ? { mrNumber: { contains: mrNumber, mode: 'insensitive' } } : {}),
         ...(moId ? { moId } : {}),
       },

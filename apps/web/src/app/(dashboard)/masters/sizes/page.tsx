@@ -1,6 +1,6 @@
 'use client'
 
-import { MasterTable, type Column } from '@/components/masters/MasterTable'
+import { MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 
 /** The individual sizes inside a run, in the order they appear on a cutting sheet. */
@@ -50,6 +50,11 @@ const formFields: FormField[] = [
   },
 ]
 
+/** Which run a size belongs to: the list otherwise mixes every run together. */
+const filterDefs: FilterDef[] = [
+  { key: 'sizeGroupId', label: 'Size Run', facet: 'sizeGroupId', optionsFrom: { resource: 'size-groups' } },
+]
+
 export default function SizesPage() {
   return (
     <MasterTable<Size>
@@ -58,6 +63,10 @@ export default function SizesPage() {
       resource="sizes"
       columns={columns}
       formFields={formFields}
+      filterDefs={filterDefs}
+      // A size is deleted, never deactivated, and not while anything uses it.
+      noActiveFlag
+      allowDelete
       defaultSort="sequence"
       searchPlaceholder="Search sizes..."
       emptyMessage="No sizes yet. Create a size run first, then add its sizes here."

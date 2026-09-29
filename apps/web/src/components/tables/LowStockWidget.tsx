@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { AlertTriangle, PackageCheck } from 'lucide-react'
 import { api } from '@/lib/api'
 
@@ -11,19 +12,29 @@ interface LowStockItem {
   uom: string
   reorderLevel: number
   currentStock: number
+  /** At or below the reorder level; otherwise only inside the early-warning margin. */
+  belowReorder?: boolean
+}
+
+interface Totals {
+  toReorder: number
+  comingUp: number
 }
 
 export function LowStockWidget() {
   const [items, setItems] = useState<LowStockItem[] | null>(null)
+  const [totals, setTotals] = useState<Totals | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
 
     api
-      .get<{ success: boolean; data: LowStockItem[] }>('/dashboard/low-stock?limit=6')
+      .get<{ success: boolean; data: LowStockItem[]; totals?: Totals }>('/dashboard/low-stock?limit=6')
       .then((res) => {
-        if (!cancelled) setItems(res.data)
+        if (cancelled) return
+        setItems(res.data)
+        setTotals(res.totals ?? null)
       })
       .catch(() => {
         if (!cancelled) setError('Could not load stock alerts.')
@@ -43,7 +54,11 @@ export function LowStockWidget() {
           </div>
           <h3 className="text-xs font-semibold text-foreground">Low Stock Alerts</h3>
         </div>
-        {items && items.length > 0 && <span className="badge-danger">{items.length} items</span>}
+        {/* The card lists six; the badge is how many there are in all, the
+          same number the stock screen gives. */}
+        {totals && totals.toReorder > 0 && (
+          <span className="badge-danger">{totals.toReorder} to reorder</span>
+        )}
       </div>
 
       {error && <p className="text-xs text-red-400 py-6 text-center">{error}</p>}
@@ -91,11 +106,22 @@ export function LowStockWidget() {
                       {item.currentStock.toLocaleString('en-IN')} {item.uom}
                     </span>{' '}
                     of {item.reorderLevel.toLocaleString('en-IN')}
+                    {item.belowReorder === false && (
+                      <span className="text-muted-foreground"> · coming up</span>
+                    )}
                   </p>
                 </div>
               </div>
             )
           })}
+          {totals && totals.toReorder + totals.comingUp > items.length && (
+            <Link
+              href="/inventory/stock?low=true"
+              className="block pt-1 text-[11px] text-teal-400 hover:underline"
+            >
+              See all {totals.toReorder} to reorder on the stock screen →
+            </Link>
+          )}
         </div>
       )}
     </div>

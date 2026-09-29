@@ -1,7 +1,10 @@
 'use client'
 
-import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import { useState } from 'react'
+import { FileSpreadsheet } from 'lucide-react'
+import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { ImportCustomersDialog } from '@/components/masters/ImportCustomersDialog'
 import { formatCurrency } from '@/lib/utils'
 
 interface Customer {
@@ -32,7 +35,7 @@ const columns: Column<Customer>[] = [
     key: 'code',
     header: 'Code',
     sortable: true,
-    className: 'font-mono text-xs text-teal-400',
+    className: 'font-mono text-xs text-teal-400 whitespace-nowrap',
   },
   {
     key: 'name',
@@ -94,7 +97,7 @@ const columns: Column<Customer>[] = [
     key: 'creditDays',
     header: 'Terms',
     align: 'right',
-    render: (c) => <span className="text-xs text-muted-foreground">{c.creditDays} days</span>,
+    render: (c) => <span className="text-xs text-muted-foreground whitespace-nowrap">{c.creditDays} days</span>,
   },
   {
     key: 'isActive',
@@ -103,15 +106,29 @@ const columns: Column<Customer>[] = [
   },
 ]
 
+/*
+ * Four across, so a customer fits on one screen: who they are and how to
+ * reach them, then both addresses side by side with city, state, PIN and the
+ * delivery state on one row, then credit and bank on two full rows ending
+ * with notes beside the blacklist tick. Hints sit in the boxes rather than
+ * under them.
+ */
 const formFields: FormField[] = [
-  { name: 'code', label: 'Customer Code', generated: true, section: 'Identity' },
-  { name: 'name', label: 'Customer Name', required: true, placeholder: 'Rajan Traders', section: 'Identity' },
+  { name: 'code', label: 'Customer Code', generated: true, section: 'Identity & Contact' },
+  {
+    name: 'name',
+    label: 'Customer Name',
+    required: true,
+    placeholder: 'Rajan Traders',
+    section: 'Identity & Contact',
+    span: 2,
+  },
   {
     name: 'type',
     label: 'Type',
     type: 'select',
     required: true,
-    section: 'Identity',
+    section: 'Identity & Contact',
     options: [
       { value: 'DOMESTIC', label: 'Domestic' },
       { value: 'EXPORT', label: 'Export' },
@@ -122,69 +139,131 @@ const formFields: FormField[] = [
   {
     name: 'gstin',
     label: 'GSTIN',
-    section: 'Identity',
+    section: 'Identity & Contact',
     placeholder: '27AAACL1234M1Z5',
     uppercase: true,
-    help: '15 characters. Leave blank if unregistered.',
     derives: { field: 'billingStateCode', from: (v) => (/^\d{2}/.test(v) ? v.slice(0, 2) : null) },
   },
   {
     name: 'billingStateCode',
     label: 'GST State Code',
-    section: 'Identity',
-    placeholder: '27',
-    help: 'Filled in from the GSTIN. Decides CGST+SGST or IGST on every invoice.',
+    section: 'Identity & Contact',
+    placeholder: '27 (from the GSTIN)',
   },
-  { name: 'pan', label: 'PAN', section: 'Identity', placeholder: 'AAACL1234M', uppercase: true },
-  { name: 'phone', label: 'Phone', section: 'Contact', placeholder: '+91 98765 43210' },
-  { name: 'email', label: 'Email', section: 'Contact', placeholder: 'accounts@example.com' },
-  { name: 'billingAddress', label: 'Billing Address', type: 'textarea', section: 'Address' },
+  { name: 'pan', label: 'PAN', section: 'Identity & Contact', placeholder: 'AAACL1234M', uppercase: true },
+  { name: 'phone', label: 'Phone', section: 'Identity & Contact', placeholder: '+91 98765 43210' },
+  { name: 'email', label: 'Email', section: 'Identity & Contact', placeholder: 'accounts@example.com' },
+  { name: 'billingAddress', label: 'Billing Address', type: 'textarea', section: 'Address', span: 2, rows: 1 },
+  { name: 'shippingAddress', label: 'Shipping Address', type: 'textarea', section: 'Address', span: 2, rows: 1 },
   { name: 'billingCity', label: 'City', section: 'Address', placeholder: 'Surat' },
   { name: 'billingState', label: 'State', section: 'Address', placeholder: 'Gujarat' },
   { name: 'billingPincode', label: 'PIN Code', section: 'Address', placeholder: '395010' },
-  { name: 'shippingAddress', label: 'Shipping Address', type: 'textarea', section: 'Address' },
   {
     name: 'shippingStateCode',
     label: 'Delivery State Code',
     section: 'Address',
-    placeholder: '27',
-    help: 'Only if goods go to a different state from the billing address — that is where the tax follows',
+    placeholder: 'Only if another state',
   },
   {
     name: 'creditLimit',
-    label: 'Credit Limit',
+    label: 'Credit Limit (₹)',
     type: 'number',
-    section: 'Payment Terms',
+    section: 'Credit, Bank & Notes',
     placeholder: '500000',
-    help: 'In rupees',
+  },
+  { name: 'creditDays', label: 'Credit Days', type: 'number', section: 'Credit, Bank & Notes', placeholder: '30' },
+  {
+    name: 'paymentTerms',
+    label: 'Payment Terms',
+    section: 'Credit, Bank & Notes',
+    placeholder: '30 days from invoice',
+  },
+  { name: 'bankName', label: 'Bank Name', section: 'Credit, Bank & Notes' },
+  { name: 'bankAccount', label: 'Account Number', section: 'Credit, Bank & Notes' },
+  { name: 'bankIFSC', label: 'IFSC Code', section: 'Credit, Bank & Notes', placeholder: 'HDFC0001234', uppercase: true },
+  { name: 'notes', label: 'Notes', type: 'textarea', section: 'Credit, Bank & Notes', span: 1, rows: 1 },
+  {
+    name: 'isBlacklisted',
+    label: 'Blacklisted',
+    type: 'checkbox',
+    placeholder: 'Block new orders',
+    section: 'Credit, Bank & Notes',
+  },
+  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Credit, Bank & Notes' },
+]
+
+/*
+ * The ways a customer list gets narrowed: kind, place, terms, GST, broker,
+ * blacklist. State, city and terms offer the values in use; each counts
+ * what it would leave.
+ */
+const filterDefs: FilterDef[] = [
+  {
+    key: 'type',
+    label: 'Type',
+    facet: 'type',
+    options: Object.entries(TYPE_LABEL).map(([value, t]) => ({ value, label: t.label })),
+  },
+  { key: 'billingState', label: 'State', facet: 'billingState', valuesFromFacet: true, noneLabel: 'Not set' },
+  { key: 'billingCity', label: 'City', facet: 'billingCity', valuesFromFacet: true, noneLabel: 'Not set' },
+  {
+    key: 'creditDays',
+    label: 'Terms',
+    facet: 'creditDays',
+    valuesFromFacet: true,
+    sortValues: (a, b) => Number(a) - Number(b),
+    valueLabel: (v) => `${v} days`,
   },
   {
-    name: 'creditDays',
-    label: 'Credit Days',
-    type: 'number',
-    section: 'Payment Terms',
-    placeholder: '30',
+    key: 'gst',
+    label: 'GST',
+    facet: 'gst',
+    options: [
+      { value: 'registered', label: 'Registered' },
+      { value: 'unregistered', label: 'Unregistered' },
+    ],
   },
-  { name: 'paymentTerms', label: 'Payment Terms', section: 'Payment Terms', placeholder: '30 days from invoice' },
-  { name: 'bankName', label: 'Bank Name', section: 'Bank Details' },
-  { name: 'bankAccount', label: 'Account Number', section: 'Bank Details' },
-  { name: 'bankIFSC', label: 'IFSC Code', section: 'Bank Details', placeholder: 'HDFC0001234', uppercase: true },
-  { name: 'notes', label: 'Notes', type: 'textarea', section: 'Other' },
-  { name: 'isBlacklisted', label: 'Blacklisted', type: 'checkbox', placeholder: 'Block new orders', section: 'Other' },
-  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Other' },
+  { key: 'brokerId', label: 'Broker', facet: 'brokerId', optionsFrom: { resource: 'brokers' }, noneLabel: 'No broker' },
+  {
+    key: 'isBlacklisted',
+    label: 'Blacklist',
+    facet: 'isBlacklisted',
+    options: [
+      { value: 'false', label: 'Not blacklisted' },
+      { value: 'true', label: 'Blacklisted' },
+    ],
+  },
 ]
 
 export default function CustomersPage() {
+  const [importing, setImporting] = useState(false)
+  // Bumped after an import, so the list and its filter counts reload.
+  const [refreshKey, setRefreshKey] = useState(0)
+
   return (
-    <MasterTable<Customer>
-      title="Customers"
-      entityName="Customer"
-      resource="customers"
-      columns={columns}
-      formFields={formFields}
-      defaultSort="name"
-      searchPlaceholder="Search name, code, GSTIN, phone, email..."
-      emptyMessage="No customers yet. Add your first customer to get started."
-    />
+    <>
+      <MasterTable<Customer>
+        title="Customers"
+        entityName="Customer"
+        resource="customers"
+        columns={columns}
+        formFields={formFields}
+        formColumns={4}
+        filterDefs={filterDefs}
+        defaultSort="name"
+        searchPlaceholder="Search name, code, GSTIN, phone, email, city..."
+        emptyMessage="No customers yet. Add your first customer to get started."
+        refreshKey={refreshKey}
+        exportable
+        actions={
+          <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+            <FileSpreadsheet size={16} /> Import
+          </button>
+        }
+      />
+      {importing && (
+        <ImportCustomersDialog onClose={() => setImporting(false)} onImported={() => setRefreshKey((k) => k + 1)} />
+      )}
+    </>
   )
 }

@@ -1,7 +1,10 @@
 'use client'
 
-import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import { useState } from 'react'
+import { FileSpreadsheet } from 'lucide-react'
+import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { ImportCategoriesDialog } from '@/components/masters/ImportCategoriesDialog'
 
 /**
  * Item categories, and the subcategories under them.
@@ -24,8 +27,20 @@ interface ItemCategory {
   name: string
   parentId: string | null
   parent?: { id: string; name: string } | null
-  children?: { id: string; name: string }[]
+  departmentId?: string | null
+  department?: { id: string; name: string } | null
+  children?: { id: string; name: string; department?: { id: string; name: string } | null }[]
   isActive: boolean
+}
+
+/**
+ * A sub-category's own department; a main category's own, or else the ones
+ * its sub-categories use, so Fabric reads Cutting and Thread reads
+ * Stitching, Embroidery.
+ */
+const departmentsOf = (c: ItemCategory): string[] => {
+  if (c.department) return [c.department.name]
+  return [...new Set((c.children ?? []).map((k) => k.department?.name).filter((n): n is string => Boolean(n)))]
 }
 
 const columns: Column<ItemCategory>[] = [
@@ -69,6 +84,19 @@ const columns: Column<ItemCategory>[] = [
       )
     },
   },
+  {
+    key: 'department',
+    header: 'Department',
+    render: (c) => {
+      const names = departmentsOf(c)
+      if (names.length === 0) return <span className="text-muted-foreground">—</span>
+      return (
+        <span className={c.department ? '' : 'text-muted-foreground'}>
+          {names.join(', ')}
+        </span>
+      )
+    },
+  },
   { key: 'isActive', header: 'Status', render: (c) => <ActiveBadge isActive={c.isActive} /> },
 ]
 
@@ -79,7 +107,9 @@ const formFields: FormField[] = [
     name: 'parentId',
     label: 'Category',
     type: 'select',
-    optionsFrom: { resource: 'item-categories' },
+    // Main categories only: there are two levels, and a sub-category cannot
+    // hold another.
+    optionsFrom: { resource: 'item-categories', filter: (row) => !row.parentId },
     placeholder: 'None — I am adding a main category',
     span: 2,
     help: 'Which category this sits under. Leave it empty to add a main category instead.',
@@ -93,6 +123,14 @@ const formFields: FormField[] = [
     help: 'The name. With Category left empty above, this becomes a main category — "Fabric" rather than "Cotton".',
   },
   {
+    name: 'departmentId',
+    label: 'Department',
+    type: 'select',
+    optionsFrom: { resource: 'departments' },
+    span: 2,
+    help: 'Who normally uses what is filed here. A new item in this category starts with it.',
+  },
+  {
     name: 'isActive',
     label: 'Active',
     type: 'checkbox',
@@ -100,17 +138,74 @@ const formFields: FormField[] = [
   },
 ]
 
+/*
+ * Two dropdowns: a main category (with everything under it), and the level.
+ * Each counts what it would leave, like the item list's filters.
+ */
+const filterDefs: FilterDef[] = [
+  {
+    key: 'departmentId',
+    label: 'Department',
+    facet: 'departmentId',
+    noneLabel: 'No department',
+    optionsFrom: { resource: 'departments' },
+  },
+  {
+    key: 'categoryId',
+    label: 'Category',
+    facet: 'parentId',
+    optionsFrom: { resource: 'item-categories', filter: (r) => !r.parentId },
+    // The category itself and its sub-categories.
+    count: (id, counts) => (counts[id] ?? 0) + 1,
+  },
+  {
+    key: 'level',
+    label: 'Level',
+    facet: 'parentId',
+    options: [
+      { value: 'main', label: 'Main categories' },
+      { value: 'sub', label: 'Sub-categories' },
+    ],
+    count: (value, counts) => {
+      const mains = counts.none ?? 0
+      const all = Object.values(counts).reduce((a, b) => a + b, 0)
+      return value === 'main' ? mains : all - mains
+    },
+  },
+]
+
 export default function ItemCategoriesPage() {
+  const [importing, setImporting] = useState(false)
+  // Bumped after an import, so the list and its filter counts reload.
+  const [refreshKey, setRefreshKey] = useState(0)
+
   return (
-    <MasterTable<ItemCategory>
-      title="Item Categories"
-      entityName="Category"
-      resource="item-categories"
-      columns={columns}
-      formFields={formFields}
-      defaultSort="name"
-      searchPlaceholder="Search categories..."
-      emptyMessage="No categories yet. Add one, then add subcategories beneath it."
-    />
+    <>
+      <MasterTable<ItemCategory>
+        title="Item Categories"
+        entityName="Category"
+        resource="item-categories"
+        columns={columns}
+        formFields={formFields}
+        filterDefs={filterDefs}
+        defaultSort="name"
+        searchPlaceholder="Search categories..."
+        emptyMessage="No categories yet. Add one, then add subcategories beneath it."
+        refreshKey={refreshKey}
+        allowDelete
+        deleteRefusedHint="Delete those sub-categories, or move them under another category, first."
+        actions={
+          <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+            <FileSpreadsheet size={16} /> Import
+          </button>
+        }
+      />
+      {importing && (
+        <ImportCategoriesDialog
+          onClose={() => setImporting(false)}
+          onImported={() => setRefreshKey((k) => k + 1)}
+        />
+      )}
+    </>
   )
 }
