@@ -319,8 +319,10 @@ router.get('/ledger', requirePermission(MODULE, 'view'), async (req, res) => {
       GROUP BY 1`,
   )
 
-  const [ids, [summary], series, ...facetRows] = await Promise.all([
-    idsQuery, summaryQuery, seriesQuery, ...facetQueries,
+  const [ids, [summary], series, analysis, ...facetRows] = await Promise.all([
+    idsQuery, summaryQuery, seriesQuery,
+    req.query.analysis === '1' ? ledgerAnalysis(all) : Promise.resolve(undefined),
+    ...facetQueries,
   ])
   const facets = Object.fromEntries(LEDGER_FILTERS.map((k, n) => [k, facetRows[n]]))
 
@@ -331,8 +333,41 @@ router.get('/ledger', requirePermission(MODULE, 'view'), async (req, res) => {
     summary,
     series,
     facets,
+    ...(analysis ? { analysis } : {}),
   })
 })
+
+type LedgerGroup = { value: string; label: string | null; moves: number; inValue: number; outValue: number }
+
+/**
+ * For the ledger's dashboard: what the filters leave, cut by store, category,
+ * department and document, and the items that moved the most value.
+ */
+async function ledgerAnalysis(all: Prisma.Sql) {
+  const sums = Prisma.sql`
+    COUNT(*)::int AS moves,
+    COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
+    COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue"`
+  const moved = Prisma.sql`SUM((s."inQty" + s."outQty") * COALESCE(s."unitRate", 0))`
+  const by = (k: LedgerFilter) => prisma.$queryRaw<LedgerGroup[]>`
+    SELECT ${LEDGER_VALUE[k]} AS value, MAX(${LEDGER_LABEL[k] ?? Prisma.sql`NULL::text`}) AS label, ${sums}
+    ${LEDGER_FROM} ${all}
+    GROUP BY 1
+    ORDER BY ${moved} DESC, moves DESC`
+  const [byStore, byCategory, byDepartment, byDocument, topItems] = await Promise.all([
+    by('store'), by('category'), by('department'), by('document'),
+    prisma.$queryRaw<Array<LedgerGroup & { code: string; uom: string; inQty: number; outQty: number }>>`
+      SELECT s."itemId" AS value, MAX(i.name) AS label, MAX(i.code) AS code, MAX(u.symbol) AS uom,
+        COALESCE(SUM(s."inQty"), 0)::float8 AS "inQty", COALESCE(SUM(s."outQty"), 0)::float8 AS "outQty", ${sums}
+      ${LEDGER_FROM}
+      JOIN ld_erp.uom u ON u.id = i."uomId"
+      ${all}
+      GROUP BY 1
+      ORDER BY ${moved} DESC, moves DESC
+      LIMIT 10`,
+  ])
+  return { byStore, byCategory, byDepartment, byDocument, topItems }
+}
 
 /** The movements with these ids, in that order, with what each item is. */
 async function ledgerRows(ids: string[]) {

@@ -2,10 +2,10 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   AlertCircle, RefreshCw, Search, X, Download, Loader2, Activity, ArrowDownToLine,
-  ArrowUpFromLine, Users, CalendarDays,
+  ArrowUpFromLine, Users, CalendarDays, LayoutDashboard, List, Scale, Flame, Boxes, Gauge,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
@@ -66,12 +66,30 @@ interface Day {
 type FilterKey =
   | 'store' | 'movement' | 'document' | 'direction' | 'owner' | 'category' | 'sub' | 'department' | 'itemType'
 
+interface Group {
+  value: string
+  label: string | null
+  moves: number
+  inValue: number
+  outValue: number
+}
+
+interface Analysis {
+  byStore: Group[]
+  byCategory: Group[]
+  byDepartment: Group[]
+  byDocument: Group[]
+  topItems: Array<Group & { code: string; uom: string; inQty: number; outQty: number }>
+}
+
 interface LedgerResponse {
   data: Row[]
   pagination: { page: number; pages: number; total: number }
   summary: Summary
   series: Day[]
   facets: Record<FilterKey, Array<{ value: string; label: string | null; count: number }>>
+  /** Only when the dashboard asks for it. */
+  analysis?: Analysis
 }
 
 const MOVEMENT: Record<string, { label: string; cls: string }> = {
@@ -230,8 +248,88 @@ function buckets(series: Day[], from: string, to: string) {
   return [...map.values()].map((b) => ({ ...b, label: label(b), unit }))
 }
 
+/**
+ * One cut of the movements — by store, by category — as a row each, with the
+ * value in and out drawn against the biggest row. Clicking a row filters by it.
+ */
+function GroupPanel({
+  title,
+  rows,
+  nameOf,
+  picked,
+  onPick,
+  top = 8,
+}: {
+  title: string
+  rows: Group[] | undefined
+  nameOf: (g: Group) => string
+  picked: string[]
+  onPick: (value: string) => void
+  top?: number
+}) {
+  const list = rows ?? []
+  const peak = Math.max(1, ...list.map((g) => Math.max(g.inValue, g.outValue)))
+  return (
+    <div className="glass-card p-4">
+      <div className="flex items-baseline justify-between">
+        <p className="text-sm font-medium text-foreground">{title}</p>
+        <p className="text-[11px] text-muted-foreground">in · out</p>
+      </div>
+      {!rows ? (
+        <p className="py-8 text-center text-xs text-muted-foreground">Loading...</p>
+      ) : list.length === 0 ? (
+        <p className="py-8 text-center text-xs text-muted-foreground">Nothing to show.</p>
+      ) : (
+        <div className="mt-2 space-y-0.5">
+          {list.slice(0, top).map((g) => {
+            const on = picked.includes(g.value)
+            return (
+              <button
+                key={g.value}
+                type="button"
+                onClick={() => onPick(g.value)}
+                title={`${nameOf(g)}\nIn ${rupees(g.inValue)} · Out ${rupees(g.outValue)} · ${g.moves} movements\n${on ? 'Click to stop showing only these' : 'Click to show only these'}`}
+                className={`grid w-full grid-cols-[minmax(0,9rem)_1fr_auto] items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-primary/5 ${on ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
+              >
+                <span className="truncate text-foreground">{nameOf(g)}</span>
+                <span className="space-y-0.5">
+                  <span className="block h-1.5 rounded-full bg-secondary">
+                    <span className="block h-1.5 rounded-full bg-emerald-500/70" style={{ width: `${(g.inValue / peak) * 100}%` }} />
+                  </span>
+                  <span className="block h-1.5 rounded-full bg-secondary">
+                    <span className="block h-1.5 rounded-full bg-red-400/70" style={{ width: `${(g.outValue / peak) * 100}%` }} />
+                  </span>
+                </span>
+                <span className="w-28 text-right tabular-nums leading-tight">
+                  <span className="block text-emerald-500">{rupees(g.inValue)}</span>
+                  <span className="block text-red-400">{g.outValue > 0 ? rupees(g.outValue) : '—'}</span>
+                </span>
+              </button>
+            )
+          })}
+          {list.length > top && (
+            <p className="px-2 pt-1 text-[11px] text-muted-foreground">and {list.length - top} more</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type View = 'movements' | 'dashboard'
+
 function LedgerScreen() {
   const params = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+  const view: View = params.get('view') === 'dashboard' ? 'dashboard' : 'movements'
+  const setView = (v: View) => {
+    const next = new URLSearchParams(params.toString())
+    if (v === 'dashboard') next.set('view', 'dashboard')
+    else next.delete('view')
+    const qs = next.toString()
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+  }
   // Arriving from an item page lands already filtered to that item.
   const itemId = params.get('itemId') ?? ''
 
@@ -274,6 +372,8 @@ function LedgerScreen() {
       const qs = filterQs()
       qs.set('page', String(page))
       qs.set('limit', '50')
+      // The dashboard's breakdowns cost a few more queries; only it asks.
+      if (view === 'dashboard') qs.set('analysis', '1')
       const r = await api.get<LedgerResponse>(`/inventory/ledger?${qs}`)
       if (id === latest.current) setRes(r)
     } catch (err) {
@@ -289,7 +389,7 @@ function LedgerScreen() {
     } finally {
       if (id === latest.current) setLoading(false)
     }
-  }, [filterQs, page])
+  }, [filterQs, page, view])
 
   useEffect(() => {
     void load()
@@ -369,6 +469,27 @@ function LedgerScreen() {
   }, [res?.facets?.movement])
   const mixPeak = Math.max(1, ...movementMix.map((m) => m.count))
 
+  const analysis = res?.analysis
+  const insight = useMemo(() => {
+    const days = res?.series ?? []
+    const busiest = days.reduce<Day | null>((b, d) => (!b || d.moves > b.moves ? d : b), null)
+    const biggest = days.reduce<Day | null>(
+      (b, d) => (!b || d.inValue + d.outValue > b.inValue + b.outValue ? d : b),
+      null,
+    )
+    return {
+      busiest,
+      biggest,
+      activeDays: days.length,
+      perDay: days.length ? (summary?.total ?? 0) / days.length : 0,
+    }
+  }, [res?.series, summary?.total])
+  const showDay = (day: string) => {
+    setFrom(day)
+    setTo(day)
+    setPreset('custom')
+  }
+
   /** Every movement the filters leave, as a spreadsheet. */
   const exportRows = async () => {
     setExporting(true)
@@ -422,6 +543,68 @@ function LedgerScreen() {
   const card = (active: boolean) =>
     `glass-card p-4 text-left transition-colors hover:border-primary/50 ${active ? 'border-primary ring-2 ring-primary/30' : ''}`
 
+  // The search and dropdowns, the same on both tabs. Raised so an open
+  // dropdown lies over whatever is below it.
+  const filterBar = (
+    <div className="relative z-20 space-y-2 px-4 py-3 border-b border-border">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex h-10 min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+          <Search size={14} className="text-muted-foreground" />
+          <input
+            className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
+            placeholder="Search item, code, store, note, customer..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search the ledger"
+          />
+          {search && (
+            <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
+              <X size={14} />
+            </button>
+          )}
+        </div>
+        {FILTERS.map((f) => (
+          <FilterMenu
+            key={f.key}
+            label={f.label}
+            choices={choicesFor(f.key)}
+            selected={picked[f.key] ?? []}
+            onChange={(next) => setFilter(f.key, next)}
+          />
+        ))}
+      </div>
+      {narrowed && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {chips.map((c) => (
+            <button
+              key={`${c.key}-${c.value}`}
+              type="button"
+              onClick={() => setFilter(c.key, (picked[c.key] ?? []).filter((v) => v !== c.value))}
+              className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+            >
+              {c.text} <X size={11} />
+            </button>
+          ))}
+          {(from || to) && (
+            <button
+              type="button"
+              onClick={() => pickPreset('all')}
+              className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+            >
+              {from === to ? dayTitle(from) : `${from ? dayTitle(from) : 'start'} – ${to ? dayTitle(to) : 'today'}`} <X size={11} />
+            </button>
+          )}
+          <button type="button" onClick={clearAll} className="text-xs text-teal-500 hover:underline">
+            Clear all
+          </button>
+          <span className="ml-auto text-xs text-muted-foreground">
+            {(summary?.total ?? 0).toLocaleString('en-IN')} movements
+          </span>
+        </div>
+      )}
+    </div>
+  )
+
   // The table, with a line at the top of each day saying what that day did.
   let lastDay = ''
 
@@ -450,6 +633,28 @@ function LedgerScreen() {
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
         </div>
+      </div>
+
+      <div className="flex gap-1 border-b border-border" role="tablist">
+        {([
+          { key: 'movements', label: 'Movements', icon: List },
+          { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        ] as const).map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={view === t.key}
+            onClick={() => setView(t.key)}
+            className={`-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm transition-colors ${
+              view === t.key
+                ? 'border-primary font-medium text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <t.icon size={15} /> {t.label}
+          </button>
+        ))}
       </div>
 
       {error && (
@@ -522,6 +727,7 @@ function LedgerScreen() {
       </div>
 
       {/* Four figures for what the filters leave, each a filter itself. */}
+      {view === 'movements' && (
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <button type="button" className={card(false)} onClick={clearAll} title="Clear every filter">
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -567,159 +773,250 @@ function LedgerScreen() {
           </p>
         </button>
       </div>
+      )}
 
-      {/* The shape of it: value in and out over the period, and what kind of movements they were. */}
-      <div className="grid gap-3 lg:grid-cols-3">
-        <div className="glass-card flex flex-col p-4 lg:col-span-2">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <p className="text-sm font-medium text-foreground">
-              Flow {bars[0] ? `by ${bars[0].unit}` : ''}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Net change{' '}
-              <span className={`font-semibold tabular-nums ${net >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
+      {view === 'dashboard' && (
+        <>
+          <div className="glass-card p-0">{filterBar}</div>
+
+          {/* What the period says, in four lines. */}
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <div className="glass-card p-4">
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Scale size={13} /> Net change
+              </p>
+              <p className={`mt-1 text-lg font-bold tabular-nums sm:text-2xl ${net >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
                 {net >= 0 ? '+' : ''}
                 {rupees(net)}
-              </span>
-            </p>
-          </div>
-          {bars.length === 0 ? (
-            <p className="py-10 text-center text-xs text-muted-foreground">No movements in this period.</p>
-          ) : (
-            <>
-              <div className="mt-3 flex h-36 flex-1 items-stretch gap-[2px] lg:h-auto lg:min-h-[9rem]" role="img" aria-label="Value in and out over the period">
-                {bars.map((b) => (
-                  <button
-                    key={b.key}
-                    type="button"
-                    onClick={() => {
-                      setFrom(b.from)
-                      setTo(b.to)
-                      setPreset('custom')
-                    }}
-                    title={`${b.from === b.to ? dayTitle(b.from) : `${dayTitle(b.from)} – ${dayTitle(b.to)}`}\nIn ${rupees(b.inValue)} · Out ${rupees(b.outValue)} · ${b.moves} movements\nClick to see only these`}
-                    className="group flex min-w-0 flex-1 flex-col rounded-sm hover:bg-primary/5"
-                  >
-                    <div className="flex flex-1 items-end justify-center">
-                      <div
-                        className="w-full max-w-[22px] rounded-t-sm bg-emerald-500/70 group-hover:bg-emerald-500"
-                        style={{ height: `${(b.inValue / peak) * 100}%`, minHeight: b.inValue > 0 ? 2 : 0 }}
-                      />
-                    </div>
-                    <div className="h-px w-full bg-border" />
-                    <div className="flex flex-1 items-start justify-center">
-                      <div
-                        className="w-full max-w-[22px] rounded-b-sm bg-red-400/70 group-hover:bg-red-400"
-                        style={{ height: `${(b.outValue / peak) * 100}%`, minHeight: b.outValue > 0 ? 2 : 0 }}
-                      />
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
-                <span>{bars[0].label}</span>
-                {bars.length > 2 && <span>{bars[Math.floor(bars.length / 2)].label}</span>}
-                <span>{bars[bars.length - 1].label}</span>
-              </div>
-              <div className="mt-2 flex gap-4 text-[11px] text-muted-foreground">
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-emerald-500" /> in, above the line</span>
-                <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-red-400" /> out, below it</span>
-                <span className="ml-auto hidden sm:inline">click a bar to see just that {bars[0].unit}</span>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="glass-card p-4">
-          <p className="text-sm font-medium text-foreground">By movement</p>
-          {movementMix.length === 0 ? (
-            <p className="py-10 text-center text-xs text-muted-foreground">Nothing to show.</p>
-          ) : (
-            <div className="mt-2 space-y-0.5">
-              {movementMix.map((m) => {
-                const on = picked.movement?.includes(m.value) ?? false
-                return (
-                  <button
-                    key={m.value}
-                    type="button"
-                    onClick={() => toggleOne('movement', m.value)}
-                    title={on ? 'Click to stop showing only these' : 'Click to show only these'}
-                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-primary/5 ${on ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
-                  >
-                    <span className="w-32 shrink-0 truncate">
-                      <span className={MOVEMENT[m.value]?.cls ?? 'badge-neutral'}>{m.label}</span>
-                    </span>
-                    <span className="h-1.5 flex-1 rounded-full bg-secondary">
-                      <span className="block h-1.5 rounded-full bg-primary/60" style={{ width: `${(m.count / mixPeak) * 100}%` }} />
-                    </span>
-                    <span className="w-8 shrink-0 text-right tabular-nums text-muted-foreground">{m.count}</span>
-                  </button>
-                )
-              })}
+              </p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                in {rupees(summary?.inValue ?? 0)} · out {rupees(summary?.outValue ?? 0)}
+              </p>
             </div>
-          )}
-        </div>
-      </div>
+            <button
+              type="button"
+              className={card(false)}
+              disabled={!insight.busiest}
+              onClick={() => insight.busiest && showDay(insight.busiest.day)}
+              title="Click to see that day"
+            >
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Flame size={13} className="text-amber-400" /> Busiest day
+              </p>
+              <p className="mt-1 text-lg font-bold text-foreground sm:text-2xl">
+                {insight.busiest ? dayTitle(insight.busiest.day).replace(/,? \d{4}$/, '') : '—'}
+              </p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {insight.busiest ? `${insight.busiest.moves} movements · click to see them` : 'no movements'}
+              </p>
+            </button>
+            <button type="button" className={card(false)} onClick={() => setView('movements')} title="See the movements">
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Boxes size={13} /> Items moved
+              </p>
+              <p className="mt-1 text-lg font-bold text-foreground tabular-nums sm:text-2xl">{summary?.items ?? 0}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                in {summary?.stores ?? 0} stores · {(summary?.total ?? 0).toLocaleString('en-IN')} movements
+              </p>
+            </button>
+            <div className="glass-card p-4">
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Gauge size={13} /> Average a day
+              </p>
+              <p className="mt-1 text-lg font-bold text-foreground tabular-nums sm:text-2xl">
+                {insight.perDay.toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+              </p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                movements, over {insight.activeDays} {insight.activeDays === 1 ? 'day' : 'days'} with any
+              </p>
+            </div>
+          </div>
 
+          {/* The shape of it: value in and out over the period, and what kind of movements they were. */}
+          <div className="grid gap-3 lg:grid-cols-3">
+            <div className="glass-card flex flex-col p-4 lg:col-span-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <p className="text-sm font-medium text-foreground">
+                  Flow {bars[0] ? `by ${bars[0].unit}` : ''}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Net change{' '}
+                  <span className={`font-semibold tabular-nums ${net >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
+                    {net >= 0 ? '+' : ''}
+                    {rupees(net)}
+                  </span>
+                </p>
+              </div>
+              {bars.length === 0 ? (
+                <p className="py-10 text-center text-xs text-muted-foreground">No movements in this period.</p>
+              ) : (
+                <>
+                  <div className="mt-3 flex h-36 flex-1 items-stretch gap-[2px] lg:h-auto lg:min-h-[9rem]" role="img" aria-label="Value in and out over the period">
+                    {bars.map((b) => (
+                      <button
+                        key={b.key}
+                        type="button"
+                        onClick={() => {
+                          setFrom(b.from)
+                          setTo(b.to)
+                          setPreset('custom')
+                        }}
+                        title={`${b.from === b.to ? dayTitle(b.from) : `${dayTitle(b.from)} – ${dayTitle(b.to)}`}\nIn ${rupees(b.inValue)} · Out ${rupees(b.outValue)} · ${b.moves} movements\nClick to see only these`}
+                        className="group flex min-w-0 flex-1 flex-col rounded-sm hover:bg-primary/5"
+                      >
+                        <div className="flex flex-1 items-end justify-center">
+                          <div
+                            className="w-full max-w-[22px] rounded-t-sm bg-emerald-500/70 group-hover:bg-emerald-500"
+                            style={{ height: `${(b.inValue / peak) * 100}%`, minHeight: b.inValue > 0 ? 2 : 0 }}
+                          />
+                        </div>
+                        <div className="h-px w-full bg-border" />
+                        <div className="flex flex-1 items-start justify-center">
+                          <div
+                            className="w-full max-w-[22px] rounded-b-sm bg-red-400/70 group-hover:bg-red-400"
+                            style={{ height: `${(b.outValue / peak) * 100}%`, minHeight: b.outValue > 0 ? 2 : 0 }}
+                          />
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+                    <span>{bars[0].label}</span>
+                    {bars.length > 2 && <span>{bars[Math.floor(bars.length / 2)].label}</span>}
+                    <span>{bars[bars.length - 1].label}</span>
+                  </div>
+                  <div className="mt-2 flex gap-4 text-[11px] text-muted-foreground">
+                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-emerald-500" /> in, above the line</span>
+                    <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-red-400" /> out, below it</span>
+                    <span className="ml-auto hidden sm:inline">click a bar to see just that {bars[0].unit}</span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="glass-card p-4">
+              <p className="text-sm font-medium text-foreground">By movement</p>
+              {movementMix.length === 0 ? (
+                <p className="py-10 text-center text-xs text-muted-foreground">Nothing to show.</p>
+              ) : (
+                <div className="mt-2 space-y-0.5">
+                  {movementMix.map((m) => {
+                    const on = picked.movement?.includes(m.value) ?? false
+                    return (
+                      <button
+                        key={m.value}
+                        type="button"
+                        onClick={() => toggleOne('movement', m.value)}
+                        title={on ? 'Click to stop showing only these' : 'Click to show only these'}
+                        className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-xs transition-colors hover:bg-primary/5 ${on ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
+                      >
+                        <span className="w-32 shrink-0 truncate">
+                          <span className={MOVEMENT[m.value]?.cls ?? 'badge-neutral'}>{m.label}</span>
+                        </span>
+                        <span className="h-1.5 flex-1 rounded-full bg-secondary">
+                          <span className="block h-1.5 rounded-full bg-primary/60" style={{ width: `${(m.count / mixPeak) * 100}%` }} />
+                        </span>
+                        <span className="w-8 shrink-0 text-right tabular-nums text-muted-foreground">{m.count}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <GroupPanel
+              title="By store"
+              rows={analysis?.byStore}
+              nameOf={(g) => g.label ?? g.value}
+              picked={picked.store ?? []}
+              onPick={(v) => toggleOne('store', v)}
+            />
+            <GroupPanel
+              title="By category"
+              rows={analysis?.byCategory}
+              nameOf={(g) => g.label ?? g.value}
+              picked={picked.category ?? []}
+              onPick={(v) => toggleOne('category', v)}
+            />
+            <GroupPanel
+              title="By department"
+              rows={analysis?.byDepartment}
+              nameOf={(g) => (g.value === 'none' ? 'No department' : (g.label ?? g.value))}
+              picked={picked.department ?? []}
+              onPick={(v) => toggleOne('department', v)}
+            />
+            <GroupPanel
+              title="By document"
+              rows={analysis?.byDocument}
+              nameOf={(g) => (g.value === 'none' ? 'No document' : docLabel(g.value))}
+              picked={picked.document ?? []}
+              onPick={(v) => toggleOne('document', v)}
+            />
+          </div>
+
+          {/* The items that moved the most money, in and out together. */}
+          <div className="glass-card p-0 overflow-hidden">
+            <div className="flex items-baseline justify-between px-4 pt-4">
+              <p className="text-sm font-medium text-foreground">Items that moved the most value</p>
+              <p className="text-[11px] text-muted-foreground">top 10 · click one for its movements</p>
+            </div>
+            {!analysis ? (
+              <p className="px-4 py-8 text-center text-xs text-muted-foreground">Loading...</p>
+            ) : analysis.topItems.length === 0 ? (
+              <p className="px-4 py-8 text-center text-xs text-muted-foreground">Nothing to show.</p>
+            ) : (
+              <div className="mt-2 overflow-x-auto">
+                <table className="data-table w-full [&>tbody>tr>td]:px-3 [&>thead>tr>th]:px-3">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Code</th>
+                      <th>Item</th>
+                      <th style={{ textAlign: 'right' }}>Came in</th>
+                      <th style={{ textAlign: 'right' }}>Went out</th>
+                      <th style={{ textAlign: 'right' }}>Value in</th>
+                      <th style={{ textAlign: 'right' }}>Value out</th>
+                      <th style={{ textAlign: 'right' }}>Movements</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {analysis.topItems.map((t, n) => (
+                      <tr
+                        key={t.value}
+                        className="cursor-pointer"
+                        onClick={() => {
+                          setSearch(t.code)
+                          setView('movements')
+                        }}
+                        title="Click to see this item's movements"
+                      >
+                        <td className="text-xs text-muted-foreground tabular-nums">{n + 1}</td>
+                        <td className="whitespace-nowrap font-mono text-xs text-teal-500">{t.code}</td>
+                        <td className="min-w-[180px] text-sm font-medium text-foreground">{t.label}</td>
+                        <td className="whitespace-nowrap text-right tabular-nums text-emerald-500">
+                          {t.inQty > 0 ? `+${qtyFmt(t.inQty)} ${t.uom}` : '—'}
+                        </td>
+                        <td className="whitespace-nowrap text-right tabular-nums text-red-400">
+                          {t.outQty > 0 ? `−${qtyFmt(t.outQty)} ${t.uom}` : '—'}
+                        </td>
+                        <td className="whitespace-nowrap text-right tabular-nums">{rupees(t.inValue)}</td>
+                        <td className="whitespace-nowrap text-right tabular-nums">{t.outValue > 0 ? rupees(t.outValue) : '—'}</td>
+                        <td className="text-right tabular-nums text-muted-foreground">{t.moves}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {view === 'movements' && (
       <div className="glass-card p-0 overflow-hidden">
-        {/* Raised so an open dropdown lies over the table below. */}
-        <div className="relative z-20 space-y-2 px-4 py-3 border-b border-border">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex h-10 min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
-              <Search size={14} className="text-muted-foreground" />
-              <input
-                className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
-                placeholder="Search item, code, store, note, customer..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                aria-label="Search the ledger"
-              />
-              {search && (
-                <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
-                  <X size={14} />
-                </button>
-              )}
-            </div>
-            {FILTERS.map((f) => (
-              <FilterMenu
-                key={f.key}
-                label={f.label}
-                choices={choicesFor(f.key)}
-                selected={picked[f.key] ?? []}
-                onChange={(next) => setFilter(f.key, next)}
-              />
-            ))}
-          </div>
-          {narrowed && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {chips.map((c) => (
-                <button
-                  key={`${c.key}-${c.value}`}
-                  type="button"
-                  onClick={() => setFilter(c.key, (picked[c.key] ?? []).filter((v) => v !== c.value))}
-                  className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
-                >
-                  {c.text} <X size={11} />
-                </button>
-              ))}
-              {(from || to) && (
-                <button
-                  type="button"
-                  onClick={() => pickPreset('all')}
-                  className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
-                >
-                  {from === to ? dayTitle(from) : `${from ? dayTitle(from) : 'start'} – ${to ? dayTitle(to) : 'today'}`} <X size={11} />
-                </button>
-              )}
-              <button type="button" onClick={clearAll} className="text-xs text-teal-500 hover:underline">
-                Clear all
-              </button>
-              <span className="ml-auto text-xs text-muted-foreground">
-                {(summary?.total ?? 0).toLocaleString('en-IN')} movements
-              </span>
-            </div>
-          )}
-        </div>
+        {filterBar}
 
         {loading && !res ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
@@ -835,6 +1132,7 @@ function LedgerScreen() {
 
         <Pagination page={page} pages={res?.pagination.pages ?? 1} onPageChange={setPage} busy={loading} />
       </div>
+      )}
     </div>
   )
 }
