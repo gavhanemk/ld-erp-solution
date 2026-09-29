@@ -35,10 +35,16 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [unread, setUnread] = useState(0)
   const [user, setUser] = useState<{ name?: string; role?: string } | null>(null)
+  // The browser's clock, not the server's. The page is first drawn on a
+  // server in UTC — on Vercel, once, at build time — so a greeting or a date
+  // worked out there rarely matches the one worked out here, and React throws
+  // away the page to redraw it (minified error #418).
+  const [now, setNow] = useState<Date | null>(null)
 
   // localStorage is only readable in the browser, so this waits for mount.
   useEffect(() => {
     setUser(currentUser())
+    setNow(new Date())
 
     const saved = localStorage.getItem('theme')
     const dark = saved !== 'light'
@@ -82,8 +88,8 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
     }
   }
 
-  const greeting = () => {
-    const h = new Date().getHours()
+  const greeting = (at: Date) => {
+    const h = at.getHours()
     if (h < 12) return 'Good Morning'
     if (h < 17) return 'Good Afternoon'
     return 'Good Evening'
@@ -104,8 +110,10 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
       </button>
 
       <div className="min-w-0 flex-1">
+        {/* A non-breaking space holds each line's height until the browser
+            has filled it in, so nothing below jumps when it does. */}
         <p className="truncate text-sm font-medium text-foreground">
-          {greeting()}
+          {now ? greeting(now) : ' '}
           {firstName && (
             <>
               , <span className="text-teal-400">{firstName}</span> 👋
@@ -116,12 +124,14 @@ export function TopBar({ sidebarCollapsed: _, onOpenMobileNav }: TopBarProps) {
             the most expensive: a wrapped date was what pushed everything to
             the right of it off the edge of the screen. */}
         <p className="hidden truncate text-xs text-muted-foreground sm:block">
-          {new Date().toLocaleDateString('en-IN', {
-            weekday: 'long',
-            day: 'numeric',
-            month: 'long',
-            year: 'numeric',
-          })}
+          {now
+            ? now.toLocaleDateString('en-IN', {
+                weekday: 'long',
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+              })
+            : ' '}
         </p>
       </div>
 
