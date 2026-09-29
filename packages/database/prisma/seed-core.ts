@@ -361,6 +361,10 @@ export async function seedCore(prisma: PrismaClient) {
     // Both used to leave nothing but a ledger row tagged with the clock.
     { docType: 'STN', prefix: 'STN' },
     { docType: 'ADJ', prefix: 'ADJ' },
+    // A customer's own material in, our fabric out to an outside unit, and what
+    // comes back from one. JW already existed and is the outward challan.
+    { docType: 'CGRN', prefix: 'CGRN' },
+    { docType: 'JWR', prefix: 'JWR' },
   ]
 
   for (const s of series) {

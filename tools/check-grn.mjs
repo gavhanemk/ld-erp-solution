@@ -106,6 +106,8 @@ const lineB = order.lines.find((l) => l.itemId === itemB.id)
 // ── receiving against a draft must be refused ──────────────────────────────
 const tooEarly = await call('POST', '/purchase/grn', {
   poId: order.id,
+  challanNo: "SUPP-CH-001",
+  challanDate: new Date().toISOString().slice(0, 10),
   lines: [{ poLineId: lineA.id, warehouseId: wh.id, receivedQty: 10 }],
 })
 check(
@@ -120,6 +122,8 @@ await call('PATCH', `/purchase/orders/${order.id}/send`)
 // ── first receipt: 60 arrive on line A, 5 of them rejected ─────────────────
 const grn1 = await call('POST', '/purchase/grn', {
   poId: order.id,
+  challanNo: "SUPP-CH-001",
+  challanDate: new Date().toISOString().slice(0, 10),
   vehicleNo: 'MH04AB1234',
   lines: [{ poLineId: lineA.id, warehouseId: wh.id, receivedQty: 60, rejectedQty: 5 }],
 })
@@ -143,6 +147,8 @@ check('order line shows 55 received, 45 pending', Number(l1?.receivedQty) === 55
 // ── over-receipt is refused and says what is left ──────────────────────────
 const over = await call('POST', '/purchase/grn', {
   poId: order.id,
+  challanNo: "SUPP-CH-001",
+  challanDate: new Date().toISOString().slice(0, 10),
   lines: [{ poLineId: lineA.id, warehouseId: wh.id, receivedQty: 100 }],
 })
 check('over-receipt is refused', over.status === 400 && over.json?.code === 'OVER_RECEIPT', over.json)
@@ -151,6 +157,8 @@ console.log(`        message: ${over.json?.message}`)
 // ── rejecting more than arrived is refused ─────────────────────────────────
 const badReject = await call('POST', '/purchase/grn', {
   poId: order.id,
+  challanNo: "SUPP-CH-001",
+  challanDate: new Date().toISOString().slice(0, 10),
   lines: [{ poLineId: lineA.id, warehouseId: wh.id, receivedQty: 5, rejectedQty: 9 }],
 })
 check('cannot reject more than arrived', badReject.status === 400, badReject.json?.message)
@@ -158,6 +166,8 @@ check('cannot reject more than arrived', badReject.status === 400, badReject.jso
 // ── second receipt completes the order ─────────────────────────────────────
 const grn2 = await call('POST', '/purchase/grn', {
   poId: order.id,
+  challanNo: "SUPP-CH-001",
+  challanDate: new Date().toISOString().slice(0, 10),
   lines: [
     { poLineId: lineA.id, warehouseId: wh.id, receivedQty: 45 },
     { poLineId: lineB.id, warehouseId: wh.id, receivedQty: 40 },
@@ -174,6 +184,8 @@ check(`second item went in (${beforeB} -> ${afterB})`, afterB === beforeB + 40, 
 // ── nothing more can be received ───────────────────────────────────────────
 const done = await call('POST', '/purchase/grn', {
   poId: order.id,
+  challanNo: "SUPP-CH-001",
+  challanDate: new Date().toISOString().slice(0, 10),
   lines: [{ poLineId: lineB.id, warehouseId: wh.id, receivedQty: 1 }],
 })
 check('a completed order refuses more', done.status === 400 && done.json?.code === 'PO_DONE', done.json)
