@@ -928,10 +928,51 @@ router.use(
     entityType: 'SizeGroup',
     createSchema: createSizeGroupSchema,
     updateSchema: updateSizeGroupSchema,
-    searchFields: ['name'],
+    // "xl" finds every run with an XL in it.
+    searchFields: ['name', 'sizes.some.label'],
     sortableFields: ['name'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { sizes: { orderBy: { sequence: 'asc' } } },
+    include: { sizes: { orderBy: { sequence: 'asc' } }, _count: { select: { styles: true } } },
+    filters: {
+      gender: {
+        where: (v) => {
+          const values = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (values.length) or.push({ gender: { in: values } })
+          if (v.includes('none')) or.push({ gender: null })
+          return { OR: or }
+        },
+        facets: ['gender'],
+      },
+      // Runs holding any of the sizes picked.
+      size: { where: (v) => ({ sizes: { some: { label: { in: v } } } }), facets: ['size'] },
+      // Whether any style is cut in it.
+      use: {
+        where: (v) =>
+          v.includes('used') && v.includes('unused')
+            ? {}
+            : v.includes('used')
+              ? { styles: { some: {} } }
+              : { styles: { none: {} } },
+        facets: ['use'],
+      },
+    },
+    facets: ['gender', 'size', 'use'],
+    customFacets: {
+      size: async (where) => {
+        const rows = await prisma.sizeGroup.findMany({ where, select: { sizes: { select: { label: true } } } })
+        const counts: Record<string, number> = {}
+        for (const r of rows) for (const l of new Set(r.sizes.map((x) => x.label))) counts[l] = (counts[l] ?? 0) + 1
+        return counts
+      },
+      use: async (where) => {
+        const [used, unused] = await Promise.all([
+          prisma.sizeGroup.count({ where: { AND: [where, { styles: { some: {} } }] } }),
+          prisma.sizeGroup.count({ where: { AND: [where, { styles: { none: {} } }] } }),
+        ])
+        return { used, unused }
+      },
+    },
   }),
 )
 

@@ -59,6 +59,8 @@ export interface FilterDef {
    * each its own label.
    */
   valuesFromFacet?: boolean
+  /** The order of those values, where A to Z is not it: sizes S, M, L. */
+  sortValues?: (a: string, b: string) => number
   /**
    * For a count that has to be added up rather than read off: a main
    * category counts the items under its sub-categories too.
@@ -254,7 +256,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
       for (const v of Object.keys(counts)) if (v && v !== 'none') seen.add(v)
       for (const v of picked[def.key] ?? []) if (v !== 'none') seen.add(v)
       list = [...seen]
-        .sort((a, b) => a.localeCompare(b))
+        // Numbers by value: 28, 30 … 40, not 28, 300, 30.
+        .sort(def.sortValues ?? ((a, b) => a.localeCompare(b, undefined, { numeric: true })))
         .map((v) => ({ value: v, label: v, count: counts[v] ?? 0 }))
       // Typed-in columns hold both nothing and an empty string; both are "not set".
       if (def.noneLabel) {
