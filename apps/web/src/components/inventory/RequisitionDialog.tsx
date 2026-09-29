@@ -1,8 +1,10 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { X, Loader2, AlertCircle, Plus, Trash2 } from 'lucide-react'
+import { Loader2, Plus, Trash2, ClipboardList, FileText, Package } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { Section } from '@/components/purchase/Section'
 
 /**
  * A department asking the store for material.
@@ -53,9 +55,11 @@ export function RequisitionDialog({
     void (async () => {
       try {
         const [i, d, w] = await Promise.all([
-          masterResource<ItemOption>('items').list({ limit: 500 }),
-          masterResource<{ id: string; name: string }>('departments').list({ limit: 100 }),
-          masterResource<{ id: string; name: string }>('warehouses').list({ limit: 100 }),
+          // Active only: a deactivated item, department or store is not offered
+          // for anything new.
+          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          masterResource<{ id: string; name: string }>('departments').list({ limit: 100, active: true }),
+          masterResource<{ id: string; name: string }>('warehouses').list({ limit: 100, active: true }),
         ])
         if (cancelled) return
         setItems(i.data)
@@ -106,175 +110,178 @@ export function RequisitionDialog({
     }
   }
 
+  const raise = (
+    <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>
+      {saving ? <Loader2 size={15} className="animate-spin" /> : <ClipboardList size={15} />}
+      Raise requisition
+    </button>
+  )
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm sm:p-8">
-      <div className="glass-card my-auto w-full max-w-4xl" role="dialog" aria-modal="true">
-        <div className="border-border flex items-start justify-between gap-4 border-b px-5 py-4">
-          <div>
-            <h2 className="text-foreground text-base font-semibold">New material requisition</h2>
-            <p className="text-muted-foreground mt-1 max-w-2xl text-xs">
-              Nothing leaves the store on this alone. Somebody else has to approve it, and then the
-              store hands it over — those are three different people on purpose.
-            </p>
-          </div>
-          <button className="btn-ghost p-1.5" onClick={onClose} aria-label="Close">
-            <X size={16} />
-          </button>
-        </div>
-
-        <div className="space-y-4 px-5 py-4">
-          {error && (
-            <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
-              <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
-              <p className="text-sm text-red-400">{error}</p>
-            </div>
-          )}
-
-          <div className="grid gap-3 sm:grid-cols-3">
-            <label className="block">
-              <span className="form-label">Department asking</span>
-              <select
-                className="form-input"
-                value={departmentId}
-                onChange={(e) => setDepartmentId(e.target.value)}
-                disabled={loadingLists}
-              >
-                <option value="">Choose…</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              <span className="form-label">Draw from</span>
-              <select
-                className="form-input"
-                value={warehouseId}
-                onChange={(e) => setWarehouseId(e.target.value)}
-                disabled={loadingLists}
-              >
-                <option value="">Choose…</option>
-                {warehouses.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block">
-              <span className="form-label">Needed by (optional)</span>
-              <input
-                type="date"
-                className="form-input"
-                value={requiredDate}
-                onChange={(e) => setRequiredDate(e.target.value)}
-              />
-            </label>
-          </div>
-
-          <div className="border-border overflow-x-auto rounded-lg border">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th style={{ width: '40%' }}>Item</th>
-                  <th style={{ textAlign: 'right' }}>Quantity</th>
-                  <th>What for</th>
-                  <th style={{ width: 40 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((line, i) => (
-                  <tr key={i}>
-                    <td>
-                      <select
-                        className="form-input h-9"
-                        value={line.itemId}
-                        onChange={(e) => setLine(i, { itemId: e.target.value })}
-                        disabled={loadingLists}
-                        aria-label={`Item on line ${i + 1}`}
-                      >
-                        <option value="">Choose an item…</option>
-                        {items.map((it) => (
-                          <option key={it.id} value={it.id}>
-                            {it.code} — {it.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <input
-                          type="number"
-                          step="0.001"
-                          min="0"
-                          className="form-input h-9 w-28 text-right tabular-nums"
-                          value={line.requestedQty}
-                          onChange={(e) => setLine(i, { requestedQty: e.target.value })}
-                          aria-label={`Quantity on line ${i + 1}`}
-                        />
-                        <span className="text-muted-foreground w-8 text-left text-xs">
-                          {itemsById.get(line.itemId)?.uom?.symbol ?? ''}
-                        </span>
-                      </div>
-                    </td>
-                    <td>
-                      <input
-                        className="form-input h-9"
-                        value={line.purpose}
-                        onChange={(e) => setLine(i, { purpose: e.target.value })}
-                        placeholder="Cutting lay 1, sample, …"
-                        aria-label={`Purpose on line ${i + 1}`}
-                      />
-                    </td>
-                    <td className="text-right">
-                      <button
-                        className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
-                        onClick={() =>
-                          setLines((prev) =>
-                            prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
-                          )
-                        }
-                        aria-label={`Remove line ${i + 1}`}
-                      >
-                        <Trash2 size={15} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <button
-            className="btn-ghost text-xs"
-            onClick={() => setLines((prev) => [...prev, emptyLine()])}
-          >
-            <Plus size={14} /> Add another item
-          </button>
-
-          <label className="block">
-            <span className="form-label">Note (optional)</span>
-            <input
+    <FormFrame
+      icon={ClipboardList}
+      title="New material requisition"
+      subtitle="A department asking the store for material. Somebody else approves it, and then the store hands it over."
+      primary={raise}
+      footer={
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
+          Cancel
+        </button>
+      }
+      footerNote="Three different people on purpose: who asks, who approves, who hands over."
+      error={error}
+      onClose={onClose}
+      busy={saving}
+    >
+      <Section icon={FileText} title="Basic Details">
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
+          <label className="block min-w-0">
+            <span className="form-label">
+              Department asking<span className="ml-0.5 text-red-500">*</span>
+            </span>
+            <select
               className="form-input"
+              value={departmentId}
+              onChange={(e) => setDepartmentId(e.target.value)}
+              disabled={loadingLists}
+              autoFocus
+            >
+              <option value="">{loadingLists ? 'Loading...' : 'Choose a department...'}</option>
+              {departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="form-label">
+              Draw from<span className="ml-0.5 text-red-500">*</span>
+            </span>
+            <select
+              className="form-input"
+              value={warehouseId}
+              onChange={(e) => setWarehouseId(e.target.value)}
+              disabled={loadingLists}
+            >
+              <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
+              {warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block min-w-0">
+            <span className="form-label">Needed by</span>
+            <input
+              type="date"
+              className="form-input"
+              value={requiredDate}
+              onChange={(e) => setRequiredDate(e.target.value)}
+            />
+          </label>
+          <label className="block min-w-0 sm:col-span-3">
+            <span className="form-label">Note</span>
+            <input
+              className="form-input placeholder:text-muted-foreground/60"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Against which order, or anything the store should know"
             />
           </label>
         </div>
+      </Section>
 
-        <div className="border-border flex items-center justify-end gap-2 border-t px-5 py-4">
-          <button className="btn-ghost" onClick={onClose} disabled={saving}>
-            Cancel
+      <Section
+        icon={Package}
+        title="Items"
+        actions={
+          <button
+            type="button"
+            className="btn-secondary h-8 px-3 text-xs"
+            onClick={() => setLines((prev) => [...prev, emptyLine()])}
+          >
+            <Plus size={14} /> Add another item
           </button>
-          <button className="btn-primary" onClick={() => void save()} disabled={saving}>
-            {saving && <Loader2 size={15} className="animate-spin" />}
-            Raise it
-          </button>
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="line-table w-full min-w-[620px] text-sm">
+            <thead>
+              <tr>
+                <th style={{ width: 36 }}>#</th>
+                <th style={{ width: '45%' }}>Item</th>
+                <th style={{ textAlign: 'right' }}>Quantity</th>
+                <th>What for</th>
+                <th style={{ width: 40 }} />
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((line, i) => (
+                <tr key={i}>
+                  <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
+                  <td className="px-3 py-2">
+                    <select
+                      className="form-input h-9"
+                      value={line.itemId}
+                      onChange={(e) => setLine(i, { itemId: e.target.value })}
+                      disabled={loadingLists}
+                      aria-label={`Item on line ${i + 1}`}
+                    >
+                      <option value="">Choose an item...</option>
+                      {items.map((it) => (
+                        <option key={it.id} value={it.id}>
+                          {it.code} — {it.name}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      <input
+                        type="number"
+                        step="0.001"
+                        min="0"
+                        className="form-input h-9 w-28 text-right tabular-nums"
+                        value={line.requestedQty}
+                        onChange={(e) => setLine(i, { requestedQty: e.target.value })}
+                        aria-label={`Quantity on line ${i + 1}`}
+                      />
+                      <span className="text-muted-foreground w-8 text-left text-xs">
+                        {itemsById.get(line.itemId)?.uom?.symbol ?? ''}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <input
+                      className="form-input h-9 placeholder:text-muted-foreground/60"
+                      value={line.purpose}
+                      onChange={(e) => setLine(i, { purpose: e.target.value })}
+                      placeholder="e.g. Cutting lay 1, sample"
+                      aria-label={`Purpose on line ${i + 1}`}
+                    />
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      type="button"
+                      className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                      onClick={() =>
+                        setLines((prev) =>
+                          prev.length === 1 ? [emptyLine()] : prev.filter((_, x) => x !== i)
+                        )
+                      }
+                      aria-label={`Remove line ${i + 1}`}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      </div>
-    </div>
+      </Section>
+    </FormFrame>
   )
 }
