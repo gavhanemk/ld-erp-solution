@@ -384,6 +384,71 @@ export async function transferStock(
 }
 
 /**
+ * Which items need reordering: the one answer every screen gives.
+ *
+ * An item needs reordering when our own stock of it, every store together, is
+ * at or below its reorder level. Four screens used to work this out four ways:
+ * the stock list store by store (so an item split across two stores could be
+ * low in one and fine overall, and one with nothing anywhere never showed up at
+ * all), the dashboard counting a customer's fabric as ours. Now there is this.
+ *
+ * Only active items with a reorder level above nought. An item that has never
+ * moved is at nought, which is below any reorder level, and is included.
+ */
+export async function reorderStatus(
+  tx: Prisma.TransactionClient,
+  filters: { itemId?: string } = {},
+): Promise<
+  Array<{
+    itemId: string
+    itemCode: string
+    itemName: string
+    uom: string
+    categoryId: string
+    categoryName: string
+    reorderLevel: number
+    onHand: number
+    isLow: boolean
+  }>
+> {
+  const rows = await tx.$queryRaw<
+    Array<{
+      itemId: string
+      itemCode: string
+      itemName: string
+      uom: string
+      categoryId: string
+      categoryName: string
+      reorderLevel: number
+      onHand: number
+    }>
+  >`
+    SELECT
+      i.id                                   AS "itemId",
+      i.code                                 AS "itemCode",
+      i.name                                 AS "itemName",
+      u.symbol                               AS "uom",
+      i."categoryId"                         AS "categoryId",
+      c.name                                 AS "categoryName",
+      i."reorderLevel"::float8               AS "reorderLevel",
+      COALESCE(SUM(s."inQty" - s."outQty") FILTER (WHERE s."ownership" = 'OWNED'), 0)::float8 AS "onHand"
+    FROM ld_erp.items i
+    JOIN ld_erp.uom             u ON u.id = i."uomId"
+    JOIN ld_erp.item_categories c ON c.id = i."categoryId"
+    LEFT JOIN ld_erp.stock_ledger s ON s."itemId" = i.id
+    WHERE i."isActive" = true
+      AND i."reorderLevel" > 0
+      AND (${filters.itemId ?? null}::text IS NULL OR i.id = ${filters.itemId ?? null})
+    GROUP BY i.id, i.code, i.name, u.symbol, i."categoryId", c.name, i."reorderLevel"
+    ORDER BY i.name ASC
+  `
+  return rows.map((r) => {
+    const onHand = round3(r.onHand)
+    return { ...r, onHand, isLow: onHand <= r.reorderLevel }
+  })
+}
+
+/**
  * Everything on hand, one row per item and warehouse.
  *
  * Grouped in SQL rather than by reading every movement into memory: a mill runs
@@ -398,7 +463,10 @@ export async function onHand(
     warehouseId?: string
     categoryId?: string
     ownership?: StockOwnership
-    /** Only rows at or below the item's reorder level. */
+    /**
+     * Only items that need reordering (see `reorderStatus`), with a row for
+     * each that has nothing in any store, since that is the most urgent.
+     */
     lowOnly?: boolean
     search?: string
     /**
@@ -428,7 +496,10 @@ export async function onHand(
     qty: number
     value: number
     avgRate: number
+    /** The item needs reordering: our own stock, every store together, is at or below its reorder level. */
     isLow: boolean
+    /** Our own stock of the item in every store together, where it has a reorder level. */
+    itemOnHand: number | null
     lastMovedAt: Date | null
   }>
 > {
@@ -490,18 +561,59 @@ export async function onHand(
     ORDER BY i.name ASC, w.name ASC
   `
 
-  return rows
+  const status = new Map((await reorderStatus(tx, { itemId: filters.itemId })).map((r) => [r.itemId, r]))
+
+  const out = rows
     .map((r) => {
       const qty = round3(r.qty)
       const value = round2(r.value)
-      const isLow = r.reorderLevel !== null && qty <= r.reorderLevel
+      const item = status.get(r.itemId)
       return {
         ...r,
         qty,
         value,
         avgRate: qty > 0 ? round2(value / qty) : 0,
-        isLow,
+        // A customer's fabric is not ours to reorder.
+        isLow: r.ownership === 'OWNED' && Boolean(item?.isLow),
+        itemOnHand: item ? item.onHand : null,
       }
     })
     .filter((r) => (filters.lowOnly ? r.isLow : true))
+
+  // Asked for what needs reordering: an item with nothing in any store has no
+  // row above, and it is the one most in need.
+  if (filters.lowOnly && !filters.warehouseId && !filters.ownership?.startsWith('CUSTOMER')) {
+    const shown = new Set(out.map((r) => r.itemId))
+    const words = (filters.searchWords ?? []).map((w) => w.toLowerCase())
+    const text = filters.search?.toLowerCase()
+    for (const item of status.values()) {
+      if (!item.isLow || shown.has(item.itemId)) continue
+      if (filters.categoryId && item.categoryId !== filters.categoryId) continue
+      const hay = `${item.itemName} ${item.itemCode}`.toLowerCase()
+      if (text && !hay.includes(text)) continue
+      if (words.length && !words.every((w) => hay.includes(w))) continue
+      out.push({
+        itemId: item.itemId,
+        itemCode: item.itemCode,
+        itemName: item.itemName,
+        uom: item.uom,
+        categoryName: item.categoryName,
+        reorderLevel: item.reorderLevel,
+        warehouseId: '',
+        warehouseName: 'None in any store',
+        ownership: 'OWNED',
+        ownerCustomerId: null,
+        ownerName: null,
+        qty: 0,
+        value: 0,
+        avgRate: 0,
+        isLow: true,
+        itemOnHand: item.onHand,
+        lastMovedAt: null,
+      })
+    }
+    out.sort((a, b) => a.itemName.localeCompare(b.itemName))
+  }
+
+  return out
 }

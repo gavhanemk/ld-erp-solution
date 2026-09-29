@@ -9,6 +9,7 @@ import {
   lockedBalanceOf,
   onHand,
   recordMovement,
+  reorderStatus,
   transferStock,
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
@@ -33,14 +34,14 @@ const str = (v: unknown): string | undefined =>
 // ── What is on hand ─────────────────────────────────────────────────────────
 
 router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
-  const rows = await onHand(prisma, {
+  const [rows, reorder] = await Promise.all([onHand(prisma, {
     itemId: str(req.query.itemId),
     warehouseId: str(req.query.warehouseId),
     categoryId: str(req.query.categoryId),
     ownership: str(req.query.ownership) as never,
     lowOnly: req.query.low === 'true',
     search: str(req.query.q),
-  })
+  }), reorderStatus(prisma)])
 
   res.json({
     success: true,
@@ -52,9 +53,23 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
       totalValue: rows
         .filter((r) => r.ownership === 'OWNED')
         .reduce((sum, r) => sum + r.value, 0),
-      lowCount: rows.filter((r) => r.isLow).length,
+      // Items, not rows: an item in two stores is one thing to reorder. The
+      // same count the dashboard shows.
+      lowCount: reorder.filter((r) => r.isLow).length,
     },
   })
+})
+
+/**
+ * The items that need reordering, and how far below they are.
+ *
+ * The same rule as the stock screen and the dashboard (`reorderStatus`), for
+ * any screen that only wants to mark them: the items master shows its warning
+ * on these and no others.
+ */
+router.get('/reorder', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const rows = (await reorderStatus(prisma)).filter((r) => r.isLow)
+  res.json({ success: true, data: rows })
 })
 
 /** One item: where it is, and what has happened to it lately. */

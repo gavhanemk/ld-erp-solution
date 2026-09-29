@@ -160,7 +160,7 @@ export default function StockItemPage() {
             {item.reorderLevel !== null ? qtyFmt(Number(item.reorderLevel)) : '—'}
           </p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {item.reorderLevel !== null && totals.qty <= Number(item.reorderLevel)
+            {Number(item.reorderLevel) > 0 && totals.qty <= Number(item.reorderLevel)
               ? 'below it — time to order'
               : 'comfortable'}
           </p>

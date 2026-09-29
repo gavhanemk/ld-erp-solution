@@ -1,6 +1,8 @@
 'use client'
 
+import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
+import { api } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 
@@ -39,7 +41,12 @@ const TYPE_LABEL: Record<string, { label: string; cls: string }> = {
   TRIM: { label: 'Trim', cls: 'badge-purple' },
 }
 
-const columns: Column<Item>[] = [
+/**
+ * The list's columns. `toReorder` is the items that need reordering, by id,
+ * with their stock: the warning shows on those and no others. It used to show
+ * on every item that had a reorder level, whatever its stock.
+ */
+const columnsFor = (toReorder: Map<string, number>): Column<Item>[] => [
   // A code is one token; broken over two lines it reads as two.
   {
     key: 'code',
@@ -106,8 +113,17 @@ const columns: Column<Item>[] = [
     align: 'right',
     render: (i) =>
       i.reorderLevel ? (
-        <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs">
-          <AlertTriangle size={12} className="text-amber-400" />
+        <span
+          className={`inline-flex items-center gap-1 whitespace-nowrap text-xs ${
+            toReorder.has(i.id) ? 'font-semibold text-amber-500' : ''
+          }`}
+          title={
+            toReorder.has(i.id)
+              ? `Needs reordering: ${toReorder.get(i.id)!.toLocaleString('en-IN')} ${i.uom?.symbol ?? ''} in all stores`
+              : undefined
+          }
+        >
+          {toReorder.has(i.id) && <AlertTriangle size={12} className="text-amber-500" />}
           {Number(i.reorderLevel).toLocaleString('en-IN')} {i.uom?.symbol ?? ''}
         </span>
       ) : (
@@ -281,6 +297,17 @@ const filterDefs: FilterDef[] = [
 ]
 
 export default function ItemsPage() {
+  // Which items need reordering, by the same rule as the stock screen. Someone
+  // without access to stock simply sees no warnings.
+  const [toReorder, setToReorder] = useState<Map<string, number>>(new Map())
+  useEffect(() => {
+    api
+      .get<{ data: Array<{ itemId: string; onHand: number }> }>('/inventory/reorder')
+      .then((res) => setToReorder(new Map(res.data.map((r) => [r.itemId, r.onHand]))))
+      .catch(() => {})
+  }, [])
+  const columns = useMemo(() => columnsFor(toReorder), [toReorder])
+
   return (
     <MasterTable<Item>
       title="Items"

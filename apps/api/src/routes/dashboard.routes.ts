@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { prisma } from '@ld-erp/database'
+import { reorderStatus } from '../services/stock.service'
 import { AuthRequest, userCan } from '../middleware/auth'
 import { getNumericPreference } from '../lib/preferences'
 
@@ -223,46 +224,42 @@ router.get('/low-stock', async (req, res) => {
   // the reorder level, so there is time to raise a purchase order.
   const bufferPercent = await getNumericPreference('lowStockBufferPercent', 0)
 
-  const items = await prisma.item.findMany({
-    where: { isActive: true, reorderLevel: { gt: 0 } },
-    select: { id: true, code: true, name: true, reorderLevel: true, uom: { select: { symbol: true } } },
-  })
-  if (items.length === 0) return res.json({ success: true, data: [] })
+  // The same rule as the stock screen: our own stock, every store together,
+  // at or below the reorder level. A customer's fabric in our godown used to be
+  // added in here, which could hide a real shortage.
+  const status = await reorderStatus(prisma)
 
-  // Stock on hand is the ledger's net movement per item, across warehouses.
-  const movements = await prisma.stockLedger.groupBy({
-    by: ['itemId'],
-    where: { itemId: { in: items.map((i) => i.id) } },
-    _sum: { inQty: true, outQty: true },
-  })
-
-  const onHand = new Map(
-    movements.map((m) => [m.itemId, Number(m._sum.inQty ?? 0) - Number(m._sum.outQty ?? 0)]),
-  )
-
-  const low = items
-    .map((i) => {
-      const reorderLevel = Number(i.reorderLevel)
-      return {
-        id: i.id,
-        code: i.code,
-        name: i.name,
-        uom: i.uom?.symbol ?? '',
-        reorderLevel,
-        // An item that has never moved is at zero, which is genuinely below its
-        // reorder level and should be flagged.
-        currentStock: onHand.get(i.id) ?? 0,
-        warnAt: reorderLevel * (1 + bufferPercent / 100),
-      }
-    })
+  const warned = status
+    .map((i) => ({
+      id: i.itemId,
+      code: i.itemCode,
+      name: i.itemName,
+      uom: i.uom,
+      reorderLevel: i.reorderLevel,
+      currentStock: i.onHand,
+      warnAt: i.reorderLevel * (1 + bufferPercent / 100),
+      belowReorder: i.isLow,
+    }))
     .filter((i) => i.currentStock <= i.warnAt)
     // Items already at or under the reorder level are the real shortages; the
     // buffer only brings the next ones into view, so they sort behind.
-    .map((i) => ({ ...i, belowReorder: i.currentStock <= i.reorderLevel }))
-    .sort((a, b) => a.currentStock - a.reorderLevel - (b.currentStock - b.reorderLevel))
-    .slice(0, limit)
+    .sort(
+      (a, b) =>
+        Number(b.belowReorder) - Number(a.belowReorder) ||
+        a.currentStock - a.reorderLevel - (b.currentStock - b.reorderLevel),
+    )
 
-  res.json({ success: true, data: low })
+  const low = warned.slice(0, limit)
+  // The list is cut to fit the card; the totals say how many there are in all,
+  // so the card and the stock screen give the same number.
+  res.json({
+    success: true,
+    data: low,
+    totals: {
+      toReorder: warned.filter((i) => i.belowReorder).length,
+      comingUp: warned.filter((i) => !i.belowReorder).length,
+    },
+  })
 })
 
 // GET /api/dashboard/production-today
