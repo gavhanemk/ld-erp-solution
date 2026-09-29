@@ -96,6 +96,8 @@ interface MasterTableProps<T> {
    * sent for it, and no Deactivate. Pair with allowDelete.
    */
   noActiveFlag?: boolean
+  /** Changing this reloads the list, for a change made outside it (an import). */
+  refreshKey?: number
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
 }
@@ -115,6 +117,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   filterDefs = [],
   allowDelete = false,
   noActiveFlag = false,
+  refreshKey = 0,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -307,7 +310,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
 
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
 
   /**
    * Masters are referenced by transactions forever, so the API deactivates

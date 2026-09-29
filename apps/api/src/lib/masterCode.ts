@@ -45,7 +45,7 @@ export const CODE_ATTEMPTS = 5
  * unique and correct and would still make the list harder to read, so the
  * category's own name decides the prefix.
  */
-async function itemPrefix(categoryId: unknown): Promise<string> {
+export async function itemPrefix(categoryId: unknown): Promise<string> {
   if (typeof categoryId !== 'string' || !categoryId) return PREFIX.item
 
   const category = await prisma.itemCategory.findUnique({

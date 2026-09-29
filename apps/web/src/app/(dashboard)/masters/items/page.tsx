@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle } from 'lucide-react'
+import { AlertTriangle, FileSpreadsheet } from 'lucide-react'
+import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { api } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
@@ -317,7 +318,12 @@ export default function ItemsPage() {
   }, [])
   const columns = useMemo(() => columnsFor(toReorder), [toReorder])
 
+  // Bringing many items, and today's stock, in from a spreadsheet.
+  const [importing, setImporting] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+
   return (
+    <>
     <MasterTable<Item>
       title="Items"
       entityName="Item"
@@ -325,10 +331,23 @@ export default function ItemsPage() {
       columns={columns}
       formFields={formFields}
       formColumns={4}
+      refreshKey={refreshKey}
+      actions={
+        <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
+          <FileSpreadsheet size={16} /> Import
+        </button>
+      }
       filterDefs={filterDefs}
       defaultSort="name"
       searchPlaceholder="Search name, code, HSN, category, department..."
       emptyMessage="No items yet. Add fabric, thread, buttons and other materials here."
     />
+    {importing && (
+      <ImportItemsDialog
+        onClose={() => setImporting(false)}
+        onImported={() => setRefreshKey((k) => k + 1)}
+      />
+    )}
+    </>
   )
 }

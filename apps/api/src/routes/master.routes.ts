@@ -2,10 +2,11 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
+import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import {
   copyBomSchema,
   createBomSchema,
@@ -357,6 +358,73 @@ router.use(
     defaultSort: { field: 'name', order: 'asc' },
   }),
 )
+
+/*
+ * Items from a spreadsheet: the template to fill, and the filled sheet read
+ * back. Posting without `confirm` only checks the sheet and says what each row
+ * would do; with it, the whole sheet is written in one go. Ahead of the items
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/items/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withItems = req.query.withItems === 'true'
+  const buffer = await buildTemplate(withItems)
+  const name = withItems ? 'items-with-current-list.xlsx' : 'items-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+const importBody = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  confirm: z.boolean().optional(),
+})
+
+router.post('/items/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await planImport(rows)
+
+  // Stock is the inventory's, so bringing it in needs the inventory's right too.
+  const withStock = plans.some((p) => p.stock)
+  if (withStock && !userCan(req.user, 'inventory', 'create')) {
+    throw new AppError(
+      'This sheet brings in stock, and your role cannot enter stock. Remove the stock columns, or ask someone from the store.',
+      403,
+      'NO_STOCK_RIGHT',
+    )
+  }
+
+  const summary = {
+    rows: plans.length,
+    newItems: new Set(plans.filter((p) => p.plan.item === 'new').map((p) => p.itemKey)).size,
+    existingItems: new Set(plans.filter((p) => p.plan.item === 'existing' && !p.plan.skipped).map((p) => p.itemKey)).size,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    stockLines: plans.filter((p) => p.stock).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const done = await runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'ItemImport',
+    entityId: done.reference,
+    after: { fileName, created: done.created, stockLines: done.stockLines },
+  })
+  res.status(201).json({
+    success: true,
+    message: `Imported ${done.created.length} new ${done.created.length === 1 ? 'item' : 'items'}${
+      done.stockLines ? ` and ${done.stockLines} ${done.stockLines === 1 ? 'line' : 'lines'} of opening stock` : ''
+    }.`,
+    data: { summary, created: done.created, stockLines: done.stockLines },
+  })
+})
 
 router.use(
   '/items',
