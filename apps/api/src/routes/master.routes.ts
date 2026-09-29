@@ -757,6 +757,16 @@ router.use(
       },
     },
     facets: ['parentId', 'departmentId'],
+    /*
+     * Deleting for good. An item must have a category, so its items move to
+     * the one the person picks. A main category with sub-categories under it
+     * is refused until they are deleted or moved: taking them along to another
+     * category, unasked, would re-file every item beneath them.
+     */
+    permanentDelete: {
+      children: { one: 'sub-category', many: 'sub-categories', then: 'refuse' },
+      items: { one: 'item', many: 'items', model: 'item', field: 'categoryId', then: 'move' },
+    },
     // Counted the way the filter matches: a category counts once for its own
     // department and each of its sub-categories', so "Cutting 9" is Fabric
     // and its eight sub-categories, the nine rows the filter then shows.

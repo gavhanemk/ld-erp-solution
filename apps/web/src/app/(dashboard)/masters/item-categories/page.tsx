@@ -192,6 +192,8 @@ export default function ItemCategoriesPage() {
         searchPlaceholder="Search categories..."
         emptyMessage="No categories yet. Add one, then add subcategories beneath it."
         refreshKey={refreshKey}
+        allowDelete
+        deleteRefusedHint="Delete those sub-categories, or move them under another category, first."
         actions={
           <button type="button" className="btn-secondary" onClick={() => setImporting(true)}>
             <FileSpreadsheet size={16} /> Import

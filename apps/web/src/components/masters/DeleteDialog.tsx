@@ -30,6 +30,7 @@ export function DeleteDialog({
   id,
   name,
   entityName,
+  refusedHint = 'Take it off those first.',
   onClose,
   onDeleted,
 }: {
@@ -38,6 +39,8 @@ export function DeleteDialog({
   name: string
   /** "Department" */
   entityName: string
+  /** What to do about whatever stops the delete. */
+  refusedHint?: string
   onClose: () => void
   /** Called with the API's sentence saying what was done. */
   onDeleted: (message: string) => void
@@ -57,13 +60,21 @@ export function DeleteDialog({
         if (cancelled) return
         setCheck(res.data)
         if (res.data.move.length) {
-          const list = await masterResource<{ id: string; name: string }>(resource).list({
+          const list = await masterResource<{ id: string; name: string; parent?: { name: string } | null }>(
+            resource,
+          ).list({
             limit: 200,
             active: true,
             sort: 'name',
             order: 'asc',
           })
-          if (!cancelled) setTargets(list.data.filter((r) => r.id !== id))
+          // A record under another (a sub-category) is named with its parent,
+          // "Fabric / Cotton", and sits beside it in the list.
+          const named = list.data
+            .filter((r) => r.id !== id)
+            .map((r) => ({ id: r.id, name: r.parent ? `${r.parent.name} / ${r.name}` : r.name }))
+            .sort((a, b) => a.name.localeCompare(b.name))
+          if (!cancelled) setTargets(named)
         }
       })
       .catch((err) => {
@@ -137,8 +148,7 @@ export function DeleteDialog({
           {refused.length > 0 && (
             <p className="text-foreground">
               It cannot be deleted: <span className="font-medium">{sentence(refused)}</span> still{' '}
-              {refused.length === 1 && refused[0].startsWith('1 ') ? 'uses' : 'use'} it. Take it off those
-              first.
+              {refused.length === 1 && refused[0].startsWith('1 ') ? 'uses' : 'use'} it. {refusedHint}
             </p>
           )}
 
@@ -146,7 +156,7 @@ export function DeleteDialog({
             <p className="text-foreground">Nothing uses this {noun}, so nothing else changes.</p>
           )}
 
-          {check && check.move.length > 0 && (
+          {check && !refused.length && check.move.length > 0 && (
             <div className="space-y-2">
               <p className="text-foreground">
                 <span className="font-medium">{sentence(check.move)}</span>{' '}
@@ -175,13 +185,13 @@ export function DeleteDialog({
             </div>
           )}
 
-          {check && check.blank.length > 0 && (
+          {check && !refused.length && check.blank.length > 0 && (
             <p className="text-foreground">
               <span className="font-medium">{sentence(check.blank)}</span> will be left with no {noun}.
             </p>
           )}
 
-          {check && (check.move.length > 0 || check.blank.length > 0) && (
+          {check && !refused.length && (check.move.length > 0 || check.blank.length > 0) && (
             <p className="text-muted-foreground flex items-start gap-2 text-xs">
               <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />
               Past records change too.

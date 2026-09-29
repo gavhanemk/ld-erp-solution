@@ -91,6 +91,8 @@ interface MasterTableProps<T> {
    * or move, and asks where, before anything is done.
    */
   allowDelete?: boolean
+  /** What the delete box tells the person to do about what stops a delete. */
+  deleteRefusedHint?: string
   /**
    * The master has no active flag (sizes): no "Active only" tick, nothing
    * sent for it, and no Deactivate. Pair with allowDelete.
@@ -116,6 +118,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   entityName,
   filterDefs = [],
   allowDelete = false,
+  deleteRefusedHint,
   noActiveFlag = false,
   refreshKey = 0,
 }: MasterTableProps<T>) {
@@ -642,6 +645,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
               singular,
           )}
           entityName={singular}
+          refusedHint={deleteRefusedHint}
           onClose={() => setDeleting(null)}
           onDeleted={(message) => {
             setDeleting(null)
