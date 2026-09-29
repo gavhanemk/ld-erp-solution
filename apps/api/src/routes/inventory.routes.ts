@@ -1,11 +1,19 @@
 import { Router } from 'express'
-import { prisma } from '@ld-erp/database'
+import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { balanceOf, onHand, recordMovement, transferStock } from '../services/stock.service'
-import type { Prisma } from '@prisma/client'
+import { getPrintHeader } from '../lib/printData'
+import {
+  balanceOf,
+  lockedBalanceOf,
+  onHand,
+  recordMovement,
+  reorderStatus,
+  transferStock,
+} from '../services/stock.service'
+import { decidePending } from '../services/requisition.service'
 import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
@@ -19,6 +27,7 @@ import {
   issueRequisitionSchema,
   openingStockSchema,
   rejectRequisitionSchema,
+  closeRequisitionSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
 
@@ -35,14 +44,14 @@ const str = (v: unknown): string | undefined =>
 // ── What is on hand ─────────────────────────────────────────────────────────
 
 router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
-  const rows = await onHand(prisma, {
+  const [rows, reorder] = await Promise.all([onHand(prisma, {
     itemId: str(req.query.itemId),
     warehouseId: str(req.query.warehouseId),
     categoryId: str(req.query.categoryId),
     ownership: str(req.query.ownership) as never,
     lowOnly: req.query.low === 'true',
     search: str(req.query.q),
-  })
+  }), reorderStatus(prisma)])
 
   res.json({
     success: true,
@@ -54,9 +63,23 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
       totalValue: rows
         .filter((r) => r.ownership === 'OWNED')
         .reduce((sum, r) => sum + r.value, 0),
-      lowCount: rows.filter((r) => r.isLow).length,
+      // Items, not rows: an item in two stores is one thing to reorder. The
+      // same count the dashboard shows.
+      lowCount: reorder.filter((r) => r.isLow).length,
     },
   })
+})
+
+/**
+ * The items that need reordering, and how far below they are.
+ *
+ * The same rule as the stock screen and the dashboard (`reorderStatus`), for
+ * any screen that only wants to mark them: the items master shows its warning
+ * on these and no others.
+ */
+router.get('/reorder', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const rows = (await reorderStatus(prisma)).filter((r) => r.isLow)
+  res.json({ success: true, data: rows })
 })
 
 /** One item: where it is, and what has happened to it lately. */
@@ -193,6 +216,31 @@ const adjustmentInclude = {
 }
 
 /**
+ * Refuses a count or an opening that lists the same item twice.
+ *
+ * Each line is set against the book figure as it stood before the document,
+ * so two lines for one item were both applied: 500 on the book, two lines
+ * of 400, and the book ended at 300. Adding the lines up would be a guess —
+ * two racks of 400, or one rack counted twice? — so the person is asked to
+ * enter the item once, with its total.
+ */
+async function refuseRepeatedItems(tx: Prisma.TransactionClient, itemIds: string[]) {
+  const seen = new Map<string, number>()
+  for (const [i, itemId] of itemIds.entries()) {
+    const first = seen.get(itemId)
+    if (first !== undefined) {
+      const item = await tx.item.findUnique({ where: { id: itemId }, select: { name: true } })
+      throw new AppError(
+        `${item?.name ?? 'An item'} is on lines ${first + 1} and ${i + 1}. Enter it once, with the total.`,
+        400,
+        'REPEATED_ITEM',
+      )
+    }
+    seen.set(itemId, i)
+  }
+}
+
+/**
  * Opening stock.
  *
  * Allowed once per item and warehouse. Running it twice is almost always
@@ -208,11 +256,15 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
     const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
+    await refuseRepeatedItems(tx, data.lines.map((l) => l.itemId))
+
     const reference = `OPEN-${Date.now()}`
     const written = []
 
     for (const line of data.lines) {
-      const existing = await balanceOf(tx, {
+      // Locked, so two people entering the same opening at once cannot both
+      // find it empty.
+      const existing = await lockedBalanceOf(tx, {
         itemId: line.itemId,
         warehouseId: data.warehouseId,
       })
@@ -279,11 +331,13 @@ router.post('/adjustments', requirePermission(MODULE, 'approve'), async (req: Au
     const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
+    await refuseRepeatedItems(tx, data.lines.map((l) => l.itemId))
+
     const counted = []
 
     for (const line of data.lines) {
       const key = { itemId: line.itemId, warehouseId: data.warehouseId }
-      const before = await balanceOf(tx, key)
+      const before = await lockedBalanceOf(tx, key)
       const difference = Number((line.countedQty - before.qty).toFixed(3))
 
       if (difference > 0 && before.qty === 0 && line.unitRate === undefined) {
@@ -606,6 +660,7 @@ const mrInclude = {
   raisedBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
   issuedBy: { select: { id: true, name: true } },
+  closedBy: { select: { id: true, name: true } },
   lines: {
     include: {
       item: {
@@ -621,7 +676,24 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
 
   const where: Record<string, unknown> = {}
-  if (str(req.query.status)) where.status = str(req.query.status)
+  const status = str(req.query.status)
+  if (status) {
+    // Where a requisition stands, which is more than its approval status: an
+    // approved one may be waiting, part handed over, complete, or closed.
+    const open = { closedAt: null, issuedAt: null }
+    const stages: Record<string, Record<string, unknown>> = {
+      PENDING: { status: 'PENDING', closedAt: null },
+      APPROVED: { status: 'APPROVED', ...open },
+      PARTLY: { status: 'APPROVED', ...open, lines: { some: { issuedQty: { gt: 0 } } } },
+      ISSUED: { issuedAt: { not: null } },
+      CLOSED: { closedAt: { not: null } },
+      REJECTED: { status: 'REJECTED' },
+    }
+    if (!stages[status]) {
+      throw new AppError(`Unknown status '${status}'`, 400, 'INVALID_STATUS')
+    }
+    Object.assign(where, stages[status])
+  }
   if (str(req.query.departmentId)) where.departmentId = str(req.query.departmentId)
 
   const q = str(req.query.q)
@@ -761,14 +833,30 @@ router.patch(
           'ALREADY_ISSUED',
         )
       }
+      if (mr.closedAt) {
+        throw new AppError(
+          `${mr.mrNumber} was closed, so how it was answered can no longer be changed.`,
+          400,
+          'CLOSED',
+        )
+      }
 
-      const own = new Set(mr.lines.map((l) => l.id))
+      const own = new Map(mr.lines.map((l) => [l.id, l]))
       for (const l of data.lines) {
-        if (!own.has(l.lineId)) {
+        const line = own.get(l.lineId)
+        if (!line) {
           throw new AppError(
             `One of those lines is not on ${mr.mrNumber}. Reopen the requisition and try again.`,
             400,
             'WRONG_LINE',
+          )
+        }
+        // Part of it has already left the rack, so it is the store's line now.
+        if (l.fulfilment === 'PURCHASE' && Number(line.issuedQty) > 0) {
+          throw new AppError(
+            `Some of that line was already handed over from the store, so it cannot be switched to buying. Close the requisition and raise a new one for the rest.`,
+            400,
+            'PART_ISSUED',
           )
         }
       }
@@ -860,9 +948,16 @@ router.patch(
       )
     }
 
-    const after = await prisma.materialRequisition.update({
+    // Only a requisition still pending is approved, checked in the same
+    // statement that approves it, so an approve and a refuse arriving
+    // together cannot both land.
+    await decidePending(before.id, before.mrNumber, {
+      status: 'APPROVED',
+      approvedById: req.user!.id,
+      approvedAt: new Date(),
+    })
+    const after = await prisma.materialRequisition.findUniqueOrThrow({
       where: { id: before.id },
-      data: { status: 'APPROVED', approvedById: req.user!.id, approvedAt: new Date() },
       include: mrInclude,
     })
 
@@ -898,14 +993,14 @@ router.patch(
       )
     }
 
-    const after = await prisma.materialRequisition.update({
+    await decidePending(before.id, before.mrNumber, {
+      status: 'REJECTED',
+      approvedById: req.user!.id,
+      approvedAt: new Date(),
+      rejectionReason: reason,
+    })
+    const after = await prisma.materialRequisition.findUniqueOrThrow({
       where: { id: before.id },
-      data: {
-        status: 'REJECTED',
-        approvedById: req.user!.id,
-        approvedAt: new Date(),
-        rejectionReason: reason,
-      },
       include: mrInclude,
     })
 
@@ -922,13 +1017,32 @@ router.patch(
   },
 )
 
+/** A quantity as the store says it: 12.5, not 12.500. */
+const qtyText = (n: number) => String(Number(n.toFixed(3)))
+
+/**
+ * Holds a requisition for the rest of the transaction.
+ *
+ * Everything that changes what can still be issued (an issue, a close) takes
+ * this first, so two of them cannot both work from the same "still to issue".
+ * A second waits here and, once through, reads what the first left.
+ */
+async function lockRequisition(tx: Prisma.TransactionClient, id: string) {
+  await tx.$queryRaw`SELECT id FROM ld_erp.material_requisitions WHERE id = ${id} FOR UPDATE`
+}
+
 /**
  * Handing the material over. This is the moment stock actually leaves.
  *
- * Everything until now was paperwork; one transaction takes the quantities off
- * the rack and stamps who did it. If any line is short the whole issue is
- * refused rather than half-done, because a partly-issued requisition that
- * nobody noticed is how a cutting room starts a lay it cannot finish.
+ * The store can hand over part of it now and the rest later: 30 of the 50
+ * metres today because that is what is on the rack, the other 20 when the
+ * next roll comes in. Each issue takes what is given on each line, up to what
+ * is still owed, and leaves the rest open. Once every line from the store has
+ * been handed over in full, the requisition is complete. If the rest is no
+ * longer wanted, it is closed instead (see /close).
+ *
+ * Within one issue, if any line is short on the rack the whole issue is
+ * refused rather than half-done, so what the person pressed is what happened.
  */
 router.post(
   '/requisitions/:id/issue',
@@ -937,13 +1051,31 @@ router.post(
     const body = issueRequisitionSchema.parse(req.body ?? {})
     const when = body.issueDate ?? new Date()
 
-    const after = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      // Held before anything is read. Three clicks at once (a double-click,
+      // two tabs, a retried request) used to all read "not issued yet" and all
+      // take stock: 2 metres asked for, 6 left the store. Now the second waits
+      // here and then sees what the first issued.
+      await lockRequisition(tx, req.params.id)
+
       const mr = await tx.materialRequisition.findUnique({
         where: { id: req.params.id },
-        include: { lines: true, department: true },
+        include: {
+          lines: {
+            include: { item: { select: { name: true, uom: { select: { symbol: true } } } } },
+          },
+          department: true,
+        },
       })
       if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
 
+      if (mr.closedAt) {
+        throw new AppError(
+          `${mr.mrNumber} was closed on ${mr.closedAt.toLocaleDateString('en-IN')}, so nothing more can be issued against it.`,
+          400,
+          'CLOSED',
+        )
+      }
       if (mr.status !== 'APPROVED') {
         throw new AppError(
           mr.status === 'PENDING'
@@ -955,37 +1087,56 @@ router.post(
       }
       if (mr.issuedAt) {
         throw new AppError(
-          `${mr.mrNumber} was already issued on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
-          400,
+          `${mr.mrNumber} was issued in full on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
+          409,
           'ALREADY_ISSUED',
         )
       }
 
+      // docs/04-business-rules.md, section 7: raised, approved and issued by
+      // three different people.
+      if (mr.raisedById && mr.raisedById === req.user!.id) {
+        throw new AppError(
+          'You raised this requisition, so somebody else in the store has to hand the material over.',
+          403,
+          'SELF_ISSUE',
+        )
+      }
+      if (mr.approvedById && mr.approvedById === req.user!.id) {
+        throw new AppError(
+          'You approved this requisition, so somebody else in the store has to hand the material over.',
+          403,
+          'SELF_ISSUE',
+        )
+      }
+
       const askedFor = new Map(body.lines?.map((l) => [l.lineId, l.issueQty]) ?? [])
+      const handedOver: string[] = []
 
       for (const line of mr.lines) {
         /*
          * A line marked for purchase is not the store's to answer.
          *
          * It is on this requisition to tell the buyer what to order, and there
-         * is nothing on the rack behind it. Skipped silently rather than
-         * refused: a requisition routinely mixes the two — four things off
-         * the shelf and one to be bought — and stopping the whole issue
-         * because of the fifth would leave the other four sitting in a store
-         * somebody is waiting at.
+         * is nothing on the rack behind it. Skipped rather than refused: a
+         * requisition routinely mixes the two.
          */
         if (line.fulfilment === 'PURCHASE') continue
 
-        const qty = askedFor.get(line.id) ?? Number(line.requestedQty)
+        const unit = line.item.uom?.symbol ?? ''
+        const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
+        if (owed <= 0) continue
+
+        // Not named in the request: everything still owed on it.
+        const qty = askedFor.get(line.id) ?? owed
         if (qty <= 0) continue
 
-        if (qty > Number(line.requestedQty)) {
-          const item = await tx.item.findUnique({
-            where: { id: line.itemId },
-            select: { name: true },
-          })
+        if (qty > owed + 1e-9) {
           throw new AppError(
-            `${item?.name ?? 'That item'}: ${qty} is more than the ${Number(line.requestedQty)} approved. Raise a new requisition for the rest.`,
+            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(qty)}. Raise a new requisition for more.`.replace(
+              /\s+/g,
+              ' ',
+            ),
             400,
             'OVER_ISSUE',
           )
@@ -1011,32 +1162,257 @@ router.post(
 
         await tx.materialRequisitionLine.update({
           where: { id: line.id },
-          data: { issuedQty: qty },
+          data: { issuedQty: { increment: qty } },
+        })
+        handedOver.push(`${qtyText(qty)} ${unit} ${line.item.name}`.replace(/\s+/g, ' '))
+      }
+
+      if (handedOver.length === 0) {
+        throw new AppError(
+          'Nothing to hand over: enter a quantity on at least one line.',
+          400,
+          'NOTHING_TO_ISSUE',
+        )
+      }
+
+      // Complete once every line from the store has been handed over in full.
+      // issuedBy is whoever handed over the last of it; each part is in the
+      // stock ledger with its own date, and in the audit trail with its person.
+      const lines = await tx.materialRequisitionLine.findMany({ where: { mrId: mr.id } })
+      const stillOwed = lines.filter(
+        (l) => l.fulfilment !== 'PURCHASE' && Number(l.issuedQty) < Number(l.requestedQty) - 1e-9,
+      ).length
+      if (stillOwed === 0) {
+        await tx.materialRequisition.update({
+          where: { id: mr.id },
+          data: { issuedById: req.user!.id, issuedAt: when },
         })
       }
 
-      return tx.materialRequisition.update({
+      const after = await tx.materialRequisition.findUniqueOrThrow({
         where: { id: mr.id },
-        data: { issuedById: req.user!.id, issuedAt: when },
         include: mrInclude,
       })
+      return { after, handedOver, stillOwed }
     })
 
     await writeAuditLog(req, {
       module: MODULE,
       action: 'UPDATE',
       entityType: 'MaterialRequisition',
-      entityId: after.id,
-      after,
+      entityId: result.after.id,
+      after: { ...result.after, handedOverNow: result.handedOver },
     })
 
     res.json({
       success: true,
-      message: `Material issued against ${after.mrNumber}.`,
-      data: after,
+      message:
+        result.stillOwed === 0
+          ? `${result.after.mrNumber} issued in full.`
+          : `Issued against ${result.after.mrNumber}: ${result.handedOver.join(', ')}. ${result.stillOwed} ${result.stillOwed === 1 ? 'line is' : 'lines are'} still to be handed over.`,
+      data: result.after,
     })
   },
 )
+
+/**
+ * Cancelling a requisition, or closing one that is part issued.
+ *
+ * Material that is no longer wanted should not sit on the list for ever as
+ * "approved, not collected". Nothing issued yet: it is cancelled. Some of it
+ * issued: it is closed, and what was handed over stays handed over.
+ *
+ * The person who raised it can withdraw it; the store, or anybody who can
+ * approve requisitions, can close one that is no longer needed. A reason is
+ * always asked for. Refused and fully issued requisitions are already over.
+ */
+router.post(
+  '/requisitions/:id/close',
+  requirePermission(MODULE, 'view'),
+  async (req: AuthRequest, res) => {
+    const { reason } = closeRequisitionSchema.parse(req.body ?? {})
+
+    const result = await prisma.$transaction(async (tx) => {
+      await lockRequisition(tx, req.params.id)
+      const before = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!before) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+      const mine = before.raisedById === req.user!.id
+      if (!mine && !userCan(req.user, MODULE, 'edit') && !userCan(req.user, MODULE, 'approve')) {
+        throw new AppError(
+          'Only the person who raised it, the store, or an approver can cancel a requisition.',
+          403,
+          'NOT_ALLOWED',
+        )
+      }
+      if (before.closedAt) {
+        throw new AppError(`${before.mrNumber} is already closed.`, 409, 'CLOSED')
+      }
+      if (before.status === 'REJECTED') {
+        throw new AppError(
+          `${before.mrNumber} was refused, so there is nothing to cancel.`,
+          400,
+          'REJECTED',
+        )
+      }
+      if (before.issuedAt) {
+        throw new AppError(
+          `${before.mrNumber} was issued in full, so there is nothing left to close.`,
+          400,
+          'ALREADY_ISSUED',
+        )
+      }
+
+      await tx.materialRequisition.update({
+        where: { id: before.id },
+        data: { closedAt: new Date(), closedById: req.user!.id, closeReason: reason },
+      })
+      const after = await tx.materialRequisition.findUniqueOrThrow({
+        where: { id: before.id },
+        include: mrInclude,
+      })
+      const partly = before.lines.some((l) => Number(l.issuedQty) > 0)
+      return { before, after, partly }
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: result.after.id,
+      before: result.before,
+      after: result.after,
+    })
+
+    res.json({
+      success: true,
+      message: result.partly
+        ? `${result.after.mrNumber} closed. What was handed over stays issued; the rest is no longer owed.`
+        : `${result.after.mrNumber} cancelled.`,
+      data: result.after,
+    })
+  },
+)
+
+// ── Printed store papers ────────────────────────────────────────────────────
+//
+// Three sheets the store works from on paper: the slip a department signs for
+// what it was handed, the note that travels with goods between stores, and the
+// sheet a keeper carries to the rack for a count. Each route gives the page
+// everything it prints, letterhead included, in one call.
+
+/** The material issue slip for a requisition: what was asked, given and still owed. */
+router.get('/requisitions/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const mr = await prisma.materialRequisition.findUnique({
+    where: { id: req.params.id },
+    include: mrInclude,
+  })
+  if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+  // Each part handed over, with its date: the slip is signed for these.
+  const handovers = await prisma.stockLedger.findMany({
+    where: { referenceType: 'MATERIAL_REQUISITION', referenceId: mr.id, outQty: { gt: 0 } },
+    select: {
+      transactionDate: true,
+      outQty: true,
+      item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      warehouse: { select: { name: true } },
+    },
+    orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }],
+  })
+
+  const header = await getPrintHeader('MR')
+  res.json({ success: true, data: { ...header, mr, handovers } })
+})
+
+/** The stock transfer note that goes with the goods. */
+router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const transfer = await prisma.stockTransfer.findUnique({
+    where: { id: req.params.id },
+    include: {
+      ...transferInclude,
+      fromWarehouse: { select: { id: true, name: true, address: true } },
+      toWarehouse: { select: { id: true, name: true, address: true } },
+      lines: {
+        include: {
+          item: {
+            select: {
+              code: true,
+              name: true,
+              hsnCode: true,
+              uom: { select: { symbol: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+  if (!transfer) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('STN')
+  res.json({ success: true, data: { ...header, transfer } })
+})
+
+/**
+ * The sheet a keeper takes to the rack.
+ *
+ * Every item in the store with its book figure, in category then name order so
+ * the list follows the racks rather than the alphabet. `all=true` adds the
+ * active items with nothing on the book there, so stock the book does not know
+ * about has a line to be written on. The page decides whether to print the book
+ * figure: a count made without seeing it is the honest one.
+ */
+router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) => {
+  const warehouseId = str(req.query.warehouseId)
+  if (!warehouseId) throw new AppError('Choose a store', 400, 'NO_STORE')
+  const warehouse = await prisma.warehouse.findUnique({
+    where: { id: warehouseId },
+    select: { id: true, name: true, code: true, address: true },
+  })
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+
+  const held = await onHand(prisma, { warehouseId, ownership: 'OWNED' })
+  const rows = held.map((r) => ({
+    itemId: r.itemId,
+    code: r.itemCode,
+    name: r.itemName,
+    category: r.categoryName,
+    uom: r.uom,
+    bookQty: r.qty,
+  }))
+
+  if (req.query.all === 'true') {
+    const shown = new Set(rows.map((r) => r.itemId))
+    const others = await prisma.item.findMany({
+      where: { isActive: true, id: { notIn: [...shown] } },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        category: { select: { name: true } },
+        uom: { select: { symbol: true } },
+      },
+    })
+    for (const i of others) {
+      rows.push({
+        itemId: i.id,
+        code: i.code,
+        name: i.name,
+        category: i.category.name,
+        uom: i.uom.symbol,
+        bookQty: 0,
+      })
+    }
+  }
+
+  rows.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))
+
+  const header = await getPrintHeader('COUNT')
+  res.json({ success: true, data: { ...header, warehouse, rows, printedAt: new Date() } })
+})
 
 
 // ── A customer's material, and fabric out at a job worker ───────────────────

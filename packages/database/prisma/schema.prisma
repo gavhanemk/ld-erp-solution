@@ -295,6 +295,7 @@ model User {
   raisedMRs            MaterialRequisition[]       @relation("MRRaisedBy")
   approvedMRs          MaterialRequisition[]       @relation("MRApprovedBy")
   issuedMRs            MaterialRequisition[]       @relation("MRIssuedBy")
+  closedMRs            MaterialRequisition[]       @relation("MRClosedBy")
   createdBills         PurchaseInvoice[]           @relation("BillCreatedBy")
   createdPayments      SupplierPayment[]           @relation("PaymentCreatedBy")
   reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
@@ -528,10 +529,16 @@ model ItemCategory {
   parentId String?
   parent   ItemCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
   children ItemCategory[] @relation("CategoryHierarchy")
+  /// The department that normally uses what is filed here: Cotton to
+  /// Cutting, Embroidery Thread to Embroidery. A new item in the category
+  /// starts with it. Optional; cleared if the department goes.
+  departmentId String?
+  department   Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   isActive Boolean        @default(true)
 
   items Item[]
 
+  @@index([departmentId])
   @@map("item_categories")
 }
 
@@ -557,6 +564,10 @@ model Item {
   category     ItemCategory @relation(fields: [categoryId], references: [id])
   uomId        String
   uom          UOM          @relation(fields: [uomId], references: [id])
+  /// The department that normally uses this item: fabric to Cutting, thread
+  /// to Stitching. Optional — a carton is not any one department's.
+  departmentId String?
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   hsnCode      String?
   reorderLevel Decimal?     @db.Decimal(10, 3)
   minStock     Decimal?     @db.Decimal(10, 3)
@@ -590,6 +601,7 @@ model Item {
 
   @@index([code])
   @@index([type])
+  @@index([departmentId])
   @@map("items")
   customerGrnLines    CustomerGRNLine[]    @relation("CustomerGRNLines")
   jobWorkChallanLines JobWorkChallanLine[] @relation("JobWorkChallanLines")
@@ -969,6 +981,8 @@ model Department {
   machines          Machine[]
   workstations      Workstation[]
   requisitions      MaterialRequisition[]
+  items             Item[]
+  itemCategories    ItemCategory[]
   productionEntries ProductionEntry[]
   routingSteps      RoutingStep[]
   bomLines          BOMLine[]
@@ -2099,6 +2113,12 @@ model MaterialRequisition {
   issuedAt        DateTime?
   /// Why it was refused. A rejection with no reason just gets raised again.
   rejectionReason String?
+  /// Set when it is cancelled, or closed with part of it still unissued: the
+  /// rest is no longer wanted. Nothing more can be issued against it.
+  closedAt        DateTime?
+  closedById      String?
+  closedBy        User?               @relation("MRClosedBy", fields: [closedById], references: [id])
+  closeReason     String?
   notes           String?
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt

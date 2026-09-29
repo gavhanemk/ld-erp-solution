@@ -68,6 +68,12 @@ const DEFAULT_TITLES: Record<string, string> = {
   // Theirs. We are recording what they sent us, so the sheet says so rather
   // than pretending the mill issued a credit note to itself.
   SCN: "SUPPLIER'S CREDIT NOTE",
+  // The store's own papers. A department signs the issue slip for what it was
+  // handed; the transfer note travels with the goods; the count sheet goes to
+  // the rack and comes back written on.
+  MR: 'MATERIAL ISSUE SLIP',
+  STN: 'STOCK TRANSFER NOTE',
+  COUNT: 'STOCK COUNT SHEET',
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { CheckCircle2, Clock, XCircle, Loader2, Inbox } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, currentUser } from '@/lib/api'
 import { formatCurrency, formatDate } from '@/lib/utils'
 
 interface Approval {
@@ -13,6 +13,8 @@ interface Approval {
   amount: number | null
   date: string
   urgent: boolean
+  /** Requisitions only: who raised it, who therefore may not approve it. */
+  raisedById?: string | null
 }
 
 const typeColors: Record<string, string> = {
@@ -48,6 +50,8 @@ export function PendingApprovalsTable() {
     void load()
   }, [load])
 
+  const me = currentUser()
+
   const decide = async (a: Approval, decision: 'approve' | 'reject') => {
     let reason = ''
     if (decision === 'reject') {
@@ -56,6 +60,12 @@ export function PendingApprovalsTable() {
       reason = input.trim()
       if (!reason) {
         setError('A reason is required when rejecting.')
+        return
+      }
+      // The requisition screen asks for a reason somebody can act on, and the
+      // server now holds this door to the same bar.
+      if (a.type === 'MR' && reason.length < 5) {
+        setError('Say why it is being refused, in a few words.')
         return
       }
     } else if (!window.confirm(`Approve ${a.number} (${typeLabel[a.type]})?`)) {
@@ -141,6 +151,11 @@ export function PendingApprovalsTable() {
                   <td className="text-muted-foreground text-xs">{formatDate(a.date)}</td>
                   <td>
                     <div className="flex items-center gap-2 justify-end">
+                      {a.type === 'MR' && a.raisedById && a.raisedById === me?.id ? (
+                        <span className="text-[11px] text-muted-foreground" title="You raised it, so somebody else has to approve it">
+                          Yours — someone else approves
+                        </span>
+                      ) : (
                       <button
                         disabled={busyId === a.id}
                         onClick={() => void decide(a, 'approve')}
@@ -153,6 +168,7 @@ export function PendingApprovalsTable() {
                         )}
                         Approve
                       </button>
+                      )}
                       <button
                         disabled={busyId === a.id}
                         onClick={() => void decide(a, 'reject')}

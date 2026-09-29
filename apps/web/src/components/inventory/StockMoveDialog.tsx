@@ -1,8 +1,19 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { X, Loader2, AlertCircle, Plus, Trash2 } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import {
+  Loader2,
+  Plus,
+  Trash2,
+  Package,
+  PackagePlus,
+  ClipboardCheck,
+  ArrowRightLeft,
+  Warehouse,
+} from 'lucide-react'
+import { api, apiErrorMessage, masterResource } from '@/lib/api'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { Section } from '@/components/purchase/Section'
 
 /**
  * The three ways stock moves without a purchase or a sale behind it.
@@ -102,8 +113,9 @@ export function StockMoveDialog({
     void (async () => {
       try {
         const [i, w] = await Promise.all([
-          masterResource<ItemOption>('items').list({ limit: 500 }),
-          masterResource<WarehouseOption>('warehouses').list({ limit: 100 }),
+          // Active only: a deactivated item or store is not offered for new stock.
+          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          masterResource<WarehouseOption>('warehouses').list({ limit: 100, active: true }),
         ])
         if (cancelled) return
         setItems(i.data)
@@ -145,6 +157,37 @@ export function StockMoveDialog({
       return setError('Say why the figure is being changed — one line is enough.')
     }
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
+    // A count or an opening sets each line against the book once, so an item
+    // entered on two lines would be applied twice. Moves may repeat an item.
+    if (mode !== 'transfer') {
+      const ids = filled.map((l) => l.itemId)
+      const twice = ids.find((id, i) => ids.indexOf(id) !== i)
+      if (twice) {
+        return setError(
+          `${itemsById.get(twice)?.name ?? 'An item'} is on the list twice. Enter it once, with the total.`,
+        )
+      }
+    }
+
+    // Opening stock comes in at a rate or it is worth nothing. An empty box
+    // used to go through as ₹0 without a word.
+    if (mode === 'opening') {
+      const unpriced = filled.find((l) => !(Number(l.rate) > 0))
+      if (unpriced) {
+        const it = itemsById.get(unpriced.itemId)
+        return setError(
+          `Enter a rate for ${it?.name ?? 'every item'}: what one ${it?.uom?.symbol ?? 'unit'} cost. At ₹0 the stock would be valued at nothing.`,
+        )
+      }
+    }
+    if (mode === 'count') {
+      const zero = filled.find((l) => l.rate !== '' && !(Number(l.rate) > 0))
+      if (zero) {
+        return setError(
+          `${itemsById.get(zero.itemId)?.name ?? 'An item'}: a rate of ₹0 would value the stock found at nothing. Enter what it cost, or leave the rate empty.`,
+        )
+      }
+    }
 
     setSaving(true)
     try {
@@ -157,7 +200,7 @@ export function StockMoveDialog({
           lines: filled.map((l) => ({
             itemId: l.itemId,
             qty: Number(l.qty),
-            unitRate: Number(l.rate || 0),
+            unitRate: Number(l.rate),
           })),
         })
       } else if (mode === 'count') {
@@ -181,186 +224,101 @@ export function StockMoveDialog({
 
       onSaved(res.message ?? 'Saved.')
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
+      setError(apiErrorMessage(err))
     } finally {
       setSaving(false)
     }
   }
 
+  const Icon = mode === 'opening' ? PackagePlus : mode === 'count' ? ClipboardCheck : ArrowRightLeft
+
+  const primary = (
+    <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>
+      {saving ? <Loader2 size={15} className="animate-spin" /> : <Icon size={15} />}
+      {copy.action}
+    </button>
+  )
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
-      <div className="glass-card w-full max-w-4xl my-auto" role="dialog" aria-modal="true">
-        <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-border">
-          <div>
-            <h2 className="text-base font-semibold text-foreground">{copy.title}</h2>
-            <p className="mt-1 text-xs text-muted-foreground max-w-2xl">{copy.blurb}</p>
-          </div>
-          <button className="btn-ghost p-1.5" onClick={onClose} aria-label="Close">
-            <X size={16} />
-          </button>
-        </div>
+    <FormFrame
+      icon={Icon}
+      title={copy.title}
+      subtitle={copy.blurb}
+      primary={primary}
+      footer={
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
+          Cancel
+        </button>
+      }
+      error={error}
+      onClose={onClose}
+      busy={saving}
+    >
+      <Section icon={Warehouse} title={mode === 'transfer' ? 'From and to' : 'Store'}>
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+          <label className="block min-w-0">
+            <span className="form-label">
+              {mode === 'transfer' ? 'Take it from' : 'Store'}
+              <span className="ml-0.5 text-red-500">*</span>
+            </span>
+            <select
+              className="form-input"
+              value={warehouseId}
+              onChange={(e) => setWarehouseId(e.target.value)}
+              disabled={loadingLists}
+              autoFocus
+            >
+              <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
+              {warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </label>
 
-        <div className="px-5 py-4 space-y-4">
-          {error && (
-            <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-              <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-              <p className="text-sm text-red-400">{error}</p>
-            </div>
-          )}
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
+          {mode === 'transfer' && (
+            <label className="block min-w-0">
               <span className="form-label">
-                {mode === 'transfer' ? 'Take it from' : 'Store'}
+                Send it to<span className="ml-0.5 text-red-500">*</span>
               </span>
               <select
                 className="form-input"
-                value={warehouseId}
-                onChange={(e) => setWarehouseId(e.target.value)}
+                value={toWarehouseId}
+                onChange={(e) => setToWarehouseId(e.target.value)}
                 disabled={loadingLists}
               >
-                <option value="">Choose a store…</option>
-                {warehouses.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
+                <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
+                {warehouses
+                  .filter((w) => w.id !== warehouseId)
+                  .map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
               </select>
             </label>
+          )}
 
-            {mode === 'transfer' && (
-              <label className="block">
-                <span className="form-label">Send it to</span>
-                <select
-                  className="form-input"
-                  value={toWarehouseId}
-                  onChange={(e) => setToWarehouseId(e.target.value)}
-                  disabled={loadingLists}
-                >
-                  <option value="">Choose a store…</option>
-                  {warehouses
-                    .filter((w) => w.id !== warehouseId)
-                    .map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                </select>
-              </label>
-            )}
-
-            {mode === 'count' && (
-              <label className="block">
-                <span className="form-label">Why the figure is changing</span>
-                <input
-                  className="form-input"
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                  placeholder="Monthly physical count, damage found, …"
-                />
-              </label>
-            )}
-          </div>
-
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th style={{ width: '50%' }}>Item</th>
-                  <th style={{ textAlign: 'right' }}>{copy.qtyLabel}</th>
-                  {mode !== 'transfer' && <th style={{ textAlign: 'right' }}>Rate ₹</th>}
-                  <th style={{ width: 40 }} />
-                </tr>
-              </thead>
-              <tbody>
-                {lines.map((line, i) => {
-                  const item = itemsById.get(line.itemId)
-                  return (
-                    <tr key={i}>
-                      <td>
-                        <select
-                          className="form-input h-9"
-                          value={line.itemId}
-                          onChange={(e) => {
-                            const picked = itemsById.get(e.target.value)
-                            setLine(i, {
-                              itemId: e.target.value,
-                              // The item's standard rate is a starting point for
-                              // an opening balance, not for a count — a count
-                              // priced at the list rate would quietly revalue
-                              // stock that is already carried at something else.
-                              rate:
-                                mode === 'opening' && picked?.standardRate != null
-                                  ? String(picked.standardRate)
-                                  : line.rate,
-                            })
-                          }}
-                          disabled={loadingLists}
-                          aria-label={`Item on line ${i + 1}`}
-                        >
-                          <option value="">Choose an item…</option>
-                          {items.map((it) => (
-                            <option key={it.id} value={it.id}>
-                              {it.code} — {it.name}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <input
-                            type="number"
-                            step="0.001"
-                            min="0"
-                            className="form-input h-9 w-28 text-right tabular-nums"
-                            value={line.qty}
-                            onChange={(e) => setLine(i, { qty: e.target.value })}
-                            aria-label={`${copy.qtyLabel} on line ${i + 1}`}
-                          />
-                          <span className="text-xs text-muted-foreground w-8 text-left">
-                            {item?.uom?.symbol ?? ''}
-                          </span>
-                        </div>
-                      </td>
-                      {mode !== 'transfer' && (
-                        <td className="text-right">
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            className="form-input h-9 w-28 text-right tabular-nums"
-                            value={line.rate}
-                            onChange={(e) => setLine(i, { rate: e.target.value })}
-                            placeholder={mode === 'count' ? 'only if new' : ''}
-                            aria-label={`Rate on line ${i + 1}`}
-                          />
-                        </td>
-                      )}
-                      <td className="text-right">
-                        <button
-                          className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                          onClick={() => removeLine(i)}
-                          aria-label={`Remove line ${i + 1}`}
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <button className="btn-ghost text-xs" onClick={addLine}>
-            <Plus size={14} /> Add another item
-          </button>
+          {mode === 'count' && (
+            <label className="block min-w-0">
+              <span className="form-label">
+                Why the figure is changing<span className="ml-0.5 text-red-500">*</span>
+              </span>
+              <input
+                className="form-input placeholder:text-muted-foreground/60"
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="e.g. Monthly physical count, damage found"
+              />
+            </label>
+          )}
 
           {mode !== 'count' && (
-            <label className="block">
-              <span className="form-label">Note (optional)</span>
+            <label className={`block min-w-0 ${mode === 'transfer' ? 'sm:col-span-2' : ''}`}>
+              <span className="form-label">Note</span>
               <input
-                className="form-input"
+                className="form-input placeholder:text-muted-foreground/60"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 placeholder="Anything the store should know"
@@ -368,17 +326,110 @@ export function StockMoveDialog({
             </label>
           )}
         </div>
+      </Section>
 
-        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-border">
-          <button className="btn-ghost" onClick={onClose} disabled={saving}>
-            Cancel
+      <Section
+        icon={Package}
+        title="Items"
+        actions={
+          <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={addLine}>
+            <Plus size={14} /> Add another item
           </button>
-          <button className="btn-primary" onClick={() => void save()} disabled={saving}>
-            {saving && <Loader2 size={15} className="animate-spin" />}
-            {copy.action}
-          </button>
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="line-table w-full min-w-[620px] text-sm">
+            <thead>
+              <tr>
+                <th style={{ width: 36 }}>#</th>
+                <th style={{ width: '50%' }}>Item</th>
+                <th style={{ textAlign: 'right' }}>{copy.qtyLabel}</th>
+                {mode !== 'transfer' && <th style={{ textAlign: 'right' }}>Rate ₹</th>}
+                <th style={{ width: 40 }} />
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((line, i) => {
+                const item = itemsById.get(line.itemId)
+                return (
+                  <tr key={i}>
+                    <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
+                    <td className="px-3 py-2">
+                      <select
+                        className="form-input h-9"
+                        value={line.itemId}
+                        onChange={(e) => {
+                          const picked = itemsById.get(e.target.value)
+                          setLine(i, {
+                            itemId: e.target.value,
+                            // The item's standard rate is a starting point for
+                            // an opening balance, not for a count — a count
+                            // priced at the list rate would quietly revalue
+                            // stock that is already carried at something else.
+                            rate:
+                              mode === 'opening' && picked?.standardRate != null
+                                ? String(picked.standardRate)
+                                : line.rate,
+                          })
+                        }}
+                        disabled={loadingLists}
+                        aria-label={`Item on line ${i + 1}`}
+                      >
+                        <option value="">Choose an item...</option>
+                        {items.map((it) => (
+                          <option key={it.id} value={it.id}>
+                            {it.code} — {it.name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <input
+                          type="number"
+                          step="0.001"
+                          min="0"
+                          className="form-input h-9 w-28 text-right tabular-nums"
+                          value={line.qty}
+                          onChange={(e) => setLine(i, { qty: e.target.value })}
+                          aria-label={`${copy.qtyLabel} on line ${i + 1}`}
+                        />
+                        <span className="text-muted-foreground w-8 text-left text-xs">
+                          {item?.uom?.symbol ?? ''}
+                        </span>
+                      </div>
+                    </td>
+                    {mode !== 'transfer' && (
+                      <td className="px-3 py-2 text-right">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          className="form-input h-9 w-28 text-right tabular-nums placeholder:text-muted-foreground/60"
+                          value={line.rate}
+                          onChange={(e) => setLine(i, { rate: e.target.value })}
+                          placeholder={mode === 'count' ? 'only if new' : ''}
+                          aria-label={`Rate on line ${i + 1}`}
+                        />
+                      </td>
+                    )}
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        className="btn-ghost text-muted-foreground p-1.5 hover:text-red-400"
+                        onClick={() => removeLine(i)}
+                        aria-label={`Remove line ${i + 1}`}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
         </div>
-      </div>
-    </div>
+      </Section>
+    </FormFrame>
   )
 }

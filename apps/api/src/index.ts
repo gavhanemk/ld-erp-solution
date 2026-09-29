@@ -132,9 +132,8 @@ app.use(cors({
  * appears not to exist. That is exactly how it was found.
  *
  * So development gets a ceiling high enough that it never interferes with
- * working on the thing, and production keeps a real one. The auth limit stays
- * tight in both: twenty password attempts a quarter of an hour is the point
- * of it, and nobody signs in twenty times while developing.
+ * working on the thing, and production keeps a real one. The sign-in limits
+ * below are the same in both, and count only wrong passwords.
  */
 const inProduction = process.env.NODE_ENV === 'production'
 /*
@@ -156,12 +155,43 @@ const globalLimit = rateLimit({
     code: 'RATE_LIMITED',
   },
 })
-const authLimit = rateLimit({
+/*
+ * Wrong passwords, not sign-ins.
+ *
+ * This used to allow twenty requests a quarter of an hour to everything under
+ * /api/auth, counted by internet address. A mill's office shares one address,
+ * and every open browser refreshes its token under /api/auth every fifteen
+ * minutes, so the office used the twenty up between them and everybody was
+ * told they had tried too many passwords (two testers were locked out in a
+ * morning). Now only POST /login is limited, only failed attempts count, and
+ * they count per account: ten wrong passwords for one email in a quarter of
+ * an hour, which stops guessing at one person's password without anybody
+ * else noticing. A looser ceiling per address still slows somebody trying
+ * one password against many accounts.
+ */
+const failedSignIn = {
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  skipSuccessfulRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+}
+const accountLimit = rateLimit({
+  ...failedSignIn,
+  max: 10,
+  keyGenerator: (req) =>
+    `${req.ip}|${String((req.body as { email?: unknown } | undefined)?.email ?? '').trim().toLowerCase()}`,
   message: {
     success: false,
-    message: 'Too many sign-in attempts. Wait a quarter of an hour and try again.',
+    message: 'Too many wrong passwords for this account. Wait a quarter of an hour and try again, or ask an administrator to reset it.',
+    code: 'RATE_LIMITED',
+  },
+})
+const addressLimit = rateLimit({
+  ...failedSignIn,
+  max: 100,
+  message: {
+    success: false,
+    message: 'Too many failed sign-ins from this connection. Wait a quarter of an hour and try again.',
     code: 'RATE_LIMITED',
   },
 })
@@ -226,7 +256,8 @@ app.get('/health', async (_, res) => {
 })
 
 // Public Routes
-app.use('/api/auth', authLimit, authRoutes)
+app.post('/api/auth/login', addressLimit, accountLimit)
+app.use('/api/auth', authRoutes)
 app.use('/api/webhooks', webhookRoutes)
 
 // Protected Routes

@@ -1,10 +1,11 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   Search, RefreshCw, AlertCircle, AlertTriangle, PackagePlus, ClipboardCheck,
-  ArrowLeftRight, Warehouse as WarehouseIcon,
+  ArrowLeftRight, Warehouse as WarehouseIcon, Printer,
 } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StockMoveDialog, type MoveMode } from '@/components/inventory/StockMoveDialog'
@@ -31,7 +32,10 @@ interface StockRow {
   qty: number
   value: number
   avgRate: number
+  /** The item needs reordering: our own stock, every store together, at or below its level. */
   isLow: boolean
+  /** Our own stock of the item in every store together, where it has a reorder level. */
+  itemOnHand: number | null
   lastMovedAt: string | null
 }
 
@@ -47,7 +51,7 @@ const money = (v: number) =>
 const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
 
-export default function StockPage() {
+function StockScreen() {
   const [rows, setRows] = useState<StockRow[]>([])
   const [summary, setSummary] = useState({ lines: 0, totalValue: 0, lowCount: 0 })
   const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([])
@@ -60,6 +64,11 @@ export default function StockPage() {
   const [debounced, setDebounced] = useState('')
   const [warehouseId, setWarehouseId] = useState('')
   const [lowOnly, setLowOnly] = useState(false)
+  // Arriving from the dashboard's "see all" opens straight on what to reorder.
+  const params = useSearchParams()
+  useEffect(() => {
+    if (params.get('low') === 'true') setLowOnly(true)
+  }, [params])
   const [dialog, setDialog] = useState<MoveMode | null>(null)
 
   useEffect(() => {
@@ -74,7 +83,12 @@ export default function StockPage() {
       .catch(() => undefined)
   }, [])
 
+  // Replies can arrive out of order: the first, unfiltered load can land after
+  // the one asked for a moment later, and overwrite it. Only the newest counts.
+  const latest = useRef(0)
+
   const load = useCallback(async () => {
+    const id = ++latest.current
     setLoading(true)
     setError(null)
     try {
@@ -84,9 +98,11 @@ export default function StockPage() {
       if (lowOnly) qs.set('low', 'true')
 
       const res = await api.get<StockResponse>(`/inventory/stock?${qs}`)
+      if (id !== latest.current) return
       setRows(res.data)
       setSummary(res.summary)
     } catch (err) {
+      if (id !== latest.current) return
       setError(
         err instanceof ApiError
           ? err.status === 403
@@ -96,7 +112,7 @@ export default function StockPage() {
       )
       setRows([])
     } finally {
-      setLoading(false)
+      if (id === latest.current) setLoading(false)
     }
   }, [debounced, warehouseId, lowOnly])
 
@@ -123,6 +139,13 @@ export default function StockPage() {
           <button className="btn-ghost" onClick={() => setDialog('transfer')}>
             <ArrowLeftRight size={15} /> Move
           </button>
+          <Link
+            href={`/print/count-sheet${warehouseId ? `?warehouseId=${warehouseId}` : ''}`}
+            className="btn-ghost"
+            title="A sheet to take to the rack and write the count on"
+          >
+            <Printer size={15} /> Count sheet
+          </Link>
           <button className="btn-ghost" onClick={() => setDialog('count')}>
             <ClipboardCheck size={15} /> Count
           </button>
@@ -162,7 +185,7 @@ export default function StockPage() {
           <p className="mt-0.5 text-[11px] text-muted-foreground">item and store together</p>
         </div>
         <div className="glass-card p-4">
-          <p className="text-xs text-muted-foreground">Below reorder level</p>
+          <p className="text-xs text-muted-foreground">Items to reorder</p>
           <p
             className={`mt-1 text-2xl font-bold tabular-nums ${
               summary.lowCount > 0 ? 'text-amber-400' : 'text-foreground'
@@ -176,6 +199,9 @@ export default function StockPage() {
           >
             {lowOnly ? 'show everything' : 'show only these'}
           </button>
+          <p className="text-[10px] text-muted-foreground">
+            our own stock, all stores together, at or below the reorder level
+          </p>
         </div>
       </div>
 
@@ -221,7 +247,7 @@ export default function StockPage() {
               checked={lowOnly}
               onChange={(e) => setLowOnly(e.target.checked)}
             />
-            Only below reorder level
+            Only items to reorder
           </label>
           <Link href="/inventory/ledger" className="text-xs text-teal-400 hover:underline ml-auto">
             See every movement →
@@ -278,7 +304,7 @@ export default function StockPage() {
                           <AlertTriangle
                             size={13}
                             className="text-amber-400"
-                            aria-label="Below reorder level"
+                            aria-label="Needs reordering"
                           />
                         )}
                         <span className={r.isLow ? 'text-amber-400 font-semibold' : ''}>
@@ -286,8 +312,13 @@ export default function StockPage() {
                         </span>
                         <span className="text-xs text-muted-foreground w-8 text-left">{r.uom}</span>
                       </div>
+                      {/* The flag is for the item, not this store: say what it
+                        is judged on, so a store holding plenty is not a puzzle. */}
                       {r.isLow && r.reorderLevel !== null && (
                         <div className="text-[10px] text-muted-foreground">
+                          {r.itemOnHand !== null && r.itemOnHand !== r.qty
+                            ? `${qtyFmt(r.itemOnHand)} in all stores · `
+                            : ''}
                           reorder at {qtyFmt(r.reorderLevel)}
                         </div>
                       )}
@@ -318,5 +349,15 @@ export default function StockPage() {
         />
       )}
     </div>
+  )
+}
+
+// useSearchParams needs a Suspense boundary, as on the ledger page, or the
+// whole route opts out of static rendering and the build refuses it.
+export default function StockPage() {
+  return (
+    <Suspense fallback={<p className="text-sm text-muted-foreground">Loading...</p>}>
+      <StockScreen />
+    </Suspense>
   )
 }

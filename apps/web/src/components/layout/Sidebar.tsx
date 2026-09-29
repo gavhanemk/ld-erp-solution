@@ -64,6 +64,7 @@ const navItems: NavItem[] = [
       { label: 'Customers', href: '/masters/customers' },
       { label: 'Suppliers', href: '/masters/suppliers' },
       { label: 'Agents & Brokers', href: '/masters/brokers' },
+      { label: 'Departments', href: '/masters/departments' },
       { label: 'Workstations', href: '/masters/workstations' },
       { label: 'Extra Charges', href: '/masters/charges' },
       { label: 'Warehouses', href: '/masters/warehouses' },
@@ -188,7 +189,8 @@ const slug = (label: string) =>
 export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: SidebarProps) {
   const pathname = usePathname()
   const router = useRouter()
-  const [openMenus, setOpenMenus] = useState<string[]>(['Masters'])
+  // Every group starts shut; the user opens the one they want.
+  const [openMenus, setOpenMenus] = useState<string[]>([])
   const [user, setUser] = useState<{ name?: string; role?: string } | null>(null)
   const { qcInDailyProduction } = useAppSettings()
 

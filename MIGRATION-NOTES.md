@@ -7,6 +7,62 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 29 Sep 2026 — an item category's department
+
+**Migration:** `20260929140000_category_department`
+**Branch:** `test/masters-inventory`
+**Status: applied to the shared database on 29 Sep with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+`item_categories.departmentId`, nullable, with a foreign key to `departments`
+that sets it null if the department is deleted, and an index. The department
+that normally uses what is filed under the category; a new item in it starts
+with that department. On a branch without this folder, `prisma migrate dev`
+will propose dropping it. Say no.
+
+Filled in afterwards through the API (so each change is audited): every
+sub-category took the department its items already use, or its main
+category's where it had no items. Main categories are left empty and show
+their sub-categories'.
+
+## 29 Sep 2026 — a requisition can be cancelled, or closed part issued
+
+**Migration:** `20260929100000_requisition_close`
+**Branch:** `test/masters-inventory`
+**Status: applied to the shared database on 29 Sep with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+Three nullable columns on `material_requisitions`: `closedAt`, `closedById` (a
+user, set null if the user goes) and `closeReason`. No row changes. On a branch
+without this folder, `prisma migrate dev` will propose dropping them. Say no.
+
+### Why
+
+A requisition could be waiting, approved or refused, and nothing else. One that
+was no longer wanted sat on the list for ever as "approved, not collected", and
+one handed over in part could never be finished. Cancelled is a different fact
+from refused (the person who raised it withdrew it, or the store closed it), so
+it has its own columns rather than borrowing `REJECTED`. A requisition with part
+issued and the rest closed keeps `issuedAt` empty and `closedAt` set.
+
+## 28 Sep 2026 — an item's department
+
+**Migration:** `20260928150000_item_department`
+**Branch:** `test/masters-inventory`
+**Status: applied to the shared database on 28 Sep with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+`items.departmentId`, nullable, with a foreign key to `departments` that sets it
+null if the department is deleted, and an index. The department that normally
+uses the item: fabric to Cutting, thread to Stitching. On a branch without this
+folder, `prisma migrate dev` will propose dropping it. Say no.
+
 ## 28 Sep 2026 — a customer's material in, and our fabric out to a job worker
 
 **Migration:** `20260928140000_customer_material_and_job_work`

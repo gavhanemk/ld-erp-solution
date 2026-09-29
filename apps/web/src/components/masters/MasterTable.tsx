@@ -10,9 +10,15 @@ import {
   AlertCircle,
   Pencil,
   Ban,
+  Trash2,
+  X,
+  Download,
+  Loader2,
 } from 'lucide-react'
-import { ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
+import { api, ApiError, masterResource, tokens, type ListParams, type Paginated } from '@/lib/api'
 import { MasterFormDialog, type FormField } from './MasterFormDialog'
+import { FilterMenu, type FilterChoice } from './FilterMenu'
+import { DeleteDialog } from './DeleteDialog'
 import { useAppSettings } from '@/lib/appSettings'
 
 export interface Column<T> {
@@ -24,6 +30,50 @@ export interface Column<T> {
   /** Only columns the API whitelists may be sorted; others render unclickable. */
   sortable?: boolean
   className?: string
+}
+
+type Row = Record<string, unknown>
+type Picked = Record<string, string[]>
+
+/**
+ * A dropdown filter over the list. The API has to accept `key` as a filter
+ * (see `filters` in the route's crudRouter options).
+ */
+export interface FilterDef {
+  /** Query parameter the choices are sent as. */
+  key: string
+  label: string
+  /** Fixed choices, for an enum like item type. */
+  options?: { value: string; label: string }[]
+  /** Or choices loaded from another master. */
+  optionsFrom?: {
+    resource: string
+    /** Keeps only the rows to offer, given what the other filters have ticked. */
+    filter?: (row: Row, picked: Picked) => boolean
+    /** Defaults to the row's name. Sees what else is ticked, to say less when it can. */
+    label?: (row: Row, picked: Picked) => string
+  }
+  /** The facet whose counts label each choice. */
+  facet?: string
+  /**
+   * Or choices read off the facet itself, for a typed-in column with no
+   * master behind it (a style's season, fabric, fit): every value in use,
+   * each its own label.
+   */
+  valuesFromFacet?: boolean
+  /** The order of those values, where A to Z is not it: sizes S, M, L. */
+  sortValues?: (a: string, b: string) => number
+  /** How each of those values reads: credit days 30 as "30 days". */
+  valueLabel?: (value: string) => string
+  /**
+   * For a count that has to be added up rather than read off: a main
+   * category counts the items under its sub-categories too.
+   */
+  count?: (value: string, counts: Record<string, number>, rows: Row[]) => number
+  /** Offers "not set" as a choice of its own, under this label. */
+  noneLabel?: string
+  /** Emptied when this other filter changes, as a sub-category is by its category. */
+  dependsOn?: string
 }
 
 interface MasterTableProps<T> {
@@ -43,8 +93,35 @@ interface MasterTableProps<T> {
    * edit and deactivate actions; omitting it leaves the table read-only.
    */
   formFields?: FormField[]
+  /** Fields per row in the form on a wide screen. */
+  formColumns?: 3 | 4
+  /** A wider form card, for a master with many fields (suppliers). */
+  formWide?: boolean
   /** Singular noun used in the dialog heading, e.g. "Customer". */
   entityName?: string
+  /**
+   * Offers a permanent Delete beside Deactivate. The route must allow it (the
+   * crudRouter's `permanentDelete`); the box then says what it would clear
+   * or move, and asks where, before anything is done.
+   */
+  allowDelete?: boolean
+  /** What the delete box tells the person to do about what stops a delete. */
+  deleteRefusedHint?: string
+  /**
+   * The master has no active flag (sizes): no "Active only" tick, nothing
+   * sent for it, and no Deactivate. Pair with allowDelete.
+   */
+  noActiveFlag?: boolean
+  /** Changing this reloads the list, for a change made outside it (an import). */
+  refreshKey?: number
+  /**
+   * Offers Export: the list as a spreadsheet, as filtered, searched and
+   * sorted on screen, every page of it. The route must allow it (the
+   * crudRouter's `exportSheet`).
+   */
+  exportable?: boolean
+  /** Dropdown filters shown beside the search. */
+  filterDefs?: FilterDef[]
 }
 
 export function MasterTable<T extends { id: string; isActive?: boolean }>({
@@ -57,7 +134,15 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   filters,
   emptyMessage = 'Nothing here yet.',
   formFields,
+  formColumns,
+  formWide = false,
   entityName,
+  filterDefs = [],
+  allowDelete = false,
+  deleteRefusedHint,
+  noActiveFlag = false,
+  refreshKey = 0,
+  exportable = false,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -74,6 +159,9 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<T | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  // The record whose delete box is open, and what the last delete did.
+  const [deleting, setDeleting] = useState<T | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   // Rows per page comes from Settings -> Preferences.
   const { rowsPerPage } = useAppSettings()
@@ -88,10 +176,145 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     return () => clearTimeout(timer)
   }, [search])
 
+  // What each dropdown has ticked, by query parameter.
+  const [picked, setPicked] = useState<Picked>({})
+  // The rows each master-backed dropdown offers, loaded once.
+  const [filterRows, setFilterRows] = useState<Record<string, Row[]>>({})
+  // Per facet, how many records each value would leave.
+  const [facetCounts, setFacetCounts] = useState<Record<string, Record<string, number>> | null>(
+    null,
+  )
+
   // A new search or filter invalidates the current page number.
+  const pickedKey = JSON.stringify(picked)
   useEffect(() => {
     setPage(1)
-  }, [debouncedSearch, activeOnly])
+  }, [debouncedSearch, activeOnly, pickedKey])
+
+  // Everything that narrows the list, as the API takes it. The list and the
+  // counts are asked the same question, so they can never disagree.
+  const filtersKey = JSON.stringify(filters)
+  const narrowing = useMemo<ListParams>(() => {
+    const params: ListParams = {
+      q: debouncedSearch || undefined,
+      active: activeOnly && !noActiveFlag ? true : undefined,
+      ...filters,
+    }
+    for (const [key, values] of Object.entries(picked)) {
+      if (values.length) params[key] = values.join(',')
+    }
+    return params
+    // Compared by contents: `filters` is an object literal at most call sites.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch, activeOnly, pickedKey, filtersKey])
+
+  // Dropdowns fed from another master load their rows once.
+  const filterDefsKey = filterDefs.map((f) => f.key).join()
+  useEffect(() => {
+    let cancelled = false
+    for (const def of filterDefs) {
+      if (!def.optionsFrom) continue
+      masterResource<Row>(def.optionsFrom.resource)
+        .list({ limit: 200, active: true })
+        .then((res) => {
+          if (!cancelled) setFilterRows((prev) => ({ ...prev, [def.key]: res.data }))
+        })
+        .catch(() => {
+          if (!cancelled) setFilterRows((prev) => ({ ...prev, [def.key]: [] }))
+        })
+    }
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterDefsKey])
+
+  // The counts follow the search and every filter; the newest request wins.
+  const facetRequest = useRef(0)
+  const hasFacets = filterDefs.some((f) => f.facet)
+  useEffect(() => {
+    if (!hasFacets) return
+    const id = ++facetRequest.current
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(narrowing)) {
+      if (v !== undefined && v !== '') qs.set(k, String(v))
+    }
+    api
+      .get<{ data: Record<string, Record<string, number>> }>(`/masters/${resource}/facets?${qs}`)
+      .then((res) => {
+        if (id === facetRequest.current) setFacetCounts(res.data)
+      })
+      .catch(() => {
+        // Without counts the dropdowns still filter; they just show no numbers.
+        if (id === facetRequest.current) setFacetCounts({})
+      })
+  }, [narrowing, resource, hasFacets])
+
+  // Every value a facet-fed dropdown has offered, so a value the other
+  // filters narrow to nought stays in its list with 0 rather than vanishing.
+  const facetValuesSeen = useRef<Record<string, Set<string>>>({})
+
+  const choicesFor = (def: FilterDef): FilterChoice[] | undefined => {
+    const counts = def.facet && facetCounts ? (facetCounts[def.facet] ?? {}) : undefined
+    const countOf = (value: string, rows: Row[]) =>
+      counts === undefined
+        ? undefined
+        : def.count
+          ? def.count(value, counts, rows)
+          : (counts[value] ?? 0)
+
+    let list: FilterChoice[]
+    if (def.valuesFromFacet) {
+      if (!counts) return undefined
+      const seen = (facetValuesSeen.current[def.key] ??= new Set())
+      for (const v of Object.keys(counts)) if (v && v !== 'none') seen.add(v)
+      for (const v of picked[def.key] ?? []) if (v !== 'none') seen.add(v)
+      list = [...seen]
+        // Numbers by value: 28, 30 … 40, not 28, 300, 30.
+        .sort(def.sortValues ?? ((a, b) => a.localeCompare(b, undefined, { numeric: true })))
+        .map((v) => ({ value: v, label: def.valueLabel ? def.valueLabel(v) : v, count: counts[v] ?? 0 }))
+      // Typed-in columns hold both nothing and an empty string; both are "not set".
+      if (def.noneLabel) {
+        list.push({ value: 'none', label: def.noneLabel, count: (counts.none ?? 0) + (counts[''] ?? 0) })
+      }
+      return list
+    } else if (def.optionsFrom) {
+      const rows = filterRows[def.key]
+      if (!rows) return undefined
+      const { filter, label } = def.optionsFrom
+      list = rows
+        .filter((r) => !filter || filter(r, picked))
+        .map((r) => ({
+          value: String(r.id),
+          label: label ? label(r, picked) : String(r.name ?? r.id),
+          count: countOf(String(r.id), rows),
+        }))
+    } else {
+      list = (def.options ?? []).map((o) => ({ ...o, count: countOf(o.value, []) }))
+    }
+    if (def.noneLabel) list.push({ value: 'none', label: def.noneLabel, count: countOf('none', []) })
+    return list
+  }
+
+  const setFilter = (key: string, values: string[]) =>
+    setPicked((prev) => {
+      const next = { ...prev, [key]: values }
+      for (const def of filterDefs) if (def.dependsOn === key) next[def.key] = []
+      return next
+    })
+
+  // Each ticked choice as a removable chip, named as it is in its list.
+  const chips = filterDefs.flatMap((def) => {
+    const values = picked[def.key] ?? []
+    if (!values.length) return []
+    const choices = choicesFor(def) ?? []
+    return values.map((value) => ({
+      key: def.key,
+      value,
+      text: `${def.label}: ${choices.find((c) => c.value === value)?.label ?? '…'}`,
+    }))
+  })
+  const narrowed = chips.length > 0 || Boolean(debouncedSearch)
 
   // Responses can arrive out of order; only the newest request may render.
   const requestId = useRef(0)
@@ -105,11 +328,9 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
       const res: Paginated<T> = await client.list({
         page,
         limit: rowsPerPage,
-        q: debouncedSearch || undefined,
         sort,
         order,
-        active: activeOnly ? true : undefined,
-        ...filters,
+        ...narrowing,
       })
 
       if (id !== requestId.current) return
@@ -128,14 +349,11 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     } finally {
       if (id === requestId.current) setLoading(false)
     }
-    // `filters` is an object literal at most call sites, so it is compared by
-    // its contents rather than identity to avoid an endless reload loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, page, rowsPerPage, debouncedSearch, sort, order, activeOnly, JSON.stringify(filters)])
+  }, [client, page, rowsPerPage, sort, order, narrowing])
 
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, refreshKey])
 
   /**
    * Masters are referenced by transactions forever, so the API deactivates
@@ -160,6 +378,38 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
       setActionError(
         err instanceof ApiError ? err.message : 'Could not deactivate. Is the API running?',
       )
+    }
+  }
+
+  const [exporting, setExporting] = useState(false)
+  /** What is on screen, every page, as a file handed to the browser. */
+  const exportList = async () => {
+    setExporting(true)
+    setActionError(null)
+    try {
+      const qs = new URLSearchParams({ order })
+      if (sort) qs.set('sort', sort)
+      for (const [k, v] of Object.entries(narrowing)) {
+        if (v !== undefined && v !== '') qs.set(k, String(v))
+      }
+      const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:5000/api'
+      const res = await fetch(`${base}/masters/${resource}/export?${qs}`, {
+        headers: { Authorization: `Bearer ${tokens.access() ?? ''}` },
+      })
+      if (!res.ok) throw new Error(`The export could not be made (${res.status}).`)
+      const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? `${resource}.xlsx`
+      const url = URL.createObjectURL(await res.blob())
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'The export could not be made.')
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -189,6 +439,18 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
             Refresh
           </button>
           {actions}
+          {exportable && (
+            <button
+              type="button"
+              onClick={() => void exportList()}
+              className="btn-secondary"
+              disabled={exporting || pagination.total === 0}
+              title={narrowed ? 'Export the rows the filters leave' : 'Export every row'}
+            >
+              {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+              Export
+            </button>
+          )}
           {editable && (
             <button
               onClick={() => {
@@ -204,26 +466,104 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
         </div>
       </div>
 
-      <div className="glass-card p-4 flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-60 flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border">
-          <Search size={15} className="text-muted-foreground" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={searchPlaceholder}
-            className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
-          />
+      {/* Raised above the table so an open dropdown lies over it, not under it. */}
+      <div className="glass-card relative z-20 space-y-3 p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex h-10 min-w-60 flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+            <Search size={15} className="text-muted-foreground" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={searchPlaceholder}
+              className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          {filterDefs.map((def) => (
+            <FilterMenu
+              key={def.key}
+              label={def.label}
+              choices={choicesFor(def)}
+              selected={picked[def.key] ?? []}
+              onChange={(values) => setFilter(def.key, values)}
+            />
+          ))}
+
+          {!noActiveFlag && (
+          <label className="ml-1 flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={activeOnly}
+              onChange={(e) => setActiveOnly(e.target.checked)}
+              className="accent-teal-500"
+            />
+            Active only
+          </label>
+          )}
         </div>
-        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={activeOnly}
-            onChange={(e) => setActiveOnly(e.target.checked)}
-            className="accent-teal-500"
-          />
-          Active only
-        </label>
+
+        {chips.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            {chips.map((c) => (
+              <span
+                key={`${c.key}:${c.value}`}
+                className="border-primary/30 bg-primary/10 inline-flex items-center gap-1 rounded-full border py-0.5 pl-2.5 pr-1 text-xs text-foreground"
+              >
+                {c.text}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setFilter(
+                      c.key,
+                      (picked[c.key] ?? []).filter((v) => v !== c.value),
+                    )
+                  }
+                  className="rounded-full p-0.5 text-muted-foreground hover:text-foreground"
+                  aria-label={`Remove ${c.text}`}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setPicked({})
+                setSearch('')
+              }}
+              className="text-primary text-xs font-medium hover:underline"
+            >
+              Clear all
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* What the last delete did, in the API's words: "Embroidery QC deleted.
+        1 operation and 1 routing step moved to Embroidery." */}
+      {notice && (
+        <div className="glass-card flex items-start justify-between gap-3 border-emerald-500/40 p-4">
+          <p className="text-sm text-foreground">{notice}</p>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="text-muted-foreground hover:text-foreground"
+            aria-label="Dismiss"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {(error || actionError) && (
         <div className="glass-card p-4 flex items-start gap-3 border-red-500/40">
@@ -245,19 +585,18 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                 {columns.map((col) => (
                   <th
                     key={col.key}
-                    className={[
-                      col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : '',
-                      col.sortable ? 'cursor-pointer select-none hover:text-foreground' : '',
-                    ]
-                      .filter(Boolean)
-                      .join(' ')}
+                    // Inline, because the stylesheet's `.data-table > thead > tr > th`
+                    // sets text-left at a weight a `text-right` class cannot beat,
+                    // which left a number's heading at the far side of its column.
+                    style={col.align ? { textAlign: col.align } : undefined}
+                    className={col.sortable ? 'cursor-pointer select-none hover:text-foreground' : undefined}
                     onClick={col.sortable ? () => toggleSort(col.key) : undefined}
                   >
                     {col.header}
                     {sort === col.key && (order === 'asc' ? ' ↑' : ' ↓')}
                   </th>
                 ))}
-                {editable && <th className="text-right">Actions</th>}
+                {editable && <th style={{ textAlign: 'right' }}>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -278,7 +617,11 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                     colSpan={columns.length + (editable ? 1 : 0)}
                     className="text-center py-10 text-muted-foreground"
                   >
-                    {debouncedSearch ? `No matches for "${debouncedSearch}".` : emptyMessage}
+                    {narrowed
+                      ? `Nothing matches${debouncedSearch ? ` "${debouncedSearch}"` : ''}${
+                          chips.length ? ' with these filters' : ''
+                        }.`
+                      : emptyMessage}
                   </td>
                 </tr>
               )}
@@ -316,13 +659,28 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                       >
                         <Pencil size={14} />
                       </button>
-                      {row.isActive !== false && (
+                      {/* Kept in place but hidden on an inactive row, so the
+                        Delete beside it stays in the same column on every row. */}
+                      {!noActiveFlag && (
                         <button
-                          className="btn-ghost p-1.5 text-red-400"
+                          className={`btn-ghost p-1.5 text-red-400 ${row.isActive === false ? 'invisible' : ''}`}
                           title={`Deactivate ${singular.toLowerCase()}`}
                           onClick={() => void deactivate(row)}
                         >
                           <Ban size={14} />
+                        </button>
+                      )}
+                      {allowDelete && (
+                        <button
+                          className="btn-ghost p-1.5 text-red-500"
+                          title={`Delete ${singular.toLowerCase()} permanently`}
+                          onClick={() => {
+                            setActionError(null)
+                            setNotice(null)
+                            setDeleting(row)
+                          }}
+                        >
+                          <Trash2 size={14} />
                         </button>
                       )}
                     </td>
@@ -360,6 +718,27 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
         )}
       </div>
 
+      {deleting && (
+        <DeleteDialog
+          resource={resource}
+          id={deleting.id}
+          name={String(
+            (deleting as Record<string, unknown>).name ??
+              (deleting as Record<string, unknown>).label ??
+              (deleting as Record<string, unknown>).code ??
+              singular,
+          )}
+          entityName={singular}
+          refusedHint={deleteRefusedHint}
+          onClose={() => setDeleting(null)}
+          onDeleted={(message) => {
+            setDeleting(null)
+            setNotice(message)
+            void load()
+          }}
+        />
+      )}
+
       {editable && formFields && (
         <MasterFormDialog<T>
           open={dialogOpen}
@@ -369,6 +748,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           fields={formFields}
           record={editing}
           title={singular}
+          columns={formColumns}
+          wide={formWide}
         />
       )}
     </div>

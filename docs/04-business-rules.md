@@ -191,6 +191,10 @@ Built. All of it is enforced in one file:
    The reverse also holds: a customer's fabric in our godown is **not** ours, and
    is left out of the stock value.
 6. **Value it consistently.** Weighted average, chosen once, for everything.
+7. **Stock moves forward in time.** A movement may be dated any day from the
+   last movement of that item in that store up to today — not before it, and
+   never in the future. Paperwork entered a day late is fine unless the same
+   item has moved in that store since; then it is dated on or after that day.
 
 ### How it is held
 
@@ -207,9 +211,28 @@ out; value is the same sum priced at each row's own rate. Stock leaves at the
 running average, which is what keeps the two in step — an item at zero quantity
 is also at zero value.
 
+**Dates follow the order of entry.** Every balance check and every average
+rate is worked out in the order movements are written, so a movement dated
+before the last one of the same item and store would sit in the ledger out of
+that order and make its running balance wrong. `settleDate` refuses it, naming
+the date to use, and dates each movement strictly after the one before it, so
+two sent at the same moment still list in the order the lock let them through.
+
 **Three people, not one.** A requisition is raised by one person, approved by a
-second and issued by a third. The person who raised it cannot approve it, and
-both doors — the inventory screen and the approvals inbox — enforce that.
+second and issued by a third. Neither the person who raised it nor the one who
+approved it can issue it, and the person who raised it cannot approve it. Both
+doors — the inventory screen and the approvals inbox — enforce that, and a
+requisition is decided and issued once: the decision and the issue each only
+land on a requisition still in the state they expect.
+
+**Part now, the rest later.** The store hands over what it has: 30 of 50 metres
+today, the other 20 when the next roll comes. Each issue takes up to what is
+still owed on each line, and the requisition is complete once every line from
+the store is handed over in full. If the rest is no longer wanted it is
+**closed**, and one with nothing handed over is **cancelled**: the person who
+raised it may withdraw it, and the store or an approver may close it, always
+with a reason. After that nothing more is issued against it, and a withdrawn
+requisition can no longer be approved.
 
 ### What still has to come
 

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 
 // ─────────────────────────────────────────────────────────────
 // Shared field helpers
@@ -18,7 +19,7 @@ const tidyIdentifier = <T extends z.ZodTypeAny>(schema: T) =>
   )
 
 /** 15-character GSTIN: 2 state digits, 10-char PAN, entity digit, 'Z', checksum. */
-const gstin = tidyIdentifier(
+export const gstin = tidyIdentifier(
   z
     .string()
     .length(15, 'A GSTIN is exactly 15 characters — count what you have typed')
@@ -28,7 +29,7 @@ const gstin = tidyIdentifier(
     ),
 )
 
-const pan = tidyIdentifier(
+export const pan = tidyIdentifier(
   z
     .string()
     .length(10, 'A PAN is exactly 10 characters')
@@ -97,9 +98,9 @@ const code = z.preprocess(
  * taxed CGST+SGST or IGST, so it cannot be free text. Derived from the GSTIN
  * when one is given.
  */
-const stateCode = z
+export const stateCode = z
   .string()
-  .regex(/^[0-3][0-9]$/, 'A state code is the two digits your GSTIN starts with')
+  .regex(/^[0-9]{2}$/, 'A state code is the two digits your GSTIN starts with')
   .optional()
   .nullable()
 
@@ -108,6 +109,19 @@ const optionalText = z.string().max(500).optional().nullable()
 
 /** Money and quantity arrive as JSON numbers or strings; Prisma Decimal takes both. */
 const decimal = z.union([z.number(), z.string().regex(/^-?\d+(\.\d+)?$/)])
+
+/**
+ * A quantity that has to be there: more than nought. A BOM line of -2 metres
+ * saved at ₹-236 and was approved, and a line of 0 costs nothing and draws
+ * nothing, so neither is a component.
+ */
+const positiveDecimal = z.union([
+  z.number().positive('A quantity has to be more than nought'),
+  z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, 'A quantity has to be a number more than nought')
+    .refine((v) => Number(v) > 0, 'A quantity has to be more than nought'),
+])
 const nonNegativeDecimal = z
   .union([z.number().nonnegative(), z.string().regex(/^\d+(\.\d+)?$/)])
   .optional()
@@ -143,7 +157,7 @@ const isActive = z.boolean().optional()
 // Customer
 // ─────────────────────────────────────────────────────────────
 
-export const createCustomerSchema = z.object({
+const customerFields = z.object({
   // Left out on a new record: the server makes one up. Still validated when
   // somebody does supply one, so an imported code cannot be malformed.
   code: code.optional(),
@@ -177,13 +191,45 @@ export const createCustomerSchema = z.object({
   notes: optionalText,
   isActive,
 })
-export const updateCustomerSchema = createCustomerSchema.partial()
+
+/*
+ * A customer's GSTIN, state code and PAN have to agree, or every invoice to
+ * them carries the wrong tax: GSTIN 27… with state code 24 used to save, and
+ * was taxed as Gujarat. What the GSTIN already says is filled in when left
+ * empty, and the state's name always comes from its code.
+ */
+type CustomerIn = z.infer<typeof customerFields>
+const checkCustomer = (v: Partial<CustomerIn>, ctx: z.RefinementCtx) => {
+  checkRegistration(
+    { gstin: v.gstin, stateCode: v.billingStateCode, pan: v.pan },
+    { stateCode: 'billingStateCode', pan: 'pan' },
+    ctx,
+  )
+  checkRegistration(
+    { gstin: v.shippingGstin, stateCode: v.shippingStateCode },
+    { stateCode: 'shippingStateCode' },
+    ctx,
+  )
+}
+const fillCustomer = <T extends Partial<CustomerIn>>(v: T): T => {
+  const billing = fromGstin(v.gstin)
+  const shipping = fromGstin(v.shippingGstin)
+  const out = { ...v }
+  if (billing && !out.billingStateCode) out.billingStateCode = billing.stateCode
+  if (billing && !out.pan) out.pan = billing.pan
+  if (shipping && !out.shippingStateCode) out.shippingStateCode = shipping.stateCode
+  if (out.billingStateCode) out.billingState = stateName(out.billingStateCode) ?? out.billingState
+  if (out.shippingStateCode) out.shippingState = stateName(out.shippingStateCode) ?? out.shippingState
+  return out
+}
+export const createCustomerSchema = customerFields.superRefine(checkCustomer).transform(fillCustomer)
+export const updateCustomerSchema = customerFields.partial().superRefine(checkCustomer).transform(fillCustomer)
 
 // ─────────────────────────────────────────────────────────────
 // Supplier
 // ─────────────────────────────────────────────────────────────
 
-export const createSupplierSchema = z.object({
+const supplierFields = z.object({
   // Left out on a new record: the server makes one up. Still validated when
   // somebody does supply one, so an imported code cannot be malformed.
   code: code.optional(),
@@ -212,7 +258,21 @@ export const createSupplierSchema = z.object({
   notes: optionalText,
   isActive,
 })
-export const updateSupplierSchema = createSupplierSchema.partial()
+
+/** A supplier's GSTIN, state code and PAN agree, as a customer's must. */
+type SupplierIn = z.infer<typeof supplierFields>
+const checkSupplier = (v: Partial<SupplierIn>, ctx: z.RefinementCtx) =>
+  checkRegistration({ gstin: v.gstin, stateCode: v.stateCode, pan: v.pan }, { stateCode: 'stateCode', pan: 'pan' }, ctx)
+const fillSupplier = <T extends Partial<SupplierIn>>(v: T): T => {
+  const reg = fromGstin(v.gstin)
+  const out = { ...v }
+  if (reg && !out.stateCode) out.stateCode = reg.stateCode
+  if (reg && !out.pan) out.pan = reg.pan
+  if (out.stateCode) out.state = stateName(out.stateCode) ?? out.state
+  return out
+}
+export const createSupplierSchema = supplierFields.superRefine(checkSupplier).transform(fillSupplier)
+export const updateSupplierSchema = supplierFields.partial().superRefine(checkSupplier).transform(fillSupplier)
 
 // ─────────────────────────────────────────────────────────────
 // Item
@@ -228,6 +288,8 @@ export const createItemSchema = z
     type: ItemTypeEnum,
     categoryId: z.string().min(1, 'Choose a category from the list'),
     uomId: z.string().min(1, 'Choose a unit — pieces, metres, kilograms and so on'),
+    // The department that normally uses it. Optional; null clears it.
+    departmentId: z.string().min(1).optional().nullable(),
     hsnCode: z
       .string()
       .regex(/^[0-9]{4,8}$/, 'An HSN code is 4 to 8 digits, nothing else')
@@ -266,7 +328,15 @@ export const createStyleSchema = z.object({
   // The size run is a named master now, not a typed-in list. Free text let
   // "XL" and "xl" both exist and the quantities quietly stopped reconciling.
   sizeGroupId: z.string().min(1).optional().nullable(),
-  colors: z.array(z.string().min(1).max(50)).default([]),
+  // "White" and "white" were both accepted, and a BOM made for one could not
+  // be found under the other.
+  colors: z
+    .array(z.string().trim().min(1).max(50))
+    .default([])
+    .refine(
+      (list) => new Set(list.map((c) => c.toLowerCase())).size === list.length,
+      'A colour is listed twice. Each colour once, however it is capitalised.',
+    ),
   techPackUrl: z.string().url().optional().nullable(),
   imageUrl: z.string().url().optional().nullable(),
   isActive,
@@ -284,7 +354,7 @@ export const updateStyleSchema = createStyleSchema.partial()
  */
 export const bomLineSizeSchema = z.object({
   sizeId: z.string().min(1, 'Pick a size'),
-  qtyPerUnit: decimal,
+  qtyPerUnit: positiveDecimal,
 })
 
 export const bomLineSchema = z.object({
@@ -297,7 +367,7 @@ export const bomLineSchema = z.object({
   component: z.string().max(60).optional().nullable(),
   /** The department that draws this from the store — Cutting, Stitching, Packing. */
   departmentId: z.string().optional().nullable(),
-  qtyPerUnit: decimal,
+  qtyPerUnit: positiveDecimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
   notes: optionalText,
@@ -448,7 +518,8 @@ export const updateBankAccountSchema = createBankAccountSchema.partial()
 
 export const createDepartmentSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
-  code,
+  // Made from the name when left out: "Printing QC" → PRIQC.
+  code: code.optional(),
   name,
   isActive,
 })
@@ -494,6 +565,8 @@ export const updateUomSchema = createUomSchema.partial()
 export const createItemCategorySchema = z.object({
   name,
   parentId: z.string().optional().nullable(),
+  // The department a new item in this category starts with. Null clears it.
+  departmentId: z.string().min(1).optional().nullable(),
   isActive,
 })
 export const updateItemCategorySchema = createItemCategorySchema.partial()
@@ -592,7 +665,7 @@ export const updateWorkstationSchema = z.object({
   isActive,
 })
 
-export const createBrokerSchema = z.object({
+const brokerFields = z.object({
   // Left out on a new record: the server makes one up. Still validated when
   // somebody does supply one, so an imported code cannot be malformed.
   code: code.optional(),
@@ -611,7 +684,25 @@ export const createBrokerSchema = z.object({
   notes: optionalText,
   isActive,
 })
-export const updateBrokerSchema = createBrokerSchema.partial()
+
+/*
+ * An agent's GSTIN, state code and PAN agree, as a customer's and a
+ * supplier's must: the commission bill they raise is taxed by that state,
+ * and TDS is deducted against that PAN.
+ */
+type BrokerIn = z.infer<typeof brokerFields>
+const checkBroker = (v: Partial<BrokerIn>, ctx: z.RefinementCtx) =>
+  checkRegistration({ gstin: v.gstin, stateCode: v.stateCode, pan: v.pan }, { stateCode: 'stateCode', pan: 'pan' }, ctx)
+const fillBroker = <T extends Partial<BrokerIn>>(v: T): T => {
+  const reg = fromGstin(v.gstin)
+  const out = { ...v }
+  if (reg && !out.stateCode) out.stateCode = reg.stateCode
+  if (reg && !out.pan) out.pan = reg.pan
+  if (out.stateCode) out.state = stateName(out.stateCode) ?? out.state
+  return out
+}
+export const createBrokerSchema = brokerFields.superRefine(checkBroker).transform(fillBroker)
+export const updateBrokerSchema = brokerFields.partial().superRefine(checkBroker).transform(fillBroker)
 
 export const createChargeTypeSchema = z.object({
   name,

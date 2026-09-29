@@ -2,10 +2,13 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
-  Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight,
+  Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer,
 } from 'lucide-react'
-import { api, ApiError, currentUser, type Paginated } from '@/lib/api'
+import Link from 'next/link'
+import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
+import { IssueDialog } from '@/components/inventory/IssueDialog'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -42,8 +45,17 @@ interface Requisition {
   raisedBy: { id: string; name: string } | null
   approvedBy: { id: string; name: string } | null
   issuedBy: { id: string; name: string } | null
+  /** Cancelled, or closed with part still owed: nothing more is issued. */
+  closedAt: string | null
+  closeReason: string | null
+  closedBy: { id: string; name: string } | null
   lines: Line[]
 }
+
+/** Something from the store is still owed on it, and some has been handed over. */
+const partlyIssued = (mr: Requisition) =>
+  mr.lines.some((l) => Number(l.issuedQty) > 0) &&
+  mr.lines.some((l) => l.fulfilment !== 'PURCHASE' && Number(l.issuedQty) < Number(l.requestedQty))
 
 const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -57,8 +69,17 @@ const qtyFmt = (v: number) =>
  */
 function stage(
   mr: Requisition,
-  isMine: boolean
+  isMine: boolean,
+  iApproved = false
 ): { label: string; cls: string; next?: string } {
+  if (mr.closedAt) {
+    const some = mr.lines.some((l) => Number(l.issuedQty) > 0)
+    return {
+      label: some ? 'Closed — part issued' : 'Cancelled',
+      cls: 'badge-neutral',
+      next: `${mr.closeReason ?? ''}${mr.closedBy ? ` — ${mr.closedBy.name}` : ''}`,
+    }
+  }
   if (mr.status === 'REJECTED') return { label: 'Refused', cls: 'badge-danger' }
 
   if (mr.status === 'PENDING') {
@@ -71,11 +92,27 @@ function stage(
     }
   }
 
+  if (!mr.issuedAt && partlyIssued(mr)) {
+    const fromStock = mr.lines.filter((l) => l.fulfilment !== 'PURCHASE')
+    const full = fromStock.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
+    return {
+      label: 'Part issued',
+      cls: 'badge-warning',
+      next: `${full} of ${fromStock.length} ${fromStock.length === 1 ? 'line' : 'lines'} handed over in full. The rest is still owed, or close it if it is no longer wanted.`,
+    }
+  }
+
   if (!mr.issuedAt) {
     return {
       label: 'Approved — not collected',
       cls: 'badge-info',
-      next: 'Nothing has moved yet. Press issue when the store hands the material over.',
+      // Raised, approved and issued by three different people, so the two
+      // who have had their say are told it is somebody else's turn.
+      next: isMine
+        ? 'You raised it, so somebody else in the store hands the material over.'
+        : iApproved
+          ? 'You approved it, so somebody else in the store hands the material over.'
+          : 'Nothing has moved yet. Press issue when the store hands the material over.',
     }
   }
 
@@ -97,6 +134,9 @@ export default function RequisitionsPage() {
   const [status, setStatus] = useState('')
   const [open, setOpen] = useState<string | null>(null)
   const [dialog, setDialog] = useState(false)
+  // The requisition being handed over, and the one a reason is being asked for.
+  const [issuing, setIssuing] = useState<Requisition | null>(null)
+  const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
@@ -210,37 +250,36 @@ export default function RequisitionsPage() {
     }
   }
 
-  const act = async (mr: Requisition, what: 'approve' | 'reject' | 'issue') => {
-    let body: Record<string, unknown> = {}
-
-    if (what === 'reject') {
-      const reason = prompt(`Why is ${mr.mrNumber} being refused?`)
-      if (!reason || reason.trim().length < 5) return
-      body = { reason: reason.trim() }
-    }
-    if (what === 'issue' && !confirm(`Hand over the material on ${mr.mrNumber}? Stock leaves now.`)) {
-      return
-    }
-
+  const act = async (mr: Requisition, what: 'approve' | 'reject' | 'close', reason?: string) => {
     setBusy(mr.id)
     setError(null)
     setMessage(null)
     try {
       const res =
-        what === 'issue'
-          ? await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/issue`, body)
+        what === 'close'
+          ? await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/close`, { reason })
           : await api.patch<{ message?: string }>(
               `/inventory/requisitions/${mr.id}/${what}`,
-              body,
+              what === 'reject' ? { reason } : {},
             )
+      setAsking(null)
       await load()
       if (res.message) setMessage(res.message)
     } catch (err) {
+      setAsking(null)
       setError(err instanceof ApiError ? err.message : 'Could not save.')
     } finally {
       setBusy(null)
     }
   }
+
+  // The person who raised it may withdraw it; the store or an approver may
+  // close it. The server holds the same rule.
+  const mayClose = (mr: Requisition, isMine: boolean) =>
+    !mr.closedAt &&
+    mr.status !== 'REJECTED' &&
+    !mr.issuedAt &&
+    (isMine || can('inventory', 'edit') || can('inventory', 'approve'))
 
   return (
     <div className="space-y-5">
@@ -291,7 +330,10 @@ export default function RequisitionsPage() {
           >
             <option value="">All</option>
             <option value="PENDING">Waiting for approval</option>
-            <option value="APPROVED">Approved</option>
+            <option value="APPROVED">Approved — to hand over</option>
+            <option value="PARTLY">Part issued</option>
+            <option value="ISSUED">Issued in full</option>
+            <option value="CLOSED">Cancelled or closed</option>
             <option value="REJECTED">Refused</option>
           </select>
           <span className="text-xs text-muted-foreground ml-auto">{total} requisitions</span>
@@ -325,7 +367,8 @@ export default function RequisitionsPage() {
                   // The server refuses this too; hiding the button just avoids
                   // offering somebody a door that is certain to be shut.
                   const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
-                  const s = stage(mr, isMine)
+                  const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
+                  const s = stage(mr, isMine, iApproved)
 
                   return (
                     <Fragment key={mr.id}>
@@ -365,7 +408,7 @@ export default function RequisitionsPage() {
                         </td>
                         <td className="text-right whitespace-nowrap">
                           <div className="flex justify-end gap-1">
-                            {mr.status === 'PENDING' && !isMine && (
+                            {mr.status === 'PENDING' && !mr.closedAt && !isMine && (
                               <>
                                 <button
                                   className="btn-ghost p-1.5 hover:text-emerald-400"
@@ -378,7 +421,7 @@ export default function RequisitionsPage() {
                                 </button>
                                 <button
                                   className="btn-ghost p-1.5 hover:text-red-400"
-                                  onClick={() => void act(mr, 'reject')}
+                                  onClick={() => setAsking({ mr, kind: 'reject' })}
                                   disabled={busy === mr.id}
                                   title="Refuse"
                                   aria-label={`Refuse ${mr.mrNumber}`}
@@ -387,15 +430,37 @@ export default function RequisitionsPage() {
                                 </button>
                               </>
                             )}
-                            {mr.status === 'APPROVED' && !mr.issuedAt && (
+                            {mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt && !isMine && !iApproved && (
                               <button
                                 className="btn-ghost p-1.5 hover:text-teal-400"
-                                onClick={() => void act(mr, 'issue')}
+                                onClick={() => setIssuing(mr)}
                                 disabled={busy === mr.id}
                                 title="Hand the material over"
                                 aria-label={`Issue ${mr.mrNumber}`}
                               >
                                 <PackageCheck size={15} />
+                              </button>
+                            )}
+                            {/* The slip the department signs for what it was handed. */}
+                            {mr.status === 'APPROVED' && (
+                              <Link
+                                href={`/print/material-issue/${mr.id}`}
+                                className="btn-ghost inline-flex p-1.5 hover:text-teal-400"
+                                title="Print the issue slip"
+                                aria-label={`Print ${mr.mrNumber}`}
+                              >
+                                <Printer size={15} />
+                              </Link>
+                            )}
+                            {mayClose(mr, isMine) && (
+                              <button
+                                className="btn-ghost p-1.5 hover:text-red-400"
+                                onClick={() => setAsking({ mr, kind: 'close' })}
+                                disabled={busy === mr.id}
+                                title={partlyIssued(mr) ? 'Close — the rest is not needed' : 'Cancel'}
+                                aria-label={`${partlyIssued(mr) ? 'Close' : 'Cancel'} ${mr.mrNumber}`}
+                              >
+                                <Ban size={15} />
                               </button>
                             )}
                           </div>
@@ -421,7 +486,7 @@ export default function RequisitionsPage() {
                                 cannot know what is on the rack. The store
                                 keeper can, and the figure is beside every line
                                 while they decide. */}
-                              {mr.status === 'APPROVED' && !mr.issuedAt && (
+                              {mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt && (
                                 <div className="border-border bg-card mb-3 rounded-lg border">
                                   <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2">
                                     <h4 className="text-foreground text-xs font-semibold">
@@ -546,6 +611,13 @@ export default function RequisitionsPage() {
                                         issued {qtyFmt(Number(l.issuedQty))}
                                       </span>
                                     )}
+                                    {Number(l.issuedQty) > 0 &&
+                                      Number(l.issuedQty) < Number(l.requestedQty) && (
+                                        <span className="ml-2 text-amber-500">
+                                          owed{' '}
+                                          {qtyFmt(Number(l.requestedQty) - Number(l.issuedQty))}
+                                        </span>
+                                      )}
                                   </div>
                                 </div>
                               ))}
@@ -556,6 +628,13 @@ export default function RequisitionsPage() {
                                   <>
                                     Handed over by {mr.issuedBy.name} on{' '}
                                     {formatDate(mr.issuedAt)}.
+                                  </>
+                                )}
+                                {mr.closedAt && (
+                                  <>
+                                    {mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Closed' : 'Cancelled'}
+                                    {mr.closedBy && <> by {mr.closedBy.name}</>} on {formatDate(mr.closedAt)}
+                                    {mr.closeReason && <>: {mr.closeReason}</>}.{' '}
                                   </>
                                 )}
                                 {mr.notes && <div className="mt-1">{mr.notes}</div>}
@@ -572,6 +651,46 @@ export default function RequisitionsPage() {
           </div>
         )}
       </div>
+
+      {issuing && (
+        <IssueDialog
+          mrId={issuing.id}
+          mrNumber={issuing.mrNumber}
+          lines={issuing.lines}
+          onClose={() => setIssuing(null)}
+          onDone={(msg) => {
+            setIssuing(null)
+            setMessage(msg)
+            void load()
+          }}
+        />
+      )}
+
+      {asking && (
+        <ReasonDialog
+          title={
+            asking.kind === 'reject'
+              ? `Refuse ${asking.mr.mrNumber}?`
+              : `${partlyIssued(asking.mr) ? 'Close' : 'Cancel'} ${asking.mr.mrNumber}?`
+          }
+          description={
+            asking.kind === 'reject'
+              ? 'Whoever raised it sees the reason, so say what they should do instead.'
+              : partlyIssued(asking.mr)
+                ? 'What was handed over stays issued. The rest is no longer owed, and nothing more can be issued against it.'
+                : 'Nothing has been handed over. It comes off the list, and nothing can be issued against it.'
+          }
+          confirmLabel={
+            asking.kind === 'reject' ? 'Refuse' : partlyIssued(asking.mr) ? 'Close it' : 'Cancel it'
+          }
+          danger
+          minLength={5}
+          placeholder={asking.kind === 'reject' ? 'e.g. Use the offcuts from lot 12 first' : 'e.g. Order for this style was dropped'}
+          busy={busy === asking.mr.id}
+          onConfirm={(reason) => void act(asking.mr, asking.kind, reason)}
+          onCancel={() => setAsking(null)}
+        />
+      )}
 
       {dialog && (
         <RequisitionDialog

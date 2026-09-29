@@ -1,6 +1,6 @@
 'use client'
 
-import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 
 /**
@@ -16,6 +16,7 @@ interface SizeGroup {
   gender: string | null
   isActive: boolean
   sizes: { id: string; code: string; label: string; sequence: number }[]
+  _count?: { styles: number }
 }
 
 const GENDER_LABEL: Record<string, string> = {
@@ -64,7 +65,55 @@ const columns: Column<SizeGroup>[] = [
     align: 'right',
     render: (g) => <span className="text-muted-foreground">{g.sizes?.length ?? 0}</span>,
   },
+  {
+    key: 'styles',
+    header: 'Styles',
+    align: 'right',
+    render: (g) =>
+      g._count?.styles ? (
+        <span>{g._count.styles}</span>
+      ) : (
+        <span className="text-muted-foreground">Not used</span>
+      ),
+  },
   { key: 'isActive', header: 'Status', render: (g) => <ActiveBadge isActive={g.isActive} /> },
+]
+
+/*
+ * Who the run is for, a size it holds (every run with an XL), and whether
+ * any style is cut in it. Each counts what it would leave.
+ */
+/** Chest and waist sizes by number, then letter sizes smallest first. */
+const LETTER = ['XXS', 'XS', 'S', 'M', 'L', 'XL', 'XXL', '2XL', '3XL', 'XXXL', '4XL', '5XL']
+const sizeOrder = (a: string, b: string) => {
+  const rank = (v: string) => {
+    if (/^\d+(\.\d+)?$/.test(v)) return [0, Number(v)]
+    const i = LETTER.indexOf(v.toUpperCase())
+    return i >= 0 ? [1, i] : [2, 0]
+  }
+  const [ga, na] = rank(a)
+  const [gb, nb] = rank(b)
+  return ga - gb || na - nb || a.localeCompare(b)
+}
+
+const filterDefs: FilterDef[] = [
+  {
+    key: 'gender',
+    label: 'For',
+    facet: 'gender',
+    options: Object.entries(GENDER_LABEL).map(([value, label]) => ({ value, label })),
+    noneLabel: 'Not set',
+  },
+  { key: 'size', label: 'Size', facet: 'size', valuesFromFacet: true, sortValues: sizeOrder },
+  {
+    key: 'use',
+    label: 'Use',
+    facet: 'use',
+    options: [
+      { value: 'used', label: 'Used by a style' },
+      { value: 'unused', label: 'Not used yet' },
+    ],
+  },
 ]
 
 const formFields: FormField[] = [
@@ -97,8 +146,9 @@ export default function SizeRunsPage() {
       resource="size-groups"
       columns={columns}
       formFields={formFields}
+      filterDefs={filterDefs}
       defaultSort="name"
-      searchPlaceholder="Search size runs..."
+      searchPlaceholder="Search size run or size..."
       emptyMessage="No size runs yet. Create one, then add its sizes."
       actions={
         <a href="/masters/sizes" className="btn-secondary text-xs">
