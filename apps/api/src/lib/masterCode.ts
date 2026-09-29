@@ -69,11 +69,46 @@ async function itemPrefix(categoryId: unknown): Promise<string> {
  *
  * `attempt` walks past a number that has just been taken by somebody else.
  */
+/**
+ * A department's code is short and says which department: CUT, STI, PKG,
+ * CUTQC. That is what the mill's own list already looks like, so a new one is
+ * made the same way from its name: the first three letters of the first word,
+ * then any short word after it whole ("QC") and the first letter of any long
+ * one. "Printing QC" → PRIQC. If that is taken, a number goes on the end.
+ */
+async function nextDepartmentCode(name: unknown, attempt: number): Promise<string> {
+  const words = String(name ?? '')
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean)
+  const base =
+    (words[0]?.slice(0, 3) ?? '') + words.slice(1).map((w) => (w.length <= 3 ? w : w[0])).join('')
+  const stem = (base || 'DEP').slice(0, 10)
+
+  const taken = new Set(
+    (
+      await prisma.department.findMany({
+        where: { code: { startsWith: stem } },
+        select: { code: true },
+      })
+    ).map((d) => d.code),
+  )
+  let n = 1 + attempt
+  let code = n === 1 ? stem : `${stem}${n}`
+  while (taken.has(code)) {
+    n += 1
+    code = `${stem}${n}`
+  }
+  return code
+}
+
 export async function nextMasterCode(
   model: string,
   data: Record<string, unknown> = {},
   attempt = 0,
 ): Promise<string> {
+  if (model === 'department') return nextDepartmentCode(data.name, attempt)
+
   const prefix = model === 'item' ? await itemPrefix(data.categoryId) : PREFIX[model]
   if (!prefix) {
     throw new Error(`No code prefix is set up for ${model}`)
@@ -100,7 +135,8 @@ export async function nextMasterCode(
 }
 
 /** Whether this register has its codes made up for it. */
-export const isGeneratedCode = (model: string): boolean => model in PREFIX
+export const isGeneratedCode = (model: string): boolean =>
+  model in PREFIX || model === 'department'
 
 /**
  * Saves a record with a generated code, stepping past a number somebody else

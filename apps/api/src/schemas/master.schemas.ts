@@ -398,7 +398,8 @@ export const updateBankAccountSchema = createBankAccountSchema.partial()
 
 export const createDepartmentSchema = z.object({
   companyId: z.string().min(1, 'Company is required'),
-  code,
+  // Made from the name when left out: "Printing QC" → PRIQC.
+  code: code.optional(),
   name,
   isActive,
 })

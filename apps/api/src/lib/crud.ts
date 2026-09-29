@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import type { ZodTypeAny } from 'zod'
+import { ZodError, type ZodTypeAny } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
@@ -27,6 +27,12 @@ export interface CrudOptions {
    * these". Nothing outside this list is ever passed to Prisma.
    */
   filters?: Record<string, CrudFilter>
+  /**
+   * Columns no two records may share, compared without regard to capitals or
+   * spaces at the ends, so "Printing" and "printing " cannot both be offered
+   * in one dropdown. The clash is reported under that field on the form.
+   */
+  uniqueFields?: string[]
   /**
    * Scalar columns GET /facets counts rows by, so a filter dropdown can show
    * how many records each choice would leave.
@@ -97,6 +103,7 @@ export function crudRouter(options: CrudOptions): Router {
     injectOnCreate,
     filters = {},
     facets = [],
+    uniqueFields = [],
   } = options
 
   const router = Router({ mergeParams: true })
@@ -104,6 +111,31 @@ export function crudRouter(options: CrudOptions): Router {
   // The factory is generic over 56 models, so the delegate is reached
   // dynamically. Prisma's per-model types cannot be expressed here.
   const delegate = () => (prisma as unknown as Record<string, any>)[model]
+
+  /** Refuses a value another record already has, naming that record. */
+  const assertUnique = async (data: Record<string, unknown>, exceptId?: string) => {
+    for (const field of uniqueFields) {
+      const value = data[field]
+      if (typeof value !== 'string' || !value.trim()) continue
+      const clash = await delegate().findFirst({
+        where: {
+          [field]: { equals: value.trim(), mode: 'insensitive' },
+          ...(exceptId ? { NOT: { id: exceptId } } : {}),
+        },
+      })
+      if (clash) {
+        const label = clash.code ? ` (${clash.code})` : ''
+        const inactive = clash.isActive === false ? ', inactive — edit it to bring it back' : ''
+        throw new ZodError([
+          {
+            code: 'custom',
+            path: [field],
+            message: `${clash[field]}${label} already exists${inactive}`,
+          },
+        ])
+      }
+    }
+  }
 
   /**
    * The where clause for a list request: active flag, search, and every
@@ -214,6 +246,7 @@ export function crudRouter(options: CrudOptions): Router {
     }
 
     const data = createSchema.parse(body)
+    await assertUnique(data as Record<string, unknown>)
 
     // The form no longer asks for a code, so one is made up here. Two people
     // saving at the same instant can both read the same highest number; the
@@ -243,6 +276,7 @@ export function crudRouter(options: CrudOptions): Router {
 
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
+    await assertUnique(data as Record<string, unknown>, req.params.id)
 
     const updated = await delegate().update({ where: { id: req.params.id }, data, include })
 

@@ -8,6 +8,7 @@ import {
   AlertCircle,
   Save,
   Boxes,
+  Building2,
   CreditCard,
   Database,
   Factory,
@@ -52,6 +53,7 @@ const RESOURCE_ICONS: Record<string, LucideIcon> = {
   warehouses: Warehouse,
   'bank-accounts': Landmark,
   routings: Route,
+  departments: Building2,
 }
 
 /** Each panel's icon, by the section name the screens already give their fields. */

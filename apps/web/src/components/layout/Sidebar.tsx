@@ -64,6 +64,7 @@ const navItems: NavItem[] = [
       { label: 'Customers', href: '/masters/customers' },
       { label: 'Suppliers', href: '/masters/suppliers' },
       { label: 'Agents & Brokers', href: '/masters/brokers' },
+      { label: 'Departments', href: '/masters/departments' },
       { label: 'Workstations', href: '/masters/workstations' },
       { label: 'Extra Charges', href: '/masters/charges' },
       { label: 'Warehouses', href: '/masters/warehouses' },

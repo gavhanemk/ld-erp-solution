@@ -427,11 +427,17 @@ router.use(
     entityType: 'Department',
     createSchema: createDepartmentSchema,
     updateSchema: updateDepartmentSchema,
+    uniqueFields: ['name'],
     injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { operations: true },
+    // The counts say what a department is holding up before anyone renames or
+    // deactivates it.
+    include: {
+      operations: true,
+      _count: { select: { items: true, workstations: true, operations: true, requisitions: true } },
+    },
   }),
 )
 
