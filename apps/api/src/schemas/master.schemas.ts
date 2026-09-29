@@ -109,6 +109,19 @@ const optionalText = z.string().max(500).optional().nullable()
 
 /** Money and quantity arrive as JSON numbers or strings; Prisma Decimal takes both. */
 const decimal = z.union([z.number(), z.string().regex(/^-?\d+(\.\d+)?$/)])
+
+/**
+ * A quantity that has to be there: more than nought. A BOM line of -2 metres
+ * saved at ₹-236 and was approved, and a line of 0 costs nothing and draws
+ * nothing, so neither is a component.
+ */
+const positiveDecimal = z.union([
+  z.number().positive('A quantity has to be more than nought'),
+  z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, 'A quantity has to be a number more than nought')
+    .refine((v) => Number(v) > 0, 'A quantity has to be more than nought'),
+])
 const nonNegativeDecimal = z
   .union([z.number().nonnegative(), z.string().regex(/^\d+(\.\d+)?$/)])
   .optional()
@@ -315,7 +328,15 @@ export const createStyleSchema = z.object({
   // The size run is a named master now, not a typed-in list. Free text let
   // "XL" and "xl" both exist and the quantities quietly stopped reconciling.
   sizeGroupId: z.string().min(1).optional().nullable(),
-  colors: z.array(z.string().min(1).max(50)).default([]),
+  // "White" and "white" were both accepted, and a BOM made for one could not
+  // be found under the other.
+  colors: z
+    .array(z.string().trim().min(1).max(50))
+    .default([])
+    .refine(
+      (list) => new Set(list.map((c) => c.toLowerCase())).size === list.length,
+      'A colour is listed twice. Each colour once, however it is capitalised.',
+    ),
   techPackUrl: z.string().url().optional().nullable(),
   imageUrl: z.string().url().optional().nullable(),
   isActive,
@@ -333,7 +354,7 @@ export const updateStyleSchema = createStyleSchema.partial()
  */
 export const bomLineSizeSchema = z.object({
   sizeId: z.string().min(1, 'Pick a size'),
-  qtyPerUnit: decimal,
+  qtyPerUnit: positiveDecimal,
 })
 
 export const bomLineSchema = z.object({
@@ -346,7 +367,7 @@ export const bomLineSchema = z.object({
   component: z.string().max(60).optional().nullable(),
   /** The department that draws this from the store — Cutting, Stitching, Packing. */
   departmentId: z.string().optional().nullable(),
-  qtyPerUnit: decimal,
+  qtyPerUnit: positiveDecimal,
   wastagePercent: z.number().min(0).max(100).optional(),
   unitCost: nonNegativeDecimal,
   notes: optionalText,

@@ -742,6 +742,62 @@ router.post('/styles/import', requirePermission(MODULE, 'create'), async (req: A
   })
 })
 
+/*
+ * What a style's BOMs stand on, checked before the style is saved.
+ *
+ * A BOM gives quantities per size of the style's size run, and is made for one
+ * of the style's colours. Changing the size run left every such BOM pointing at
+ * sizes the style no longer has, and the next save of any of them failed with
+ * "Size 40 is not in the size run"; taking a colour off left its BOM for a
+ * colour that no longer existed. Both are refused while a live BOM relies on
+ * them. Ahead of the CRUD router, so the shared CRUD code is left alone.
+ */
+router.patch('/styles/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, _res, next) => {
+  const style = await prisma.style.findUnique({
+    where: { id: req.params.id },
+    select: { code: true, sizeGroupId: true, colors: true },
+  })
+  if (!style) return next()
+  const body = (req.body ?? {}) as { sizeGroupId?: string | null; colors?: unknown }
+  const live = { styleId: req.params.id, status: { not: 'OBSOLETE' as const } }
+
+  if (body.sizeGroupId !== undefined && (body.sizeGroupId || null) !== style.sizeGroupId) {
+    const sized = await prisma.bOM.count({
+      where: {
+        ...live,
+        OR: [{ baseSizeId: { not: null } }, { lines: { some: { sizes: { some: {} } } } }],
+      },
+    })
+    if (sized > 0) {
+      throw new AppError(
+        `${sized} ${sized === 1 ? 'BOM' : 'BOMs'} for ${style.code} ${sized === 1 ? 'gives' : 'give'} quantities by size in the current size run. Changing the run would leave them pointing at sizes the style no longer has. Clear their per-size quantities first, or make a new style for the new run.`,
+        409,
+        'STYLE_SIZE_RUN_IN_USE',
+      )
+    }
+  }
+
+  if (Array.isArray(body.colors)) {
+    const kept = new Set(body.colors.map((c) => String(c).trim().toLowerCase()))
+    const removed = style.colors.filter((c) => !kept.has(c.trim().toLowerCase()))
+    if (removed.length > 0) {
+      const boms = await prisma.bOM.findMany({
+        where: { ...live, color: { in: removed } },
+        select: { color: true, version: true },
+      })
+      if (boms.length > 0) {
+        const named = [...new Set(boms.map((b) => b.color))].join(', ')
+        throw new AppError(
+          `${style.code} has a BOM for ${named}. Retire that BOM before taking the colour off the style.`,
+          409,
+          'STYLE_COLOUR_IN_USE',
+        )
+      }
+    }
+  }
+  next()
+})
+
 router.use(
   '/styles',
   crudRouter({
@@ -1738,10 +1794,16 @@ async function assertRoutingRefsExist(
   const workstationIds = [...new Set(steps.map((s) => s.workstationId).filter(Boolean))] as string[]
 
   const [operations, departments, workstations] = await Promise.all([
-    prisma.operation.findMany({ where: { id: { in: operationIds } }, select: { id: true } }),
-    prisma.department.findMany({ where: { id: { in: departmentIds } }, select: { id: true } }),
+    prisma.operation.findMany({
+      where: { id: { in: operationIds } },
+      select: { id: true, name: true, departmentId: true },
+    }),
+    prisma.department.findMany({ where: { id: { in: departmentIds } }, select: { id: true, name: true } }),
     workstationIds.length
-      ? prisma.workstation.findMany({ where: { id: { in: workstationIds } }, select: { id: true } })
+      ? prisma.workstation.findMany({
+          where: { id: { in: workstationIds } },
+          select: { id: true, name: true, departmentId: true },
+        })
       : Promise.resolve([]),
   ])
 
@@ -1754,6 +1816,37 @@ async function assertRoutingRefsExist(
   if (workstations.length !== workstationIds.length) {
     throw new AppError('One of the workstations no longer exists', 400, 'INVALID_WORKSTATION')
   }
+
+  // A step is done by one department, with that department's operation on
+  // that department's machine. A cutting operation booked to Accounts, on a
+  // stitching workstation, used to save, and the floor's piece-rates and
+  // loading were then worked out against the wrong department.
+  // Names for every department involved, the operations' and workstations'
+  // own as well as the steps', so a message can say which one it should be.
+  const involved = [...new Set([...operations.map((o) => o.departmentId), ...workstations.map((w) => w.departmentId)])]
+  const named = await prisma.department.findMany({ where: { id: { in: involved } }, select: { id: true, name: true } })
+  const deptName = new Map([...departments, ...named].map((d) => [d.id, d.name]))
+  const op = new Map(operations.map((o) => [o.id, o]))
+  const ws = new Map(workstations.map((w) => [w.id, w]))
+  steps.forEach((step, i) => {
+    const here = deptName.get(step.departmentId) ?? 'this department'
+    const o = op.get(step.operationId)!
+    if (o.departmentId !== step.departmentId) {
+      throw new AppError(
+        `Step ${i + 1}: ${o.name} is a ${deptName.get(o.departmentId) ?? 'different department'} operation, not ${here}. Pick the department it belongs to, or another operation.`,
+        400,
+        'STEP_DEPARTMENT_MISMATCH',
+      )
+    }
+    const w = step.workstationId ? ws.get(step.workstationId) : undefined
+    if (w && w.departmentId !== step.departmentId) {
+      throw new AppError(
+        `Step ${i + 1}: ${w.name} is not a ${here} workstation. Pick one of ${here}'s, or leave it empty.`,
+        400,
+        'STEP_WORKSTATION_MISMATCH',
+      )
+    }
+  })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2105,6 +2198,49 @@ function toLineCreate(line: PricedLine) {
 }
 
 /**
+ * A BOM is built from things still in use.
+ *
+ * A new BOM needs an active style, and any component not already on the BOM
+ * has to be an active item: a deactivated style and a deactivated item both
+ * used to be accepted, and approved. Components already on a BOM are left
+ * alone, so a draft whose item was retired later can still be opened and the
+ * item replaced.
+ */
+async function assertActiveForBom(
+  styleId: string,
+  lines: IncomingBomLine[] | undefined,
+  alreadyOn: Set<string>,
+  isNew: boolean,
+): Promise<void> {
+  if (isNew) {
+    const style = await prisma.style.findUnique({
+      where: { id: styleId },
+      select: { code: true, isActive: true },
+    })
+    if (style && !style.isActive) {
+      throw new AppError(
+        `${style.code} is deactivated, so no new BOM can be made for it. Reactivate the style first.`,
+        400,
+        'BOM_STYLE_INACTIVE',
+      )
+    }
+  }
+  const added = [...new Set((lines ?? []).map((l) => l.componentItemId))].filter((id) => !alreadyOn.has(id))
+  if (added.length === 0) return
+  const retired = await prisma.item.findMany({
+    where: { id: { in: added }, isActive: false },
+    select: { name: true },
+  })
+  if (retired.length > 0) {
+    throw new AppError(
+      `${retired.map((i) => i.name).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated, so ${retired.length === 1 ? 'it' : 'they'} cannot go on a BOM.`,
+      400,
+      'BOM_COMPONENT_INACTIVE',
+    )
+  }
+}
+
+/**
  * Checks the things a foreign key cannot: that the colour, the routing and the
  * sizes named on the lines all belong to the same style as the BOM. Postgres
  * would accept a trouser routing on a shirt BOM quite happily, and nobody would
@@ -2366,6 +2502,7 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
     required: true,
   })
   await assertCostDepartmentsExist(costLines)
+  await assertActiveForBom(styleId, lines, new Set(), true)
 
   const useVersion = version ?? '1.0'
   const typedVersion = version !== undefined
@@ -2445,6 +2582,12 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   if (changesCosting) {
     await assertBomRefsExist(before.styleId, nextRoutingId, lines, nextBaseSizeId)
     await assertCostDepartmentsExist(costLines)
+    await assertActiveForBom(
+      before.styleId,
+      lines,
+      new Set(before.lines.map((l) => l.componentItemId)),
+      false,
+    )
   }
   // A draft renamed to a version its colour already has. Colour itself cannot be
   // changed here — that is what copying to another colour is for — so the check
@@ -2570,6 +2713,31 @@ router.patch(
     }
     if (before.lines.length === 0) {
       throw new AppError('Add at least one component before approving this BOM.', 409, 'BOM_EMPTY')
+    }
+
+    // Orders are costed against an approved BOM, so it may not rest on a style
+    // or a component that has been retired.
+    const retired = await prisma.item.findMany({
+      where: { id: { in: before.lines.map((l) => l.componentItemId) }, isActive: false },
+      select: { name: true },
+    })
+    const styleNow = await prisma.style.findUnique({
+      where: { id: before.styleId },
+      select: { isActive: true, code: true },
+    })
+    if (styleNow && !styleNow.isActive) {
+      throw new AppError(
+        `${styleNow.code} is deactivated, so a BOM for it cannot be approved.`,
+        409,
+        'BOM_STYLE_INACTIVE',
+      )
+    }
+    if (retired.length > 0) {
+      throw new AppError(
+        `${retired.map((i) => i.name).join(', ')} ${retired.length === 1 ? 'is' : 'are'} deactivated. Replace ${retired.length === 1 ? 'it' : 'them'} on the BOM before approving.`,
+        409,
+        'BOM_COMPONENT_INACTIVE',
+      )
     }
 
     // A rate of zero prints as confidently as a real one, so an approval is
