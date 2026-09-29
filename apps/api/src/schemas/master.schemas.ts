@@ -592,7 +592,7 @@ export const updateWorkstationSchema = z.object({
   isActive,
 })
 
-export const createBrokerSchema = z.object({
+const brokerFields = z.object({
   // Left out on a new record: the server makes one up. Still validated when
   // somebody does supply one, so an imported code cannot be malformed.
   code: code.optional(),
@@ -611,7 +611,25 @@ export const createBrokerSchema = z.object({
   notes: optionalText,
   isActive,
 })
-export const updateBrokerSchema = createBrokerSchema.partial()
+
+/*
+ * An agent's GSTIN, state code and PAN agree, as a customer's and a
+ * supplier's must: the commission bill they raise is taxed by that state,
+ * and TDS is deducted against that PAN.
+ */
+type BrokerIn = z.infer<typeof brokerFields>
+const checkBroker = (v: Partial<BrokerIn>, ctx: z.RefinementCtx) =>
+  checkRegistration({ gstin: v.gstin, stateCode: v.stateCode, pan: v.pan }, { stateCode: 'stateCode', pan: 'pan' }, ctx)
+const fillBroker = <T extends Partial<BrokerIn>>(v: T): T => {
+  const reg = fromGstin(v.gstin)
+  const out = { ...v }
+  if (reg && !out.stateCode) out.stateCode = reg.stateCode
+  if (reg && !out.pan) out.pan = reg.pan
+  if (out.stateCode) out.state = stateName(out.stateCode) ?? out.state
+  return out
+}
+export const createBrokerSchema = brokerFields.superRefine(checkBroker).transform(fillBroker)
+export const updateBrokerSchema = brokerFields.partial().superRefine(checkBroker).transform(fillBroker)
 
 export const createChargeTypeSchema = z.object({
   name,

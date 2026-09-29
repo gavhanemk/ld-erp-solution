@@ -7,6 +7,7 @@ import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
 import * as customerImport from '../services/customerImport.service'
 import * as supplierImport from '../services/supplierImport.service'
+import * as brokerImport from '../services/brokerImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
@@ -1216,6 +1217,52 @@ router.use(
   }),
 )
 
+/*
+ * Agents from a spreadsheet, as customers and suppliers: check first, then
+ * all or nothing. New agents only; one already there is skipped. Ahead of
+ * the CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/brokers/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await brokerImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'agents-with-current-list.xlsx' : 'agents-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/brokers/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await brokerImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await brokerImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newAgents: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.broker === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await brokerImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'BrokerImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'agent' : 'agents'}.`
+      : 'Nothing to import: every agent is already in the system.',
+    data: { summary, created },
+  })
+})
+
 router.use(
   '/brokers',
   crudRouter({
@@ -1226,9 +1273,63 @@ router.use(
     updateSchema: updateBrokerSchema,
     // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
     uniqueFields: ['name', 'gstin'],
-    searchFields: ['name', 'code', 'phone', 'email'],
+    searchFields: ['name', 'code', 'phone', 'email', 'city'],
     sortableFields: ['name', 'code', 'brokeragePercent'],
     defaultSort: { field: 'name', order: 'asc' },
+    // How many customers each one brings, for the list and its filter.
+    include: { _count: { select: { customers: true } } },
+    filters: {
+      // By the GST state code, not the typed name: the agents on file have the
+      // code but were saved before the name was filled in from it.
+      stateCode: textFilter('stateCode'),
+      city: textFilter('city'),
+      brokeragePercent: {
+        where: (v) => ({ brokeragePercent: { in: v.map(Number).filter(Number.isFinite) } }),
+        facets: ['brokeragePercent'],
+      },
+      tdsSection: textFilter('tdsSection'),
+      // Registered for GST or not: a registered agent bills GST on the commission.
+      gst: {
+        where: (v) =>
+          v.includes('registered') && v.includes('unregistered')
+            ? {}
+            : v.includes('registered')
+              ? { AND: [{ gstin: { not: null } }, { gstin: { not: '' } }] }
+              : { OR: [{ gstin: null }, { gstin: '' }] },
+        facets: ['gst'],
+      },
+      // Whether any customer comes through them.
+      customers: {
+        where: (v) =>
+          v.includes('with') && v.includes('without')
+            ? {}
+            : v.includes('with')
+              ? { customers: { some: {} } }
+              : { customers: { none: {} } },
+        facets: ['customers'],
+      },
+    },
+    facets: ['stateCode', 'city', 'brokeragePercent', 'tdsSection', 'gst', 'customers'],
+    customFacets: {
+      gst: async (where) => {
+        const [registered, unregistered] = await Promise.all([
+          prisma.broker.count({ where: { AND: [where, { gstin: { not: null } }, { gstin: { not: '' } }] } }),
+          prisma.broker.count({ where: { AND: [where, { OR: [{ gstin: null }, { gstin: '' }] }] } }),
+        ])
+        return { registered, unregistered }
+      },
+      customers: async (where) => {
+        const [withCustomers, without] = await Promise.all([
+          prisma.broker.count({ where: { AND: [where, { customers: { some: {} } }] } }),
+          prisma.broker.count({ where: { AND: [where, { customers: { none: {} } }] } }),
+        ])
+        return { with: withCustomers, without }
+      },
+    },
+    exportSheet: {
+      fileName: 'agents',
+      build: (rows) => brokerImport.brokerWorkbook(rows, false),
+    },
   }),
 )
 
