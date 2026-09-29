@@ -53,9 +53,46 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
     search: str(req.query.q),
   }), reorderStatus(prisma)])
 
+  // What each item is, for the screen's filters: its type, its main category
+  // and sub-category, and the department that uses it. Read once for every
+  // item on the list, the ones to reorder with nothing anywhere included.
+  const itemIds = [...new Set([...rows.map((r) => r.itemId), ...reorder.map((r) => r.itemId)])]
+  const items = await prisma.item.findMany({
+    where: { id: { in: itemIds } },
+    select: {
+      id: true,
+      type: true,
+      category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+      department: { select: { id: true, name: true } },
+    },
+  })
+  const about = new Map(
+    items.map((i) => {
+      // An item filed under a sub-category has its main category above it;
+      // one filed straight under a main category has no sub-category.
+      const main = i.category.parent ?? { id: i.category.id, name: i.category.name }
+      const sub = i.category.parent ? { id: i.category.id, name: i.category.name } : null
+      return [
+        i.id,
+        {
+          itemType: i.type,
+          mainCategoryId: main.id,
+          mainCategoryName: main.name,
+          subCategoryId: sub?.id ?? null,
+          subCategoryName: sub?.name ?? null,
+          departmentId: i.department?.id ?? null,
+          departmentName: i.department?.name ?? null,
+        },
+      ]
+    }),
+  )
+
   res.json({
     success: true,
-    data: rows,
+    data: rows.map((r) => ({ ...r, ...about.get(r.itemId) })),
+    // Every item that needs reordering, so the screen can show one with
+    // nothing in any store (it has no row above) and count them as it filters.
+    reorder: reorder.filter((r) => r.isLow).map((r) => ({ ...r, ...about.get(r.itemId) })),
     summary: {
       lines: rows.length,
       // Only our own stock has a value to us. A customer's fabric sitting in
