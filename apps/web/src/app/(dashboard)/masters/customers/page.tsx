@@ -126,7 +126,7 @@ const formFields: FormField[] = [
     placeholder: '27AAACL1234M1Z5',
     uppercase: true,
     help: '15 characters. Leave blank if unregistered.',
-    derives: { field: 'billingStateCode', from: (v) => (/^d{2}/.test(v) ? v.slice(0, 2) : null) },
+    derives: { field: 'billingStateCode', from: (v) => (/^\d{2}/.test(v) ? v.slice(0, 2) : null) },
   },
   {
     name: 'billingStateCode',
