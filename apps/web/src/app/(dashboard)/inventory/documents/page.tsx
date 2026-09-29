@@ -9,7 +9,9 @@ import {
   ChevronDown,
   ChevronRight,
   ArrowRight,
+  Printer,
 } from 'lucide-react'
+import Link from 'next/link'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 
@@ -281,6 +283,15 @@ export default function StockDocumentsPage() {
                           )}
                         </td>
                         <td className="whitespace-nowrap text-right">
+                          {/* The note that travels with the goods. */}
+                          <Link
+                            href={`/print/stock-transfer/${t.id}`}
+                            className="btn-ghost inline-flex p-1.5 hover:text-teal-400"
+                            title="Print the transfer note"
+                            aria-label={`Print ${t.transferNumber}`}
+                          >
+                            <Printer size={15} />
+                          </Link>
                           {!t.cancelledAt && (
                             <button
                               className="btn-ghost p-1.5 hover:text-red-400"

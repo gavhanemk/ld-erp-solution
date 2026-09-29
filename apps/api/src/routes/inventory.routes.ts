@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
+import { getPrintHeader } from '../lib/printData'
 import {
   balanceOf,
   lockedBalanceOf,
@@ -1276,5 +1277,122 @@ router.post(
     })
   },
 )
+
+// ── Printed store papers ────────────────────────────────────────────────────
+//
+// Three sheets the store works from on paper: the slip a department signs for
+// what it was handed, the note that travels with goods between stores, and the
+// sheet a keeper carries to the rack for a count. Each route gives the page
+// everything it prints, letterhead included, in one call.
+
+/** The material issue slip for a requisition: what was asked, given and still owed. */
+router.get('/requisitions/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const mr = await prisma.materialRequisition.findUnique({
+    where: { id: req.params.id },
+    include: mrInclude,
+  })
+  if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+  // Each part handed over, with its date: the slip is signed for these.
+  const handovers = await prisma.stockLedger.findMany({
+    where: { referenceType: 'MATERIAL_REQUISITION', referenceId: mr.id, outQty: { gt: 0 } },
+    select: {
+      transactionDate: true,
+      outQty: true,
+      item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      warehouse: { select: { name: true } },
+    },
+    orderBy: [{ transactionDate: 'asc' }, { createdAt: 'asc' }],
+  })
+
+  const header = await getPrintHeader('MR')
+  res.json({ success: true, data: { ...header, mr, handovers } })
+})
+
+/** The stock transfer note that goes with the goods. */
+router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const transfer = await prisma.stockTransfer.findUnique({
+    where: { id: req.params.id },
+    include: {
+      ...transferInclude,
+      fromWarehouse: { select: { id: true, name: true, address: true } },
+      toWarehouse: { select: { id: true, name: true, address: true } },
+      lines: {
+        include: {
+          item: {
+            select: {
+              code: true,
+              name: true,
+              hsnCode: true,
+              uom: { select: { symbol: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+  if (!transfer) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('STN')
+  res.json({ success: true, data: { ...header, transfer } })
+})
+
+/**
+ * The sheet a keeper takes to the rack.
+ *
+ * Every item in the store with its book figure, in category then name order so
+ * the list follows the racks rather than the alphabet. `all=true` adds the
+ * active items with nothing on the book there, so stock the book does not know
+ * about has a line to be written on. The page decides whether to print the book
+ * figure: a count made without seeing it is the honest one.
+ */
+router.get('/count-sheet', requirePermission(MODULE, 'view'), async (req, res) => {
+  const warehouseId = str(req.query.warehouseId)
+  if (!warehouseId) throw new AppError('Choose a store', 400, 'NO_STORE')
+  const warehouse = await prisma.warehouse.findUnique({
+    where: { id: warehouseId },
+    select: { id: true, name: true, code: true, address: true },
+  })
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+
+  const held = await onHand(prisma, { warehouseId, ownership: 'OWNED' })
+  const rows = held.map((r) => ({
+    itemId: r.itemId,
+    code: r.itemCode,
+    name: r.itemName,
+    category: r.categoryName,
+    uom: r.uom,
+    bookQty: r.qty,
+  }))
+
+  if (req.query.all === 'true') {
+    const shown = new Set(rows.map((r) => r.itemId))
+    const others = await prisma.item.findMany({
+      where: { isActive: true, id: { notIn: [...shown] } },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        category: { select: { name: true } },
+        uom: { select: { symbol: true } },
+      },
+    })
+    for (const i of others) {
+      rows.push({
+        itemId: i.id,
+        code: i.code,
+        name: i.name,
+        category: i.category.name,
+        uom: i.uom.symbol,
+        bookQty: 0,
+      })
+    }
+  }
+
+  rows.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name))
+
+  const header = await getPrintHeader('COUNT')
+  res.json({ success: true, data: { ...header, warehouse, rows, printedAt: new Date() } })
+})
 
 export default router

@@ -2,8 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
-  Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban,
+  Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer,
 } from 'lucide-react'
+import Link from 'next/link'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { IssueDialog } from '@/components/inventory/IssueDialog'
@@ -439,6 +440,17 @@ export default function RequisitionsPage() {
                               >
                                 <PackageCheck size={15} />
                               </button>
+                            )}
+                            {/* The slip the department signs for what it was handed. */}
+                            {mr.status === 'APPROVED' && (
+                              <Link
+                                href={`/print/material-issue/${mr.id}`}
+                                className="btn-ghost inline-flex p-1.5 hover:text-teal-400"
+                                title="Print the issue slip"
+                                aria-label={`Print ${mr.mrNumber}`}
+                              >
+                                <Printer size={15} />
+                              </Link>
                             )}
                             {mayClose(mr, isMine) && (
                               <button

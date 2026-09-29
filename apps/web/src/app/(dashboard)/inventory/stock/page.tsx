@@ -5,7 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import Link from 'next/link'
 import {
   Search, RefreshCw, AlertCircle, AlertTriangle, PackagePlus, ClipboardCheck,
-  ArrowLeftRight, Warehouse as WarehouseIcon,
+  ArrowLeftRight, Warehouse as WarehouseIcon, Printer,
 } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StockMoveDialog, type MoveMode } from '@/components/inventory/StockMoveDialog'
@@ -139,6 +139,13 @@ function StockScreen() {
           <button className="btn-ghost" onClick={() => setDialog('transfer')}>
             <ArrowLeftRight size={15} /> Move
           </button>
+          <Link
+            href={`/print/count-sheet${warehouseId ? `?warehouseId=${warehouseId}` : ''}`}
+            className="btn-ghost"
+            title="A sheet to take to the rack and write the count on"
+          >
+            <Printer size={15} /> Count sheet
+          </Link>
           <button className="btn-ghost" onClick={() => setDialog('count')}>
             <ClipboardCheck size={15} /> Count
           </button>
