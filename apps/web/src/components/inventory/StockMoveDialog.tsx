@@ -11,7 +11,7 @@ import {
   ArrowRightLeft,
   Warehouse,
 } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 
@@ -169,6 +169,26 @@ export function StockMoveDialog({
       }
     }
 
+    // Opening stock comes in at a rate or it is worth nothing. An empty box
+    // used to go through as ₹0 without a word.
+    if (mode === 'opening') {
+      const unpriced = filled.find((l) => !(Number(l.rate) > 0))
+      if (unpriced) {
+        const it = itemsById.get(unpriced.itemId)
+        return setError(
+          `Enter a rate for ${it?.name ?? 'every item'}: what one ${it?.uom?.symbol ?? 'unit'} cost. At ₹0 the stock would be valued at nothing.`,
+        )
+      }
+    }
+    if (mode === 'count') {
+      const zero = filled.find((l) => l.rate !== '' && !(Number(l.rate) > 0))
+      if (zero) {
+        return setError(
+          `${itemsById.get(zero.itemId)?.name ?? 'An item'}: a rate of ₹0 would value the stock found at nothing. Enter what it cost, or leave the rate empty.`,
+        )
+      }
+    }
+
     setSaving(true)
     try {
       let res: { message?: string }
@@ -180,7 +200,7 @@ export function StockMoveDialog({
           lines: filled.map((l) => ({
             itemId: l.itemId,
             qty: Number(l.qty),
-            unitRate: Number(l.rate || 0),
+            unitRate: Number(l.rate),
           })),
         })
       } else if (mode === 'count') {
@@ -204,7 +224,7 @@ export function StockMoveDialog({
 
       onSaved(res.message ?? 'Saved.')
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
+      setError(apiErrorMessage(err))
     } finally {
       setSaving(false)
     }

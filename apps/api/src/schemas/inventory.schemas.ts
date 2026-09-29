@@ -18,6 +18,21 @@ const rate = z
   .min(0, 'A rate cannot be negative')
   .max(9_999_999, 'That rate looks like a typo')
 
+/**
+ * The rate stock comes in at, where nothing on hand can price it.
+ *
+ * More than nought. Opening stock left without a rate used to be saved at ₹0
+ * with no word said, and every metre of it then counted for nothing in the
+ * stock value and dragged down the average everything after it left at.
+ */
+const inRate = z
+  .number({
+    required_error: 'Enter a rate: what one unit cost',
+    invalid_type_error: 'Rate has to be a number',
+  })
+  .positive('Enter a rate: at ₹0 this stock would be valued at nothing')
+  .max(9_999_999, 'That rate looks like a typo')
+
 const id = (what: string) => z.string().min(1, `Pick ${what}`)
 
 /**
@@ -35,7 +50,7 @@ export const openingStockSchema = z.object({
       z.object({
         itemId: id('an item'),
         qty,
-        unitRate: rate,
+        unitRate: inRate,
         batchNumber: z.string().max(50).optional().nullable(),
       }),
     )
@@ -91,7 +106,7 @@ export const adjustmentSchema = z.object({
           .min(0, 'A counted quantity cannot be negative')
           .max(9_999_999, 'That quantity looks like a typo'),
         /** Only used when the count is higher and there is nothing on hand to price it from. */
-        unitRate: rate.optional(),
+        unitRate: inRate.optional(),
       }),
     )
     .min(1, 'Add at least one item'),
