@@ -32,6 +32,9 @@ interface Item {
   departmentId: string | null
   department?: { id: string; name: string; code: string } | null
   uom: { id: string; name: string; symbol: string } | null
+  styleId: string | null
+  color: string | null
+  style: { id: string; code: string; name: string; colors: string[] } | null
 }
 
 const TYPE_LABEL: Record<string, { label: string; cls: string }> = {
@@ -68,6 +71,21 @@ const columnsFor = (toReorder: Map<string, number>): Column<Item>[] => [
   // An item is filed under one category. When that is a sub-category, its
   // parent is the Category and it is the Sub Category; when it is a main
   // category, there is no sub-category to show.
+  {
+    key: 'style',
+    header: 'Style · Colour',
+    render: (i) =>
+      i.style ? (
+        <span className="text-xs">
+          <span className="font-mono text-teal-400">{i.style.code}</span>
+          {i.color && <span className="text-muted-foreground"> · {i.color}</span>}
+        </span>
+      ) : i.type === 'FINISHED_GOOD' ? (
+        <span className="text-xs text-amber-400">Style not set</span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
+  },
   {
     key: 'category',
     header: 'Category',
@@ -149,6 +167,7 @@ const isMain = (row: Record<string, unknown>) => !row.parentId
  *
  *   Item name ........... | Item type   | Unit
  *   Category | Sub category | Department | HSN
+ *   Style | Colour                        (a finished good only)
  *   Description ...........................
  *   Standard rate | Reorder level | Minimum | Maximum
  *
@@ -228,6 +247,26 @@ const formFields: FormField[] = [
     label: 'HSN Code',
     section: 'Identity',
     placeholder: '52081200',
+  },
+  {
+    name: 'styleId',
+    label: 'Style',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    optionsFrom: { resource: 'styles' },
+    showIf: (v) => v.type === 'FINISHED_GOOD',
+    help: 'Which garment this is — the item becomes that style in one colour',
+  },
+  {
+    name: 'color',
+    label: 'Colour',
+    type: 'select',
+    required: true,
+    section: 'Identity',
+    optionsFromField: { field: 'styleId', resource: 'styles', arrayKey: 'colors' },
+    showIf: (v) => v.type === 'FINISHED_GOOD' && Boolean(v.styleId),
+    help: "One of the style's own colours — add more on the Style if it isn't listed",
   },
   { name: 'description', label: 'Description', type: 'textarea', section: 'Identity' },
   {

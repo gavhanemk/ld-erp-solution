@@ -300,13 +300,40 @@ export const createItemSchema = z
     maxStock: nonNegativeDecimal,
     standardRate: nonNegativeDecimal,
     imageUrl: z.string().url().optional().nullable(),
+    // Which garment this is, for a finished good. Shape only, here — whether
+    // the colour is actually one of the style's own colours needs a database
+    // lookup, so that lives in assertItemStyleColorValid instead.
+    styleId: z.string().min(1, 'Choose a style').optional().nullable(),
+    color: z.string().min(1, 'Choose a colour').max(50).optional().nullable(),
     isActive,
   })
-  .refine(
-    (v) =>
-      v.minStock == null || v.maxStock == null || Number(v.minStock) <= Number(v.maxStock),
-    { message: 'Minimum stock cannot exceed maximum stock', path: ['minStock'] },
-  )
+  // One superRefine, not several chained refines: each .refine() wraps the
+  // schema in another ZodEffects layer, and updateItemSchema below only
+  // peels off one with .innerType() before calling .partial() — a second
+  // wrapper would break that. All three cross-field rules live here instead.
+  .superRefine((v, ctx) => {
+    if (v.minStock != null && v.maxStock != null && Number(v.minStock) > Number(v.maxStock)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Minimum stock cannot exceed maximum stock',
+        path: ['minStock'],
+      })
+    }
+    if (v.type === 'FINISHED_GOOD' && !v.styleId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'A finished good needs a style — pick which garment this is',
+        path: ['styleId'],
+      })
+    }
+    if (v.type !== 'FINISHED_GOOD' && (v.styleId || v.color)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Style and colour only apply to finished goods — clear them, or change the item type',
+        path: ['styleId'],
+      })
+    }
+  })
 
 export const updateItemSchema = createItemSchema.innerType().partial()
 

@@ -2,6 +2,7 @@ import { prisma } from '@ld-erp/database'
 import { recordAudit } from '../../lib/audit'
 import { nextDocumentNumber } from '../../lib/docNumber'
 import { withGeneratedCode } from '../../lib/masterCode'
+import { assertItemStyleColorValid } from '../../lib/itemStyleColor'
 import { logger } from '../../utils/logger'
 import {
   createCustomerSchema,
@@ -235,6 +236,8 @@ const fromDb = {
     (await prisma.department.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((d) => d.name),
   warehouses: async () =>
     (await prisma.warehouse.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((w) => w.name),
+  styles: async () =>
+    (await prisma.style.findMany({ where: { isActive: true }, select: { name: true }, orderBy: { name: 'asc' } })).map((s) => s.name),
 }
 
 /** Fixed in the software, written the way people say them. */
@@ -559,7 +562,8 @@ const WRITES: WriteDefinition[] = [
       name: 'create_item',
       description:
         'Add an item to the item master.' +" Call this the moment somebody asks, with whatever they have already told you — even if that is only a name. It answers with the next thing it needs, and the choices to offer. Never hold back waiting until you have everything."+
-        ' Category, unit and GST rate are given by name and matched to the existing masters.',
+        ' Category, unit and GST rate are given by name and matched to the existing masters.' +
+        ' A finished good is one style in one colour — ask which style, then offer that style\'s own colours.',
       needs: 'masters:create',
       gather: [
         'what the item is called',
@@ -567,6 +571,7 @@ const WRITES: WriteDefinition[] = [
         'which unit it is measured in — call get_options with units, then offer_choices with that list',
         'its usual rate per unit, in rupees',
         'the level at which it should be reordered',
+        'if it is a finished good, which style — call get_options with styles, then offer_choices with that list — then which of that style\'s own colours',
       ],
       parameters: {
         type: 'object',
@@ -584,6 +589,8 @@ const WRITES: WriteDefinition[] = [
           gstRate: { type: 'number', description: 'GST percentage, e.g. 5, 12, 18' },
           standardRate: { type: 'number', description: 'Usual rate per unit in rupees' },
           reorderLevel: { type: 'number', description: 'Order more when stock falls to this' },
+          style: { type: 'string', description: 'Which style this is — only for a finished good' },
+          color: { type: 'string', description: "One of that style's own colours — only for a finished good" },
           ...CONFIRM_PARAM,
         },
         required: [],
@@ -641,6 +648,38 @@ const WRITES: WriteDefinition[] = [
         )
       }
 
+      // A finished good is one style in one colour. Neither question makes
+      // sense until we know it is a finished good, so they are only asked
+      // here — not in the static require_ list at the top, which runs before
+      // the category (and so the type) is known.
+      let style: { id: string; name: string; colors: string[] } | undefined
+      if (type === 'FINISHED_GOOD') {
+        if (!has(a.style)) {
+          throw new NeedMore('style', 'Which style is this?', await fromDb.styles())
+        }
+        style =
+          (await matchByName(
+            await prisma.style.findMany({ where: { isActive: true }, select: { id: true, name: true, colors: true } }),
+            String(a.style),
+          )) ?? undefined
+        if (!style) {
+          throw new NeedMore(
+            'style',
+            `I do not have a style called "${a.style}". Which is it?`,
+            await fromDb.styles(),
+          )
+        }
+        if (!has(a.color)) {
+          throw new NeedMore('color', `Which colour — ${style.name} comes in ${style.colors.join(', ')}?`, style.colors)
+        }
+      }
+
+      // Canonicalises the colour to the style's own spelling and catches a
+      // duplicate style + colour here, conversationally, rather than as a
+      // raw database error once the person has already said yes. The same
+      // check the /items screen itself runs.
+      const styleColor = await assertItemStyleColorValid(type, style?.id, style ? String(a.color) : undefined)
+
       const data = check(createItemSchema, {
         name: a.name,
         type,
@@ -650,6 +689,8 @@ const WRITES: WriteDefinition[] = [
         taxRateId,
         standardRate: a.standardRate,
         reorderLevel: a.reorderLevel,
+        styleId: styleColor.styleId,
+        color: styleColor.color,
       })
 
       const KIND: Record<string, string> = {
@@ -670,6 +711,7 @@ const WRITES: WriteDefinition[] = [
         ...(has(a.gstRate) ? { GST: `${a.gstRate}%` } : {}),
         ...(has(a.standardRate) ? { Rate: `₹${a.standardRate}` } : {}),
         ...(has(a.reorderLevel) ? { 'Reorder level': a.reorderLevel } : {}),
+        ...(style ? { Style: style.name, Colour: styleColor.color } : {}),
       }
       return {
         title: 'Add an item',

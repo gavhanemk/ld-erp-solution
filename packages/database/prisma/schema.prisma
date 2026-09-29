@@ -578,6 +578,14 @@ model Item {
   /// for the same cloth.
   taxRateId    String?
   taxRate      TaxRate?     @relation(fields: [taxRateId], references: [id])
+  /// Which garment this is, for a finished good. Required when type is
+  /// FINISHED_GOOD and forbidden otherwise; color must be one of the style's
+  /// own colors[]. Neither rule can live in the database — "one of this
+  /// style's colours" needs a lookup — so both are enforced in the API by
+  /// assertItemStyleColorValid, not here.
+  styleId      String?
+  style        Style?       @relation(fields: [styleId], references: [id])
+  color        String?
   imageUrl     String?
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
@@ -599,6 +607,7 @@ model Item {
   returnLines   PurchaseReturnLine[]
   debitLines    DebitNoteLine[]
 
+  @@unique([styleId, color])
   @@index([code])
   @@index([type])
   @@index([departmentId])
@@ -634,6 +643,7 @@ model Style {
   boms     BOM[]
   moLines  MOLine[]
   routings Routing[]
+  items    Item[]
   poLines  PurchaseOrderLine[]
 
   @@index([code])
@@ -1100,6 +1110,10 @@ model SalesOrderLine {
   so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
   itemId       String
   item         Item       @relation(fields: [itemId], references: [id])
+  /// Free text, unvalidated, and can drift from what `item` actually is.
+  /// Item.styleId/color is now the real source of truth for this; these two
+  /// fields are a Sales-module follow-up to derive from item and retire, not
+  /// fixed here.
   styleCode    String?
   color        String?
   totalQty     Decimal    @db.Decimal(10, 2)
@@ -2521,13 +2535,16 @@ model ManufacturingOrder {
 }
 
 model MOLine {
-  id       String             @id @default(cuid())
-  moId     String
-  mo       ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
-  styleId  String
-  style    Style              @relation(fields: [styleId], references: [id])
-  color    String
-  totalQty Int
+  id          String             @id @default(cuid())
+  moId        String
+  mo          ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
+  styleId     String
+  style       Style              @relation(fields: [styleId], references: [id])
+  /// Free text, unvalidated against style.colors[] — a Production-module
+  /// follow-up is deriving this from an Item (styleId, color) once an MO
+  /// line references one, not fixed here.
+  color       String
+  totalQty    Int
 
   sizes MOLineSize[]
 

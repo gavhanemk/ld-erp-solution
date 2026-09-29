@@ -34,7 +34,7 @@ import {
   Warehouse,
   type LucideIcon,
 } from 'lucide-react'
-import { ApiError, masterResource, type Paginated } from '@/lib/api'
+import { ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 
 /** The tile in the form's title bar, by master. */
@@ -120,6 +120,25 @@ export interface FormField {
      */
     filter?: (row: Record<string, unknown>, values: Record<string, unknown>) => boolean
   }
+  /**
+   * Populates a select from a property on whatever record another field on
+   * this same form currently points at — a colour picker showing exactly the
+   * colours the chosen style offers, not a fixed master resource.
+   */
+  optionsFromField?: {
+    /** Name of the field on this form holding the related record's id. */
+    field: string
+    /** Master endpoint segment that field's id belongs to, e.g. 'styles'. */
+    resource: string
+    /** Array property on that record to turn into options, e.g. 'colors'. */
+    arrayKey: string
+  }
+  /**
+   * Only rendered, and only required, while this returns true for the
+   * form's current values — a colour field with nothing to choose from until
+   * a style is picked.
+   */
+  showIf?: (values: Record<string, unknown>) => boolean
   /** Shown in place of "Select..." when a filtered list has nothing in it. */
   emptyLabel?: string
   /** Value to open an edit with, when it is not simply the record's own field. */
@@ -261,6 +280,9 @@ export function MasterFormDialog<T extends { id: string }>({
   // The rows themselves, not ready-made options, so a list that depends on
   // another field can be filtered again each time that field changes.
   const [remoteRows, setRemoteRows] = useState<Record<string, Record<string, unknown>[]>>({})
+  // Options drawn from a record another field points at (see optionsFromField),
+  // ready-made: they come from an array on one record, not from a list of rows.
+  const [fieldOptions, setFieldOptions] = useState<Record<string, { value: string; label: string }[]>>({})
 
   useEffect(() => {
     if (!open) return
@@ -293,6 +315,51 @@ export function MasterFormDialog<T extends { id: string }>({
     }
   }, [open, fields])
 
+  // A field can also draw its options from a property on whatever record
+  // another field currently points at — Colour showing exactly the list the
+  // picked Style offers, not every colour in the database. watchedKey is a
+  // stable string (not the field values directly) so the effect's own
+  // dependency array stays a fixed length across renders.
+  const watchedKey = fields
+    .filter((f) => f.optionsFromField)
+    .map((f) => String(values[f.optionsFromField!.field] ?? ''))
+    .join('|')
+
+  useEffect(() => {
+    if (!open) return
+
+    const dependentFields = fields.filter((f) => f.optionsFromField)
+    if (dependentFields.length === 0) return
+
+    let cancelled = false
+
+    void Promise.all(
+      dependentFields.map(async (f) => {
+        const { field: watched, resource: r, arrayKey } = f.optionsFromField!
+        const id = values[watched]
+        if (!id || typeof id !== 'string') return [f.name, []] as const
+        try {
+          const res = (await masterResource<Record<string, unknown>>(r).get(id)) as Single<
+            Record<string, unknown>
+          >
+          const arr = Array.isArray(res.data[arrayKey]) ? (res.data[arrayKey] as unknown[]) : []
+          return [f.name, arr.map((v) => ({ value: String(v), label: String(v) }))] as const
+        } catch {
+          return [f.name, []] as const
+        }
+      }),
+    ).then((entries) => {
+      if (!cancelled) setFieldOptions((prev) => ({ ...prev, ...Object.fromEntries(entries) }))
+    })
+
+    return () => {
+      cancelled = true
+    }
+    // watchedKey stands in for the actual watched values here on purpose —
+    // see the comment above it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, fields, watchedKey])
+
   // Escape closes, and the page behind must not scroll while the dialog is up.
   useEffect(() => {
     if (!open) return
@@ -311,6 +378,7 @@ export function MasterFormDialog<T extends { id: string }>({
   if (!open) return null
 
   const optionsFor = (f: FormField) => {
+    if (f.optionsFromField) return fieldOptions[f.name]
     if (!f.optionsFrom) return f.options
     const rows = remoteRows[f.name]
     if (!rows) return undefined
@@ -351,6 +419,13 @@ export function MasterFormDialog<T extends { id: string }>({
         if (derived) updated[field.derives.field] = derived
       }
 
+      // A field whose options depend on this one no longer has a valid
+      // selection once this one changes — Colour must not keep a value from
+      // whichever Style was picked before.
+      for (const f of fields) {
+        if (f.optionsFromField?.field === name) updated[f.name] = ''
+      }
+
       return updated
     })
 
@@ -367,6 +442,15 @@ export function MasterFormDialog<T extends { id: string }>({
       // Sending back a value nobody could have changed only risks a clash with
       // a code the server has since handed to somebody else.
       if (f.generated) continue
+
+      // A hidden field must be sent as an explicit null, not left out —
+      // leaving it out would let the server keep whatever it held before the
+      // field was hidden, which is exactly the stale value hiding it was
+      // meant to clear.
+      if (f.showIf && !f.showIf(values)) {
+        payload[f.name] = null
+        continue
+      }
 
       const raw = values[f.name]
       const key = f.sendAs ?? f.name
@@ -475,8 +559,9 @@ export function MasterFormDialog<T extends { id: string }>({
 
   // A generated code is shown in the title bar, next to the name of the form,
   // rather than as a greyed-out box taking a place in the grid. Before the
-  // record exists there is nothing to show at all.
-  const visibleFields = fields.filter((f) => !f.generated)
+  // record exists there is nothing to show at all. A showIf field has nothing
+  // to show until its own condition is met.
+  const visibleFields = fields.filter((f) => !f.generated && (!f.showIf || f.showIf(values)))
 
   // The Active tick goes in the footer beside Save rather than in a panel: it
   // is about the whole record, and in a panel it took a row of its own.

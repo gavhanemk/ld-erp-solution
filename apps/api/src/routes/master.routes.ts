@@ -13,6 +13,7 @@ import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
 import {
   bomPriceSchema,
   copyBomSchema,
@@ -579,6 +580,28 @@ router.use(
   }),
 )
 
+/**
+ * What an item is sent back with.
+ *
+ * - taxRate travels with the item so an order form can fill the GST in from
+ *   the item itself. Without it the purchase order screen read
+ *   `item.taxRate.rate`, found nothing, and left the field blank for someone
+ *   to type from memory — and a rate typed from memory is the one thing the
+ *   business rules say must never happen. The alternative source, the tax
+ *   rate list in Settings, needs a permission a purchase clerk does not have.
+ * - The category's parent too, so the form can show a sub-category under the
+ *   main one it belongs to.
+ * - The style, for a finished good: which garment it is, with the colours it
+ *   comes in.
+ */
+const itemInclude = {
+  category: { include: { parent: true } },
+  uom: true,
+  taxRate: true,
+  department: { select: { id: true, name: true, code: true } },
+  style: { select: { id: true, code: true, name: true, colors: true } },
+}
+
 /*
  * Items from a spreadsheet: the template to fill, and the filled sheet read
  * back. Posting without `confirm` only checks the sheet and says what each row
@@ -679,19 +702,28 @@ router.use(
     },
     facets: ['type', 'categoryId', 'departmentId', 'uomId'],
     defaultSort: { field: 'name', order: 'asc' },
-    // taxRate travels with the item so an order form can fill the GST in from
-    // the item itself. Without it the purchase order screen read
-    // `item.taxRate.rate`, found nothing, and left the field blank for someone
-    // to type from memory — and a rate typed from memory is the one thing the
-    // business rules say must never happen. The alternative source, the tax
-    // rate list in Settings, needs a permission a purchase clerk does not have.
-    // The category's parent too, so the form can show a sub-category under the
-    // main one it belongs to.
-    include: {
-      category: { include: { parent: true } },
-      uom: true,
-      taxRate: true,
-      department: { select: { id: true, name: true, code: true } },
+    include: itemInclude,
+    // A finished good is one style in one colour, and the colour must be one
+    // of that style's own. Checked here because it needs the style looked up,
+    // which a schema cannot do. On an edit the saved type, style and colour
+    // stand in for whatever the edit leaves out.
+    beforeSave: async (data, before) => {
+      const checked = await assertItemStyleColorValid(
+        String(data.type ?? before?.type ?? ''),
+        (data.styleId !== undefined ? data.styleId : before?.styleId) as string | null | undefined,
+        (data.color !== undefined ? data.color : before?.color) as string | null | undefined,
+        before?.id as string | undefined,
+      )
+      return {
+        data: { ...data, styleId: checked.styleId, color: checked.color },
+        // Two people saving the same style and colour at once: the database
+        // catches the second, and this says so in words.
+        onSaveError: (err) => {
+          if (checked.styleName && checked.color) {
+            rethrowItemStyleColorClash(err, checked.styleName, checked.color)
+          }
+        },
+      }
     },
   }),
 )

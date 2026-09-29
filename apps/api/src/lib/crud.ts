@@ -73,6 +73,18 @@ export interface CrudOptions {
    */
   injectOnCreate?: () => Promise<Record<string, unknown>>
   /**
+   * A check a schema cannot make, because it has to look something up — "this
+   * colour must be one of the style's own colours". Runs on create and edit,
+   * after parsing and the unique-field check, just before saving. `before` is
+   * the saved row on an edit. Returns the data to save (it may tidy a value)
+   * and may throw to refuse; `onSaveError` gets a failed save first, to turn a
+   * database clash into words.
+   */
+  beforeSave?: (
+    data: Record<string, unknown>,
+    before?: Record<string, unknown>,
+  ) => Promise<{ data: Record<string, unknown>; onSaveError?: (err: unknown) => void }>
+  /**
    * Turns on GET /export: every record the list would show, with the same
    * search, filters and sort but no pages, handed to this to make the file.
    */
@@ -152,6 +164,7 @@ export function crudRouter(options: CrudOptions): Router {
     // passing a filter Prisma rejects, which is how the sizes screen crashed.
     activeFlag = softDelete,
     injectOnCreate,
+    beforeSave,
     filters = {},
     facets = [],
     customFacets = {},
@@ -338,19 +351,25 @@ export function crudRouter(options: CrudOptions): Router {
       body = { ...body, ...missing }
     }
 
-    const data = createSchema.parse(body)
-    await assertUnique(data as Record<string, unknown>)
+    const parsed = createSchema.parse(body) as Record<string, unknown>
+    await assertUnique(parsed)
+    const { data, onSaveError } = beforeSave ? await beforeSave(parsed) : { data: parsed, onSaveError: undefined }
 
     // The form no longer asks for a code, so one is made up here. Two people
     // saving at the same instant can both read the same highest number; the
     // unique constraint catches the loser and it simply takes the next one.
     let created
-    if (isGeneratedCode(model) && !(data as Record<string, unknown>).code) {
-      created = await withGeneratedCode(model, data as Record<string, unknown>, (withCode) =>
-        delegate().create({ data: withCode, include }),
-      )
-    } else {
-      created = await delegate().create({ data, include })
+    try {
+      if (isGeneratedCode(model) && !data.code) {
+        created = await withGeneratedCode(model, data, (withCode) =>
+          delegate().create({ data: withCode, include }),
+        )
+      } else {
+        created = await delegate().create({ data, include })
+      }
+    } catch (err) {
+      onSaveError?.(err)
+      throw err
     }
 
     await writeAuditLog(req, {
@@ -365,13 +384,22 @@ export function crudRouter(options: CrudOptions): Router {
   })
 
   router.patch('/:id', requirePermission(module, 'edit'), async (req: AuthRequest, res) => {
-    const data = updateSchema.parse(req.body)
+    const parsed = updateSchema.parse(req.body) as Record<string, unknown>
 
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
-    await assertUnique(data as Record<string, unknown>, req.params.id, before)
+    await assertUnique(parsed, req.params.id, before)
+    const { data, onSaveError } = beforeSave
+      ? await beforeSave(parsed, before)
+      : { data: parsed, onSaveError: undefined }
 
-    const updated = await delegate().update({ where: { id: req.params.id }, data, include })
+    let updated
+    try {
+      updated = await delegate().update({ where: { id: req.params.id }, data, include })
+    } catch (err) {
+      onSaveError?.(err)
+      throw err
+    }
 
     await writeAuditLog(req, {
       module,
