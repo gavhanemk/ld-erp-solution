@@ -4,8 +4,9 @@ import { prisma } from '@ld-erp/database'
 import { crudRouter } from '../lib/crud'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import {
+  bomPriceSchema,
   copyBomSchema,
   createBomSchema,
   createBrandSchema,
@@ -770,6 +771,11 @@ const bomInclude = {
   },
   baseSize: { select: { id: true, code: true, label: true } },
   approvedBy: { select: { id: true, name: true } },
+  pricedBy: { select: { id: true, name: true } },
+  costLines: {
+    orderBy: { sortOrder: 'asc' as const },
+    include: { department: { select: { id: true, code: true, name: true } } },
+  },
   routing: {
     select: {
       id: true,
@@ -843,7 +849,7 @@ type IncomingBomLine = {
  * line consumes. That fallback is what keeps a BOM with no size run behaving
  * exactly as it did before sizes existed.
  */
-async function priceBomLines(lines: IncomingBomLine[], routingId?: string | null) {
+async function priceBomLines(lines: IncomingBomLine[]) {
   const itemIds = [...new Set(lines.map((l) => l.componentItemId))]
   const items = await prisma.item.findMany({
     where: { id: { in: itemIds } },
@@ -913,29 +919,135 @@ async function priceBomLines(lines: IncomingBomLine[], routingId?: string | null
     2,
   )
 
-  // Labour comes from the routing's own rates. SMV is carried as minutes and
-  // never turned into money — an hourly rate is a setting nobody has decided.
-  let labourCost: number | null = null
-  let totalSmv: number | null = null
+  return { priced, totalCost, warnings }
+}
 
-  if (routingId) {
-    const steps = await prisma.routingStep.findMany({
-      where: { routingId },
-      select: { smv: true, ratePerPiece: true },
-    })
-    if (steps.length > 0) {
-      labourCost = round(
-        steps.reduce((sum, s) => sum + Number(s.ratePerPiece ?? 0), 0),
-        2,
-      )
-      totalSmv = round(
-        steps.reduce((sum, s) => sum + Number(s.smv ?? 0), 0),
-        3,
-      )
-    }
+type IncomingCostLine = {
+  kind: 'LABOUR' | 'OVERHEAD'
+  name: string
+  departmentId?: string | null
+  basis: 'PER_PIECE' | 'PERCENT'
+  value: number
+}
+
+/**
+ * The cost of one garment, built up the way a costing sheet is: material, then
+ * labour, then overhead — which may be a percentage of the two before it, as
+ * "factory overhead 10%" usually is. Rounded to the paisa at every step, so the
+ * build-up on screen adds up on a calculator.
+ */
+function costBom(material: number, rows: IncomingCostLine[]) {
+  const labourRows = rows
+    .filter((r) => r.kind === 'LABOUR')
+    .map((r) => ({ ...r, amount: round(r.value, 2) }))
+  const labourCost = round(
+    labourRows.reduce((sum, r) => sum + r.amount, 0),
+    2,
+  )
+
+  const base = round(material + labourCost, 2)
+  const overheadRows = rows
+    .filter((r) => r.kind === 'OVERHEAD')
+    .map((r) => ({
+      ...r,
+      amount: r.basis === 'PERCENT' ? round((base * r.value) / 100, 2) : round(r.value, 2),
+    }))
+  const overheadCost = round(
+    overheadRows.reduce((sum, r) => sum + r.amount, 0),
+    2,
+  )
+
+  // Kept in the order they were typed, labour first, so the list reads the
+  // same way the form does.
+  const priced = [...labourRows, ...overheadRows].map((r, index) => ({
+    kind: r.kind,
+    name: r.name,
+    departmentId: r.departmentId || null,
+    basis: r.basis,
+    value: round(r.value, 2),
+    amount: r.amount,
+    sortOrder: index,
+  }))
+
+  return {
+    rows: priced,
+    labourCost,
+    overheadCost,
+    costPerPiece: round(material + labourCost + overheadCost, 2),
   }
+}
 
-  return { priced, totalCost, labourCost, totalSmv, warnings }
+/**
+ * Margin is a share of the selling price: at 20%, a ₹473.53 shirt sells for
+ * 473.53 ÷ 0.80. Rounded to the paisa first, so a price that divides exactly is
+ * not pushed up a rupee by floating-point dust, then up to the next rupee.
+ */
+const priceFromMargin = (cost: number, marginPercent: number) =>
+  Math.ceil(round(cost / (1 - marginPercent / 100), 2))
+
+/** The other way round, for a price typed straight in. */
+const marginFromPrice = (cost: number, price: number) => round(((price - cost) / price) * 100, 2)
+
+/** The rows as they are stored, turned back into what a save would send. */
+const storedCostRows = (
+  rows: Array<{
+    kind: 'LABOUR' | 'OVERHEAD'
+    name: string
+    departmentId: string | null
+    basis: 'PER_PIECE' | 'PERCENT'
+    value: unknown
+  }>,
+): IncomingCostLine[] =>
+  rows.map((r) => ({
+    kind: r.kind,
+    name: r.name,
+    departmentId: r.departmentId,
+    basis: r.basis,
+    value: Number(r.value),
+  }))
+
+async function assertCostDepartmentsExist(rows: IncomingCostLine[] | undefined) {
+  const ids = [
+    ...new Set((rows ?? []).map((r) => r.departmentId).filter((d): d is string => Boolean(d))),
+  ]
+  if (ids.length === 0) return
+  const found = await prisma.department.count({ where: { id: { in: ids } } })
+  if (found !== ids.length) {
+    throw new AppError('One of those departments no longer exists', 400, 'INVALID_DEPARTMENT')
+  }
+}
+
+/**
+ * Costing and pricing are for the people who may approve masters. Everyone
+ * else still sees the materials and what they cost, but not labour, overhead,
+ * margin or price — left out of the answer, not merely hidden on the screen.
+ */
+function forViewer<T extends object>(req: AuthRequest, bom: T): T {
+  if (userCan(req.user, MODULE, 'approve')) return bom
+  const {
+    labourCost: _labour,
+    overheadCost: _overhead,
+    costPerPiece: _cost,
+    marginPercent: _margin,
+    sellingPrice: _price,
+    pricedById: _pricedById,
+    pricedBy: _pricedBy,
+    pricedAt: _pricedAt,
+    costLines: _costLines,
+    ...rest
+  } = bom as T & Record<string, unknown>
+  return rest as T
+}
+
+/** Only an approver may write the costing a non-approver cannot even see. */
+function assertMayCost(req: AuthRequest, costLines: unknown) {
+  if (costLines !== undefined && !userCan(req.user, MODULE, 'approve')) {
+    throw new AppError(
+      'Only someone who can approve masters can enter labour and overhead costs.',
+      403,
+      'BOM_COSTING_FORBIDDEN',
+    )
+  }
 }
 
 type PricedLine = Awaited<ReturnType<typeof priceBomLines>>['priced'][number]
@@ -1149,7 +1261,7 @@ async function assertVersionFree(
   if (clash) throw versionClash(styleCode, color, version, typed)
 }
 
-router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
+router.get('/bom', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
@@ -1204,32 +1316,35 @@ router.get('/bom', requirePermission(MODULE, 'view'), async (req, res) => {
 
   res.json({
     success: true,
-    data: rows,
+    data: rows.map((row) => forViewer(req, row)),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   })
 })
 
-router.get('/bom/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+router.get('/bom/:id', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const bom = await prisma.bOM.findUnique({ where: { id: req.params.id }, include: bomInclude })
   if (!bom) throw new AppError('BOM not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: bom })
+  res.json({ success: true, data: forViewer(req, bom) })
 })
 
 router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { lines, styleId, color, version, notes, isActive, routingId, baseSizeId } =
+  const { lines, costLines, styleId, color, version, notes, isActive, routingId, baseSizeId } =
     createBomSchema.parse(req.body)
+  assertMayCost(req, costLines)
 
   const colour = color?.trim() || null
   const style = await assertBomRefsExist(styleId, routingId, lines, baseSizeId, {
     value: colour,
     required: true,
   })
+  await assertCostDepartmentsExist(costLines)
 
   const useVersion = version ?? '1.0'
   const typedVersion = version !== undefined
   await assertVersionFree(styleId, colour, useVersion, style.code, undefined, typedVersion)
 
-  const { priced, totalCost, labourCost, warnings } = await priceBomLines(lines, routingId)
+  const { priced, totalCost, warnings } = await priceBomLines(lines)
+  const costing = costBom(totalCost, costLines ?? [])
 
   let created
   try {
@@ -1243,8 +1358,11 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
         notes: notes ?? null,
         isActive: isActive ?? true,
         totalCost,
-        labourCost,
+        labourCost: costing.labourCost,
+        overheadCost: costing.overheadCost,
+        costPerPiece: costing.costPerPiece,
         lines: { create: priced.map(toLineCreate) },
+        ...(costing.rows.length > 0 ? { costLines: { create: costing.rows } } : {}),
       },
       include: bomInclude,
     })
@@ -1263,22 +1381,26 @@ router.post('/bom', requirePermission(MODULE, 'create'), async (req: AuthRequest
   res.status(201).json({
     success: true,
     ...(warnings.length > 0 ? { message: rateWarning(warnings) } : {}),
-    data: created,
+    data: forViewer(req, created!),
   })
 })
 
 router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { lines, version, notes, isActive, routingId, baseSizeId } = updateBomSchema.parse(req.body)
+  const { lines, costLines, version, notes, isActive, routingId, baseSizeId } =
+    updateBomSchema.parse(req.body)
+  assertMayCost(req, costLines)
 
   const before = await prisma.bOM.findUnique({ where: { id: req.params.id }, include: bomInclude })
   if (!before) throw new AppError('BOM not found', 404, 'NOT_FOUND')
 
   // An approved BOM is what running orders are costed against. Changing its
-  // components underneath them is the whole thing the approval exists to stop;
-  // a new version starts from a copy instead. Deactivating it is still allowed,
-  // because that is how a master is retired.
+  // components or its labour and overhead underneath them is the whole thing the
+  // approval exists to stop; a new version starts from a copy instead. The price
+  // has its own route and stays open. Deactivating is still allowed, because
+  // that is how a master is retired.
   const changesCosting =
     lines !== undefined ||
+    costLines !== undefined ||
     routingId !== undefined ||
     baseSizeId !== undefined ||
     version !== undefined
@@ -1294,6 +1416,7 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   const nextBaseSizeId = baseSizeId !== undefined ? baseSizeId : before.baseSizeId
   if (changesCosting) {
     await assertBomRefsExist(before.styleId, nextRoutingId, lines, nextBaseSizeId)
+    await assertCostDepartmentsExist(costLines)
   }
   // A draft renamed to a version its colour already has. Colour itself cannot be
   // changed here — that is what copying to another colour is for — so the check
@@ -1309,12 +1432,19 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   const updated = await prisma.$transaction(async (tx) => {
     // Collected rather than pre-typed from the existing row, so the costs are
     // only sent when something actually recomputed them.
-    const costs: { totalCost?: number; labourCost?: number | null } = {}
+    const costs: {
+      totalCost?: number
+      labourCost?: number
+      overheadCost?: number
+      costPerPiece?: number
+      sellingPrice?: number
+    } = {}
+    let material = Number(before.totalCost ?? 0)
 
     if (lines) {
-      const repriced = await priceBomLines(lines, nextRoutingId)
+      const repriced = await priceBomLines(lines)
+      material = repriced.totalCost
       costs.totalCost = repriced.totalCost
-      costs.labourCost = repriced.labourCost
       warnings = repriced.warnings
 
       await tx.bOMLine.deleteMany({ where: { bomId: before.id } })
@@ -1324,21 +1454,27 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       for (const line of repriced.priced) {
         await tx.bOMLine.create({ data: { ...toLineCreate(line), bomId: before.id } })
       }
-    } else if (routingId !== undefined) {
-      // The components did not move but the routing did, so labour is restated.
-      const steps = nextRoutingId
-        ? await tx.routingStep.findMany({
-            where: { routingId: nextRoutingId },
-            select: { ratePerPiece: true },
-          })
-        : []
-      costs.labourCost =
-        steps.length > 0
-          ? round(
-              steps.reduce((sum, s) => sum + Number(s.ratePerPiece ?? 0), 0),
-              2,
-            )
-          : null
+    }
+
+    // New materials move the cost even when nobody touched the costing rows: a
+    // percentage overhead is a share of the material. So the rows it already
+    // has are worked out again, unless new ones were sent.
+    if (lines || costLines) {
+      const costing = costBom(material, costLines ?? storedCostRows(before.costLines))
+      await tx.bOMCostLine.deleteMany({ where: { bomId: before.id } })
+      if (costing.rows.length > 0) {
+        await tx.bOMCostLine.createMany({
+          data: costing.rows.map((r) => ({ ...r, bomId: before.id })),
+        })
+      }
+      costs.labourCost = costing.labourCost
+      costs.overheadCost = costing.overheadCost
+      costs.costPerPiece = costing.costPerPiece
+      // A draft's price follows its margin, because the margin is what was
+      // chosen. Once approved the cost cannot move, so neither does this.
+      if (before.marginPercent !== null && costing.costPerPiece > 0) {
+        costs.sellingPrice = priceFromMargin(costing.costPerPiece, Number(before.marginPercent))
+      }
     }
 
     return tx.bOM.update({
@@ -1367,7 +1503,7 @@ router.patch('/bom/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   res.json({
     success: true,
     ...(warnings.length > 0 ? { message: rateWarning(warnings) } : {}),
-    data: updated,
+    data: forViewer(req, updated),
   })
 })
 
@@ -1451,6 +1587,85 @@ router.patch(
     res.json({
       success: true,
       message: `${bomName(after.style.code, after.color)} v${after.version} is now the approved BOM.`,
+      data: forViewer(req, after),
+    })
+  },
+)
+
+/**
+ * The price is the one part of a BOM that stays open after approval. The cost
+ * is a fact about how the garment is made, and approval freezes it; the price
+ * is a commercial call that moves with each buyer. Every change is audited, so
+ * the history of a style's price is in the log.
+ *
+ * Takes a margin, which works the price out, or a price typed straight in,
+ * which works the margin back. A price below cost is allowed — a loss leader
+ * is a decision somebody may make — but not one below half the cost, which is
+ * a typing mistake far more often than a strategy.
+ */
+router.patch(
+  '/bom/:id/price',
+  requirePermission(MODULE, 'approve'),
+  async (req: AuthRequest, res) => {
+    const { marginPercent, sellingPrice } = bomPriceSchema.parse(req.body)
+
+    const before = await prisma.bOM.findUnique({
+      where: { id: req.params.id },
+      include: bomInclude,
+    })
+    if (!before) throw new AppError('BOM not found', 404, 'NOT_FOUND')
+
+    if (before.status === 'OBSOLETE') {
+      throw new AppError(
+        'This BOM has been retired, so it is no longer priced. Price the BOM that replaced it.',
+        409,
+        'BOM_OBSOLETE',
+      )
+    }
+
+    const cost = Number(before.costPerPiece ?? 0)
+    if (cost <= 0) {
+      throw new AppError(
+        'This BOM has no cost yet. Enter its materials and costing first, then set the price.',
+        409,
+        'BOM_NO_COST',
+      )
+    }
+
+    const price = sellingPrice !== undefined ? round(sellingPrice, 2) : priceFromMargin(cost, marginPercent!)
+    const margin = sellingPrice !== undefined ? marginFromPrice(cost, price) : round(marginPercent!, 2)
+
+    if (price < cost / 2) {
+      throw new AppError(
+        `₹${price.toLocaleString('en-IN')} is less than half the cost of ₹${cost.toLocaleString('en-IN')} a piece. Check the price.`,
+        400,
+        'BOM_PRICE_TOO_LOW',
+      )
+    }
+
+    const after = await prisma.bOM.update({
+      where: { id: before.id },
+      data: {
+        marginPercent: margin,
+        sellingPrice: price,
+        pricedById: req.user!.id,
+        pricedAt: new Date(),
+      },
+      include: bomInclude,
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'BOM',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({
+      success: true,
+      message: `${bomName(after.style.code, after.color)} is priced at ₹${price.toLocaleString('en-IN')} a piece, a ${margin}% margin.`,
       data: after,
     })
   },
@@ -1510,6 +1725,28 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
         copiedFromId: source.id,
         totalCost: source.totalCost,
         labourCost: source.labourCost,
+        // The costing and the margin come across too, so a new colour starts
+        // priced; changing its fabric then moves the price with its margin.
+        // Who set the price does not: nobody has priced the copy yet.
+        overheadCost: source.overheadCost,
+        costPerPiece: source.costPerPiece,
+        marginPercent: source.marginPercent,
+        sellingPrice: source.sellingPrice,
+        ...(source.costLines.length > 0
+          ? {
+              costLines: {
+                create: source.costLines.map((c) => ({
+                  kind: c.kind,
+                  name: c.name,
+                  departmentId: c.departmentId,
+                  basis: c.basis,
+                  value: c.value,
+                  amount: c.amount,
+                  sortOrder: c.sortOrder,
+                })),
+              },
+            }
+          : {}),
         lines: {
           create: source.lines.map((l) => ({
             componentItemId: l.componentItemId,
@@ -1554,7 +1791,7 @@ router.post('/bom/:id/copy', requirePermission(MODULE, 'create'), async (req: Au
   res.status(201).json({
     success: true,
     message: `Copied to ${bomName(created!.style.code, targetColour)} v${targetVersion}. It is a draft until you approve it.`,
-    data: created,
+    data: forViewer(req, created!),
   })
 })
 
