@@ -10,6 +10,8 @@ interface Check {
   move: string[]
   /** What will simply be left blank, e.g. "2 items". */
   blank: string[]
+  /** What stops the delete altogether, e.g. "3 sales order lines". */
+  refuse?: string[]
 }
 
 const sentence = (parts: string[]) =>
@@ -81,7 +83,8 @@ export function DeleteDialog({
   }, [onClose, busy])
 
   const needsTarget = Boolean(check?.move.length)
-  const ready = check !== null && (!needsTarget || Boolean(moveTo))
+  const refused = check?.refuse ?? []
+  const ready = check !== null && refused.length === 0 && (!needsTarget || Boolean(moveTo))
 
   const confirm = async () => {
     setBusy(true)
@@ -131,7 +134,15 @@ export function DeleteDialog({
             </p>
           )}
 
-          {check && !check.move.length && !check.blank.length && (
+          {refused.length > 0 && (
+            <p className="text-foreground">
+              It cannot be deleted: <span className="font-medium">{sentence(refused)}</span> still{' '}
+              {refused.length === 1 && refused[0].startsWith('1 ') ? 'uses' : 'use'} it. Take it off those
+              first.
+            </p>
+          )}
+
+          {check && !refused.length && !check.move.length && !check.blank.length && (
             <p className="text-foreground">Nothing uses this {noun}, so nothing else changes.</p>
           )}
 

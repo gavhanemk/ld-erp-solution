@@ -566,9 +566,21 @@ router.use(
     searchFields: ['code', 'label'],
     sortableFields: ['sequence', 'code'],
     defaultSort: { field: 'sequence', order: 'asc' },
-    // Sizes are never referenced by history in their own right; the order line
-    // that used one keeps its own quantity, so a hard delete is safe.
+    // Sizes have no active flag: one is deleted, never deactivated. But order,
+    // manufacturing order and BOM lines point at the size itself, so one in
+    // use cannot go: its lines would lose their size (or a BOM its base size,
+    // silently). The delete says what uses it instead.
     softDelete: false,
+    permanentDelete: {
+      soLineSizes: { one: 'sales order line', many: 'sales order lines', then: 'refuse' },
+      moLineSizes: { one: 'manufacturing order line', many: 'manufacturing order lines', then: 'refuse' },
+      bomLineSizes: { one: 'BOM line', many: 'BOM lines', then: 'refuse' },
+      baseSizeBoms: { one: 'BOM as its base size', many: 'BOMs as their base size', then: 'refuse' },
+    },
+    filters: {
+      sizeGroupId: { where: (v) => ({ sizeGroupId: { in: v } }), facets: ['sizeGroupId'] },
+    },
+    facets: ['sizeGroupId'],
     include: { sizeGroup: { select: { id: true, name: true } } },
   }),
 )

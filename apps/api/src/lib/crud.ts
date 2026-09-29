@@ -57,6 +57,8 @@ export interface CrudOptions {
    * column must opt out.
    */
   softDelete?: boolean
+  /** Whether the model has an isActive column to filter on. Defaults to softDelete. */
+  activeFlag?: boolean
   /**
    * Fields merged into the body before validation when the client did not
    * supply them. Used for owner keys the user should never have to type, such
@@ -70,14 +72,17 @@ export interface DeleteUse {
   one: string
   many: string
   /** The model and foreign key holding the link, so it can be cleared or moved. */
-  model: string
-  field: string
+  model?: string
+  field?: string
   /**
    * 'blank' where the link is optional: an item simply has no department.
    * 'move' where it is not: a requisition must say who asked, so its
    * department changes to one the person picks.
+   * 'refuse' where neither makes sense: a sales order line for size 40 cannot
+   * be left sizeless or quietly become size 42, so the record stays while
+   * anything uses it.
    */
-  then: 'blank' | 'move'
+  then: 'blank' | 'move' | 'refuse'
 }
 
 export interface CrudFilter {
@@ -128,6 +133,9 @@ export function crudRouter(options: CrudOptions): Router {
     defaultSort = { field: 'createdAt', order: 'desc' },
     include,
     softDelete = true,
+    // A model with no isActive column (sizes) ignores ?active rather than
+    // passing a filter Prisma rejects, which is how the sizes screen crashed.
+    activeFlag = softDelete,
     injectOnCreate,
     filters = {},
     facets = [],
@@ -174,8 +182,8 @@ export function crudRouter(options: CrudOptions): Router {
     const and: Record<string, unknown>[] = []
 
     // ?active=true|false filters; omitting it returns both.
-    if (req.query.active === 'true') and.push({ isActive: true })
-    else if (req.query.active === 'false') and.push({ isActive: false })
+    if (activeFlag && req.query.active === 'true') and.push({ isActive: true })
+    else if (activeFlag && req.query.active === 'false') and.push({ isActive: false })
 
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     if (q && searchFields.length > 0) {
@@ -351,6 +359,7 @@ export function crudRouter(options: CrudOptions): Router {
       data: {
         move: uses.filter((u) => u.then === 'move').map((u) => u.label),
         blank: uses.filter((u) => u.then === 'blank').map((u) => u.label),
+        refuse: uses.filter((u) => u.then === 'refuse').map((u) => u.label),
       },
     })
   })
@@ -366,8 +375,19 @@ export function crudRouter(options: CrudOptions): Router {
      * the person chose. Nothing is left to the foreign keys, which would
      * either refuse with a database error or clear a link without a word.
      */
-    if (req.query.permanent === 'true') {
+    // A master with no active flag can only ever be deleted, so every delete
+    // of one goes through the same checks.
+    if (req.query.permanent === 'true' || (!softDelete && permanentDelete)) {
       const uses = await usesOf(req.params.id)
+      const blocking = uses.filter((u) => u.then === 'refuse')
+      if (blocking.length) {
+        const label = before.name ?? before.label ?? before.code ?? entityType
+        throw new AppError(
+          `${label} is used by ${sentence(blocking.map((u) => u.label))}, so it cannot be deleted. Take it off those first.`,
+          409,
+          'IN_USE',
+        )
+      }
       const toMove = uses.filter((u) => u.then === 'move')
       const moveTo = typeof req.query.moveTo === 'string' ? req.query.moveTo : ''
 
@@ -392,6 +412,7 @@ export function crudRouter(options: CrudOptions): Router {
       await prisma.$transaction(async (tx) => {
         const t = tx as unknown as Record<string, any>
         for (const u of uses) {
+          if (!u.model || !u.field) continue
           await t[u.model].updateMany({
             where: { [u.field]: req.params.id },
             data: { [u.field]: u.then === 'move' ? moveTo : null },

@@ -91,6 +91,11 @@ interface MasterTableProps<T> {
    * or move, and asks where, before anything is done.
    */
   allowDelete?: boolean
+  /**
+   * The master has no active flag (sizes): no "Active only" tick, nothing
+   * sent for it, and no Deactivate. Pair with allowDelete.
+   */
+  noActiveFlag?: boolean
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
 }
@@ -109,6 +114,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   entityName,
   filterDefs = [],
   allowDelete = false,
+  noActiveFlag = false,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -163,7 +169,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   const narrowing = useMemo<ListParams>(() => {
     const params: ListParams = {
       q: debouncedSearch || undefined,
-      active: activeOnly ? true : undefined,
+      active: activeOnly && !noActiveFlag ? true : undefined,
       ...filters,
     }
     for (const [key, values] of Object.entries(picked)) {
@@ -403,6 +409,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
             />
           ))}
 
+          {!noActiveFlag && (
           <label className="ml-1 flex cursor-pointer select-none items-center gap-2 text-sm text-muted-foreground">
             <input
               type="checkbox"
@@ -412,6 +419,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
             />
             Active only
           </label>
+          )}
         </div>
 
         {chips.length > 0 && (
@@ -563,13 +571,15 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                       </button>
                       {/* Kept in place but hidden on an inactive row, so the
                         Delete beside it stays in the same column on every row. */}
-                      <button
-                        className={`btn-ghost p-1.5 text-red-400 ${row.isActive === false ? 'invisible' : ''}`}
-                        title={`Deactivate ${singular.toLowerCase()}`}
-                        onClick={() => void deactivate(row)}
-                      >
-                        <Ban size={14} />
-                      </button>
+                      {!noActiveFlag && (
+                        <button
+                          className={`btn-ghost p-1.5 text-red-400 ${row.isActive === false ? 'invisible' : ''}`}
+                          title={`Deactivate ${singular.toLowerCase()}`}
+                          onClick={() => void deactivate(row)}
+                        >
+                          <Ban size={14} />
+                        </button>
+                      )}
                       {allowDelete && (
                         <button
                           className="btn-ghost p-1.5 text-red-500"
@@ -622,7 +632,12 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
         <DeleteDialog
           resource={resource}
           id={deleting.id}
-          name={String((deleting as Record<string, unknown>).name ?? (deleting as Record<string, unknown>).code ?? singular)}
+          name={String(
+            (deleting as Record<string, unknown>).name ??
+              (deleting as Record<string, unknown>).label ??
+              (deleting as Record<string, unknown>).code ??
+              singular,
+          )}
           entityName={singular}
           onClose={() => setDeleting(null)}
           onDeleted={(message) => {
