@@ -613,9 +613,6 @@ function LedgerScreen() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Stock Ledger</h1>
-          <p className="page-subtitle">
-            Every movement, newest first. This is the answer to &ldquo;why does it say that&rdquo;.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
