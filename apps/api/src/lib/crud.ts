@@ -150,10 +150,19 @@ export function crudRouter(options: CrudOptions): Router {
   const delegate = () => (prisma as unknown as Record<string, any>)[model]
 
   /** Refuses a value another record already has, naming that record. */
-  const assertUnique = async (data: Record<string, unknown>, exceptId?: string) => {
+  const assertUnique = async (
+    data: Record<string, unknown>,
+    exceptId?: string,
+    before?: Record<string, unknown>,
+  ) => {
+    const same = (a: unknown, b: unknown) =>
+      typeof a === 'string' && typeof b === 'string' && a.trim().toLowerCase() === b.trim().toLowerCase()
     for (const field of uniqueFields) {
       const value = data[field]
       if (typeof value !== 'string' || !value.trim()) continue
+      // Unchanged on an edit: a pair that was duplicated before this rule
+      // existed can still be edited (and one of them renamed).
+      if (before && same(value, before[field])) continue
       const clash = await delegate().findFirst({
         where: {
           [field]: { equals: value.trim(), mode: 'insensitive' },
@@ -163,13 +172,13 @@ export function crudRouter(options: CrudOptions): Router {
       if (clash) {
         const label = clash.code ? ` (${clash.code})` : ''
         const inactive = clash.isActive === false ? ', inactive — edit it to bring it back' : ''
-        throw new ZodError([
-          {
-            code: 'custom',
-            path: [field],
-            message: `${clash[field]}${label} already exists${inactive}`,
-          },
-        ])
+        // A name clashes with a name; anything else (a GSTIN) is said with the
+        // name of the record that already has it.
+        const message =
+          field === 'name'
+            ? `${clash.name}${label} already exists${inactive}. If it is a different one, add something to tell them apart, such as the town.`
+            : `${clash[field]} is already on ${clash.name ?? 'another record'}${label}${inactive}`
+        throw new ZodError([{ code: 'custom', path: [field], message }])
       }
     }
   }
@@ -313,7 +322,7 @@ export function crudRouter(options: CrudOptions): Router {
 
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
-    await assertUnique(data as Record<string, unknown>, req.params.id)
+    await assertUnique(data as Record<string, unknown>, req.params.id, before)
 
     const updated = await delegate().update({ where: { id: req.params.id }, data, include })
 

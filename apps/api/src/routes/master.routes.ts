@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
+import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
@@ -46,6 +47,8 @@ import {
   updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
+  gstin,
+  stateCode,
 } from '../schemas/master.schemas'
 
 const ITEM_TYPES = new Set([
@@ -116,6 +119,8 @@ router.use(
     entityType: 'Customer',
     createSchema: createCustomerSchema,
     updateSchema: updateCustomerSchema,
+    // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
+    uniqueFields: ['name', 'gstin'],
     searchFields: ['name', 'code', 'gstin', 'phone', 'email'],
     sortableFields: ['name', 'code', 'createdAt', 'creditLimit'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -130,18 +135,33 @@ router.use(
 // router, which would read "cmxyz/addresses" as an id and answer 404.
 // ─────────────────────────────────────────────────────────────
 
-const supplierAddressSchema = z.object({
+const supplierAddressFields = z.object({
   label: z.string().max(60).optional().nullable(),
   address: z.string().min(1, 'The address cannot be empty').max(400),
   city: z.string().max(80).optional().nullable(),
   state: z.string().max(80).optional().nullable(),
-  stateCode: z.string().max(2).optional().nullable(),
+  stateCode,
   pincode: z.string().max(10).optional().nullable(),
   country: z.string().max(60).optional().nullable(),
-  gstin: z.string().max(15).optional().nullable(),
+  // Validated like the supplier's own, because the default address's GSTIN
+  // is copied onto the supplier: "JUNK" used to get there this way.
+  gstin: gstin.optional().nullable(),
   /** Makes this the one a new order is offered first, and demotes the others. */
   isDefault: z.boolean().optional(),
 })
+
+type AddressIn = Partial<z.infer<typeof supplierAddressFields>>
+const checkAddress = (v: AddressIn, ctx: z.RefinementCtx) =>
+  checkRegistration({ gstin: v.gstin, stateCode: v.stateCode }, { stateCode: 'stateCode' }, ctx)
+const fillAddress = <T extends AddressIn>(v: T): T => {
+  const stateCode = v.stateCode || fromGstin(v.gstin)?.stateCode || v.stateCode
+  return stateCode ? { ...v, stateCode, state: stateName(stateCode) ?? v.state } : v
+}
+const supplierAddressSchema = supplierAddressFields.superRefine(checkAddress).transform(fillAddress)
+const supplierAddressUpdateSchema = supplierAddressFields
+  .partial()
+  .superRefine(checkAddress)
+  .transform(fillAddress)
 
 router.get(
   '/suppliers/:id/addresses',
@@ -267,7 +287,7 @@ router.patch(
       throw new AppError('Address not found', 404, 'NOT_FOUND')
     }
 
-    const data = supplierAddressSchema.partial().parse(req.body)
+    const data = supplierAddressUpdateSchema.parse(req.body)
 
     const after = await prisma.$transaction(async (tx) => {
       if (data.isDefault === true) {
@@ -330,6 +350,8 @@ router.use(
     entityType: 'Supplier',
     createSchema: createSupplierSchema,
     updateSchema: updateSupplierSchema,
+    // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
+    uniqueFields: ['name', 'gstin'],
     searchFields: ['name', 'code', 'gstin', 'phone', 'email'],
     sortableFields: ['name', 'code', 'createdAt', 'rating', 'leadTimeDays'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -344,6 +366,8 @@ router.use(
     entityType: 'Item',
     createSchema: createItemSchema,
     updateSchema: updateItemSchema,
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
     // Typing "linen" finds linen items by their category as well as their
     // name; "cutting" finds what the cutting floor uses.
     searchFields: [
@@ -430,6 +454,8 @@ router.use(
     entityType: 'Warehouse',
     createSchema: createWarehouseSchema,
     updateSchema: updateWarehouseSchema,
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
     injectOnCreate: currentCompanyId,
     searchFields: ['name', 'code'],
     sortableFields: ['name', 'code'],
@@ -514,6 +540,8 @@ router.use(
     entityType: 'ItemCategory',
     createSchema: createItemCategorySchema,
     updateSchema: updateItemCategorySchema,
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
     searchFields: ['name'],
     sortableFields: ['name'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -611,6 +639,8 @@ router.use(
     entityType: 'Broker',
     createSchema: createBrokerSchema,
     updateSchema: updateBrokerSchema,
+    // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
+    uniqueFields: ['name', 'gstin'],
     searchFields: ['name', 'code', 'phone', 'email'],
     sortableFields: ['name', 'code', 'brokeragePercent'],
     defaultSort: { field: 'name', order: 'asc' },
@@ -625,6 +655,8 @@ router.use(
     entityType: 'ChargeType',
     createSchema: createChargeTypeSchema,
     updateSchema: updateChargeTypeSchema,
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
     searchFields: ['name'],
     sortableFields: ['name', 'defaultGstRate', 'percentOfValue'],
     defaultSort: { field: 'name', order: 'asc' },
