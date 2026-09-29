@@ -21,9 +21,11 @@ import {
   FileMinus,
   ReceiptIndianRupee,
   Paperclip,
+  ClipboardCheck,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
+import { GrnQcDialog, QC_RESULT } from '@/components/purchase/GrnQcDialog'
 import { Pagination } from '@/components/tables/Pagination'
 import { ExportButton } from '@/components/tables/ExportButton'
 import { ColumnsButton } from '@/components/tables/ColumnsButton'
@@ -100,6 +102,13 @@ interface Receipt {
     status: 'NOTHING_TO_BILL' | 'NOT_BILLED' | 'PARTLY_BILLED' | 'BILLED'
   }
   bills?: Array<{ id: string; billNumber: string }>
+  /** The quality check standing on this receipt, if one was done. */
+  qc?: {
+    id: string
+    result: 'PASS' | 'CONDITIONAL_PASS' | 'FAIL'
+    inspectionDate: string
+    rejectedQty: number
+  } | null
 }
 
 /**
@@ -367,6 +376,7 @@ export default function GoodsReceiptPage() {
 
   /** The receipt being corrected, or null when the form above is closed. */
   const [editGrnId, setEditGrnId] = useState<string | null>(null)
+  const [qcGrnId, setQcGrnId] = useState<string | null>(null)
   /** The receipt whose files are open, off the paperclip on its row. */
   const [filesFor, setFilesFor] = useState<{
     id: string
@@ -1001,6 +1011,22 @@ export default function GoodsReceiptPage() {
        * invoice to fix.
        */
       const heldByBill = billedOn.length > 0
+      /*
+       * A quality check moved rejected goods out of this receipt's godowns on
+       * the strength of its quantities, so the receipt stays as it is while a
+       * check stands on it. Shown and greyed rather than hidden, so the way to
+       * a correction — cancel the check first — is on the menu itself.
+       */
+      const heldByQc = grn.qc
+        ? { disabled: true, hint: 'Cancel its QC first (Quality check → Cancel QC)' }
+        : {}
+
+      items.push({
+        key: 'qc',
+        label: grn.qc ? 'Quality check — view / cancel' : 'Quality check (QC)',
+        icon: <ClipboardCheck size={14} />,
+        onClick: () => setQcGrnId(grn.id),
+      })
 
       items.push(
         ...(grn.lines.some((l) => Number(l.rejectedQty) > 0)
@@ -1034,6 +1060,7 @@ export default function GoodsReceiptPage() {
           label: 'Correct this receipt',
           icon: <Pencil size={14} />,
           onClick: () => setEditGrnId(grn.id),
+          ...heldByQc,
         },
         ...(heldByBill
           ? []
@@ -1044,6 +1071,7 @@ export default function GoodsReceiptPage() {
                 icon: <Ban size={14} />,
                 onClick: () => setConfirmAction({ type: 'cancel', grn }),
                 danger: true,
+                ...heldByQc,
               },
             ])
       )
@@ -1058,6 +1086,9 @@ export default function GoodsReceiptPage() {
         icon: <Trash2 size={14} />,
         onClick: () => setConfirmAction({ type: 'delete', grn }),
         danger: true,
+        ...(grn.qc
+          ? { disabled: true, hint: 'Cancel its QC first (Quality check → Cancel QC)' }
+          : {}),
       })
     }
     return items
@@ -1140,7 +1171,12 @@ export default function GoodsReceiptPage() {
           <span className="text-muted-foreground">—</span>
         )
       case 'status':
-        return <span className={s.cls}>{s.label}</span>
+        return (
+          <span className="inline-flex flex-wrap items-center gap-1">
+            <span className={s.cls}>{s.label}</span>
+            <QcBadge qc={grn.qc} />
+          </span>
+        )
       case 'billing': {
         const b = billStage(grn)
         if (!b) return <span className="text-muted-foreground">—</span>
@@ -2073,6 +2109,7 @@ export default function GoodsReceiptPage() {
                                 {grn.grnNumber}
                               </a>
                               <span className={s.cls}>{s.label}</span>
+                              <QcBadge qc={grn.qc} />
                               {(() => {
                                 const b = billStage(grn)
                                 return b ? <span className={b.cls}>{b.label}</span> : null
@@ -2501,6 +2538,18 @@ export default function GoodsReceiptPage() {
         />
       )}
 
+      {qcGrnId !== null && (
+        <GrnQcDialog
+          grnId={qcGrnId}
+          onClose={() => setQcGrnId(null)}
+          onSaved={(msg) => {
+            setQcGrnId(null)
+            setMessage(msg)
+            void load()
+          }}
+        />
+      )}
+
       {editGrnId !== null && (
         <ReceiveGoodsDialog
           grnId={editGrnId}
@@ -2579,5 +2628,23 @@ export default function GoodsReceiptPage() {
         />
       )}
     </div>
+  )
+}
+
+/**
+ * Whether a quality check stands on the receipt, and what it found — beside
+ * the status, so a receipt with rejects in the reject godown is seen before
+ * anybody bills or returns against it.
+ */
+function QcBadge({ qc }: { qc: Receipt['qc'] }) {
+  if (!qc) return null
+  const r = QC_RESULT[qc.result]
+  return (
+    <span
+      className={r?.cls ?? 'badge-neutral'}
+      title={qc.rejectedQty > 0 ? `${qc.rejectedQty} rejected on QC` : 'Everything passed QC'}
+    >
+      {r?.label ?? 'QC done'}
+    </span>
   )
 }

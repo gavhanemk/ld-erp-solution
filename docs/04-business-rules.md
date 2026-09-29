@@ -44,6 +44,7 @@ configured.
 | Code | Document |
 |---|---|
 | `SO` | Sales order |
+| `ENQ` | Purchase enquiry — the old system's provisional PO |
 | `PO` | Purchase order |
 | `MO` | Manufacturing order |
 | `GRN` | Goods receipt |

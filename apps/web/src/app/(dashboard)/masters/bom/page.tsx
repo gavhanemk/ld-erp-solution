@@ -19,9 +19,8 @@ import {
   Equal,
   PencilLine,
   Archive,
-  ExternalLink,
 } from 'lucide-react'
-import { api, ApiError, type Paginated } from '@/lib/api'
+import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
@@ -331,12 +330,16 @@ interface RowProps {
 
 function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire }: RowProps) {
   const status = STATUS[bom.status] ?? STATUS.DRAFT
+  // Labour, overhead, cost and price reach only those who may approve masters;
+  // the API leaves them out for everyone else, who see material alone.
+  const canCost = can('masters', 'approve')
   const material = num(bom.totalCost)
   const labour = num(bom.labourCost)
-  const total = material + labour
+  const overhead = num(bom.overheadCost)
+  const cost = bom.costPerPiece != null ? num(bom.costPerPiece) : material + labour + overhead
+  const price = bom.sellingPrice != null ? num(bom.sellingPrice) : null
   const lines = bom.lines ?? []
-  const steps = bom.routing?.steps ?? []
-  const totalSmv = steps.reduce((sum, s) => sum + num(s.smv), 0)
+  const costLines = bom.costLines ?? []
 
   // What the status means for this BOM, in words. A badge saying "Approved"
   // does not tell anyone what approving did, or what to do next.
@@ -360,7 +363,7 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
             icon: PencilLine,
             iconClass: 'text-primary',
             title: 'Draft — not in use yet',
-            body: `Check the components and the making steps, then approve it. Approving makes it the BOM for ${who} and retires any BOM approved for it before.`,
+            body: `Check the components and the costing, then approve it. Approving makes it the BOM for ${who} and retires any BOM approved for it before.`,
           }
 
   const sizeTotals = useMemo(() => {
@@ -422,17 +425,33 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
             {bom.lines?.length ?? 0} component
             {bom.lines?.length === 1 ? '' : 's'}
             {bom.baseSize && ` · sized on ${bom.baseSize.label}`}
-            {bom.routing && ` · ${bom.routing.steps?.length ?? 0} operations`}
             {bom.style?.brandType === 'VHAGAR' && (
               <span className="vhagar-accent font-bold ml-2">VHAGAR</span>
             )}
           </p>
         </div>
 
-        <div className="text-right">
-          <p className="font-mono text-sm font-bold text-foreground">{formatRupees(total)}</p>
-          <p className="text-xs text-muted-foreground">per piece</p>
-        </div>
+        {canCost ? (
+          <div className="flex items-center gap-5 text-right">
+            <div>
+              <p className="font-mono text-sm font-bold text-foreground">{formatRupees(cost)}</p>
+              <p className="text-xs text-muted-foreground">cost per piece</p>
+            </div>
+            <div>
+              <p className={cn('font-mono text-sm font-bold', price !== null ? 'text-primary' : 'text-muted-foreground')}>
+                {price !== null ? formatRupees(price) : '—'}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {price !== null && bom.marginPercent != null ? `price · ${percent(bom.marginPercent)} margin` : 'not priced'}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="text-right">
+            <p className="font-mono text-sm font-bold text-foreground">{formatRupees(material)}</p>
+            <p className="text-xs text-muted-foreground">material per piece</p>
+          </div>
+        )}
 
         <div className="flex items-center gap-1">
           <button className="btn-ghost p-1.5" onClick={onEdit} disabled={busy} title="Edit">
@@ -489,33 +508,78 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
             <h3 className={sectionTitle}>
               Cost of one piece{bom.baseSize && ` · size ${bom.baseSize.label}`}
             </h3>
-            <div className="flex flex-col gap-2 md:flex-row md:items-stretch">
-              <CostBox
-                label="Material"
-                amount={material}
-                note={`${lines.length} component${lines.length === 1 ? '' : 's'}${
-                  total > 0 ? ` · ${Math.round((material / total) * 100)}% of the cost` : ''
-                }`}
-              />
-              <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
-                <Plus size={16} />
-              </span>
-              <CostBox
-                label="Labour"
-                amount={bom.routing ? labour : null}
-                note={
-                  bom.routing
-                    ? `${steps.length} making step${steps.length === 1 ? '' : 's'}${
-                        total > 0 ? ` · ${Math.round((labour / total) * 100)}% of the cost` : ''
-                      }`
-                    : 'No routing linked — not counted'
-                }
-              />
-              <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
-                <Equal size={16} />
-              </span>
-              <CostBox label="Total" amount={total} note="for one piece" strong />
-            </div>
+            {canCost ? (
+              <>
+                <div className="flex flex-col gap-2 md:flex-row md:items-stretch">
+                  <CostBox
+                    label="Material"
+                    amount={material}
+                    note={`${lines.length} component${lines.length === 1 ? '' : 's'}${
+                      cost > 0 ? ` · ${Math.round((material / cost) * 100)}% of the cost` : ''
+                    }`}
+                  />
+                  <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
+                    <Plus size={16} />
+                  </span>
+                  <CostBox
+                    label="Labour"
+                    amount={labour}
+                    note={
+                      cost > 0 && labour > 0
+                        ? `${Math.round((labour / cost) * 100)}% of the cost`
+                        : 'None entered'
+                    }
+                  />
+                  <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
+                    <Plus size={16} />
+                  </span>
+                  <CostBox
+                    label="Overhead"
+                    amount={overhead}
+                    note={
+                      cost > 0 && overhead > 0
+                        ? `${Math.round((overhead / cost) * 100)}% of the cost`
+                        : 'None entered'
+                    }
+                  />
+                  <span className="flex items-center justify-center text-muted-foreground" aria-hidden>
+                    <Equal size={16} />
+                  </span>
+                  <CostBox label="Cost per piece" amount={cost} note="to make one piece" strong />
+                </div>
+
+                {/* The price, and what it leaves, under the cost it is worked from. */}
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border px-4 py-3">
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground">Selling price</p>
+                    <p className={cn('mt-1 font-mono text-lg font-bold', price !== null ? 'text-primary' : 'text-muted-foreground')}>
+                      {price !== null ? formatRupees(price) : '—'}
+                    </p>
+                  </div>
+                  {price !== null ? (
+                    <p className="text-xs text-muted-foreground">
+                      {bom.marginPercent != null && `${percent(bom.marginPercent)} margin · `}
+                      profit {formatRupees(price - cost)} a piece · before GST
+                      {bom.pricedBy &&
+                        ` · priced by ${bom.pricedBy.name}${bom.pricedAt ? ` on ${formatDate(bom.pricedAt)}` : ''}`}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Not priced yet. Edit this BOM and set a margin on its last step.
+                    </p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-col gap-2 md:flex-row md:items-stretch">
+                <CostBox
+                  label="Material"
+                  amount={material}
+                  note={`${lines.length} component${lines.length === 1 ? '' : 's'}`}
+                  strong
+                />
+              </div>
+            )}
 
             {sizeTotals.length > 0 && (
               <div className="overflow-x-auto rounded-lg border border-border">
@@ -532,10 +596,12 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
                   </thead>
                   <tbody>
                     <tr>
-                      <td className={cn(td, 'text-xs text-muted-foreground')}>Material + labour</td>
+                      {/* Material only: a percentage overhead would need working
+                          out again for every size, and these rows are older data. */}
+                      <td className={cn(td, 'text-xs text-muted-foreground')}>Material</td>
                       {sizeTotals.map((s) => (
                         <td key={s.label} className={cn(td, 'text-right font-mono text-foreground')}>
-                          {formatRupees(s.cost + labour)}
+                          {formatRupees(s.cost)}
                         </td>
                       ))}
                     </tr>
@@ -667,115 +733,79 @@ function BomRow({ bom, open, busy, onToggle, onEdit, onApprove, onCopy, onRetire
             </div>
           </section>
 
-          <section className="space-y-2">
-            <div className="flex flex-wrap items-end justify-between gap-2">
+          {canCost && (
+            <section className="space-y-2">
               <div>
-                <h3 className={sectionTitle}>Labour — making steps ({steps.length})</h3>
+                <h3 className={sectionTitle}>Labour and overheads ({costLines.length})</h3>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  {bom.routing ? (
-                    <>
-                      The steps from routing{' '}
-                      <span className="font-mono text-foreground">{bom.routing.code}</span> ·{' '}
-                      {bom.routing.name}. Labour is the total of the Paid column.
-                    </>
-                  ) : (
-                    // The BOM form no longer links a routing, so this no longer
-                    // sends anyone there to do it.
-                    'No routing is linked, so labour is not in the cost yet.'
-                  )}
+                  What one piece costs beyond its material. A percentage overhead is worked out on
+                  material and labour together.
                 </p>
               </div>
-              <a
-                href="/masters/routings"
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-              >
-                Open routings
-                <ExternalLink size={13} />
-              </a>
-            </div>
 
-            {bom.routing && (
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="w-full min-w-[640px] table-fixed text-sm">
-                  <colgroup>
-                    <col className="w-10" />
-                    <col />
-                    <col className="w-72" />
-                    <col className="w-28" />
-                    <col className="w-28" />
-                  </colgroup>
-                  <thead className="bg-secondary/60">
-                    <tr className="border-b border-border">
-                      <th className={cn(th, 'text-center')}>#</th>
-                      <th className={cn(th, 'text-left')}>Step</th>
-                      <th className={cn(th, 'text-left')} title="The line or outside unit that is paid for this step">
-                        Done by
-                      </th>
-                      <th
-                        className={cn(th, 'text-right')}
-                        title="Standard minute value (SMV): the standard time one piece takes at this step"
-                      >
-                        Time / pc
-                      </th>
-                      <th className={cn(th, 'text-right')} title="What this step pays for one piece">
-                        Paid / pc
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {steps.map((step) => (
-                      <tr key={step.id} className="border-b border-border/50">
-                        <td className={cn(td, 'text-center font-mono text-xs text-muted-foreground')}>
-                          {step.sequence}
+              {costLines.length === 0 ? (
+                <p className="rounded-lg border border-border px-4 py-3 text-xs text-muted-foreground">
+                  {bom.status === 'DRAFT'
+                    ? 'No labour or overheads entered yet. Edit this BOM to add them on its costing step.'
+                    : 'No labour or overheads were entered before this BOM was approved.'}
+                </p>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border border-border">
+                  <table className="w-full min-w-[640px] table-fixed text-sm">
+                    <colgroup>
+                      <col />
+                      <col className="w-28" />
+                      <col className="w-48" />
+                      <col className="w-48" />
+                      <col className="w-28" />
+                    </colgroup>
+                    <thead className="bg-secondary/60">
+                      <tr className="border-b border-border">
+                        <th className={cn(th, 'text-left')}>Cost</th>
+                        <th className={cn(th, 'text-left')}>Type</th>
+                        <th className={cn(th, 'text-left')}>Department</th>
+                        <th className={cn(th, 'text-right')}>Charged as</th>
+                        <th className={cn(th, 'text-right')}>Per piece</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {costLines.map((c, i) => (
+                        <tr key={c.id ?? i} className="border-b border-border/50">
+                          <td className={cn(td, 'truncate text-foreground')} title={c.name}>
+                            {c.name}
+                          </td>
+                          <td className={cn(td, 'text-xs text-muted-foreground')}>
+                            {c.kind === 'LABOUR' ? 'Labour' : 'Overhead'}
+                          </td>
+                          <td className={cn(td, 'truncate text-xs text-muted-foreground')}>
+                            {c.department?.name ?? '—'}
+                          </td>
+                          <td className={cn(td, 'text-right text-xs text-muted-foreground')}>
+                            {c.basis === 'PERCENT'
+                              ? `${percent(c.value)} of material + labour`
+                              : 'Rupees per piece'}
+                          </td>
+                          <td className={cn(td, 'text-right font-mono font-semibold text-foreground')}>
+                            {formatRupees(c.amount)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-secondary/40">
+                        <td colSpan={4} className={cn(td, 'text-right font-semibold text-foreground')}>
+                          Labour and overheads for one piece
                         </td>
-                        <td className={td}>
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="truncate text-foreground">{step.operation?.name}</span>
-                            {step.isQcStep && <span className="badge-warning">Quality check</span>}
-                          </div>
-                        </td>
-                        <td className={td}>
-                          {step.workstation ? (
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span className="truncate text-xs text-foreground" title={step.workstation.name}>
-                                {step.workstation.name}
-                              </span>
-                              {step.workstation.type === 'JOB_WORK' && (
-                                <span className="badge-purple shrink-0">Job work</span>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">Not assigned</span>
-                          )}
-                        </td>
-                        <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
-                          {step.smv != null ? `${qty(step.smv)} min` : '—'}
-                        </td>
-                        <td className={cn(td, 'text-right font-mono text-foreground')}>
-                          {step.ratePerPiece != null ? formatRupees(step.ratePerPiece) : '—'}
+                        <td className={cn(td, 'text-right font-mono font-bold text-foreground')}>
+                          {formatRupees(labour + overhead)}
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="bg-secondary/40">
-                      <td colSpan={3} className={cn(td, 'text-right font-semibold text-foreground')}>
-                        Labour for one piece
-                      </td>
-                      <td className={cn(td, 'text-right font-mono text-muted-foreground')}>
-                        {totalSmv > 0 ? `${qty(totalSmv)} min` : '—'}
-                      </td>
-                      <td className={cn(td, 'text-right font-mono font-bold text-foreground')}>
-                        {formatRupees(labour)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            )}
-          </section>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
 
           {bom.notes && (
             <section className="space-y-1">

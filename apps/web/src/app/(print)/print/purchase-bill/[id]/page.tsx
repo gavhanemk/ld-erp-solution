@@ -312,7 +312,12 @@ export default function PurchaseBillPrintPage() {
   return (
     <>
       <style>{SHEET_CSS}</style>
-      <PrintToolbar backHref="/purchase/bills" backLabel="Back to bills" copies={1} />
+      <PrintToolbar
+        backHref="/purchase/bills"
+        backLabel="Back to bills"
+        copies={1}
+        fileName={bill.billNumber}
+      />
 
       <div
         className="sheet"

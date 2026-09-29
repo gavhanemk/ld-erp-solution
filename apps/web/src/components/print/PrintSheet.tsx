@@ -1,6 +1,6 @@
 'use client'
 
-import { Printer, ArrowLeft } from 'lucide-react'
+import { Printer, ArrowLeft, Download } from 'lucide-react'
 import Link from 'next/link'
 
 /**
@@ -59,10 +59,13 @@ export function DocumentTable({
   const totalWeight = columns.reduce((s, c) => s + (c.weight ?? 10), 0)
 
   return (
-    <table className="grid lines" style={{ width: '100%' }}>
+    <table className="lines grid" style={{ width: '100%' }}>
       <colgroup>
         {columns.map((c) => (
-          <col key={c.key} style={{ width: `${(((c.weight ?? 10) / totalWeight) * 100).toFixed(3)}%` }} />
+          <col
+            key={c.key}
+            style={{ width: `${(((c.weight ?? 10) / totalWeight) * 100).toFixed(3)}%` }}
+          />
         ))}
       </colgroup>
       <thead>
@@ -78,7 +81,11 @@ export function DocumentTable({
         {rows.map((row) => (
           <tr key={row.key}>
             {columns.map((c) => (
-              <td key={c.key} style={{ textAlign: c.align ?? 'left' }} className={c.align === 'right' ? 'num' : undefined}>
+              <td
+                key={c.key}
+                style={{ textAlign: c.align ?? 'left' }}
+                className={c.align === 'right' ? 'num' : undefined}
+              >
                 {row.cells[c.key]}
               </td>
             ))}
@@ -100,21 +107,56 @@ export function PrintToolbar({
   backHref,
   backLabel,
   copies,
+  fileName,
 }: {
   backHref: string
   backLabel: string
   copies: number
+  /**
+   * What the saved PDF should be called, without the extension — "ENQ-0002".
+   *
+   * Every browser takes the PDF's filename from `document.title`, so without
+   * this a saved purchase enquiry lands in somebody's downloads as
+   * "localhost" or "LD ERP Solution", and a folder of them is unsortable. Set
+   * for the moment of the print and put back after, because the tab's own
+   * title is what the person reading the screen needs.
+   */
+  fileName?: string
 }) {
+  /*
+   * Both buttons open the same dialog, because there is only one.
+   *
+   * A browser saves a PDF by printing to one, and pretending otherwise — by
+   * rasterising the sheet into a second, slightly different document — would
+   * put two versions of the same paper into the world. What the second button
+   * adds is that the outcome most people want is named on a control rather
+   * than described in a sentence they have to read first.
+   */
+  const print = () => {
+    const was = document.title
+    if (fileName) document.title = fileName
+    window.print()
+    // Restored on the next tick: the dialog is modal and synchronous in some
+    // browsers and deferred in others, and the title has to still be the
+    // document's own by the time anybody looks at the tab again.
+    window.setTimeout(() => {
+      document.title = was
+    }, 1000)
+  }
+
   return (
     <div className="no-print print-toolbar">
       <Link href={backHref} className="tb-btn">
         <ArrowLeft size={15} /> {backLabel}
       </Link>
       <span className="tb-hint">
-        Choose &ldquo;Save as PDF&rdquo; in the print box to keep a copy.
+        Both open the print box; choose your printer, or &ldquo;Save as PDF&rdquo;.
         {copies > 1 && ` ${copies} copies print, one per page.`}
       </span>
-      <button className="tb-btn tb-primary" onClick={() => window.print()}>
+      <button className="tb-btn" onClick={print}>
+        <Download size={15} /> Save as PDF
+      </button>
+      <button className="tb-btn tb-primary" onClick={print}>
         <Printer size={15} /> Print
       </button>
     </div>
@@ -216,7 +258,9 @@ export function PrintSheet({
                 <div className="box-heading">{partyHeading}</div>
                 <div className="party-name">{party.name}</div>
                 <div>
-                  {[party.address, party.city, party.state, party.pincode].filter(Boolean).join(', ')}
+                  {[party.address, party.city, party.state, party.pincode]
+                    .filter(Boolean)
+                    .join(', ')}
                 </div>
                 {party.gstin && <div>GSTIN: {party.gstin}</div>}
                 {party.phone && <div>Phone: {party.phone}</div>}
@@ -292,7 +336,7 @@ export function PrintSheet({
               </td>
 
               <td className="foot-right">
-                <table className="grid totals" style={{ width: '100%' }}>
+                <table className="totals grid" style={{ width: '100%' }}>
                   <tbody>
                     {totals.map((t) => (
                       <tr key={t.label}>

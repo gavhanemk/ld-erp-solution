@@ -48,6 +48,9 @@ export interface PrintHeader {
 const DEFAULT_TITLES: Record<string, string> = {
   INV: 'TAX INVOICE',
   PO: 'PURCHASE ORDER',
+  // Not an order, and the heading is the first thing that says so. A supplier
+  // holding a sheet headed PURCHASE ORDER will treat it as one.
+  ENQ: 'PURCHASE REQUISITION',
   DC: 'DELIVERY CHALLAN',
   JW: 'DELIVERY CHALLAN (JOB WORK)',
   // Our own booking record of a supplier's invoice, not a tax invoice we issue.
@@ -58,6 +61,10 @@ const DEFAULT_TITLES: Record<string, string> = {
   GRN: 'GOODS RECEIPT NOTE',
   // Ours, addressed to the supplier — a claim for money back.
   DN: 'DEBIT NOTE',
+  // Goods physically leaving for the supplier. "Challan" because that is what
+  // the security gate and the transporter both ask for by name; the debit note
+  // it produces is a separate sheet with its own heading.
+  PRC: 'PURCHASE RETURN CHALLAN',
   // Theirs. We are recording what they sent us, so the sheet says so rather
   // than pretending the mill issued a credit note to itself.
   SCN: "SUPPLIER'S CREDIT NOTE",
