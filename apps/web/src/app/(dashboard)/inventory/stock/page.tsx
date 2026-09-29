@@ -507,6 +507,9 @@ function StockScreen() {
                 <tr>
                   <th>Code</th>
                   <th>Item</th>
+                  <th>Category</th>
+                  <th>Sub-category</th>
+                  <th>Department</th>
                   <th>Store</th>
                   <th style={{ textAlign: 'right' }}>On hand</th>
                   <th style={{ textAlign: 'right' }}>Rate</th>
@@ -524,10 +527,13 @@ function StockScreen() {
                       >
                         {r.itemName}
                       </Link>
-                      <div className="text-[11px] text-muted-foreground">
-                        {r.categoryName}
-                        {r.departmentName ? ` · ${r.departmentName}` : ''}
-                      </div>
+                    </td>
+                    <td className="text-sm">{r.mainCategoryName}</td>
+                    <td className="text-sm">
+                      {r.subCategoryName ?? <span className="text-muted-foreground">—</span>}
+                    </td>
+                    <td className="text-sm">
+                      {r.departmentName ?? <span className="text-muted-foreground">—</span>}
                     </td>
                     <td>
                       <div className={`text-sm ${r.nowhere ? 'text-amber-400' : ''}`}>{r.warehouseName}</div>
