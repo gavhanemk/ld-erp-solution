@@ -78,6 +78,7 @@ const noneOr = (field: string) => (values: string[]) => {
  */
 const DEPARTMENT_USES: Record<string, DeleteUse> = {
   items: { one: 'item', many: 'items', model: 'item', field: 'departmentId', then: 'blank' },
+  itemCategories: { one: 'item category', many: 'item categories', model: 'itemCategory', field: 'departmentId', then: 'blank' },
   bomLines: { one: 'BOM line', many: 'BOM lines', model: 'bOMLine', field: 'departmentId', then: 'blank' },
   workstations: { one: 'workstation', many: 'workstations', model: 'workstation', field: 'departmentId', then: 'move' },
   operations: { one: 'operation', many: 'operations', model: 'operation', field: 'departmentId', then: 'move' },
@@ -676,11 +677,49 @@ router.use(
               : { parentId: { not: null } },
         facets: ['parentId'],
       },
+      // A category's own department, or, for a main category, any of its
+      // sub-categories'. 'none' is a category with none set.
+      departmentId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) {
+            or.push({ departmentId: { in: ids } }, { children: { some: { departmentId: { in: ids } } } })
+          }
+          if (v.includes('none')) or.push({ departmentId: null, children: { none: { departmentId: { not: null } } } })
+          return { OR: or }
+        },
+        facets: ['departmentId'],
+      },
     },
-    facets: ['parentId'],
+    facets: ['parentId', 'departmentId'],
+    // Counted the way the filter matches: a category counts once for its own
+    // department and each of its sub-categories', so "Cutting 9" is Fabric
+    // and its eight sub-categories, the nine rows the filter then shows.
+    customFacets: {
+      departmentId: async (where) => {
+        const rows = await prisma.itemCategory.findMany({
+          where,
+          select: { departmentId: true, children: { select: { departmentId: true } } },
+        })
+        const counts: Record<string, number> = {}
+        for (const r of rows) {
+          const depts = new Set(
+            [r.departmentId, ...r.children.map((c) => c.departmentId)].filter((d): d is string => Boolean(d)),
+          )
+          if (depts.size === 0) counts.none = (counts.none ?? 0) + 1
+          for (const d of depts) counts[d] = (counts[d] ?? 0) + 1
+        }
+        return counts
+      },
+    },
     sortableFields: ['name'],
     defaultSort: { field: 'name', order: 'asc' },
-    include: { parent: true, children: true },
+    include: {
+      parent: true,
+      department: { select: { id: true, name: true } },
+      children: { include: { department: { select: { id: true, name: true } } } },
+    },
   }),
 )
 

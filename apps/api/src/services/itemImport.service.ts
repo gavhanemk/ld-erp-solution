@@ -31,7 +31,7 @@ const COLUMNS = [
   { key: 'type', head: 'Item Type *', width: 16, list: 'types' },
   { key: 'category', head: 'Category *', width: 22, list: 'categories' },
   { key: 'subCategory', head: 'Sub Category', width: 22, list: 'subCategories', note: 'Needed when the category has sub-categories.' },
-  { key: 'department', head: 'Department *', width: 18, list: 'departments' },
+  { key: 'department', head: 'Department *', width: 18, list: 'departments', note: "Empty takes the sub-category's department." },
   { key: 'unit', head: 'Unit *', width: 12, list: 'units' },
   { key: 'hsn', head: 'HSN Code', width: 12 },
   { key: 'standardRate', head: 'Standard Rate', width: 14 },
@@ -73,7 +73,10 @@ const low = (s: string | undefined | null) => (s ?? '').trim().toLowerCase()
 /** The masters a sheet is matched against, loaded once. */
 async function loadMasters() {
   const [categories, departments, units, stores, items] = await Promise.all([
-    prisma.itemCategory.findMany({ where: { isActive: true }, select: { id: true, name: true, parentId: true } }),
+    prisma.itemCategory.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, parentId: true, departmentId: true },
+    }),
     prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
     prisma.uOM.findMany({ where: { isActive: true }, select: { id: true, name: true, symbol: true } }),
     prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true } }),
@@ -343,8 +346,12 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>): Promis
         } else categoryId = main.id
       }
 
-      const d = dept.get(low(raw.department))
-      if (!raw.department) problems.push('Department is empty.')
+      // Empty takes the category's own department, as the item form does.
+      const fromCategory = categoryId
+        ? m.departments.find((x) => x.id === m.categories.find((c) => c.id === categoryId)?.departmentId)
+        : undefined
+      const d = raw.department ? dept.get(low(raw.department)) : fromCategory
+      if (!raw.department && !d) problems.push('Department is empty, and the category has none to take.')
       else if (!d) problems.push(`No department "${raw.department}".`)
 
       const u = unit.get(low(raw.unit))

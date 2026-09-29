@@ -125,6 +125,12 @@ export interface FormField {
   sendAs?: string
   /** Fields emptied when this one changes, as a sub-category is when its category does. */
   resets?: string[]
+  /**
+   * Fills another field from the row picked here: a sub-category fills the
+   * item's department with its own. Only over a value it filled itself, or
+   * an empty one, so a department chosen by hand is never overwritten.
+   */
+  fills?: { field: string; from: (row: Record<string, unknown>) => unknown }
   /** Height of a textarea, in lines. */
   rows?: number
   /**
@@ -199,6 +205,8 @@ export function MasterFormDialog<T extends { id: string }>({
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const bodyRef = useRef<HTMLDivElement>(null)
+  // What `fills` last put in each field, to tell it from a person's choice.
+  const filledBy = useRef<Record<string, unknown>>({})
 
   // Reset whenever the dialog opens, so a previous record's values and errors
   // never leak into the next one.
@@ -226,6 +234,7 @@ export function MasterFormDialog<T extends { id: string }>({
     setValues(seed)
     setFieldErrors({})
     setFormError(null)
+    filledBy.current = {}
   }, [open, record, fields])
 
   // The cursor starts in the first box, so a clerk can type straight away.
@@ -311,6 +320,19 @@ export function MasterFormDialog<T extends { id: string }>({
     setValues((v) => {
       const updated = { ...v, [name]: next }
       for (const r of field?.resets ?? []) updated[r] = ''
+
+      if (field?.fills && field.optionsFrom && typeof next === 'string' && next) {
+        const { valueKey = 'id' } = field.optionsFrom
+        const row = remoteRows[field.name]?.find((r) => String(r[valueKey]) === next)
+        const value = row ? field.fills.from(row) : undefined
+        const target = field.fills.field
+        const current = updated[target]
+        const untouched = current === '' || current == null || current === filledBy.current[target]
+        if (value && untouched) {
+          updated[target] = value
+          filledBy.current[target] = value
+        }
+      }
 
       // One field can fill in another — a GSTIN gives the state code away, and
       // nobody should have to know that to get their tax right.

@@ -190,6 +190,7 @@ const formFields: FormField[] = [
     section: 'Identity',
     sendAs: 'categoryId',
     resets: ['subCategoryId'],
+    fills: { field: 'departmentId', from: (row) => row.departmentId },
     optionsFrom: { resource: 'item-categories', filter: isMain },
     initial: (r) => {
       const c = r.category as { parentId?: string | null } | null
@@ -204,6 +205,7 @@ const formFields: FormField[] = [
     sendAs: 'categoryId',
     emptyLabel: 'None under this category',
     mustFill: 'ifOptions',
+    fills: { field: 'departmentId', from: (row) => row.departmentId },
     optionsFrom: {
       resource: 'item-categories',
       filter: (row, values) => Boolean(values.mainCategoryId) && row.parentId === values.mainCategoryId,

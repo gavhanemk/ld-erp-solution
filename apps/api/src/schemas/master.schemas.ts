@@ -492,6 +492,8 @@ export const updateUomSchema = createUomSchema.partial()
 export const createItemCategorySchema = z.object({
   name,
   parentId: z.string().optional().nullable(),
+  // The department a new item in this category starts with. Null clears it.
+  departmentId: z.string().min(1).optional().nullable(),
   isActive,
 })
 export const updateItemCategorySchema = createItemCategorySchema.partial()

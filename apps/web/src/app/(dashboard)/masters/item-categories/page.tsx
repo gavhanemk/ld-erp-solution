@@ -24,8 +24,20 @@ interface ItemCategory {
   name: string
   parentId: string | null
   parent?: { id: string; name: string } | null
-  children?: { id: string; name: string }[]
+  departmentId?: string | null
+  department?: { id: string; name: string } | null
+  children?: { id: string; name: string; department?: { id: string; name: string } | null }[]
   isActive: boolean
+}
+
+/**
+ * A sub-category's own department; a main category's own, or else the ones
+ * its sub-categories use, so Fabric reads Cutting and Thread reads
+ * Stitching, Embroidery.
+ */
+const departmentsOf = (c: ItemCategory): string[] => {
+  if (c.department) return [c.department.name]
+  return [...new Set((c.children ?? []).map((k) => k.department?.name).filter((n): n is string => Boolean(n)))]
 }
 
 const columns: Column<ItemCategory>[] = [
@@ -69,6 +81,19 @@ const columns: Column<ItemCategory>[] = [
       )
     },
   },
+  {
+    key: 'department',
+    header: 'Department',
+    render: (c) => {
+      const names = departmentsOf(c)
+      if (names.length === 0) return <span className="text-muted-foreground">—</span>
+      return (
+        <span className={c.department ? '' : 'text-muted-foreground'}>
+          {names.join(', ')}
+        </span>
+      )
+    },
+  },
   { key: 'isActive', header: 'Status', render: (c) => <ActiveBadge isActive={c.isActive} /> },
 ]
 
@@ -95,6 +120,14 @@ const formFields: FormField[] = [
     help: 'The name. With Category left empty above, this becomes a main category — "Fabric" rather than "Cotton".',
   },
   {
+    name: 'departmentId',
+    label: 'Department',
+    type: 'select',
+    optionsFrom: { resource: 'departments' },
+    span: 2,
+    help: 'Who normally uses what is filed here. A new item in this category starts with it.',
+  },
+  {
     name: 'isActive',
     label: 'Active',
     type: 'checkbox',
@@ -107,6 +140,13 @@ const formFields: FormField[] = [
  * Each counts what it would leave, like the item list's filters.
  */
 const filterDefs: FilterDef[] = [
+  {
+    key: 'departmentId',
+    label: 'Department',
+    facet: 'departmentId',
+    noneLabel: 'No department',
+    optionsFrom: { resource: 'departments' },
+  },
   {
     key: 'categoryId',
     label: 'Category',

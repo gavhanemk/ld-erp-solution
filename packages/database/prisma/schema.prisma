@@ -502,10 +502,16 @@ model ItemCategory {
   parentId String?
   parent   ItemCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
   children ItemCategory[] @relation("CategoryHierarchy")
+  /// The department that normally uses what is filed here: Cotton to
+  /// Cutting, Embroidery Thread to Embroidery. A new item in the category
+  /// starts with it. Optional; cleared if the department goes.
+  departmentId String?
+  department   Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   isActive Boolean        @default(true)
 
   items Item[]
 
+  @@index([departmentId])
   @@map("item_categories")
 }
 
@@ -890,6 +896,7 @@ model Department {
   workstations      Workstation[]
   requisitions      MaterialRequisition[]
   items             Item[]
+  itemCategories    ItemCategory[]
   productionEntries ProductionEntry[]
   routingSteps      RoutingStep[]
   bomLines          BOMLine[]

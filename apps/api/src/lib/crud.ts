@@ -42,6 +42,13 @@ export interface CrudOptions {
    */
   uniqueFields?: string[]
   /**
+   * A facet worked out by a rule of its own rather than a plain group-by:
+   * given the where clause (every other filter applied), how many records
+   * each value would leave. For a count that has to agree with a filter that
+   * reaches through a relation.
+   */
+  customFacets?: Record<string, (where: Record<string, unknown>) => Promise<Record<string, number>>>
+  /**
    * Scalar columns GET /facets counts rows by, so a filter dropdown can show
    * how many records each choice would leave.
    */
@@ -139,6 +146,7 @@ export function crudRouter(options: CrudOptions): Router {
     injectOnCreate,
     filters = {},
     facets = [],
+    customFacets = {},
     uniqueFields = [],
     permanentDelete,
   } = options
@@ -223,6 +231,10 @@ export function crudRouter(options: CrudOptions): Router {
     const counts: Record<string, Record<string, number>> = {}
     await Promise.all(
       facets.map(async (field) => {
+        if (customFacets[field]) {
+          counts[field] = await customFacets[field](buildWhere(req, field))
+          return
+        }
         const groups: Array<Record<string, unknown> & { _count: { _all: number } }> =
           await delegate().groupBy({
             by: [field],

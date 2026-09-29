@@ -7,6 +7,26 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 29 Sep 2026 — an item category's department
+
+**Migration:** `20260929140000_category_department`
+**Branch:** `test/masters-inventory`
+**Status: applied to the shared database on 29 Sep with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+`item_categories.departmentId`, nullable, with a foreign key to `departments`
+that sets it null if the department is deleted, and an index. The department
+that normally uses what is filed under the category; a new item in it starts
+with that department. On a branch without this folder, `prisma migrate dev`
+will propose dropping it. Say no.
+
+Filled in afterwards through the API (so each change is audited): every
+sub-category took the department its items already use, or its main
+category's where it had no items. Main categories are left empty and show
+their sub-categories'.
+
 ## 29 Sep 2026 — a requisition can be cancelled, or closed part issued
 
 **Migration:** `20260929100000_requisition_close`
