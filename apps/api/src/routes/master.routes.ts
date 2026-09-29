@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { z } from 'zod'
+import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
@@ -600,6 +600,55 @@ router.use(
   }),
 )
 
+/*
+ * Two levels, main category and sub-category, and never a loop.
+ *
+ * A category could be made its own parent, or A put under B under A, and the
+ * list then read "Cat A / Cat A"; a sub-category could go under another
+ * sub-category, which no item picker offers. So the parent has to be a main
+ * category, not the category itself, and a main category that has
+ * sub-categories cannot itself be moved under another. Ahead of the CRUD.
+ */
+async function checkCategoryParent(req: AuthRequest, _res: unknown, next: (err?: unknown) => void) {
+  const parentId = (req.body ?? {}).parentId as string | null | undefined
+  if (!parentId) return next()
+  const selfId = req.params.id as string | undefined
+  if (selfId && parentId === selfId) {
+    throw new ZodError([{ code: 'custom', path: ['parentId'], message: 'A category cannot sit under itself.' }])
+  }
+  const parent = await prisma.itemCategory.findUnique({
+    where: { id: parentId },
+    select: { name: true, parentId: true },
+  })
+  if (!parent) {
+    throw new ZodError([{ code: 'custom', path: ['parentId'], message: 'That category no longer exists.' }])
+  }
+  if (parent.parentId) {
+    throw new ZodError([
+      {
+        code: 'custom',
+        path: ['parentId'],
+        message: `${parent.name} is itself a sub-category. Pick a main category.`,
+      },
+    ])
+  }
+  if (selfId) {
+    const children = await prisma.itemCategory.count({ where: { parentId: selfId } })
+    if (children > 0) {
+      throw new ZodError([
+        {
+          code: 'custom',
+          path: ['parentId'],
+          message: `This category has ${children} sub-${children === 1 ? 'category' : 'categories'} of its own, so it has to stay a main category.`,
+        },
+      ])
+    }
+  }
+  next()
+}
+router.post('/item-categories', requirePermission(MODULE, 'create'), checkCategoryParent)
+router.patch('/item-categories/:id', requirePermission(MODULE, 'edit'), checkCategoryParent)
+
 router.use(
   '/item-categories',
   crudRouter({
@@ -610,7 +659,25 @@ router.use(
     updateSchema: updateItemCategorySchema,
     // No two with the same name (ignoring capitals and spaces).
     uniqueFields: ['name'],
-    searchFields: ['name'],
+    // "fabric" finds Fabric's sub-categories too.
+    searchFields: ['name', 'parent.name'],
+    filters: {
+      // A main category, with everything under it.
+      categoryId: {
+        where: (v) => ({ OR: [{ id: { in: v } }, { parentId: { in: v } }] }),
+        facets: ['parentId'],
+      },
+      level: {
+        where: (v) =>
+          v.includes('main') && v.includes('sub')
+            ? {}
+            : v.includes('main')
+              ? { parentId: null }
+              : { parentId: { not: null } },
+        facets: ['parentId'],
+      },
+    },
+    facets: ['parentId'],
     sortableFields: ['name'],
     defaultSort: { field: 'name', order: 'asc' },
     include: { parent: true, children: true },

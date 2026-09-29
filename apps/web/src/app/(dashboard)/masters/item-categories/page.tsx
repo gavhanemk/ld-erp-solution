@@ -1,6 +1,6 @@
 'use client'
 
-import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
+import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
 
 /**
@@ -79,7 +79,9 @@ const formFields: FormField[] = [
     name: 'parentId',
     label: 'Category',
     type: 'select',
-    optionsFrom: { resource: 'item-categories' },
+    // Main categories only: there are two levels, and a sub-category cannot
+    // hold another.
+    optionsFrom: { resource: 'item-categories', filter: (row) => !row.parentId },
     placeholder: 'None — I am adding a main category',
     span: 2,
     help: 'Which category this sits under. Leave it empty to add a main category instead.',
@@ -100,6 +102,35 @@ const formFields: FormField[] = [
   },
 ]
 
+/*
+ * Two dropdowns: a main category (with everything under it), and the level.
+ * Each counts what it would leave, like the item list's filters.
+ */
+const filterDefs: FilterDef[] = [
+  {
+    key: 'categoryId',
+    label: 'Category',
+    facet: 'parentId',
+    optionsFrom: { resource: 'item-categories', filter: (r) => !r.parentId },
+    // The category itself and its sub-categories.
+    count: (id, counts) => (counts[id] ?? 0) + 1,
+  },
+  {
+    key: 'level',
+    label: 'Level',
+    facet: 'parentId',
+    options: [
+      { value: 'main', label: 'Main categories' },
+      { value: 'sub', label: 'Sub-categories' },
+    ],
+    count: (value, counts) => {
+      const mains = counts.none ?? 0
+      const all = Object.values(counts).reduce((a, b) => a + b, 0)
+      return value === 'main' ? mains : all - mains
+    },
+  },
+]
+
 export default function ItemCategoriesPage() {
   return (
     <MasterTable<ItemCategory>
@@ -108,6 +139,7 @@ export default function ItemCategoriesPage() {
       resource="item-categories"
       columns={columns}
       formFields={formFields}
+      filterDefs={filterDefs}
       defaultSort="name"
       searchPlaceholder="Search categories..."
       emptyMessage="No categories yet. Add one, then add subcategories beneath it."
