@@ -78,6 +78,7 @@ const SECTION_ICONS: Record<string, LucideIcon> = {
   'Address & Terms': MapPin,
   'Bank, MSME & Notes': Landmark,
   'Commission & Notes': Percent,
+  'Workstation': Tag,
   Style: Tag,
 }
 

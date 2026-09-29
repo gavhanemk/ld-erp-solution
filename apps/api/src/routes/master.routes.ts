@@ -8,6 +8,7 @@ import * as styleImport from '../services/styleImport.service'
 import * as customerImport from '../services/customerImport.service'
 import * as supplierImport from '../services/supplierImport.service'
 import * as brokerImport from '../services/brokerImport.service'
+import * as workstationImport from '../services/workstationImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
@@ -1199,6 +1200,77 @@ router.use(
   }),
 )
 
+/*
+ * Workstations from a spreadsheet, as the other masters: check first, then
+ * all or nothing. New stations only; one already there is skipped. Ahead of
+ * the CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/workstations/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await workstationImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'workstations-with-current-list.xlsx' : 'workstations-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/workstations/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await workstationImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await workstationImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newWorkstations: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.workstation === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await workstationImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'WorkstationImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'workstation' : 'workstations'}.`
+      : 'Nothing to import: every workstation is already in the system.',
+    data: { summary, created },
+  })
+})
+
+/*
+ * An outside unit has to name the supplier we pay, or its job-work bill can
+ * never be totalled. The form for a new one checks it; an edit sends only
+ * what changed, so here the change is read together with what is on file:
+ * switching a station to an outside unit, or clearing its supplier, is
+ * refused unless a supplier is left on it. Ahead of the CRUD.
+ */
+router.patch('/workstations/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, _res, next) => {
+  const body = (req.body ?? {}) as { type?: string; supplierId?: string | null }
+  if (!('type' in body) && !('supplierId' in body)) return next()
+  const before = await prisma.workstation.findUnique({
+    where: { id: req.params.id },
+    select: { type: true, supplierId: true },
+  })
+  if (!before) return next()
+  const type = body.type ?? before.type
+  const supplierId = 'supplierId' in body ? body.supplierId : before.supplierId
+  if (type === 'JOB_WORK' && !supplierId) {
+    throw new ZodError([
+      { code: 'custom', path: ['supplierId'], message: 'A job-work unit must be linked to the supplier you pay for it' },
+    ])
+  }
+  next()
+})
+
 router.use(
   '/workstations',
   crudRouter({
@@ -1207,12 +1279,69 @@ router.use(
     entityType: 'Workstation',
     createSchema: createWorkstationSchema,
     updateSchema: updateWorkstationSchema,
-    searchFields: ['name', 'code', 'contactPerson'],
-    sortableFields: ['name', 'code', 'createdAt'],
+    // No two with the same name (ignoring capitals and spaces).
+    uniqueFields: ['name'],
+    searchFields: ['name', 'code', 'contactPerson', 'department.name', 'supplier.name'],
+    sortableFields: ['name', 'code', 'createdAt', 'capacityPerDay'],
     defaultSort: { field: 'code', order: 'asc' },
     include: {
       department: { select: { id: true, name: true } },
       supplier: { select: { id: true, name: true } },
+      _count: { select: { routingSteps: true } },
+    },
+    filters: {
+      departmentId: { where: (v) => ({ departmentId: { in: v } }), facets: ['departmentId'] },
+      type: { where: (v) => ({ type: { in: v } }), facets: ['type'] },
+      supplierId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) or.push({ supplierId: { in: ids } })
+          if (v.includes('none')) or.push({ supplierId: null })
+          return { OR: or }
+        },
+        facets: ['supplierId'],
+      },
+      capacity: {
+        where: (v) =>
+          v.includes('set') && v.includes('unset')
+            ? {}
+            : v.includes('set')
+              ? { capacityPerDay: { not: null } }
+              : { capacityPerDay: null },
+        facets: ['capacity'],
+      },
+      // Whether any routing sends work to it.
+      routings: {
+        where: (v) =>
+          v.includes('used') && v.includes('unused')
+            ? {}
+            : v.includes('used')
+              ? { routingSteps: { some: {} } }
+              : { routingSteps: { none: {} } },
+        facets: ['routings'],
+      },
+    },
+    facets: ['departmentId', 'type', 'supplierId', 'capacity', 'routings'],
+    customFacets: {
+      capacity: async (where) => {
+        const [set, unset] = await Promise.all([
+          prisma.workstation.count({ where: { AND: [where, { capacityPerDay: { not: null } }] } }),
+          prisma.workstation.count({ where: { AND: [where, { capacityPerDay: null }] } }),
+        ])
+        return { set, unset }
+      },
+      routings: async (where) => {
+        const [used, unused] = await Promise.all([
+          prisma.workstation.count({ where: { AND: [where, { routingSteps: { some: {} } }] } }),
+          prisma.workstation.count({ where: { AND: [where, { routingSteps: { none: {} } }] } }),
+        ])
+        return { used, unused }
+      },
+    },
+    exportSheet: {
+      fileName: 'workstations',
+      build: (rows) => workstationImport.workstationWorkbook(rows, false),
     },
   }),
 )
