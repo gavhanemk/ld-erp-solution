@@ -1,10 +1,16 @@
 import { Router } from 'express'
-import { prisma } from '@ld-erp/database'
+import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { balanceOf, onHand, recordMovement, transferStock } from '../services/stock.service'
+import {
+  balanceOf,
+  lockedBalanceOf,
+  onHand,
+  recordMovement,
+  transferStock,
+} from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
 import {
   adjustmentSchema,
@@ -184,6 +190,31 @@ const adjustmentInclude = {
 }
 
 /**
+ * Refuses a count or an opening that lists the same item twice.
+ *
+ * Each line is set against the book figure as it stood before the document,
+ * so two lines for one item were both applied: 500 on the book, two lines
+ * of 400, and the book ended at 300. Adding the lines up would be a guess —
+ * two racks of 400, or one rack counted twice? — so the person is asked to
+ * enter the item once, with its total.
+ */
+async function refuseRepeatedItems(tx: Prisma.TransactionClient, itemIds: string[]) {
+  const seen = new Map<string, number>()
+  for (const [i, itemId] of itemIds.entries()) {
+    const first = seen.get(itemId)
+    if (first !== undefined) {
+      const item = await tx.item.findUnique({ where: { id: itemId }, select: { name: true } })
+      throw new AppError(
+        `${item?.name ?? 'An item'} is on lines ${first + 1} and ${i + 1}. Enter it once, with the total.`,
+        400,
+        'REPEATED_ITEM',
+      )
+    }
+    seen.set(itemId, i)
+  }
+}
+
+/**
  * Opening stock.
  *
  * Allowed once per item and warehouse. Running it twice is almost always
@@ -199,11 +230,15 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
     const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
+    await refuseRepeatedItems(tx, data.lines.map((l) => l.itemId))
+
     const reference = `OPEN-${Date.now()}`
     const written = []
 
     for (const line of data.lines) {
-      const existing = await balanceOf(tx, {
+      // Locked, so two people entering the same opening at once cannot both
+      // find it empty.
+      const existing = await lockedBalanceOf(tx, {
         itemId: line.itemId,
         warehouseId: data.warehouseId,
       })
@@ -270,11 +305,13 @@ router.post('/adjustments', requirePermission(MODULE, 'approve'), async (req: Au
     const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
+    await refuseRepeatedItems(tx, data.lines.map((l) => l.itemId))
+
     const counted = []
 
     for (const line of data.lines) {
       const key = { itemId: line.itemId, warehouseId: data.warehouseId }
-      const before = await balanceOf(tx, key)
+      const before = await lockedBalanceOf(tx, key)
       const difference = Number((line.countedQty - before.qty).toFixed(3))
 
       if (difference > 0 && before.qty === 0 && line.unitRate === undefined) {

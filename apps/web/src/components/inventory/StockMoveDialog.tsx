@@ -145,6 +145,17 @@ export function StockMoveDialog({
       return setError('Say why the figure is being changed — one line is enough.')
     }
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
+    // A count or an opening sets each line against the book once, so an item
+    // entered on two lines would be applied twice. Moves may repeat an item.
+    if (mode !== 'transfer') {
+      const ids = filled.map((l) => l.itemId)
+      const twice = ids.find((id, i) => ids.indexOf(id) !== i)
+      if (twice) {
+        return setError(
+          `${itemsById.get(twice)?.name ?? 'An item'} is on the list twice. Enter it once, with the total.`,
+        )
+      }
+    }
 
     setSaving(true)
     try {

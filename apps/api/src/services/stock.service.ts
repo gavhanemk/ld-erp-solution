@@ -116,6 +116,23 @@ export async function balanceOf(
 }
 
 /**
+ * The balance, read while holding the item's lock.
+ *
+ * For a document that decides what to write from what is there now: a count
+ * works out its correction as counted minus book. Read unlocked, an issue
+ * landing between that read and the correction would be undone by it, or
+ * doubled. The lock is the same one `recordMovement` takes, held to the end
+ * of the transaction, so taking it twice is harmless.
+ */
+export async function lockedBalanceOf(
+  tx: Prisma.TransactionClient,
+  key: StockKey,
+): Promise<Balance> {
+  await lockBalance(tx, key)
+  return balanceOf(tx, key)
+}
+
+/**
  * Writes one movement.
  *
  * Must be called inside a transaction that also creates the document causing
