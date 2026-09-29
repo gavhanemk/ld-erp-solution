@@ -5,6 +5,7 @@ import { crudRouter, type DeleteUse } from '../lib/crud'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
+import * as customerImport from '../services/customerImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
 import { AppError } from '../middleware/errorHandler'
@@ -95,6 +96,36 @@ const router = Router()
 const MODULE = 'masters'
 
 /**
+ * A filter on a typed-in column (a style's season, a customer's state): the
+ * exact values picked, and 'none' for the records with nothing typed.
+ */
+const textFilter = (field: string) => ({
+  where: (v: string[]) => {
+    const values = v.filter((x) => x !== 'none')
+    const or: Record<string, unknown>[] = []
+    if (values.length) or.push({ [field]: { in: values } })
+    if (v.includes('none')) or.push({ [field]: null }, { [field]: '' })
+    return { OR: or }
+  },
+  facets: [field],
+})
+
+/** A yes/no filter on a boolean column, counted by the same group-by. */
+const flagFilter = (field: string) => ({
+  where: (v: string[]) =>
+    v.includes('true') && v.includes('false') ? {} : { [field]: v.includes('true') },
+  facets: [field],
+})
+
+/** The body every spreadsheet import posts: the file, and whether to go ahead. */
+const importBody = z.object({
+  fileName: z.string().min(1).max(200),
+  /** The file itself, base64. */
+  file: z.string().min(1),
+  confirm: z.boolean().optional(),
+})
+
+/**
  * Warehouses, departments and brands all hang off the company. There is exactly
  * one company row per install, so the UI should never ask which — the id is
  * filled in here instead.
@@ -115,6 +146,52 @@ async function currentCompanyId(): Promise<Record<string, unknown>> {
 // Straightforward masters — the factory covers list/get/create/update/delete
 // ─────────────────────────────────────────────────────────────
 
+/*
+ * Customers from a spreadsheet, as items and styles: check first, then all
+ * or nothing. New customers only; one already there is skipped. Ahead of the
+ * CRUD, whose GET /:id would otherwise take "import-template" for an id.
+ */
+router.get('/customers/import-template', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await customerImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'customers-with-current-list.xlsx' : 'customers-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/customers/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = importBody.parse(req.body)
+  const rows = await customerImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const plans = await customerImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    newCustomers: plans.filter((p) => p.create).length,
+    existing: plans.filter((p) => p.plan.customer === 'existing').length,
+    skipped: plans.filter((p) => p.plan.skipped).length,
+    problems: plans.filter((p) => p.plan.problems.length > 0).length,
+  }
+  if (!confirm) {
+    return res.json({ success: true, data: { summary, rows: plans.map((p) => p.plan) } })
+  }
+
+  const created = await customerImport.runImport(plans)
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'CustomerImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} new ${created.length === 1 ? 'customer' : 'customers'}.`
+      : 'Nothing to import: every customer is already in the system.',
+    data: { summary, created },
+  })
+})
+
 router.use(
   '/customers',
   crudRouter({
@@ -125,9 +202,54 @@ router.use(
     updateSchema: updateCustomerSchema,
     // No two with the same name (ignoring capitals and spaces), nor the same GSTIN.
     uniqueFields: ['name', 'gstin'],
-    searchFields: ['name', 'code', 'gstin', 'phone', 'email'],
+    searchFields: ['name', 'code', 'gstin', 'phone', 'email', 'billingCity'],
     sortableFields: ['name', 'code', 'createdAt', 'creditLimit'],
     defaultSort: { field: 'name', order: 'asc' },
+    include: { broker: { select: { id: true, name: true } } },
+    filters: {
+      type: { where: (v) => ({ type: { in: v } }), facets: ['type'] },
+      billingState: textFilter('billingState'),
+      billingCity: textFilter('billingCity'),
+      creditDays: {
+        where: (v) => ({ creditDays: { in: v.map(Number).filter(Number.isFinite) } }),
+        facets: ['creditDays'],
+      },
+      // Registered for GST or not: decides whether an invoice carries a GSTIN.
+      gst: {
+        where: (v) =>
+          v.includes('registered') && v.includes('unregistered')
+            ? {}
+            : v.includes('registered')
+              ? { AND: [{ gstin: { not: null } }, { gstin: { not: '' } }] }
+              : { OR: [{ gstin: null }, { gstin: '' }] },
+        facets: ['gst'],
+      },
+      brokerId: {
+        where: (v) => {
+          const ids = v.filter((x) => x !== 'none')
+          const or: Record<string, unknown>[] = []
+          if (ids.length) or.push({ brokerId: { in: ids } })
+          if (v.includes('none')) or.push({ brokerId: null })
+          return { OR: or }
+        },
+        facets: ['brokerId'],
+      },
+      isBlacklisted: flagFilter('isBlacklisted'),
+    },
+    facets: ['type', 'billingState', 'billingCity', 'creditDays', 'gst', 'brokerId', 'isBlacklisted'],
+    customFacets: {
+      gst: async (where) => {
+        const [registered, unregistered] = await Promise.all([
+          prisma.customer.count({ where: { AND: [where, { gstin: { not: null } }, { gstin: { not: '' } }] } }),
+          prisma.customer.count({ where: { AND: [where, { OR: [{ gstin: null }, { gstin: '' }] }] } }),
+        ])
+        return { registered, unregistered }
+      },
+    },
+    exportSheet: {
+      fileName: 'customers',
+      build: (rows) => customerImport.customerWorkbook(rows, false),
+    },
   }),
 )
 
@@ -377,13 +499,6 @@ router.get('/items/import-template', requirePermission(MODULE, 'create'), async 
   res.send(buffer)
 })
 
-const importBody = z.object({
-  fileName: z.string().min(1).max(200),
-  /** The file itself, base64. */
-  file: z.string().min(1),
-  confirm: z.boolean().optional(),
-})
-
 router.post('/items/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const { fileName, file, confirm } = importBody.parse(req.body)
   const rows = await readSheet(Buffer.from(file, 'base64'), fileName)
@@ -530,21 +645,6 @@ router.post('/styles/import', requirePermission(MODULE, 'create'), async (req: A
       : 'Nothing to import: every style is already in the system.',
     data: { summary, created },
   })
-})
-
-/**
- * A filter on a typed-in column (garment, season, fabric, fit): the exact
- * values picked, and 'none' for the styles with nothing typed.
- */
-const textFilter = (field: string) => ({
-  where: (v: string[]) => {
-    const values = v.filter((x) => x !== 'none')
-    const or: Record<string, unknown>[] = []
-    if (values.length) or.push({ [field]: { in: values } })
-    if (v.includes('none')) or.push({ [field]: null }, { [field]: '' })
-    return { OR: or }
-  },
-  facets: [field],
 })
 
 router.use(

@@ -12,8 +12,10 @@ import {
   Ban,
   Trash2,
   X,
+  Download,
+  Loader2,
 } from 'lucide-react'
-import { api, ApiError, masterResource, type ListParams, type Paginated } from '@/lib/api'
+import { api, ApiError, masterResource, tokens, type ListParams, type Paginated } from '@/lib/api'
 import { MasterFormDialog, type FormField } from './MasterFormDialog'
 import { FilterMenu, type FilterChoice } from './FilterMenu'
 import { DeleteDialog } from './DeleteDialog'
@@ -61,6 +63,8 @@ export interface FilterDef {
   valuesFromFacet?: boolean
   /** The order of those values, where A to Z is not it: sizes S, M, L. */
   sortValues?: (a: string, b: string) => number
+  /** How each of those values reads: credit days 30 as "30 days". */
+  valueLabel?: (value: string) => string
   /**
    * For a count that has to be added up rather than read off: a main
    * category counts the items under its sub-categories too.
@@ -108,6 +112,12 @@ interface MasterTableProps<T> {
   noActiveFlag?: boolean
   /** Changing this reloads the list, for a change made outside it (an import). */
   refreshKey?: number
+  /**
+   * Offers Export: the list as a spreadsheet, as filtered, searched and
+   * sorted on screen, every page of it. The route must allow it (the
+   * crudRouter's `exportSheet`).
+   */
+  exportable?: boolean
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
 }
@@ -129,6 +139,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   deleteRefusedHint,
   noActiveFlag = false,
   refreshKey = 0,
+  exportable = false,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -258,7 +269,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
       list = [...seen]
         // Numbers by value: 28, 30 … 40, not 28, 300, 30.
         .sort(def.sortValues ?? ((a, b) => a.localeCompare(b, undefined, { numeric: true })))
-        .map((v) => ({ value: v, label: v, count: counts[v] ?? 0 }))
+        .map((v) => ({ value: v, label: def.valueLabel ? def.valueLabel(v) : v, count: counts[v] ?? 0 }))
       // Typed-in columns hold both nothing and an empty string; both are "not set".
       if (def.noneLabel) {
         list.push({ value: 'none', label: def.noneLabel, count: (counts.none ?? 0) + (counts[''] ?? 0) })
@@ -367,6 +378,38 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
     }
   }
 
+  const [exporting, setExporting] = useState(false)
+  /** What is on screen, every page, as a file handed to the browser. */
+  const exportList = async () => {
+    setExporting(true)
+    setActionError(null)
+    try {
+      const qs = new URLSearchParams({ order })
+      if (sort) qs.set('sort', sort)
+      for (const [k, v] of Object.entries(narrowing)) {
+        if (v !== undefined && v !== '') qs.set(k, String(v))
+      }
+      const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:5000/api'
+      const res = await fetch(`${base}/masters/${resource}/export?${qs}`, {
+        headers: { Authorization: `Bearer ${tokens.access() ?? ''}` },
+      })
+      if (!res.ok) throw new Error(`The export could not be made (${res.status}).`)
+      const name = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? `${resource}.xlsx`
+      const url = URL.createObjectURL(await res.blob())
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'The export could not be made.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const toggleSort = (key: string) => {
     if (sort === key) {
       setOrder((o) => (o === 'asc' ? 'desc' : 'asc'))
@@ -393,6 +436,18 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
             Refresh
           </button>
           {actions}
+          {exportable && (
+            <button
+              type="button"
+              onClick={() => void exportList()}
+              className="btn-secondary"
+              disabled={exporting || pagination.total === 0}
+              title={narrowed ? 'Export the rows the filters leave' : 'Export every row'}
+            >
+              {exporting ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+              Export
+            </button>
+          )}
           {editable && (
             <button
               onClick={() => {

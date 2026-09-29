@@ -72,6 +72,14 @@ export interface CrudOptions {
    * as companyId on a single-entity install.
    */
   injectOnCreate?: () => Promise<Record<string, unknown>>
+  /**
+   * Turns on GET /export: every record the list would show, with the same
+   * search, filters and sort but no pages, handed to this to make the file.
+   */
+  exportSheet?: {
+    fileName: string
+    build: (rows: Array<Record<string, unknown>>) => Promise<Buffer>
+  }
 }
 
 export interface DeleteUse {
@@ -149,6 +157,7 @@ export function crudRouter(options: CrudOptions): Router {
     customFacets = {},
     uniqueFields = [],
     permanentDelete,
+    exportSheet,
   } = options
 
   const router = Router({ mergeParams: true })
@@ -251,10 +260,8 @@ export function crudRouter(options: CrudOptions): Router {
     res.json({ success: true, data: counts })
   })
 
-  router.get('/', requirePermission(module, 'view'), async (req: AuthRequest, res) => {
-    const page = Math.max(1, Number(req.query.page) || 1)
-    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(req.query.limit) || 25))
-
+  /** The ?sort= and ?order= of a list request, checked. */
+  const sortOf = (req: AuthRequest) => {
     const sortField = typeof req.query.sort === 'string' ? req.query.sort : defaultSort.field
     if (!sortableFields.includes(sortField)) {
       throw new AppError(
@@ -263,7 +270,35 @@ export function crudRouter(options: CrudOptions): Router {
         'INVALID_SORT',
       )
     }
-    const sortOrder = req.query.order === 'asc' ? 'asc' : defaultSort.order
+    const sortOrder: 'asc' | 'desc' = req.query.order === 'asc' ? 'asc' : defaultSort.order
+    return { sortField, sortOrder }
+  }
+
+  /*
+   * The list as a spreadsheet: what is on screen, every page of it. Before
+   * /:id, so "export" is not taken for a record id.
+   */
+  if (exportSheet) {
+    router.get('/export', requirePermission(module, 'view'), async (req: AuthRequest, res) => {
+      const { sortField, sortOrder } = sortOf(req)
+      const rows = await delegate().findMany({
+        where: buildWhere(req),
+        include,
+        orderBy: { [sortField]: sortOrder },
+        take: 10000,
+      })
+      const buffer = await exportSheet.build(rows)
+      const stamp = new Date().toISOString().slice(0, 10)
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      res.setHeader('Content-Disposition', `attachment; filename="${exportSheet.fileName}-${stamp}.xlsx"`)
+      res.send(buffer)
+    })
+  }
+
+  router.get('/', requirePermission(module, 'view'), async (req: AuthRequest, res) => {
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(req.query.limit) || 25))
+    const { sortField, sortOrder } = sortOf(req)
 
     const where = buildWhere(req)
 

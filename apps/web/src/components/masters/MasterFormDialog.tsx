@@ -73,6 +73,9 @@ const SECTION_ICONS: Record<string, LucideIcon> = {
   Capacity: Gauge,
   'Costing & Stock': IndianRupee,
   Other: FileText,
+  'Identity & Contact': Tag,
+  'Credit, Bank & Notes': CreditCard,
+  Style: Tag,
 }
 
 /** Fields per row by screen width. Written out whole so Tailwind keeps them. */
@@ -563,7 +566,8 @@ export function MasterFormDialog<T extends { id: string }>({
               icon={SECTION_ICONS[section] ?? FileText}
               title={section || 'Details'}
             >
-              <div className={`grid grid-cols-1 gap-x-4 gap-y-3 ${GRID[columns]}`}>
+              {/* Rows a little closer on the four-across forms, which hold the most. */}
+              <div className={`grid grid-cols-1 gap-x-4 ${columns === 4 ? 'gap-y-2' : 'gap-y-3'} ${GRID[columns]}`}>
                 {sectionFields.map((f) => (
                   <Field
                     key={f.name}
