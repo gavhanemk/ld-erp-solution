@@ -143,16 +143,26 @@ const TYPE_LABEL: Record<string, string> = {
   TRIM: 'Trim',
 }
 
-const FILTERS: Array<{ key: FilterKey; label: string; labelOf?: (v: string) => string; noneLabel?: string }> = [
+/*
+ * Every filter the ledger takes. The ones marked `menu: false` get no dropdown
+ * — a card or a chart sets them — but still show as a chip once set.
+ */
+const FILTERS: Array<{
+  key: FilterKey
+  label: string
+  labelOf?: (v: string) => string
+  noneLabel?: string
+  menu?: false
+}> = [
   { key: 'store', label: 'Store' },
   { key: 'movement', label: 'Movement', labelOf: (v) => MOVEMENT[v]?.label ?? v },
-  { key: 'document', label: 'Document', labelOf: docLabel, noneLabel: 'No document' },
-  { key: 'direction', label: 'In / Out', labelOf: (v) => (v === 'in' ? 'Came in' : 'Went out') },
-  { key: 'owner', label: 'Whose', labelOf: (v) => (v === 'OWNED' ? 'Our own stock' : "Customers' material") },
+  { key: 'document', label: 'Document', labelOf: docLabel, noneLabel: 'No document', menu: false },
+  { key: 'direction', label: 'In / Out', labelOf: (v) => (v === 'in' ? 'Came in' : 'Went out'), menu: false },
+  { key: 'owner', label: 'Whose', labelOf: (v) => (v === 'OWNED' ? 'Our own stock' : "Customers' material"), menu: false },
   { key: 'category', label: 'Category' },
-  { key: 'sub', label: 'Sub-category', noneLabel: 'No sub-category' },
+  { key: 'sub', label: 'Sub-category', noneLabel: 'No sub-category', menu: false },
   { key: 'department', label: 'Department', noneLabel: 'No department' },
-  { key: 'itemType', label: 'Type', labelOf: (v) => TYPE_LABEL[v] ?? v },
+  { key: 'itemType', label: 'Type', labelOf: (v) => TYPE_LABEL[v] ?? v, menu: false },
 ]
 
 const qtyFmt = (v: number) =>
@@ -210,6 +220,7 @@ const PRESETS = [
   { key: '30d', label: '30 days' },
   { key: 'month', label: 'This month' },
   { key: 'fy', label: 'This FY' },
+  { key: 'custom', label: 'Custom range' },
 ]
 
 /**
@@ -406,8 +417,10 @@ function LedgerScreen() {
   }
 
   const pickPreset = (key: string) => {
-    const r = presetRange(key)
     setPreset(key)
+    // A custom range starts from whatever dates are already set.
+    if (key === 'custom') return
+    const r = presetRange(key)
     setFrom(r.from)
     setTo(r.to)
   }
@@ -505,9 +518,9 @@ function LedgerScreen() {
   // The search and dropdowns, the same on both tabs. Raised so an open
   // dropdown lies over whatever is below it.
   const filterBar = (
-    <div className="relative z-20 space-y-2 px-4 py-3 border-b border-border">
+    <div className="space-y-2 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex h-10 min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+        <div className="flex h-10 min-w-[180px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
           <Search size={14} className="text-muted-foreground" />
           <input
             className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
@@ -522,7 +535,43 @@ function LedgerScreen() {
             </button>
           )}
         </div>
-        {FILTERS.map((f) => (
+        <div className="flex h-10 items-center gap-2 rounded-lg border border-border bg-secondary pl-3 pr-1">
+          <CalendarDays size={14} className="text-muted-foreground" />
+          <select
+            className="h-full cursor-pointer bg-transparent pr-1 text-sm text-foreground outline-none"
+            value={preset}
+            onChange={(e) => pickPreset(e.target.value)}
+            aria-label="Period"
+          >
+            {PRESETS.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {preset === 'custom' && (
+          <div className="flex items-center gap-1.5">
+            <input
+              type="date"
+              className="form-input h-10 w-[140px] text-sm"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => setFrom(e.target.value)}
+              aria-label="From"
+            />
+            <span className="text-xs text-muted-foreground">to</span>
+            <input
+              type="date"
+              className="form-input h-10 w-[140px] text-sm"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => setTo(e.target.value)}
+              aria-label="To"
+            />
+          </div>
+        )}
+        {FILTERS.filter((f) => f.menu !== false).map((f) => (
           <FilterMenu
             key={f.key}
             label={f.label}
@@ -544,7 +593,7 @@ function LedgerScreen() {
               {c.text} <X size={11} />
             </button>
           ))}
-          {(from || to) && (
+          {preset === 'custom' && (from || to) && (
             <button
               type="button"
               onClick={() => pickPreset('all')}
@@ -568,10 +617,32 @@ function LedgerScreen() {
   let lastDay = ''
 
   return (
-    <div className="space-y-5">
-      <div className="page-header">
-        <div>
+    <div className="space-y-4">
+      {/* The title, the two tabs beside it, and the buttons on the right: one line. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-4">
           <h1 className="page-title">Stock Ledger</h1>
+          <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
+            {([
+              { key: 'movements', label: 'Movements', icon: List },
+              { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+            ] as const).map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={view === t.key}
+                onClick={() => setView(t.key)}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  view === t.key
+                    ? 'bg-card font-medium text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <t.icon size={15} /> {t.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
@@ -589,28 +660,6 @@ function LedgerScreen() {
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
         </div>
-      </div>
-
-      <div className="flex gap-1 border-b border-border" role="tablist">
-        {([
-          { key: 'movements', label: 'Movements', icon: List },
-          { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-        ] as const).map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={view === t.key}
-            onClick={() => setView(t.key)}
-            className={`-mb-px flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm transition-colors ${
-              view === t.key
-                ? 'border-primary font-medium text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <t.icon size={15} /> {t.label}
-          </button>
-        ))}
       </div>
 
       {error && (
@@ -635,52 +684,9 @@ function LedgerScreen() {
         </div>
       )}
 
-      {/* The period. Everything below — figures, chart, dropdowns — is for it. */}
-      <div className="flex flex-wrap items-center gap-2">
-        <CalendarDays size={15} className="text-muted-foreground" />
-        {PRESETS.map((p) => (
-          <button
-            key={p.key}
-            type="button"
-            onClick={() => pickPreset(p.key)}
-            className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-              preset === p.key
-                ? 'border-primary bg-primary/10 text-foreground'
-                : 'border-border text-muted-foreground hover:border-primary/50 hover:text-foreground'
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            From
-            <input
-              type="date"
-              className="form-input h-8 text-xs"
-              value={from}
-              max={to || undefined}
-              onChange={(e) => {
-                setFrom(e.target.value)
-                setPreset('custom')
-              }}
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            To
-            <input
-              type="date"
-              className="form-input h-8 text-xs"
-              value={to}
-              min={from || undefined}
-              onChange={(e) => {
-                setTo(e.target.value)
-                setPreset('custom')
-              }}
-            />
-          </label>
-        </div>
-      </div>
+      {/* The search, the period and the dropdowns, the same on both tabs; everything below is for them.
+          Raised so an open dropdown lies over the cards and charts. */}
+      <div className="glass-card relative z-30 p-0">{filterBar}</div>
 
       {/* Four figures for what the filters leave, each a filter itself. */}
       {view === 'movements' && (
@@ -733,8 +739,6 @@ function LedgerScreen() {
 
       {view === 'dashboard' && (
         <>
-          <div className="glass-card p-0">{filterBar}</div>
-
           {/* What the period says, in four lines. */}
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <div className="glass-card p-4">
@@ -883,8 +887,6 @@ function LedgerScreen() {
 
       {view === 'movements' && (
       <div className="glass-card p-0 overflow-hidden">
-        {filterBar}
-
         {loading && !res ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
         ) : rows.length === 0 ? (
