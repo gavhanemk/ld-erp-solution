@@ -18,6 +18,9 @@ import { AppError } from '../middleware/errorHandler'
  *   4. Stock lives in a warehouse. There is no such thing as a balance without
  *      one.
  *
+ * And one about time: a movement is dated no earlier than the last movement of
+ * the same item in the same store, and never after today (see `settleDate`).
+ *
  * Valuation is weighted average, chosen once for the whole system. It is what a
  * Tally-trained accountant expects, it survives a part-received order, and it
  * does not need batches to be tracked before the mill is ready to track them.
@@ -132,6 +135,77 @@ export async function lockedBalanceOf(
   return balanceOf(tx, key)
 }
 
+/** The calendar day in India, as YYYY-MM-DD: what "dated the 28th" means at the mill. */
+const indianDay = (d: Date) => new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10)
+
+const readableDay = (d: Date) =>
+  d.toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata',
+  })
+
+/**
+ * The date a movement is written with, or a refusal.
+ *
+ * Every balance check and every average rate here is worked out in the order
+ * movements are entered. A movement dated before one already in the book for
+ * the same item and store sits in the ledger out of that order: a transfer
+ * back-dated to January was accepted for fabric that arrived in September,
+ * and the running balance printed beside it was wrong. So a movement may be
+ * dated any day from that item's last movement in that store up to today, and
+ * not before.
+ *
+ * On the same day, a time no later than the last movement's is moved to just
+ * after it, so every item and store's movements are dated strictly in the
+ * order they were written (the lock makes that the order the balance was
+ * worked out in). Two issues sent at once would otherwise carry the times
+ * their requests arrived, not the order the lock let them through, and the
+ * ledger would list their running balances out of step. Called with the
+ * item's lock already held.
+ */
+async function settleDate(
+  tx: Prisma.TransactionClient,
+  key: StockKey & { transactionDate?: Date },
+): Promise<Date> {
+  const now = new Date()
+  const asked = key.transactionDate ?? now
+
+  if (indianDay(asked) > indianDay(now)) {
+    throw new AppError(
+      `A stock entry cannot be dated after today. ${readableDay(asked)} is in the future.`,
+      400,
+      'FUTURE_DATE',
+    )
+  }
+
+  const rows = await tx.$queryRaw<Array<{ last: Date | null }>>`
+    SELECT MAX("transactionDate") AS last
+    FROM ld_erp.stock_ledger
+    WHERE "itemId" = ${key.itemId}
+      AND "warehouseId" = ${key.warehouseId}
+      AND "ownership" = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
+      AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
+  `
+  const last = rows[0]?.last ?? null
+  if (!last) return asked
+
+  if (indianDay(asked) < indianDay(last)) {
+    const [item, warehouse] = await Promise.all([
+      tx.item.findUnique({ where: { id: key.itemId }, select: { name: true } }),
+      tx.warehouse.findUnique({ where: { id: key.warehouseId }, select: { name: true } }),
+    ])
+    throw new AppError(
+      `${item?.name ?? 'That item'} last moved in ${warehouse?.name ?? 'that store'} on ${readableDay(last)}. Date this ${readableDay(last)} or later — an earlier date would put it out of order and make the running balance wrong.`,
+      400,
+      'BEFORE_LAST_MOVEMENT',
+    )
+  }
+
+  return asked <= last ? new Date(last.getTime() + 1) : asked
+}
+
 /**
  * Writes one movement.
  *
@@ -163,6 +237,7 @@ export async function recordMovement(
 
   await lockBalance(tx, m)
 
+  const transactionDate = await settleDate(tx, m)
   const before = await balanceOf(tx, m)
   const qty = round3(m.qty)
 
@@ -227,7 +302,7 @@ export async function recordMovement(
       // what `balanceOf` trusts.
       closingStock: closing,
       unitRate,
-      transactionDate: m.transactionDate ?? new Date(),
+      transactionDate,
       notes: m.notes ?? null,
     },
   })
