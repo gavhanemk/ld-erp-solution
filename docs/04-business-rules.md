@@ -224,6 +224,15 @@ doors — the inventory screen and the approvals inbox — enforce that, and a
 requisition is decided and issued once: the decision and the issue each only
 land on a requisition still in the state they expect.
 
+**Part now, the rest later.** The store hands over what it has: 30 of 50 metres
+today, the other 20 when the next roll comes. Each issue takes up to what is
+still owed on each line, and the requisition is complete once every line from
+the store is handed over in full. If the rest is no longer wanted it is
+**closed**, and one with nothing handed over is **cancelled**: the person who
+raised it may withdraw it, and the store or an approver may close it, always
+with a reason. After that nothing more is issued against it, and a withdrawn
+requisition can no longer be approved.
+
 ### What still has to come
 
 Goods receipt is the missing inward document. Until it exists, stock arrives

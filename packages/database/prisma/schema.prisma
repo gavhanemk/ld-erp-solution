@@ -277,6 +277,7 @@ model User {
   raisedMRs            MaterialRequisition[]       @relation("MRRaisedBy")
   approvedMRs          MaterialRequisition[]       @relation("MRApprovedBy")
   issuedMRs            MaterialRequisition[]       @relation("MRIssuedBy")
+  closedMRs            MaterialRequisition[]       @relation("MRClosedBy")
   createdBills         PurchaseInvoice[]           @relation("BillCreatedBy")
   createdPayments      SupplierPayment[]           @relation("PaymentCreatedBy")
   reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
@@ -1716,6 +1717,12 @@ model MaterialRequisition {
   issuedAt        DateTime?
   /// Why it was refused. A rejection with no reason just gets raised again.
   rejectionReason String?
+  /// Set when it is cancelled, or closed with part of it still unissued: the
+  /// rest is no longer wanted. Nothing more can be issued against it.
+  closedAt        DateTime?
+  closedById      String?
+  closedBy        User?               @relation("MRClosedBy", fields: [closedById], references: [id])
+  closeReason     String?
   notes           String?
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt

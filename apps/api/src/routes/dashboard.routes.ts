@@ -31,7 +31,7 @@ router.get('/summary', async (req: AuthRequest, res) => {
       _sum: { achieved: true, target: true, rejection: true },
     }),
     prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null, deletedAt: null } }),
-    prisma.materialRequisition.count({ where: { status: 'PENDING' } }),
+    prisma.materialRequisition.count({ where: { status: 'PENDING', closedAt: null } }),
     prisma.salesInvoice.aggregate({
       where: { invoiceDate: { gte: startOfMonth } },
       _sum: { totalAmount: true },
@@ -332,7 +332,8 @@ router.get('/pending-approvals', async (req, res) => {
       include: { customer: { select: { name: true } } },
     }),
     prisma.materialRequisition.findMany({
-      where: { status: 'PENDING' },
+      // A withdrawn requisition is not waiting for anybody.
+      where: { status: 'PENDING', closedAt: null },
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: { department: { select: { name: true } } },

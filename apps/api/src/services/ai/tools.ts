@@ -375,7 +375,7 @@ export async function executeTool(
             _sum: { achieved: true, target: true, rejection: true },
           }),
           prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null, deletedAt: null } }),
-          prisma.materialRequisition.count({ where: { status: 'PENDING' } }),
+          prisma.materialRequisition.count({ where: { status: 'PENDING', closedAt: null } }),
           prisma.salesInvoice.aggregate({
             where: { invoiceDate: { gte: som } },
             _sum: { totalAmount: true },

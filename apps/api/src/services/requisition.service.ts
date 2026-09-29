@@ -21,16 +21,18 @@ export async function decidePending(
   },
 ) {
   const done = await prisma.materialRequisition.updateMany({
-    where: { id, status: 'PENDING' },
+    where: { id, status: 'PENDING', closedAt: null },
     data,
   })
   if (done.count === 0) {
     const now = await prisma.materialRequisition.findUnique({
       where: { id },
-      select: { status: true, issuedAt: true },
+      select: { status: true, issuedAt: true, closedAt: true },
     })
     throw new AppError(
-      now?.issuedAt
+      now?.closedAt
+        ? `${mrNumber} was withdrawn, so there is nothing to decide.`
+        : now?.issuedAt
         ? `${mrNumber} has already been issued, so it can no longer be approved or refused.`
         : `${mrNumber} was just ${now?.status === 'REJECTED' ? 'refused' : 'approved'} by somebody else. Refresh to see it.`,
       409,

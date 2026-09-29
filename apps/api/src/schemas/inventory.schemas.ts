@@ -128,6 +128,11 @@ export const rejectRequisitionSchema = z.object({
   reason: z.string().min(5, 'Say why it is being refused').max(500),
 })
 
+/** Cancelling a requisition, or closing one part issued. The reason goes on it. */
+export const closeRequisitionSchema = z.object({
+  reason: z.string().trim().min(5, 'Say why it is no longer needed').max(500),
+})
+
 /**
  * Issuing against an approved requisition.
  *

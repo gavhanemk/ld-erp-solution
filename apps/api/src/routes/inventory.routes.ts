@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import {
@@ -20,6 +20,7 @@ import {
   issueRequisitionSchema,
   openingStockSchema,
   rejectRequisitionSchema,
+  closeRequisitionSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
 
@@ -634,6 +635,7 @@ const mrInclude = {
   raisedBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
   issuedBy: { select: { id: true, name: true } },
+  closedBy: { select: { id: true, name: true } },
   lines: {
     include: {
       item: {
@@ -649,7 +651,24 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
 
   const where: Record<string, unknown> = {}
-  if (str(req.query.status)) where.status = str(req.query.status)
+  const status = str(req.query.status)
+  if (status) {
+    // Where a requisition stands, which is more than its approval status: an
+    // approved one may be waiting, part handed over, complete, or closed.
+    const open = { closedAt: null, issuedAt: null }
+    const stages: Record<string, Record<string, unknown>> = {
+      PENDING: { status: 'PENDING', closedAt: null },
+      APPROVED: { status: 'APPROVED', ...open },
+      PARTLY: { status: 'APPROVED', ...open, lines: { some: { issuedQty: { gt: 0 } } } },
+      ISSUED: { issuedAt: { not: null } },
+      CLOSED: { closedAt: { not: null } },
+      REJECTED: { status: 'REJECTED' },
+    }
+    if (!stages[status]) {
+      throw new AppError(`Unknown status '${status}'`, 400, 'INVALID_STATUS')
+    }
+    Object.assign(where, stages[status])
+  }
   if (str(req.query.departmentId)) where.departmentId = str(req.query.departmentId)
 
   const q = str(req.query.q)
@@ -784,14 +803,30 @@ router.patch(
           'ALREADY_ISSUED',
         )
       }
+      if (mr.closedAt) {
+        throw new AppError(
+          `${mr.mrNumber} was closed, so how it was answered can no longer be changed.`,
+          400,
+          'CLOSED',
+        )
+      }
 
-      const own = new Set(mr.lines.map((l) => l.id))
+      const own = new Map(mr.lines.map((l) => [l.id, l]))
       for (const l of data.lines) {
-        if (!own.has(l.lineId)) {
+        const line = own.get(l.lineId)
+        if (!line) {
           throw new AppError(
             `One of those lines is not on ${mr.mrNumber}. Reopen the requisition and try again.`,
             400,
             'WRONG_LINE',
+          )
+        }
+        // Part of it has already left the rack, so it is the store's line now.
+        if (l.fulfilment === 'PURCHASE' && Number(line.issuedQty) > 0) {
+          throw new AppError(
+            `Some of that line was already handed over from the store, so it cannot be switched to buying. Close the requisition and raise a new one for the rest.`,
+            400,
+            'PART_ISSUED',
           )
         }
       }
@@ -952,13 +987,32 @@ router.patch(
   },
 )
 
+/** A quantity as the store says it: 12.5, not 12.500. */
+const qtyText = (n: number) => String(Number(n.toFixed(3)))
+
+/**
+ * Holds a requisition for the rest of the transaction.
+ *
+ * Everything that changes what can still be issued (an issue, a close) takes
+ * this first, so two of them cannot both work from the same "still to issue".
+ * A second waits here and, once through, reads what the first left.
+ */
+async function lockRequisition(tx: Prisma.TransactionClient, id: string) {
+  await tx.$queryRaw`SELECT id FROM ld_erp.material_requisitions WHERE id = ${id} FOR UPDATE`
+}
+
 /**
  * Handing the material over. This is the moment stock actually leaves.
  *
- * Everything until now was paperwork; one transaction takes the quantities off
- * the rack and stamps who did it. If any line is short the whole issue is
- * refused rather than half-done, because a partly-issued requisition that
- * nobody noticed is how a cutting room starts a lay it cannot finish.
+ * The store can hand over part of it now and the rest later: 30 of the 50
+ * metres today because that is what is on the rack, the other 20 when the
+ * next roll comes in. Each issue takes what is given on each line, up to what
+ * is still owed, and leaves the rest open. Once every line from the store has
+ * been handed over in full, the requisition is complete. If the rest is no
+ * longer wanted, it is closed instead (see /close).
+ *
+ * Within one issue, if any line is short on the rack the whole issue is
+ * refused rather than half-done, so what the person pressed is what happened.
  */
 router.post(
   '/requisitions/:id/issue',
@@ -967,13 +1021,31 @@ router.post(
     const body = issueRequisitionSchema.parse(req.body ?? {})
     const when = body.issueDate ?? new Date()
 
-    const after = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      // Held before anything is read. Three clicks at once (a double-click,
+      // two tabs, a retried request) used to all read "not issued yet" and all
+      // take stock: 2 metres asked for, 6 left the store. Now the second waits
+      // here and then sees what the first issued.
+      await lockRequisition(tx, req.params.id)
+
       const mr = await tx.materialRequisition.findUnique({
         where: { id: req.params.id },
-        include: { lines: true, department: true },
+        include: {
+          lines: {
+            include: { item: { select: { name: true, uom: { select: { symbol: true } } } } },
+          },
+          department: true,
+        },
       })
       if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
 
+      if (mr.closedAt) {
+        throw new AppError(
+          `${mr.mrNumber} was closed on ${mr.closedAt.toLocaleDateString('en-IN')}, so nothing more can be issued against it.`,
+          400,
+          'CLOSED',
+        )
+      }
       if (mr.status !== 'APPROVED') {
         throw new AppError(
           mr.status === 'PENDING'
@@ -985,16 +1057,14 @@ router.post(
       }
       if (mr.issuedAt) {
         throw new AppError(
-          `${mr.mrNumber} was already issued on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
-          400,
+          `${mr.mrNumber} was issued in full on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
+          409,
           'ALREADY_ISSUED',
         )
       }
 
       // docs/04-business-rules.md, section 7: raised, approved and issued by
-      // three different people. The approve route held the first two apart;
-      // nothing held the third, so a keeper could raise, get it signed, and
-      // hand the material to themselves.
+      // three different people.
       if (mr.raisedById && mr.raisedById === req.user!.id) {
         throw new AppError(
           'You raised this requisition, so somebody else in the store has to hand the material over.',
@@ -1010,55 +1080,33 @@ router.post(
         )
       }
 
-      /*
-       * Claim the requisition before a single metre moves.
-       *
-       * The checks above read it; they do not hold it. Three clicks at once
-       * (a double-click, two tabs, a retried request) all read "not issued
-       * yet" and all went on to take stock: 2 metres asked for, 6 left the
-       * store. This update only matches a requisition still unissued, and it
-       * locks the row until this transaction ends, so a second issue waits
-       * here, then finds it issued and matches nothing. If this one fails
-       * part-way (a line short on the rack) the claim rolls back with it and
-       * the requisition can be issued again.
-       */
-      const claimed = await tx.materialRequisition.updateMany({
-        where: { id: mr.id, status: 'APPROVED', issuedAt: null },
-        data: { issuedById: req.user!.id, issuedAt: when },
-      })
-      if (claimed.count === 0) {
-        throw new AppError(
-          `${mr.mrNumber} was issued a moment ago by somebody else. Refresh to see it.`,
-          409,
-          'ALREADY_ISSUED',
-        )
-      }
-
       const askedFor = new Map(body.lines?.map((l) => [l.lineId, l.issueQty]) ?? [])
+      const handedOver: string[] = []
 
       for (const line of mr.lines) {
         /*
          * A line marked for purchase is not the store's to answer.
          *
          * It is on this requisition to tell the buyer what to order, and there
-         * is nothing on the rack behind it. Skipped silently rather than
-         * refused: a requisition routinely mixes the two — four things off
-         * the shelf and one to be bought — and stopping the whole issue
-         * because of the fifth would leave the other four sitting in a store
-         * somebody is waiting at.
+         * is nothing on the rack behind it. Skipped rather than refused: a
+         * requisition routinely mixes the two.
          */
         if (line.fulfilment === 'PURCHASE') continue
 
-        const qty = askedFor.get(line.id) ?? Number(line.requestedQty)
+        const unit = line.item.uom?.symbol ?? ''
+        const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
+        if (owed <= 0) continue
+
+        // Not named in the request: everything still owed on it.
+        const qty = askedFor.get(line.id) ?? owed
         if (qty <= 0) continue
 
-        if (qty > Number(line.requestedQty)) {
-          const item = await tx.item.findUnique({
-            where: { id: line.itemId },
-            select: { name: true },
-          })
+        if (qty > owed + 1e-9) {
           throw new AppError(
-            `${item?.name ?? 'That item'}: ${qty} is more than the ${Number(line.requestedQty)} approved. Raise a new requisition for the rest.`,
+            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(qty)}. Raise a new requisition for more.`.replace(
+              /\s+/g,
+              ' ',
+            ),
             400,
             'OVER_ISSUE',
           )
@@ -1079,29 +1127,137 @@ router.post(
 
         await tx.materialRequisitionLine.update({
           where: { id: line.id },
-          data: { issuedQty: qty },
+          data: { issuedQty: { increment: qty } },
+        })
+        handedOver.push(`${qtyText(qty)} ${unit} ${line.item.name}`.replace(/\s+/g, ' '))
+      }
+
+      if (handedOver.length === 0) {
+        throw new AppError(
+          'Nothing to hand over: enter a quantity on at least one line.',
+          400,
+          'NOTHING_TO_ISSUE',
+        )
+      }
+
+      // Complete once every line from the store has been handed over in full.
+      // issuedBy is whoever handed over the last of it; each part is in the
+      // stock ledger with its own date, and in the audit trail with its person.
+      const lines = await tx.materialRequisitionLine.findMany({ where: { mrId: mr.id } })
+      const stillOwed = lines.filter(
+        (l) => l.fulfilment !== 'PURCHASE' && Number(l.issuedQty) < Number(l.requestedQty) - 1e-9,
+      ).length
+      if (stillOwed === 0) {
+        await tx.materialRequisition.update({
+          where: { id: mr.id },
+          data: { issuedById: req.user!.id, issuedAt: when },
         })
       }
 
-      // Already stamped by the claim above; read back for the response.
-      return tx.materialRequisition.findUniqueOrThrow({
+      const after = await tx.materialRequisition.findUniqueOrThrow({
         where: { id: mr.id },
         include: mrInclude,
       })
+      return { after, handedOver, stillOwed }
     })
 
     await writeAuditLog(req, {
       module: MODULE,
       action: 'UPDATE',
       entityType: 'MaterialRequisition',
-      entityId: after.id,
-      after,
+      entityId: result.after.id,
+      after: { ...result.after, handedOverNow: result.handedOver },
     })
 
     res.json({
       success: true,
-      message: `Material issued against ${after.mrNumber}.`,
-      data: after,
+      message:
+        result.stillOwed === 0
+          ? `${result.after.mrNumber} issued in full.`
+          : `Issued against ${result.after.mrNumber}: ${result.handedOver.join(', ')}. ${result.stillOwed} ${result.stillOwed === 1 ? 'line is' : 'lines are'} still to be handed over.`,
+      data: result.after,
+    })
+  },
+)
+
+/**
+ * Cancelling a requisition, or closing one that is part issued.
+ *
+ * Material that is no longer wanted should not sit on the list for ever as
+ * "approved, not collected". Nothing issued yet: it is cancelled. Some of it
+ * issued: it is closed, and what was handed over stays handed over.
+ *
+ * The person who raised it can withdraw it; the store, or anybody who can
+ * approve requisitions, can close one that is no longer needed. A reason is
+ * always asked for. Refused and fully issued requisitions are already over.
+ */
+router.post(
+  '/requisitions/:id/close',
+  requirePermission(MODULE, 'view'),
+  async (req: AuthRequest, res) => {
+    const { reason } = closeRequisitionSchema.parse(req.body ?? {})
+
+    const result = await prisma.$transaction(async (tx) => {
+      await lockRequisition(tx, req.params.id)
+      const before = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!before) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+      const mine = before.raisedById === req.user!.id
+      if (!mine && !userCan(req.user, MODULE, 'edit') && !userCan(req.user, MODULE, 'approve')) {
+        throw new AppError(
+          'Only the person who raised it, the store, or an approver can cancel a requisition.',
+          403,
+          'NOT_ALLOWED',
+        )
+      }
+      if (before.closedAt) {
+        throw new AppError(`${before.mrNumber} is already closed.`, 409, 'CLOSED')
+      }
+      if (before.status === 'REJECTED') {
+        throw new AppError(
+          `${before.mrNumber} was refused, so there is nothing to cancel.`,
+          400,
+          'REJECTED',
+        )
+      }
+      if (before.issuedAt) {
+        throw new AppError(
+          `${before.mrNumber} was issued in full, so there is nothing left to close.`,
+          400,
+          'ALREADY_ISSUED',
+        )
+      }
+
+      await tx.materialRequisition.update({
+        where: { id: before.id },
+        data: { closedAt: new Date(), closedById: req.user!.id, closeReason: reason },
+      })
+      const after = await tx.materialRequisition.findUniqueOrThrow({
+        where: { id: before.id },
+        include: mrInclude,
+      })
+      const partly = before.lines.some((l) => Number(l.issuedQty) > 0)
+      return { before, after, partly }
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: result.after.id,
+      before: result.before,
+      after: result.after,
+    })
+
+    res.json({
+      success: true,
+      message: result.partly
+        ? `${result.after.mrNumber} closed. What was handed over stays issued; the rest is no longer owed.`
+        : `${result.after.mrNumber} cancelled.`,
+      data: result.after,
     })
   },
 )
