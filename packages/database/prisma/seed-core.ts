@@ -365,6 +365,8 @@ export async function seedCore(prisma: PrismaClient) {
     // comes back from one. JW already existed and is the outward challan.
     { docType: 'CGRN', prefix: 'CGRN' },
     { docType: 'JWR', prefix: 'JWR' },
+    // A customer's own material going back to them unworked.
+    { docType: 'CMR', prefix: 'CMR' },
   ]
 
   for (const s of series) {

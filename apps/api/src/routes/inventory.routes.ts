@@ -19,9 +19,11 @@ import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
+  cancelCustomerReturnSchema,
   cancelJobWorkChallanSchema,
   cancelTransferSchema,
   createCustomerGrnSchema,
+  createCustomerReturnSchema,
   createJobWorkChallanSchema,
   createJobWorkReturnSchema,
   createRequisitionSchema,
@@ -2127,6 +2129,272 @@ router.patch(
     res.json({
       success: true,
       message: `${after.grnNumber} cancelled and the material taken back off the books.`,
+      data: after,
+    })
+  },
+)
+
+// ── A customer's material going back to them ────────────────────────────────
+
+const RETURN_REASON_LABEL: Record<string, string> = {
+  LEFTOVER: 'Left over after their order',
+  REJECTED: 'Rejected at inspection',
+  EXCESS: 'More than their challan',
+  OTHER: 'Other',
+}
+
+/**
+ * Sending a customer's own material back to them unworked.
+ *
+ * Every line moves CUSTOMER_OWNED stock of that customer out of the one store.
+ * The stock service refuses more than their balance there and names what is
+ * left, so a return can never take our own cloth, or another customer's.
+ */
+router.post('/customer-return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createCustomerReturnSchema.parse(req.body)
+  const when = data.returnDate ?? new Date()
+
+  const created = await prisma.$transaction(async (tx) => {
+    const [customer, warehouse] = await Promise.all([
+      tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true } }),
+      tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true } }),
+    ])
+    if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
+    if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+
+    if (data.grnId) {
+      const grn = await tx.customerGRN.findUnique({
+        where: { id: data.grnId },
+        select: { customerId: true, grnNumber: true, cancelledAt: true },
+      })
+      if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+      if (grn.customerId !== data.customerId) {
+        throw new AppError(`${grn.grnNumber} is a different customer's receipt.`, 400, 'RECEIPT_NOT_THEIRS')
+      }
+      if (grn.cancelledAt) {
+        throw new AppError(`${grn.grnNumber} was cancelled, so nothing came in on it.`, 400, 'RECEIPT_CANCELLED')
+      }
+    }
+
+    const items = await tx.item.findMany({
+      where: { id: { in: data.lines.map((l) => l.itemId) } },
+      select: { id: true, hsnCode: true },
+    })
+    const hsnOf = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+    const returnNumber = await nextDocumentNumber(tx, 'CMR', when)
+    const doc = await tx.customerMaterialReturn.create({
+      data: {
+        returnNumber,
+        customerId: data.customerId,
+        grnId: data.grnId ?? null,
+        warehouseId: data.warehouseId,
+        returnDate: when,
+        reason: data.reason,
+        vehicleNo: data.vehicleNo ?? null,
+        transporter: data.transporter ?? null,
+        lrNumber: data.lrNumber ?? null,
+        notes: data.notes ?? null,
+        createdById: req.user?.id ?? null,
+        lines: {
+          create: data.lines.map((l) => ({
+            itemId: l.itemId,
+            qty: l.qty,
+            hsnCode: hsnOf.get(l.itemId) ?? null,
+            notes: l.notes ?? null,
+          })),
+        },
+      },
+      include: { lines: true },
+    })
+
+    for (const line of doc.lines) {
+      await recordMovement(tx, {
+        itemId: line.itemId,
+        warehouseId: data.warehouseId,
+        transactionType: 'RETURN',
+        direction: 'OUT',
+        qty: Number(line.qty),
+        ownership: 'CUSTOMER_OWNED',
+        ownerCustomerId: data.customerId,
+        referenceType: 'CUSTOMER_RETURN',
+        referenceId: doc.id,
+        transactionDate: when,
+        notes: `${returnNumber}: back to ${customer.name} (${RETURN_REASON_LABEL[data.reason].toLowerCase()})`,
+      })
+    }
+
+    return { ...doc, customerName: customer.name }
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'CustomerMaterialReturn',
+    entityId: created.id,
+    after: created,
+  })
+
+  res.status(201).json({
+    success: true,
+    message: `${created.returnNumber} saved. ${created.lines.length} ${created.lines.length === 1 ? 'item has' : 'items have'} gone back to ${created.customerName} and off our books.`,
+    data: created,
+  })
+})
+
+/*
+ * Every line of every return, one row each, with the return's details and
+ * what the item is — for the Returns tab, its filters, figures and export.
+ */
+router.get('/customer-return/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const returns = await prisma.customerMaterialReturn.findMany({
+    orderBy: [{ returnDate: 'desc' }, { createdAt: 'desc' }],
+    take: 2000,
+    include: {
+      customer: { select: { id: true, name: true } },
+      grn: { select: { id: true, grnNumber: true } },
+      warehouse: { select: { id: true, name: true } },
+      createdBy: { select: { id: true, name: true } },
+      lines: {
+        include: {
+          item: {
+            select: {
+              id: true, code: true, name: true, uom: { select: { symbol: true } },
+              category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+              department: { select: { id: true, name: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const data = returns.flatMap((r) =>
+    r.lines.map((l) => ({
+      id: l.id,
+      returnId: r.id,
+      returnNumber: r.returnNumber,
+      returnDate: r.returnDate,
+      reason: r.reason,
+      reasonLabel: RETURN_REASON_LABEL[r.reason] ?? r.reason,
+      grnNumber: r.grn?.grnNumber ?? null,
+      vehicleNo: r.vehicleNo,
+      transporter: r.transporter,
+      lrNumber: r.lrNumber,
+      notes: r.notes,
+      cancelledAt: r.cancelledAt,
+      cancelReason: r.cancelReason,
+      customerId: r.customer.id,
+      customerName: r.customer.name,
+      warehouseId: r.warehouse.id,
+      warehouseName: r.warehouse.name,
+      createdByName: r.createdBy?.name ?? null,
+      lineCount: r.lines.length,
+      itemId: l.item.id,
+      itemCode: l.item.code,
+      itemName: l.item.name,
+      uom: l.item.uom?.symbol ?? '',
+      hsnCode: l.hsnCode,
+      mainCategoryId: l.item.category.parent?.id ?? l.item.category.id,
+      mainCategoryName: l.item.category.parent?.name ?? l.item.category.name,
+      subCategoryName: l.item.category.parent ? l.item.category.name : null,
+      departmentId: l.item.department?.id ?? null,
+      departmentName: l.item.department?.name ?? null,
+      qty: Number(l.qty),
+      lineNotes: l.notes,
+    })),
+  )
+
+  res.json({ success: true, data })
+})
+
+/**
+ * The delivery challan that goes with the customer's material. Under Rule 55
+ * a movement that is not a supply still travels on a challan naming both
+ * parties, with each item's HSN and quantity.
+ */
+router.get('/customer-return/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const doc = await prisma.customerMaterialReturn.findUnique({
+    where: { id: req.params.id },
+    include: {
+      customer: {
+        select: {
+          id: true, name: true, code: true, gstin: true, phone: true,
+          billingAddress: true, billingCity: true, billingState: true, billingStateCode: true, billingPincode: true,
+          shippingAddress: true, shippingCity: true, shippingState: true, shippingStateCode: true, shippingPincode: true,
+        },
+      },
+      grn: { select: { grnNumber: true, receiptDate: true, challanNumber: true, challanDate: true } },
+      warehouse: { select: { id: true, name: true, address: true } },
+      createdBy: { select: { id: true, name: true } },
+      cancelledBy: { select: { id: true, name: true } },
+      lines: { include: { item: itemLineSelect } },
+    },
+  })
+  if (!doc) throw new AppError('That return does not exist', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('CMR')
+  res.json({ success: true, data: { ...header, doc: { ...doc, reasonLabel: RETURN_REASON_LABEL[doc.reason] ?? doc.reason } } })
+})
+
+/**
+ * Taking a return back: the lorry never left, or the customer sent it back.
+ * The material comes back onto our racks under the customer's name.
+ */
+router.patch(
+  '/customer-return/:id/cancel',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = cancelCustomerReturnSchema.parse(req.body ?? {})
+
+    const after = await prisma.$transaction(async (tx) => {
+      const before = await tx.customerMaterialReturn.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!before) throw new AppError('That return does not exist', 404, 'NOT_FOUND')
+      if (before.cancelledAt) {
+        throw new AppError(
+          `${before.returnNumber} was already cancelled on ${before.cancelledAt.toLocaleDateString('en-IN')}.`,
+          400,
+          'ALREADY_CANCELLED',
+        )
+      }
+
+      for (const line of before.lines) {
+        await recordMovement(tx, {
+          itemId: line.itemId,
+          warehouseId: before.warehouseId,
+          transactionType: 'CUSTOMER_MATERIAL',
+          direction: 'IN',
+          qty: Number(line.qty),
+          unitRate: 0,
+          ownership: 'CUSTOMER_OWNED',
+          ownerCustomerId: before.customerId,
+          referenceType: 'CUSTOMER_RETURN_CANCELLED',
+          referenceId: before.id,
+          transactionDate: new Date(),
+          notes: `${before.returnNumber} cancelled: ${reason}`,
+        })
+      }
+
+      return tx.customerMaterialReturn.update({
+        where: { id: before.id },
+        data: { cancelledAt: new Date(), cancelledById: req.user?.id ?? null, cancelReason: reason },
+      })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'CustomerMaterialReturn',
+      entityId: after.id,
+      after,
+    })
+
+    res.json({
+      success: true,
+      message: `${after.returnNumber} cancelled. The material is back on our racks under the customer's name.`,
       data: after,
     })
   },

@@ -121,6 +121,8 @@ const DOCUMENT: Record<string, string> = {
   GRN_QC_CANCELLED: 'Quality check undone',
   CUSTOMER_GRN: "Customer's material in",
   CUSTOMER_GRN_CANCELLED: "Customer's receipt cancelled",
+  CUSTOMER_RETURN: 'Returned to customer',
+  CUSTOMER_RETURN_CANCELLED: 'Return to customer cancelled',
   JOB_WORK_CHALLAN: 'Job work challan',
   JOB_WORK_CHALLAN_CANCELLED: 'Job work challan cancelled',
   JOB_WORK_RETURN: 'Back from job work',

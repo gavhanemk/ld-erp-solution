@@ -268,6 +268,60 @@ export const cancelCustomerGrnSchema = z.object({
     .max(500),
 })
 
+/** Why a customer's material is going back to them. */
+export const CUSTOMER_RETURN_REASONS = ['LEFTOVER', 'REJECTED', 'EXCESS', 'OTHER'] as const
+
+/**
+ * A customer's own material going back to them unworked. Every line comes out
+ * of one store, from that customer's balance of the item — the stock service
+ * refuses more than is there, and says how much is.
+ */
+export const createCustomerReturnSchema = z
+  .object({
+    customerId: id('the customer it goes back to'),
+    /** The receipt it came in on, when it is going back against one. */
+    grnId: z.string().optional().nullable(),
+    warehouseId: id('the store it leaves from'),
+    returnDate: z.coerce.date().optional(),
+    reason: z.enum(CUSTOMER_RETURN_REASONS, { errorMap: () => ({ message: 'Say why it is going back' }) }),
+    vehicleNo: z.string().max(20, 'That vehicle number is too long').optional().nullable(),
+    transporter: z.string().max(120).optional().nullable(),
+    lrNumber: z.string().max(50).optional().nullable(),
+    notes: z.string().max(1000).optional().nullable(),
+    lines: z
+      .array(
+        z.object({
+          itemId: id('an item'),
+          qty: z.coerce.number().positive('Enter how much is going back').max(9_999_999),
+          notes: z.string().max(200).optional().nullable(),
+        }),
+      )
+      .min(1, 'Add at least one item'),
+  })
+  .superRefine((data, ctx) => {
+    if (data.reason === 'OTHER' && !data.notes?.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['notes'], message: 'Say why it is going back' })
+    }
+    const seen = new Set<string>()
+    data.lines.forEach((line, i) => {
+      if (seen.has(line.itemId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'itemId'],
+          message: 'This item is already on the return. Put the whole quantity on one line.',
+        })
+      }
+      seen.add(line.itemId)
+    })
+  })
+
+export const cancelCustomerReturnSchema = z.object({
+  reason: z
+    .string()
+    .min(5, 'Say why the return is being cancelled — one line is enough')
+    .max(500),
+})
+
 /**
  * Our own fabric leaving for an outside unit.
  *

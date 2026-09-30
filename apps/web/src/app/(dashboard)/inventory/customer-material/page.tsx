@@ -6,11 +6,12 @@ import Link from 'next/link'
 import {
   Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, FileSpreadsheet, CalendarDays,
   List, LayoutDashboard, FileText, Boxes, AlertTriangle, Users, Warehouse as WarehouseIcon, PackageCheck,
-  LineChart, Target, PieChart as PieIcon,
+  LineChart, Target, PieChart as PieIcon, Undo2, Printer,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { CustomerMaterialDialog } from '@/components/inventory/CustomerMaterialDialog'
 import { ImportCustomerMaterialDialog } from '@/components/inventory/ImportCustomerMaterialDialog'
+import { CustomerReturnDialog } from '@/components/inventory/CustomerReturnDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
@@ -88,6 +89,46 @@ interface HeldRow {
   departmentName: string | null
 }
 
+/** One item on a return to the customer. */
+interface ReturnRow {
+  id: string
+  returnId: string
+  returnNumber: string
+  returnDate: string
+  reason: string
+  reasonLabel: string
+  grnNumber: string | null
+  vehicleNo: string | null
+  transporter: string | null
+  lrNumber: string | null
+  notes: string | null
+  cancelledAt: string | null
+  cancelReason: string | null
+  customerId: string
+  customerName: string
+  warehouseId: string
+  warehouseName: string
+  createdByName: string | null
+  lineCount: number
+  itemId: string
+  itemCode: string
+  itemName: string
+  uom: string
+  hsnCode: string | null
+  mainCategoryId: string
+  mainCategoryName: string
+  subCategoryName: string | null
+  departmentId: string | null
+  departmentName: string | null
+  qty: number
+  lineNotes: string | null
+}
+
+/** Receipts and returns share the fields the filters read, so one filter row serves both tabs. */
+type AnyRow = LineRow | ReturnRow
+const isReceipt = (r: AnyRow): r is LineRow => 'receivedQty' in r
+const dateOf = (r: AnyRow) => (isReceipt(r) ? r.receiptDate : r.returnDate)
+
 type FilterKey = 'customer' | 'store' | 'category' | 'department' | 'arrival' | 'status'
 
 const arrivalOf = (r: LineRow) =>
@@ -95,21 +136,21 @@ const arrivalOf = (r: LineRow) =>
 
 const ARRIVAL_LABEL: Record<string, string> = { match: 'Matched their challan', short: 'Short', excess: 'More than challan' }
 
-const valueOf: Record<FilterKey, (r: LineRow) => string> = {
+const valueOf: Record<FilterKey, (r: AnyRow) => string> = {
   customer: (r) => r.customerId,
   store: (r) => r.warehouseId,
   category: (r) => r.mainCategoryId,
   department: (r) => r.departmentId ?? 'none',
-  arrival: arrivalOf,
+  arrival: (r) => (isReceipt(r) ? arrivalOf(r) : 'n/a'),
   status: (r) => (r.cancelledAt ? 'cancelled' : 'active'),
 }
 
-const FILTERS: Array<{ key: FilterKey; label: string; labelOf: (r: LineRow) => string; noneLabel?: string }> = [
+const FILTERS: Array<{ key: FilterKey; label: string; labelOf: (r: AnyRow) => string; noneLabel?: string }> = [
   { key: 'customer', label: 'Customer', labelOf: (r) => r.customerName },
   { key: 'store', label: 'Store', labelOf: (r) => r.warehouseName },
   { key: 'category', label: 'Category', labelOf: (r) => r.mainCategoryName },
   { key: 'department', label: 'Department', labelOf: (r) => r.departmentName ?? '', noneLabel: 'No department' },
-  { key: 'arrival', label: 'Arrival', labelOf: (r) => ARRIVAL_LABEL[arrivalOf(r)] },
+  { key: 'arrival', label: 'Arrival', labelOf: (r) => (isReceipt(r) ? ARRIVAL_LABEL[arrivalOf(r)] : '') },
   { key: 'status', label: 'Status', labelOf: (r) => (r.cancelledAt ? 'Cancelled' : 'Active') },
 ]
 
@@ -154,23 +195,25 @@ const PRESETS = [
 
 const PAGE = 50
 
-type View = 'receipts' | 'dashboard'
+type View = 'receipts' | 'returns' | 'dashboard'
 
 function CustomerMaterialScreen() {
   const params = useSearchParams()
   const router = useRouter()
   const pathname = usePathname()
-  const view: View = params.get('view') === 'dashboard' ? 'dashboard' : 'receipts'
+  const view: View = params.get('view') === 'dashboard' ? 'dashboard' : params.get('view') === 'returns' ? 'returns' : 'receipts'
   const setView = (v: View) => {
     const next = new URLSearchParams(params.toString())
-    if (v === 'dashboard') next.set('view', 'dashboard')
-    else next.delete('view')
+    if (v === 'receipts') next.delete('view')
+    else next.set('view', v)
     const qs = next.toString()
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
   }
 
   const [rows, setRows] = useState<LineRow[]>([])
   const [held, setHeld] = useState<HeldRow[]>([])
+  const [returns, setReturns] = useState<ReturnRow[]>([])
+  const [returning, setReturning] = useState<null | { customerId: string; warehouseId: string; itemId?: string }>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -192,10 +235,14 @@ function CustomerMaterialScreen() {
     setLoading(true)
     setError(null)
     try {
-      const res = await api.get<{ data: LineRow[]; held: HeldRow[] }>('/inventory/customer-grn/lines')
+      const [res, back] = await Promise.all([
+        api.get<{ data: LineRow[]; held: HeldRow[] }>('/inventory/customer-grn/lines'),
+        api.get<{ data: ReturnRow[] }>('/inventory/customer-return/lines'),
+      ])
       if (id !== latest.current) return
       setRows(res.data)
       setHeld(res.held ?? [])
+      setReturns(back.data)
     } catch (err) {
       if (id !== latest.current) return
       setError(
@@ -220,16 +267,20 @@ function CustomerMaterialScreen() {
 
   const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
   const inPeriod = useCallback(
-    (r: LineRow) => {
-      const d = dayKey(r.receiptDate)
+    (r: AnyRow) => {
+      const d = dayKey(dateOf(r))
       return (!from || d >= from) && (!to || d <= to)
     },
     [from, to],
   )
   const matchesSearch = useCallback(
-    (r: LineRow) => {
+    (r: AnyRow) => {
       if (!words.length) return true
-      const hay = `${r.grnNumber} ${r.challanNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${r.warehouseName} ${r.markings ?? ''} ${r.vehicleNo ?? ''}`.toLowerCase()
+      const hay = (
+        isReceipt(r)
+          ? `${r.grnNumber} ${r.challanNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${r.warehouseName} ${r.markings ?? ''} ${r.vehicleNo ?? ''}`
+          : `${r.returnNumber} ${r.grnNumber ?? ''} ${r.customerName} ${r.itemCode} ${r.itemName} ${r.warehouseName} ${r.reasonLabel} ${r.vehicleNo ?? ''} ${r.lrNumber ?? ''}`
+      ).toLowerCase()
       return words.every((w) => hay.includes(w))
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -238,23 +289,25 @@ function CustomerMaterialScreen() {
 
   /** Whether a row passes every filter except `skip` (a filter never narrows its own counts). */
   const passes = useCallback(
-    (r: LineRow, skip?: FilterKey) =>
+    (r: AnyRow, skip?: FilterKey) =>
       inPeriod(r) &&
       matchesSearch(r) &&
       (Object.entries(picked) as Array<[FilterKey, string[]]>).every(
-        ([k, values]) => k === skip || !values?.length || values.includes(valueOf[k](r)),
+        // Arrival means nothing for a return, so it never hides one.
+        ([k, values]) => k === skip || !values?.length || (k === 'arrival' && !isReceipt(r)) || values.includes(valueOf[k](r)),
       ),
     [picked, matchesSearch, inPeriod],
   )
 
   const shown = useMemo(() => rows.filter((r) => passes(r)), [rows, passes])
+  const shownReturns = useMemo(() => returns.filter((r) => passes(r)), [returns, passes])
 
   const choicesFor = (key: FilterKey): FilterChoice[] | undefined => {
     if (loading && !rows.length) return undefined
     const def = FILTERS.find((f) => f.key === key)!
     const labels = new Map<string, string>()
     const counts = new Map<string, number>()
-    for (const r of rows) {
+    for (const r of (view === 'returns' ? returns : rows) as AnyRow[]) {
       const v = valueOf[key](r)
       if (!labels.has(v)) labels.set(v, v === 'none' ? (def.noneLabel ?? 'Not set') : def.labelOf(r))
       if (passes(r, key)) counts.set(v, (counts.get(v) ?? 0) + 1)
@@ -353,6 +406,37 @@ function CustomerMaterialScreen() {
     setExporting(true)
     try {
       const XLSX = await import('xlsx')
+      if (view === 'returns') {
+        const book = XLSX.utils.book_new()
+        const sheet = XLSX.utils.json_to_sheet(
+          shownReturns.map((r) => ({
+            Return: r.returnNumber,
+            'Returned On': dayKey(r.returnDate),
+            Customer: r.customerName,
+            'Against Receipt': r.grnNumber ?? '',
+            Reason: r.reasonLabel,
+            'From Store': r.warehouseName,
+            'Item Code': r.itemCode,
+            'Item Name': r.itemName,
+            Category: r.mainCategoryName,
+            'Sub Category': r.subCategoryName ?? '',
+            HSN: r.hsnCode ?? '',
+            Qty: r.qty,
+            Unit: r.uom,
+            'Vehicle No': r.vehicleNo ?? '',
+            Transport: r.transporter ?? '',
+            'LR No': r.lrNumber ?? '',
+            Status: r.cancelledAt ? 'Cancelled' : 'Returned',
+            'Cancel Reason': r.cancelReason ?? '',
+            'Returned By': r.createdByName ?? '',
+            Note: [r.notes, r.lineNotes].filter(Boolean).join(' · '),
+          })),
+        )
+        sheet['!cols'] = [14, 12, 26, 15, 26, 20, 14, 30, 18, 18, 10, 10, 7, 13, 16, 12, 10, 26, 18, 30].map((wch) => ({ wch }))
+        XLSX.utils.book_append_sheet(book, sheet, 'Returned To Customers')
+        XLSX.writeFile(book, `customer-returns-${dayKey(new Date())}.xlsx`)
+        return
+      }
       const sheet = XLSX.utils.json_to_sheet(
         shown.map((r) => ({
           Receipt: r.grnNumber,
@@ -484,6 +568,28 @@ function CustomerMaterialScreen() {
 
   const pages = Math.ceil(shown.length / PAGE) || 1
   const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
+  const returnPages = Math.ceil(shownReturns.length / PAGE) || 1
+  const returnPageRows = shownReturns.slice((page - 1) * PAGE, page * PAGE)
+  const liveReturns = shownReturns.filter((r) => !r.cancelledAt)
+
+  const cancelReturn = async (r: ReturnRow) => {
+    const reason = prompt(
+      `Why is ${r.returnNumber} being cancelled?\n\nAll ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'} on it come back onto our racks under ${r.customerName}'s name.`,
+    )
+    if (!reason || reason.trim().length < 5) return
+    setBusy(r.returnId)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.patch<{ message?: string }>(`/inventory/customer-return/${r.returnId}/cancel`, { reason: reason.trim() })
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not cancel it.')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const filterBar = (
     <div className="space-y-2 px-4 py-3">
@@ -543,7 +649,7 @@ function CustomerMaterialScreen() {
             </option>
           ))}
         </select>
-        {FILTERS.filter((f) => f.key !== 'department').map((f) => (
+        {FILTERS.filter((f) => f.key !== 'department' && !(view === 'returns' && f.key === 'arrival')).map((f) => (
           <FilterMenu
             key={f.key}
             label={f.label}
@@ -569,7 +675,7 @@ function CustomerMaterialScreen() {
             Clear all
           </button>
           <span className="ml-auto text-xs text-muted-foreground">
-            {shown.length} of {rows.length} items
+            {view === 'returns' ? `${shownReturns.length} of ${returns.length}` : `${shown.length} of ${rows.length}`} items
           </span>
         </div>
       )}
@@ -585,6 +691,7 @@ function CustomerMaterialScreen() {
           <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
             {([
               { key: 'receipts', label: 'Receipts', icon: List },
+              { key: 'returns', label: 'Returns', icon: Undo2 },
               { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
             ] as const).map((t) => (
               <button
@@ -612,10 +719,18 @@ function CustomerMaterialScreen() {
           <button
             className="btn-secondary"
             onClick={() => void exportRows()}
-            disabled={exporting || shown.length === 0}
+            disabled={exporting || (view === 'returns' ? shownReturns.length === 0 : shown.length === 0)}
             title={narrowed ? 'Export the rows the filters leave' : 'Export every row'}
           >
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => setReturning({ customerId: '', warehouseId: '' })}
+            disabled={!held.length}
+            title={held.length ? "Send a customer's material back to them" : 'No customer material with us to return'}
+          >
+            <Undo2 size={15} /> Return material
           </button>
           <button className="btn-primary" onClick={() => setDialog(true)}>
             <Plus size={15} /> Receive material
@@ -794,6 +909,141 @@ function CustomerMaterialScreen() {
         </>
       )}
 
+      {view === 'returns' && (
+        <>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <KpiTile
+              icon={Undo2}
+              tone={TONE.teal}
+              label="Returns"
+              value={String(new Set(liveReturns.map((r) => r.returnId)).size)}
+              sub={`${new Set(liveReturns.map((r) => r.customerId)).size} ${new Set(liveReturns.map((r) => r.customerId)).size === 1 ? 'customer' : 'customers'}${narrowed ? ' · click to show all' : ''}`}
+              onClick={clearAll}
+              title="Clear every filter"
+            />
+            <KpiTile icon={Boxes} tone={TONE.blue} label="Items returned" value={String(liveReturns.length)} sub="one row each below" />
+            <KpiTile
+              icon={PackageCheck}
+              tone={TONE.sky}
+              label="Still with us"
+              value={String(held.length)}
+              sub="item and store together · see the dashboard"
+            />
+            <KpiTile
+              icon={Ban}
+              tone={TONE.rose}
+              label="Cancelled"
+              value={String(new Set(shownReturns.filter((r) => r.cancelledAt).map((r) => r.returnId)).size)}
+              sub={isSet('status', ['cancelled']) ? 'showing only these · click to show all' : 'returns taken back'}
+              onClick={() => toggleTo('status', ['cancelled'])}
+              active={isSet('status', ['cancelled'])}
+            />
+          </div>
+
+          <div className="glass-card overflow-hidden p-0">
+            {loading && !returns.length ? (
+              <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
+            ) : shownReturns.length === 0 ? (
+              <div className="px-4 py-10 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {narrowed
+                    ? 'Nothing matches that.'
+                    : "Nothing returned yet. When a customer's material goes back to them unworked, send it with Return material."}
+                </p>
+              </div>
+            ) : (
+              <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`}>
+                <table className="data-table w-full [&>tbody>tr>td]:px-2.5 [&>thead>tr>th]:px-2.5">
+                  <thead>
+                    <tr>
+                      <th>Return</th>
+                      <th>Customer</th>
+                      <th>Why</th>
+                      <th>From store</th>
+                      <th>Code</th>
+                      <th>Item</th>
+                      <th>Category</th>
+                      <th>HSN</th>
+                      <th style={{ textAlign: 'right' }}>Qty</th>
+                      <th>Vehicle</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {returnPageRows.map((r) => (
+                      <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined}>
+                        <td className="whitespace-nowrap">
+                          <div className="font-mono text-xs text-foreground">{r.returnNumber}</div>
+                          <div className="text-[10px] text-muted-foreground" title={r.createdByName ? `By ${r.createdByName}` : undefined}>
+                            {formatDate(r.returnDate)}
+                          </div>
+                        </td>
+                        <td className="min-w-[120px] text-sm">
+                          {r.customerName}
+                          {r.grnNumber && <div className="text-[10px] text-sky-400">against {r.grnNumber}</div>}
+                        </td>
+                        <td className="max-w-[180px] text-xs" title={r.notes ?? undefined}>
+                          {r.reasonLabel}
+                          {r.notes && <div className="truncate text-[10px] text-muted-foreground">{r.notes}</div>}
+                        </td>
+                        <td className="min-w-[90px] text-xs">{r.warehouseName}</td>
+                        <td className="whitespace-nowrap font-mono text-xs text-teal-500">{r.itemCode}</td>
+                        <td className="min-w-[150px]">
+                          <Link href={`/inventory/stock/${r.itemId}`} className="text-sm font-medium text-foreground hover:text-teal-400">
+                            {r.itemName}
+                          </Link>
+                          {r.lineNotes && <div className="text-[10px] text-muted-foreground">{r.lineNotes}</div>}
+                        </td>
+                        <td className="text-xs">{r.mainCategoryName}</td>
+                        <td className="font-mono text-xs text-muted-foreground">{r.hsnCode ?? '—'}</td>
+                        <td className="whitespace-nowrap text-right font-semibold tabular-nums">
+                          {qtyFmt(r.qty)} <span className="text-xs font-normal text-muted-foreground">{r.uom}</span>
+                        </td>
+                        <td className="whitespace-nowrap text-xs">
+                          {r.vehicleNo ?? <span className="text-muted-foreground">—</span>}
+                          {r.lrNumber && <div className="text-[10px] text-muted-foreground">LR {r.lrNumber}</div>}
+                        </td>
+                        <td className="whitespace-nowrap">
+                          <div className="flex items-center gap-1">
+                            {r.cancelledAt ? <span className="badge-neutral">Cancelled</span> : <span className="badge-success">Returned</span>}
+                            <Link
+                              href={`/print/customer-return/${r.returnId}`}
+                              className="btn-ghost inline-flex p-1.5 text-muted-foreground hover:text-teal-400"
+                              title="Print the delivery challan"
+                              aria-label={`Print ${r.returnNumber}`}
+                            >
+                              <Printer size={15} />
+                            </Link>
+                            {!r.cancelledAt && (
+                              <button
+                                type="button"
+                                className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
+                                onClick={() => void cancelReturn(r)}
+                                disabled={busy === r.returnId}
+                                title={`Cancel ${r.returnNumber} (all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'})`}
+                                aria-label={`Cancel ${r.returnNumber}`}
+                              >
+                                {busy === r.returnId ? <Loader2 size={15} className="animate-spin" /> : <Ban size={15} />}
+                              </button>
+                            )}
+                          </div>
+                          {r.cancelReason && (
+                            <div className="max-w-[160px] truncate text-[10px] text-muted-foreground" title={r.cancelReason}>
+                              {r.cancelReason}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <Pagination page={page} pages={returnPages} onPageChange={setPage} />
+          </div>
+        </>
+      )}
+
       {view === 'dashboard' && (
         <>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
@@ -810,7 +1060,7 @@ function CustomerMaterialScreen() {
               tone={TONE.blue}
               label="Received"
               value={String(live.length)}
-              sub={`items on ${new Set(live.map((r) => r.receiptId)).size} receipts`}
+              sub={`items on ${new Set(live.map((r) => r.receiptId)).size} receipts · ${liveReturns.length} returned`}
             />
             <KpiTile
               icon={AlertTriangle}
@@ -877,6 +1127,7 @@ function CustomerMaterialScreen() {
                       <th>Store</th>
                       <th style={{ textAlign: 'right' }}>Still here</th>
                       <th>Last moved</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
@@ -895,6 +1146,16 @@ function CustomerMaterialScreen() {
                           <td className="whitespace-nowrap text-xs text-muted-foreground">
                             {h.lastMovedAt ? formatDate(h.lastMovedAt) : '—'}
                           </td>
+                          <td className="text-right">
+                            <button
+                              type="button"
+                              className="btn-ghost inline-flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-teal-400"
+                              onClick={() => setReturning({ customerId: h.customerId, warehouseId: h.warehouseId, itemId: h.itemId })}
+                              title={`Send this back to ${h.customerName}`}
+                            >
+                              <Undo2 size={14} /> Return
+                            </button>
+                          </td>
                         </tr>
                       ))}
                   </tbody>
@@ -911,6 +1172,20 @@ function CustomerMaterialScreen() {
           onSaved={(msg) => {
             setDialog(false)
             setMessage(msg)
+            void load()
+          }}
+        />
+      )}
+      {returning && (
+        <CustomerReturnDialog
+          held={held.map((h) => ({ ...h, customerName: h.customerName ?? 'Customer' }))}
+          receipts={[...new Map(rows.filter((r) => !r.cancelledAt).map((r) => [r.receiptId, { id: r.receiptId, grnNumber: r.grnNumber, customerId: r.customerId, date: r.receiptDate }])).values()]}
+          start={returning.customerId ? returning : undefined}
+          onClose={() => setReturning(null)}
+          onSaved={(msg) => {
+            setReturning(null)
+            setMessage(msg)
+            setView('returns')
             void load()
           }}
         />
