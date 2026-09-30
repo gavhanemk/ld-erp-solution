@@ -1,10 +1,9 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, PackageCheck, Package, ShoppingCart, Warehouse, Info, History } from 'lucide-react'
+import { Loader2, PackageCheck, Info, History, ChevronDown, ChevronRight } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
-import { Section } from '@/components/purchase/Section'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -112,6 +111,7 @@ export function FulfilDialog({
   const [stock, setStock] = useState<StockRow[]>([])
   const [handovers, setHandovers] = useState<Handover[]>([])
   const [events, setEvents] = useState<TrailEvent[]>([])
+  const [showHistory, setShowHistory] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -296,15 +296,26 @@ export function FulfilDialog({
     </button>
   )
 
-  const doing =
-    summary && (summary.issueLines || summary.buyChanges)
-      ? [
-          summary.issueLines ? `hand over ${summary.issueLines} ${summary.issueLines === 1 ? 'line' : 'lines'}` : null,
-          summary.buyChanges ? `put ${summary.buyLines} ${summary.buyLines === 1 ? 'line' : 'lines'} on the indent` : null,
-        ]
-          .filter(Boolean)
-          .join(' and ')
-      : null
+  /** What Confirm will do, in words: "Hand over 500 mtr Interlining from Trims · buy 500 mtr". */
+  const doing = (() => {
+    if (!mr || !summary) return null
+    const parts: string[] = []
+    for (const l of mr.lines) {
+      const unit = l.item.uom.symbol
+      const giving = issuingOf(l)
+      if (giving > 0) {
+        const from = storesFor(l)
+          .filter((st) => num(issue[l.id]?.[st.id] ?? '') > 0)
+          .map((st) => st.name)
+          .join(' + ')
+        parts.push(`hand over ${fmt(giving)} ${unit} ${l.item.name} from ${from}`)
+      }
+      const b = num(buy[l.id] ?? '0')
+      const was = boughtOf(l)?.buyQty ?? 0
+      if (Math.abs(b - was) > 1e-9) parts.push(b > 0 ? `set ${fmt(b)} ${unit} ${l.item.name} to buy` : `stop buying ${l.item.name}`)
+    }
+    return parts.length ? parts.join(' · ') : null
+  })()
 
   return (
     <FormFrame
@@ -322,7 +333,7 @@ export function FulfilDialog({
           Cancel
         </button>
       }
-      footerNote={doing ? `Confirm will ${doing}.` : 'Enter what to hand over from each store, and how much to buy.'}
+      footerNote={doing ? `Confirm will ${doing}.` : 'Nothing changed yet. Enter what to hand over, or change what to buy.'}
       error={error}
       onClose={onClose}
       busy={saving}
@@ -349,7 +360,7 @@ export function FulfilDialog({
             const issued = Number(l.issuedQty)
             const owed = owedOf(l)
             const stores = storesFor(l)
-            const available = r3(stores.reduce((t, s) => t + s.qty, 0))
+            const available = r3(stores.reduce((t, st) => t + st.qty, 0))
             const giving = issuingOf(l)
             const shortAfter = r3(Math.max(0, owed - giving))
             const theirs = l.ownership === 'CUSTOMER_OWNED'
@@ -364,279 +375,253 @@ export function FulfilDialog({
                   : available > 0
                     ? { cls: 'badge-warning', text: 'Part in stock' }
                     : { cls: 'badge-danger', text: 'Not in stock' }
+            // The bar: handed over (green), then planned to buy (blue), out of what was asked.
+            const pct = (v: number) => `${Math.max(0, Math.min(100, asked ? (v / asked) * 100 : 0))}%`
+            const plannedBuy = Math.min(Math.max(0, (was?.buyQty ?? 0) - (was?.receivedQty ?? 0)), owed)
+            const figures = [
+              { label: 'Asked', value: asked, tone: 'text-foreground' },
+              { label: 'Handed over', value: issued, tone: 'text-emerald-600 dark:text-emerald-400' },
+              { label: 'To buy', value: was?.buyQty ?? 0, tone: 'text-sky-600 dark:text-sky-400' },
+              { label: 'Still owed', value: owed, tone: owed ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground' },
+            ]
             return (
-              <Section
-                key={l.id}
-                icon={Package}
-                title={`${l.item.name}`}
-                actions={
+              <section key={l.id} className="overflow-hidden rounded-xl border border-border bg-card">
+                {/* Which item, in one line, with the rest as small print. */}
+                <header className="flex flex-wrap items-start justify-between gap-2 border-b border-border px-4 py-3">
+                  <div className="min-w-0">
+                    <h3 className="text-[15px] font-semibold text-foreground">{l.item.name}</h3>
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                      <span className="font-mono">{l.item.code}</span>
+                      {cat && <> · {cat.parent ? `${cat.parent.name} › ${cat.name}` : cat.name}</>} · asked of {l.warehouse.name}
+                      {l.purpose && <> · for {l.purpose}</>}
+                    </p>
+                  </div>
                   <div className="flex items-center gap-2">
                     {theirs && <span className="badge-info">{l.ownerCustomer?.name ?? 'Customer'}&apos;s material</span>}
                     <span className={status.cls}>{status.text}</span>
                   </div>
-                }
-              >
-                {/* The line in figures. */}
-                <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4 lg:grid-cols-7">
-                  {[
-                    ['Code', <span key="c" className="font-mono">{l.item.code}</span>],
-                    ['Category', `${cat?.parent?.name ?? cat?.name ?? '—'}${cat?.parent ? ` › ${cat.name}` : ''}`],
-                    ['Asked of', l.warehouse.name],
-                    ['What for', l.purpose ?? '—'],
-                    ['Asked', `${fmt(asked)} ${unit}`],
-                    ['Handed over', issued ? `${fmt(issued)} ${unit}` : '—'],
-                    ['Still owed', <span key="o" className={owed ? 'font-semibold text-amber-600 dark:text-amber-400' : ''}>{owed ? `${fmt(owed)} ${unit}` : '—'}</span>],
-                  ].map(([label, value]) => (
-                    <div key={String(label)} className="min-w-0">
-                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-                      <div className="truncate text-foreground">{value}</div>
-                    </div>
-                  ))}
-                </div>
+                </header>
 
-                {(() => {
-                  // This line's hand-overs: same item, same owner.
-                  const given = handovers.filter(
-                    (h) =>
-                      h.itemId === l.item.id &&
-                      (theirs ? h.ownership === 'CUSTOMER_OWNED' && h.ownerCustomerId === l.ownerCustomer?.id : h.ownership === 'OWNED'),
-                  )
-                  const orders = was?.orders ?? []
-                  if (!given.length && !orders.length && !(was && was.buyQty > 0)) return null
-                  return (
-                    <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2">
-                      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
-                        <History size={12} className="text-muted-foreground" /> So far
-                      </div>
-                      <ul className="space-y-0.5 text-[11px] text-muted-foreground">
-                        {given.map((h, n) => (
-                          <li key={`h${n}`}>
-                            <span className="tabular-nums text-foreground">{when(h.at)}</span> · handed over{' '}
-                            <b className="font-semibold text-emerald-600 dark:text-emerald-400">
-                              {fmt(h.qty)} {unit}
-                            </b>{' '}
-                            from {h.warehouseName}
-                          </li>
-                        ))}
-                        {was && was.buyQty > 0 && (
-                          <li>
-                            On the indent for the buyer:{' '}
-                            <b className="font-semibold text-sky-600 dark:text-sky-400">
-                              {fmt(was.buyQty)} {unit}
-                            </b>
-                            {!orders.length && ' · not ordered yet'}
-                          </li>
-                        )}
-                        {orders.map((o) => (
-                          <li key={o.poId}>
-                            <span className="tabular-nums text-foreground">{formatDate(o.poDate)}</span> · ordered{' '}
-                            <b className="font-semibold text-foreground">
-                              {fmt(o.qty)} {unit}
-                            </b>{' '}
-                            on{' '}
-                            <a href={`/print/purchase-order/${o.poId}`} target="_blank" rel="noreferrer" className="font-mono text-teal-500 hover:underline">
-                              {o.poNumber}
-                            </a>
-                            {o.receivedQty > 0 ? ` · ${fmt(o.receivedQty)} received` : ' · not received yet'}
-                          </li>
-                        ))}
-                      </ul>
+                <div className="space-y-4 px-4 py-3">
+                  {/* Where the line stands: four numbers and one bar. */}
+                  <div>
+                    <div className="grid grid-cols-4 gap-3">
+                      {figures.map((f) => (
+                        <div key={f.label}>
+                          <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{f.label}</div>
+                          <div className={`text-lg font-semibold tabular-nums ${f.tone}`}>
+                            {f.value ? fmt(f.value) : '—'} {f.value ? <span className="text-xs font-normal text-muted-foreground">{unit}</span> : null}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  )
-                })()}
-
-                <div className="grid gap-4 lg:grid-cols-5">
-                  {/* Hand over now, from any rack that has it. */}
-                  <div className="lg:col-span-3">
-                    <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                      <Warehouse size={13} className="text-muted-foreground" /> Hand over now
-                      <span className="font-normal text-muted-foreground">
-                        · {fmt(available)} {unit} {theirs ? 'of theirs' : 'of ours'} in {stores.filter((s) => s.qty > 0).length || 'no'}{' '}
-                        {stores.filter((s) => s.qty > 0).length === 1 ? 'store' : 'stores'}
-                      </span>
+                    <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-secondary">
+                      <div className="bg-emerald-500" style={{ width: pct(issued) }} title={`Handed over ${fmt(issued)} ${unit}`} />
+                      <div className="bg-sky-400" style={{ width: pct(plannedBuy) }} title={`To buy ${fmt(plannedBuy)} ${unit}`} />
                     </div>
-                    <table className="subtable w-full rounded-lg border border-border">
-                      <thead>
-                        <tr>
-                          <th>Store</th>
-                          <th className="text-right">Available</th>
-                          <th className="text-right" style={{ width: '9rem' }}>
-                            Issue now
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {stores.map((s) => {
-                          const v = issue[l.id]?.[s.id] ?? ''
-                          const over = num(v) > s.qty + 1e-9
-                          return (
-                            <tr key={s.id}>
-                              <td className="text-xs">
-                                {s.name}
-                                {s.id === l.warehouse.id && <span className="ml-1.5 text-[10px] text-muted-foreground">(asked of)</span>}
-                              </td>
-                              <td className={`text-right text-xs tabular-nums ${s.qty ? '' : 'text-muted-foreground'}`}>
-                                {fmt(s.qty)} {unit}
-                              </td>
-                              <td className="text-right">
-                                <div className="relative ml-auto w-32">
-                                  <input
-                                    className={`form-input h-8 pr-9 text-right text-xs tabular-nums ${over ? 'border-red-500' : ''}`}
-                                    inputMode="decimal"
-                                    value={v}
-                                    placeholder="0"
-                                    onChange={(e) => setIssue((p) => ({ ...p, [l.id]: { ...(p[l.id] ?? {}), [s.id]: e.target.value } }))}
-                                    disabled={!canIssue || s.qty <= 0 || owed <= 0}
-                                    aria-label={`Issue ${l.item.name} from ${s.name}`}
-                                  />
-                                  <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">
-                                    {unit}
-                                  </span>
-                                </div>
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                      <tfoot>
-                        <tr>
-                          <td className="text-xs font-semibold">Handing over now</td>
-                          <td />
-                          <td className={`text-right text-xs font-semibold tabular-nums ${giving > owed + 1e-9 ? 'text-red-500' : ''}`}>
-                            {fmt(giving)} of {fmt(owed)} {unit}
-                          </td>
-                        </tr>
-                      </tfoot>
-                    </table>
-                    {stores.length > 1 && (
-                      <p className="mt-1 text-[10px] text-muted-foreground">
-                        Stock from another store goes straight to the department; the ledger records which rack it left.
-                      </p>
-                    )}
                   </div>
 
-                  {/* What to buy. */}
-                  <div className="lg:col-span-2">
-                    <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                      <ShoppingCart size={13} className="text-muted-foreground" /> Buy (indent)
-                    </div>
-                    {theirs ? (
-                      <p className="rounded-lg border border-border bg-secondary/40 p-3 text-xs text-muted-foreground">
-                        This is {l.ownerCustomer?.name ?? 'the customer'}&apos;s material, so it is never bought. If theirs is short, ask them to send
-                        the rest.
-                      </p>
-                    ) : (
-                      <div className="space-y-2 rounded-lg border border-border bg-secondary/40 p-3">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-muted-foreground">Still short after this</span>
-                          <span className={`font-semibold tabular-nums ${shortAfter ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                            {shortAfter ? `${fmt(shortAfter)} ${unit}` : 'nothing'}
+                  {owed <= 0 ? (
+                    <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400">
+                      Everything asked for has been handed over.
+                    </p>
+                  ) : (
+                    <div className="grid gap-4 lg:grid-cols-5">
+                      {/* Step 1: hand over now, from any rack that has it. */}
+                      <div className="lg:col-span-3">
+                        <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                          <h4 className="text-sm font-semibold text-foreground">
+                            <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] text-primary">1</span>
+                            Hand over now
+                          </h4>
+                          <span className="text-[11px] text-muted-foreground">
+                            {available ? `${fmt(available)} ${unit} ${theirs ? 'of theirs ' : ''}in stock` : 'none in stock'}
                           </span>
                         </div>
-                        <div className="relative">
-                          <input
-                            className="form-input h-9 pr-10 text-right tabular-nums"
-                            inputMode="decimal"
-                            value={buy[l.id] ?? ''}
-                            onChange={(e) => setBuy((p) => ({ ...p, [l.id]: e.target.value }))}
-                            aria-label={`Quantity to buy of ${l.item.name}`}
-                          />
-                          <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{unit}</span>
+                        <div className="overflow-hidden rounded-lg border border-border">
+                          <table className="w-full text-sm">
+                            <thead className="bg-secondary text-[10px] uppercase tracking-wider text-muted-foreground">
+                              <tr>
+                                <th className="px-3 py-1.5 text-left font-semibold">Store</th>
+                                <th className="px-3 py-1.5 text-right font-semibold">Has</th>
+                                <th className="px-3 py-1.5 text-right font-semibold" style={{ width: '9rem' }}>
+                                  Give
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {stores.map((st) => {
+                                const v = issue[l.id]?.[st.id] ?? ''
+                                const over = num(v) > st.qty + 1e-9
+                                return (
+                                  <tr key={st.id} className="border-t border-border">
+                                    <td className="px-3 py-1.5 text-xs text-foreground">
+                                      {st.name}
+                                      {st.id === l.warehouse.id && <span className="ml-1 text-[10px] text-muted-foreground">(asked)</span>}
+                                    </td>
+                                    <td className={`px-3 py-1.5 text-right text-xs tabular-nums ${st.qty ? 'text-foreground' : 'text-muted-foreground'}`}>
+                                      {fmt(st.qty)}
+                                    </td>
+                                    <td className="px-3 py-1">
+                                      <div className="relative ml-auto w-32">
+                                        <input
+                                          className={`form-input h-8 pr-9 text-right text-xs tabular-nums ${over ? 'border-red-500' : ''}`}
+                                          inputMode="decimal"
+                                          value={v}
+                                          placeholder="0"
+                                          onChange={(e) => setIssue((p) => ({ ...p, [l.id]: { ...(p[l.id] ?? {}), [st.id]: e.target.value } }))}
+                                          disabled={!canIssue || st.qty <= 0}
+                                          aria-label={`Issue ${l.item.name} from ${st.name}`}
+                                        />
+                                        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">{unit}</span>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            </tbody>
+                          </table>
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {[
-                            { label: `Just the shortfall · ${fmt(shortAfter)}`, v: shortAfter },
-                            { label: `The whole line · ${fmt(asked)}`, v: asked },
-                            { label: was?.orderedQty ? `Only what is ordered · ${fmt(was.orderedQty)}` : 'Nothing', v: was?.orderedQty ?? 0 },
-                          ].map((c) => (
-                            <button
-                              key={c.label}
-                              type="button"
-                              className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
-                                Math.abs(buyNow - c.v) < 1e-9 ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground'
-                              }`}
-                              onClick={() => setBuy((p) => ({ ...p, [l.id]: String(c.v) }))}
-                            >
-                              {c.label}
-                            </button>
-                          ))}
+                        <p className={`mt-1 text-[11px] ${giving > owed + 1e-9 ? 'text-red-500' : 'text-muted-foreground'}`}>
+                          Giving {fmt(giving)} of the {fmt(owed)} {unit} still owed.
+                        </p>
+                      </div>
+
+                      {/* Step 2: what to buy. */}
+                      <div className="lg:col-span-2">
+                        <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                          <h4 className="text-sm font-semibold text-foreground">
+                            <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] text-primary">2</span>
+                            Buy
+                          </h4>
+                          {!theirs && (
+                            <span className={`text-[11px] ${shortAfter ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                              {shortAfter ? `${fmt(shortAfter)} ${unit} short` : 'nothing short'}
+                            </span>
+                          )}
                         </div>
-                        {buyNow > shortAfter + 1e-9 && (
-                          <p className="text-[11px] text-sky-600 dark:text-sky-400">
-                            {fmt(r3(buyNow - shortAfter))} {unit} more than is short: the extra goes into stock when it arrives.
+                        {theirs ? (
+                          <p className="rounded-lg border border-border bg-secondary/40 p-3 text-xs text-muted-foreground">
+                            {l.ownerCustomer?.name ?? 'The customer'}&apos;s material is never bought. If it is short, ask them to send the rest.
                           </p>
-                        )}
-                        {buyNow > 0 && buyNow + 1e-9 < shortAfter && (
-                          <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                            {fmt(r3(shortAfter - buyNow))} {unit} would still be owed with nothing planned to cover it.
-                          </p>
-                        )}
-                        {was && (was.orderedQty > 0 || was.buyQty > 0) && (
-                          <p className="text-[11px] text-muted-foreground">
-                            On the indent now: {fmt(was.buyQty)} {unit}
-                            {was.orderedQty > 0 && (
-                              <>
-                                {' '}
-                                · ordered {fmt(was.orderedQty)}
-                                {was.poNumbers.length ? ` on ${was.poNumbers.join(', ')}` : ''}
-                              </>
-                            )}
-                            {was.receivedQty > 0 && <> · received {fmt(was.receivedQty)}</>}
-                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="relative">
+                              <input
+                                className="form-input h-9 pr-10 text-right tabular-nums"
+                                inputMode="decimal"
+                                value={buy[l.id] ?? ''}
+                                onChange={(e) => setBuy((p) => ({ ...p, [l.id]: e.target.value }))}
+                                aria-label={`Quantity to buy of ${l.item.name}`}
+                              />
+                              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">{unit}</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {[
+                                { label: `Shortfall ${fmt(shortAfter)}`, v: shortAfter },
+                                { label: `Whole line ${fmt(asked)}`, v: asked },
+                                { label: was?.orderedQty ? `Only ordered ${fmt(was.orderedQty)}` : 'None', v: was?.orderedQty ?? 0 },
+                              ].map((c) => (
+                                <button
+                                  key={c.label}
+                                  type="button"
+                                  className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${
+                                    Math.abs(buyNow - c.v) < 1e-9 ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground'
+                                  }`}
+                                  onClick={() => setBuy((p) => ({ ...p, [l.id]: String(c.v) }))}
+                                >
+                                  {c.label}
+                                </button>
+                              ))}
+                            </div>
+                            {/* One hint at most: the one that matters for this figure. */}
+                            <p className="text-[11px] text-muted-foreground">
+                              {buyNow > shortAfter + 1e-9
+                                ? `${fmt(r3(buyNow - shortAfter))} ${unit} more than is short goes into stock.`
+                                : buyNow > 0 && buyNow + 1e-9 < shortAfter
+                                  ? `${fmt(r3(shortAfter - buyNow))} ${unit} would still be owed.`
+                                  : buyNow > 0
+                                    ? 'Goes on the indent for the buyer.'
+                                    : shortAfter
+                                      ? 'Nothing will be bought.'
+                                      : 'Nothing needs buying.'}
+                              {was?.orderedQty ? ` Ordered ${fmt(was.orderedQty)} on ${was.poNumbers.join(', ')}${was.receivedQty ? `, ${fmt(was.receivedQty)} received` : ''}.` : ''}
+                            </p>
+                          </div>
                         )}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
-              </Section>
+              </section>
             )
           })}
 
-          {events.length > 0 && (
-            <Section icon={History} title="Activity">
-              <ol className="space-y-1.5">
-                {events.map((e, n) => {
-                  const what =
-                    e.action === 'CREATE'
-                      ? 'raised it'
-                      : e.action === 'APPROVE'
-                        ? 'approved it'
-                        : e.action === 'REJECT'
-                          ? 'refused it'
-                          : e.handedOver?.length
-                            ? `handed over ${e.handedOver.join(', ')}`
-                            : e.plan
-                              ? `set what to buy: ${
-                                  e.plan
-                                    .map((p) => {
-                                      const l = mr.lines.find((x) => x.id === p.lineId)
-                                      return l ? `${fmt(p.buyQty)} ${l.item.uom.symbol} ${l.item.name}` : null
-                                    })
-                                    .filter(Boolean)
-                                    .join(', ') || 'nothing'
-                                }`
-                              : e.closeReason
-                                ? `closed it: ${e.closeReason}`
-                                : e.toBuy?.length
-                                  ? `marked ${e.toBuy.join(', ')} to be bought (the whole line)`
-                                  : 'updated it'
-                  return (
-                    <li key={n} className="flex gap-3 text-xs">
-                      <span className="w-28 shrink-0 tabular-nums text-muted-foreground">{when(e.at)}</span>
+          {/* Everything that has happened to it, folded away until wanted. */}
+          {(events.length > 0 || handovers.length > 0) && (
+            <div className="rounded-xl border border-border bg-card">
+              <button
+                type="button"
+                onClick={() => setShowHistory((v) => !v)}
+                className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm font-medium text-foreground hover:bg-secondary/40"
+                aria-expanded={showHistory}
+              >
+                {showHistory ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                <History size={14} className="text-muted-foreground" /> History
+                <span className="text-xs font-normal text-muted-foreground">({events.length})</span>
+              </button>
+              {showHistory && (
+                <ol className="space-y-1.5 border-t border-border px-4 py-3">
+                  {events.map((e, n) => {
+                    const what =
+                      e.action === 'CREATE'
+                        ? 'raised it'
+                        : e.action === 'APPROVE'
+                          ? 'approved it'
+                          : e.action === 'REJECT'
+                            ? 'refused it'
+                            : e.handedOver?.length
+                              ? `handed over ${e.handedOver.join(', ')}`
+                              : e.plan
+                                ? `set to buy ${
+                                    e.plan
+                                      .map((p) => {
+                                        const l = mr.lines.find((x) => x.id === p.lineId)
+                                        return l ? `${fmt(p.buyQty)} ${l.item.uom.symbol} ${l.item.name}` : null
+                                      })
+                                      .filter(Boolean)
+                                      .join(', ') || 'nothing'
+                                  }`
+                                : e.closeReason
+                                  ? `closed it: ${e.closeReason}`
+                                  : e.toBuy?.length
+                                    ? `marked ${e.toBuy.join(', ')} to be bought (the whole line)`
+                                    : 'updated it'
+                    return (
+                      <li key={n} className="flex gap-3 text-xs">
+                        <span className="w-28 shrink-0 tabular-nums text-muted-foreground">{when(e.at)}</span>
+                        <span className="text-foreground">
+                          <b className="font-semibold">{e.who}</b> {what}
+                        </span>
+                      </li>
+                    )
+                  })}
+                  {bought.flatMap((b) => b.orders ?? []).map((o) => (
+                    <li key={o.poId} className="flex gap-3 text-xs">
+                      <span className="w-28 shrink-0 tabular-nums text-muted-foreground">{formatDate(o.poDate)}</span>
                       <span className="text-foreground">
-                        <b className="font-semibold">{e.who}</b> {what}
+                        Ordered {fmt(o.qty)} on{' '}
+                        <a href={`/print/purchase-order/${o.poId}`} target="_blank" rel="noreferrer" className="font-mono text-teal-500 hover:underline">
+                          {o.poNumber}
+                        </a>
+                        {o.receivedQty > 0 ? ` · ${fmt(o.receivedQty)} received` : ' · not received yet'}
                       </span>
                     </li>
-                  )
-                })}
-              </ol>
-            </Section>
+                  ))}
+                </ol>
+              )}
+            </div>
           )}
-
-          <p className="px-1 text-[11px] text-muted-foreground">
-            What is bought appears for the buyer under <b>Select from indent</b> on a new purchase order. When it arrives on a goods receipt,
-            open this requisition again to hand it over.
-          </p>
         </>
       )}
     </FormFrame>
