@@ -12,7 +12,7 @@ import {
  * text takes the surrounding colour through currentColor.
  */
 
-export const PALETTE = ['#14b8a6', '#38bdf8', '#f59e0b', '#a78bfa', '#34d399', '#fb7185', '#818cf8', '#a3e635', '#fb923c', '#22d3ee']
+export const PALETTE = ['#2dd4bf', '#60a5fa', '#a78bfa', '#f472b6', '#fbbf24', '#34d399', '#fb7185', '#818cf8', '#fb923c', '#22d3ee']
 export const IN = '#10b981'
 export const OUT = '#f87171'
 
@@ -29,6 +29,26 @@ const inrAxis = (v: number) => inr(v).replace('.00', '').replace(/\.(\d)\d /, '.
 
 const axis = { fontSize: 11, fill: 'currentColor' }
 const lbl = { fontSize: 10, fontWeight: 600 }
+
+/**
+ * A value above (or below) a mark, on one line, left bare under `floor` so
+ * the small ones do not pile on each other.
+ */
+function valueLabel(colour: string, format: (v: number) => string, floor = 0, below = false) {
+  return function ValueLabel(props: any) {
+    const { x, y, width = 0, height = 0, value } = props
+    const v = Math.abs(Number(value))
+    if (!v || v < floor || x === undefined || y === undefined) return null
+    const cx = Number(x) + Number(width) / 2
+    const top = Math.min(Number(y), Number(y) + Number(height))
+    const bottom = Math.max(Number(y), Number(y) + Number(height))
+    return (
+      <text x={cx} y={below ? bottom + 12 : top - 6} textAnchor="middle" fill={colour} fontSize={10} fontWeight={700}>
+        {format(v)}
+      </text>
+    )
+  }
+}
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function Tip({ active, payload, label, money = true, labelOf }: any) {
@@ -66,10 +86,13 @@ export function FlowChart({ data }: { data: Array<{ day: string; inValue: number
     ...d,
     label: new Date(`${d.day}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
   }))
+  const busy = rows.filter((d) => d.moves).length
+  const labelled = busy <= 20
+  const peak = Math.max(...rows.map((d) => Math.max(d.inValue, d.outValue)))
   return (
     <div className="text-muted-foreground">
       <ResponsiveContainer width="100%" height={260}>
-        <ComposedChart data={rows} margin={{ top: 10, right: 6, left: 0, bottom: 0 }}>
+        <ComposedChart data={rows} margin={{ top: 22, right: 6, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="dIn" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={IN} stopOpacity={0.45} />
@@ -86,9 +109,15 @@ export function FlowChart({ data }: { data: Array<{ day: string; inValue: number
           <YAxis yAxisId="n" orientation="right" tick={axis} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
           <Tooltip content={<Tip />} />
           <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
-          <Bar yAxisId="n" dataKey="moves" name="Movements" fill="#a78bfa" fillOpacity={0.35} radius={[3, 3, 0, 0]} maxBarSize={14} />
-          <Area yAxisId="v" type="monotone" dataKey="inValue" name="Value in" stroke={IN} strokeWidth={2} fill="url(#dIn)" />
-          <Area yAxisId="v" type="monotone" dataKey="outValue" name="Value out" stroke={OUT} strokeWidth={2} fill="url(#dOut)" />
+          <Bar yAxisId="n" dataKey="moves" name="Movements" fill="#a78bfa" fillOpacity={0.35} radius={[3, 3, 0, 0]} maxBarSize={14}>
+            {labelled && <LabelList dataKey="moves" content={valueLabel('#8b5cf6', (v) => `${v}`)} />}
+          </Bar>
+          <Area yAxisId="v" type="monotone" dataKey="inValue" name="Value in" stroke={IN} strokeWidth={2} fill="url(#dIn)" dot={labelled ? { r: 2.5, fill: IN } : false}>
+            {labelled && <LabelList dataKey="inValue" content={valueLabel('#059669', inr, peak * 0.02)} />}
+          </Area>
+          <Area yAxisId="v" type="monotone" dataKey="outValue" name="Value out" stroke={OUT} strokeWidth={2} fill="url(#dOut)">
+            {labelled && <LabelList dataKey="outValue" content={valueLabel('#e11d48', inr, peak * 0.02)} />}
+          </Area>
         </ComposedChart>
       </ResponsiveContainer>
     </div>
@@ -123,6 +152,17 @@ export function StoreDonut({
               isAnimationActive={false}
               cursor="pointer"
               onClick={(d: any) => onPick(d.id)}
+              labelLine={false}
+              label={(p: any) => {
+                if (p.percent < 0.06) return null
+                const r = p.innerRadius + (p.outerRadius - p.innerRadius) / 2
+                const a = (-p.midAngle * Math.PI) / 180
+                return (
+                  <text x={p.cx + r * Math.cos(a)} y={p.cy + r * Math.sin(a)} fill="#fff" fontSize={10} fontWeight={700} textAnchor="middle" dominantBaseline="central">
+                    {Math.round(p.percent * 100)}%
+                  </text>
+                )
+              }}
             >
               {data.map((d, n) => (
                 <Cell key={d.id} fill={PALETTE[n % PALETTE.length]} fillOpacity={active && active !== d.id ? 0.3 : 1} />
@@ -235,6 +275,13 @@ export function AgeingBars({ data }: { data: Array<{ key: string; label: string;
               <Cell key={d.key} fill={AGE_COLOURS[n]} />
             ))}
             <LabelList dataKey="value" position="top" formatter={(v: number) => (v ? inr(v) : '')} style={{ ...lbl, fill: 'currentColor' }} />
+            <LabelList
+              dataKey="lines"
+              position="insideBottom"
+              offset={8}
+              formatter={(v: number) => (v ? `${v} lines` : '')}
+              style={{ fontSize: 9, fontWeight: 700, fill: '#fff' }}
+            />
           </Bar>
         </BarChart>
       </ResponsiveContainer>
@@ -245,23 +292,40 @@ export function AgeingBars({ data }: { data: Array<{ key: string; label: string;
 /** Items by value, largest first, with the running share as a line: the 80% mark is where A ends. */
 export function ParetoChart({ data }: { data: Array<{ code: string; name: string; value: number; cumPct: number; cls: string }> }) {
   if (!data.length) return <Empty h={280} />
-  const colour = { A: '#14b8a6', B: '#38bdf8', C: '#a78bfa' } as Record<string, string>
+  const colour = { A: '#2dd4bf', B: '#60a5fa', C: '#a78bfa' } as Record<string, string>
   return (
     <div className="text-muted-foreground">
       <ResponsiveContainer width="100%" height={280}>
-        <ComposedChart data={data} margin={{ top: 10, right: 6, left: 0, bottom: 0 }}>
+        <ComposedChart data={data} margin={{ top: 18, right: 6, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.12} vertical={false} />
           <XAxis dataKey="code" tick={{ ...axis, fontSize: 9 }} tickLine={false} axisLine={false} interval={0} angle={-40} textAnchor="end" height={52} />
           <YAxis yAxisId="v" tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} width={64} />
           <YAxis yAxisId="p" orientation="right" domain={[0, 100]} tick={axis} tickLine={false} axisLine={false} tickFormatter={(v: number) => `${v}%`} width={38} />
           <Tooltip content={<Tip labelOf={(p: any) => `${p.code} · ${p.name} · class ${p.cls}`} />} cursor={{ fill: 'currentColor', fillOpacity: 0.05 }} />
           <ReferenceLine yAxisId="p" y={80} stroke="#f59e0b" strokeDasharray="4 4" label={{ value: '80%', position: 'insideTopRight', fontSize: 10, fill: '#f59e0b' }} />
-          <Bar yAxisId="v" dataKey="value" name="Value" radius={[3, 3, 0, 0]} maxBarSize={26}>
+          <Bar yAxisId="v" dataKey="value" name="Value" radius={[4, 4, 0, 0]} maxBarSize={26}>
             {data.map((d) => (
               <Cell key={d.code} fill={colour[d.cls]} />
             ))}
+            <LabelList
+              dataKey="value"
+              content={(props: any) => {
+                // The A items only: the few that carry the value are the ones worth reading.
+                if (data[props.index]?.cls !== 'A') return null
+                return valueLabel('currentColor', (v) => inr(v).replace('₹', ''))(props)
+              }}
+            />
           </Bar>
-          <Line yAxisId="p" type="monotone" dataKey="cumPct" name="Running share %" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }} />
+          <Line yAxisId="p" type="monotone" dataKey="cumPct" name="Running share %" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2.5, fill: '#f59e0b' }}>
+            <LabelList
+              dataKey="cumPct"
+              content={(props: any) =>
+                props.index % 3 === 0 || props.index === data.length - 1
+                  ? valueLabel('#d97706', (v) => `${Math.round(v)}%`)({ ...props, width: 0 })
+                  : null
+              }
+            />
+          </Line>
         </ComposedChart>
       </ResponsiveContainer>
     </div>
@@ -295,7 +359,9 @@ export function MixRadar({ data }: { data: Array<{ label: string; moves: number 
           <BarChart data={data}>
             <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} />
             <YAxis tick={axis} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
-            <Bar dataKey="moves" name="Movements" fill="#818cf8" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="moves" name="Movements" fill="#818cf8" radius={[4, 4, 0, 0]}>
+              <LabelList dataKey="moves" position="top" style={{ ...lbl, fill: 'currentColor' }} />
+            </Bar>
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -308,6 +374,7 @@ export function MixRadar({ data }: { data: Array<{ label: string; moves: number 
           <PolarGrid stroke="currentColor" strokeOpacity={0.2} />
           <PolarAngleAxis dataKey="name" tick={{ ...axis, fontSize: 10 }} />
           <PolarRadiusAxis tick={false} axisLine={false} />
+          {/* The counts are in each name round the edge; labels at the points crowded the middle. */}
           <Radar name="Movements" dataKey="moves" stroke="#818cf8" fill="#818cf8" fillOpacity={0.4} dot={{ r: 3, fill: '#818cf8' }} />
           <Tooltip content={<Tip money={false} />} />
         </RadarChart>
@@ -333,7 +400,8 @@ export function DepartmentRings({ data }: { data: Array<{ name: string; value: n
         {[...rows].reverse().map((d) => (
           <div key={d.name} className="flex items-center gap-2 text-[11px]">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: d.fill }} />
-            <span className="w-24 truncate text-foreground">{d.name}</span>
+            <span className="w-20 truncate text-foreground">{d.name}</span>
+            <span className="w-14 text-right font-semibold tabular-nums text-foreground">{inr(d.value)}</span>
             <span className="w-8 text-right tabular-nums text-muted-foreground">{total ? Math.round((d.value / total) * 100) : 0}%</span>
           </div>
         ))}
@@ -343,12 +411,13 @@ export function DepartmentRings({ data }: { data: Array<{ name: string; value: n
 }
 
 /** The items that moved the most value, in and out side by side. */
-export function MoversBars({ data }: { data: Array<{ code: string; name: string; inValue: number; outValue: number; moves: number }> }) {
-  if (!data.length) return <Empty h={260} text="No movement in this period." />
+export function MoversBars({ data: raw }: { data: Array<{ code: string; name: string; inValue: number; outValue: number; moves: number }> }) {
+  if (!raw.length) return <Empty h={260} text="No movement in this period." />
+  const data = raw.map((d) => ({ ...d, tag: `${inr(d.inValue + d.outValue)} · ${d.moves}×` }))
   return (
     <div className="text-muted-foreground">
       <ResponsiveContainer width="100%" height={Math.max(200, data.length * 34 + 30)}>
-        <BarChart data={data} layout="vertical" margin={{ top: 0, right: 46, left: 0, bottom: 0 }}>
+        <BarChart data={data} layout="vertical" margin={{ top: 0, right: 92, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.12} horizontal={false} />
           <XAxis type="number" tick={axis} tickLine={false} axisLine={false} tickFormatter={inrAxis} />
           <YAxis type="category" dataKey="code" tick={{ ...axis, fontSize: 10 }} tickLine={false} axisLine={false} width={96} />
@@ -357,10 +426,20 @@ export function MoversBars({ data }: { data: Array<{ code: string; name: string;
           <Bar dataKey="inValue" name="Value in" stackId="m" fill={IN} barSize={14} />
           <Bar dataKey="outValue" name="Value out" stackId="m" fill={OUT} radius={[0, 4, 4, 0]} barSize={14}>
             <LabelList
-              dataKey="moves"
-              position="right"
-              formatter={(v: number) => `${v}×`}
-              style={{ ...lbl, fill: 'currentColor' }}
+              dataKey="tag"
+              content={(props: any) => (
+                // One line at the end of the bar; the default label wraps to the bar's height.
+                <text
+                  x={Number(props.x) + Number(props.width) + 6}
+                  y={Number(props.y) + Number(props.height) / 2}
+                  dominantBaseline="central"
+                  fontSize={10}
+                  fontWeight={700}
+                  fill="currentColor"
+                >
+                  {props.value}
+                </text>
+              )}
             />
           </Bar>
         </BarChart>
@@ -382,7 +461,7 @@ export function ActivityHeatmap({ data }: { data: Array<{ day: string; moves: nu
   const shade = (n: number) => {
     if (!n) return 'hsl(var(--secondary))'
     const t = n / max
-    return `rgba(20, 184, 166, ${0.25 + t * 0.75})`
+    return `rgba(20, 184, 166, ${0.45 + t * 0.55})`
   }
   const total = data.reduce((t, d) => t + d.moves, 0)
   const busiest = data.reduce((b, d) => (d.moves > b.moves ? d : b), data[0])
@@ -407,10 +486,12 @@ export function ActivityHeatmap({ data }: { data: Array<{ day: string; moves: nu
                 return (
                   <span
                     key={j}
-                    className="h-6 w-full rounded-[4px] transition-transform hover:scale-110"
+                    className="flex h-6 w-full items-center justify-center rounded-[5px] text-[9px] font-bold text-white transition-transform hover:scale-110"
                     style={{ background: c ? shade(c.moves) : 'transparent' }}
                     title={c ? `${new Date(`${c.day}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}: ${c.moves} movements` : undefined}
-                  />
+                  >
+                    {c && c.moves > 0 ? c.moves : ''}
+                  </span>
                 )
               })}
             </div>
