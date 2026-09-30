@@ -649,6 +649,7 @@ export default function RequisitionsPage() {
       {fulfilling && (
         <FulfilDialog
           mrId={fulfilling.id}
+          initial={fulfilling}
           onClose={() => setFulfilling(null)}
           onDone={(msg) => {
             setFulfilling(null)

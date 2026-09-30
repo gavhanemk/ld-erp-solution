@@ -1012,10 +1012,18 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
     })),
   )
 
-  // What has been ordered and received against each line's indent, so the
-  // fulfil window can say what is already on its way.
+  res.json({ success: true, data: { ...mr, available, bought: await boughtFor(mr.lines) } })
+})
+
+/**
+ * What has been ordered and received against each line's indent, so the
+ * fulfil window can say what is already on its way.
+ */
+async function boughtFor(
+  lines: Array<{ id: string; purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }>,
+) {
   const orders = await prisma.purchaseOrderLine.findMany({
-    where: { mrLineId: { in: mr.lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' } } },
+    where: { mrLineId: { in: lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' } } },
     select: {
       mrLineId: true,
       qty: true,
@@ -1023,7 +1031,7 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
       grnLines: { select: { receivedQty: true, grn: { select: { status: true } } } },
     },
   })
-  const bought = mr.lines.map((l) => {
+  return lines.map((l) => {
     const mine = orders.filter((o) => o.mrLineId === l.id)
     return {
       lineId: l.id,
@@ -1038,8 +1046,68 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
       poNumbers: [...new Set(mine.map((o) => o.po.poNumber))],
     }
   })
+}
 
-  res.json({ success: true, data: { ...mr, available, bought } })
+/**
+ * The live figures the fulfil window needs: every store's balance of this
+ * requisition's items, what has been ordered and received against its lines,
+ * and each line's latest issued and buy quantities.
+ *
+ * The window already has the requisition itself from the list, so this reads
+ * only figures, in four small queries sent together. On a remote database
+ * every trip costs close to half a second, and fetching the requisition again
+ * with its people, items and categories was four or five trips in a row.
+ */
+router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
+  const id = req.params.id
+  const [lines, stock, ordered, received] = await Promise.all([
+    prisma.$queryRaw<
+      Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
+    >`
+      SELECT l.id, l."requestedQty"::float8 AS "requestedQty", l."issuedQty"::float8 AS "issuedQty",
+             l."purchaseQty"::float8 AS "purchaseQty", l.fulfilment::text AS fulfilment
+      FROM ld_erp.material_requisition_lines l
+      WHERE l."mrId" = ${id}`,
+    prisma.$queryRaw<
+      Array<{ itemId: string; warehouseId: string; warehouseName: string; ownership: string; ownerCustomerId: string | null; qty: number }>
+    >`
+      SELECT s."itemId", s."warehouseId", w.name AS "warehouseName", s."ownership"::text AS "ownership",
+             s."ownerCustomerId", SUM(s."inQty" - s."outQty")::float8 AS "qty"
+      FROM ld_erp.stock_ledger s
+      JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
+      WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+      GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
+      HAVING SUM(s."inQty" - s."outQty") > 0`,
+    // Cancelled orders have bought nothing.
+    prisma.$queryRaw<Array<{ mrLineId: string; qty: number; poNumbers: string[] }>>`
+      SELECT pol."mrLineId", SUM(pol.qty)::float8 AS "qty", ARRAY_AGG(DISTINCT po."poNumber") AS "poNumbers"
+      FROM ld_erp.purchase_order_lines pol
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND po.status::text <> 'CANCELLED'
+      GROUP BY pol."mrLineId"`,
+    // Cancelled receipts booked nothing in.
+    prisma.$queryRaw<Array<{ mrLineId: string; qty: number }>>`
+      SELECT pol."mrLineId", SUM(gl."receivedQty")::float8 AS "qty"
+      FROM ld_erp.grn_lines gl
+      JOIN ld_erp.grn g ON g.id = gl."grnId"
+      JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND po.status::text <> 'CANCELLED' AND g.status::text <> 'CANCELLED'
+      GROUP BY pol."mrLineId"`,
+  ])
+  if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+  const bought = lines.map((l) => ({
+    lineId: l.id,
+    buyQty: l.purchaseQty !== null ? l.purchaseQty : l.fulfilment === 'PURCHASE' ? l.requestedQty : 0,
+    orderedQty: round3(ordered.find((o) => o.mrLineId === l.id)?.qty ?? 0),
+    receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
+    poNumbers: ordered.find((o) => o.mrLineId === l.id)?.poNumbers ?? [],
+  }))
+
+  res.json({ success: true, data: { lines, bought, stock } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {

@@ -71,14 +71,17 @@ const num = (v: string) => (v.trim() === '' ? 0 : Number(v))
 
 export function FulfilDialog({
   mrId,
+  initial,
   onClose,
   onDone,
 }: {
   mrId: string
+  /** The list's copy: the window draws from it at once, and takes only live figures from the server. */
+  initial: Requisition
   onClose: () => void
   onDone: (message: string) => void
 }) {
-  const [mr, setMr] = useState<Requisition | null>(null)
+  const [mr, setMr] = useState<Requisition | null>(initial)
   const [bought, setBought] = useState<Bought[]>([])
   const [stock, setStock] = useState<StockRow[]>([])
   const [loading, setLoading] = useState(true)
@@ -96,14 +99,29 @@ export function FulfilDialog({
     let cancelled = false
     void (async () => {
       try {
-        const [res, st] = await Promise.all([
-          api.get<{ data: Requisition & { bought: Bought[] } }>(`/inventory/requisitions/${mrId}`),
-          api.get<{ data: StockRow[] }>('/inventory/stock'),
-        ])
+        const res = await api.get<{
+          data: {
+            lines: Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: Line['fulfilment'] }>
+            bought: Bought[]
+            stock: StockRow[]
+          }
+        }>(`/inventory/requisitions/${mrId}/fulfil`)
         if (cancelled) return
-        setMr(res.data)
+        // The latest issued and buy quantities, in case the list is a moment old.
+        const fresh = new Map(res.data.lines.map((l) => [l.id, l]))
+        setMr((prev) =>
+          prev
+            ? {
+                ...prev,
+                lines: prev.lines.map((l) => {
+                  const f = fresh.get(l.id)
+                  return f ? { ...l, requestedQty: f.requestedQty, issuedQty: f.issuedQty, purchaseQty: f.purchaseQty, fulfilment: f.fulfilment } : l
+                }),
+              }
+            : prev,
+        )
         setBought(res.data.bought ?? [])
-        setStock(st.data)
+        setStock(res.data.stock ?? [])
       } catch (err) {
         if (!cancelled) setError(err instanceof ApiError ? err.message : 'Could not open the requisition.')
       } finally {
@@ -145,7 +163,7 @@ export function FulfilDialog({
   // Start from the obvious answer: hand over what the racks have, asked store
   // first, and buy whatever is still short (or keep what was already planned).
   useEffect(() => {
-    if (!mr) return
+    if (!mr || loading) return
     const nextIssue: Record<string, Record<string, string>> = {}
     const nextBuy: Record<string, string> = {}
     for (const l of mr.lines) {
@@ -169,7 +187,7 @@ export function FulfilDialog({
     setIssue(nextIssue)
     setBuy(nextBuy)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mr, stock, bought])
+  }, [mr, stock, bought, loading])
 
   const issuingOf = (l: Line) => r3(Object.values(issue[l.id] ?? {}).reduce((t, v) => t + num(v), 0))
 
@@ -277,7 +295,7 @@ export function FulfilDialog({
       onClose={onClose}
       busy={saving}
     >
-      {loading || !mr ? (
+      {!mr ? (
         <p className="px-2 py-10 text-center text-sm text-muted-foreground">{loading ? 'Opening the requisition…' : null}</p>
       ) : (
         <>
@@ -287,6 +305,11 @@ export function FulfilDialog({
             </div>
           )}
           {mr.notes && <p className="px-1 text-xs text-muted-foreground">Note on the requisition: {mr.notes}</p>}
+          {loading && (
+            <p className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+              <Loader2 size={13} className="animate-spin" /> Checking every store&apos;s stock…
+            </p>
+          )}
 
           {mr.lines.map((l) => {
             const unit = l.item.uom.symbol
