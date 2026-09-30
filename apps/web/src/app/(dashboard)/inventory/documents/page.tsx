@@ -10,9 +10,12 @@ import {
   ChevronRight,
   ArrowRight,
   Printer,
+  FileText,
 } from 'lucide-react'
-import Link from 'next/link'
 import { api, ApiError, type Paginated } from '@/lib/api'
+import { RowPanel } from '@/components/tables/RowPanel'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -68,6 +71,21 @@ type Kind = 'transfers' | 'adjustments'
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
+
+/** The item panels' columns, as shares of the row, so each table fits the panel it opens in. */
+const TRANSFER_COLS = [
+  { label: 'Code', width: '16%' },
+  { label: 'Item', width: '44%' },
+  { label: 'Quantity', width: '20%', numeric: true },
+  { label: 'Carried at', width: '20%', numeric: true },
+]
+const ADJUSTMENT_COLS = [
+  { label: 'Code', width: '14%' },
+  { label: 'Item', width: '38%' },
+  { label: 'Book said', width: '16%', numeric: true },
+  { label: 'Counted', width: '16%', numeric: true },
+  { label: 'Difference', width: '16%', numeric: true },
+]
 
 export default function StockDocumentsPage() {
   const [kind, setKind] = useState<Kind>('transfers')
@@ -222,238 +240,260 @@ export default function StockDocumentsPage() {
             </p>
           </div>
         ) : kind === 'transfers' ? (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th style={{ width: 30 }} />
-                  <th>Number</th>
-                  <th>Moved</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th style={{ textAlign: 'right' }}>Items</th>
-                  <th>Status</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {transfers.map((t) => {
-                  const expanded = open === t.id
-                  return (
-                    <Fragment key={t.id}>
-                      <tr>
-                        <td>
-                          <button
-                            className="btn-ghost p-1"
-                            onClick={() => setOpen(expanded ? null : t.id)}
-                            aria-label={expanded ? 'Hide items' : 'Show items'}
-                          >
-                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                          </button>
-                        </td>
-                        <td className="font-mono text-xs text-teal-400">{t.transferNumber}</td>
-                        <td className="text-xs">
-                          {formatDate(t.transferDate)}
-                          {t.movedBy && (
-                            <div className="text-muted-foreground text-[10px]">
-                              by {t.movedBy.name}
-                            </div>
-                          )}
-                        </td>
-                        <td className="text-sm">{t.fromWarehouse.name}</td>
-                        <td className="text-sm">
-                          <span className="flex items-center gap-1">
-                            <ArrowRight size={13} className="text-muted-foreground" />
-                            {t.toWarehouse.name}
-                          </span>
-                        </td>
-                        <td className="text-right text-sm tabular-nums">{t.lines.length}</td>
-                        <td>
-                          {t.cancelledAt ? (
-                            <>
-                              <span className="badge-neutral">Cancelled</span>
-                              {t.cancelReason && (
-                                <div className="text-muted-foreground max-w-[200px] truncate text-[10px]">
-                                  {t.cancelReason}
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <span className="badge-success">Moved</span>
-                          )}
-                        </td>
-                        <td className="whitespace-nowrap text-right">
-                          {/* The note that travels with the goods. */}
-                          <Link
-                            href={`/print/stock-transfer/${t.id}`}
-                            className="btn-ghost inline-flex p-1.5 hover:text-teal-400"
-                            title="Print the transfer note"
-                            aria-label={`Print ${t.transferNumber}`}
-                          >
-                            <Printer size={15} />
-                          </Link>
-                          {!t.cancelledAt && (
-                            <button
-                              className="btn-ghost p-1.5 hover:text-red-400"
-                              onClick={() => void cancel(t)}
-                              disabled={busy === t.id}
-                              title="Cancel and move the goods back"
-                              aria-label={`Cancel ${t.transferNumber}`}
-                            >
-                              <Ban size={15} />
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-
-                      {expanded && (
+          <div className="list-scope">
+            <ScrollableTable>
+              <table className="data-table table-compact min-w-full">
+                <thead>
+                  <tr className="bg-secondary">
+                    <th style={{ width: 30 }} />
+                    <th className="whitespace-nowrap">Number</th>
+                    <th className="whitespace-nowrap">Moved</th>
+                    <th className="whitespace-nowrap">From</th>
+                    <th className="whitespace-nowrap">To</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Items</th>
+                    <th className="whitespace-nowrap">Status</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {transfers.map((t) => {
+                    const expanded = open === t.id
+                    // The note that travels with the goods, and the way back if it was a mistake.
+                    const actions: RowAction[] = [
+                      { key: 'print', label: 'View / print', icon: <Printer size={14} />, href: `/print/stock-transfer/${t.id}`, newTab: true },
+                    ]
+                    if (!t.cancelledAt && busy !== t.id)
+                      actions.push({ key: 'cancel', label: 'Cancel and move the goods back', icon: <Ban size={14} />, onClick: () => void cancel(t), danger: true })
+                    return (
+                      <Fragment key={t.id}>
                         <tr>
-                          <td colSpan={8} className="bg-secondary/40 p-0">
-                            <table className="data-table w-full">
-                              <thead>
-                                <tr>
-                                  <th>Item</th>
-                                  <th style={{ textAlign: 'right' }}>Quantity</th>
-                                  <th style={{ textAlign: 'right' }}>Carried at</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {t.lines.map((l) => (
-                                  <tr key={l.id}>
-                                    <td>
-                                      <div className="text-sm">{l.item.name}</div>
-                                      <div className="text-muted-foreground font-mono text-[10px]">
-                                        {l.item.code}
-                                      </div>
-                                    </td>
-                                    <td className="text-right text-sm tabular-nums">
-                                      {qty(l.qty)} {l.item.uom?.symbol ?? ''}
-                                    </td>
-                                    <td className="text-right text-sm tabular-nums">
-                                      {l.unitRate === null ? '—' : qty(l.unitRate)}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                            {t.notes && (
-                              <p className="text-muted-foreground px-4 py-2 text-xs">{t.notes}</p>
+                          <td>
+                            <button
+                              className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
+                              onClick={() => setOpen(expanded ? null : t.id)}
+                              title={expanded ? 'Hide items' : 'Show items'}
+                              aria-label={`${expanded ? 'Hide' : 'Show'} items on ${t.transferNumber}`}
+                              aria-expanded={expanded}
+                            >
+                              {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </td>
+                          <td className="whitespace-nowrap">
+                            <span className="font-mono text-xs font-semibold text-teal-400">{t.transferNumber}</span>
+                          </td>
+                          <td className="whitespace-nowrap text-xs">
+                            {formatDate(t.transferDate)}
+                            {t.movedBy && (
+                              <div className="text-muted-foreground text-[10px]">
+                                by {t.movedBy.name}
+                              </div>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap text-sm">{t.fromWarehouse.name}</td>
+                          <td className="whitespace-nowrap text-sm">
+                            <span className="flex items-center gap-1">
+                              <ArrowRight size={13} className="text-muted-foreground" />
+                              {t.toWarehouse.name}
+                            </span>
+                          </td>
+                          <td className="text-right text-sm tabular-nums">{t.lines.length}</td>
+                          <td className="whitespace-nowrap">
+                            {t.cancelledAt ? (
+                              <>
+                                <span className="badge-neutral">Cancelled</span>
+                                {t.cancelReason && (
+                                  <div className="text-muted-foreground max-w-[200px] truncate text-[10px]">
+                                    {t.cancelReason}
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <span className="badge-success">Moved</span>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap text-right">
+                            <div className="flex justify-end gap-1.5">
+                              <ActionMenu label={`Actions for ${t.transferNumber}`} items={actions} />
+                            </div>
+                          </td>
+                        </tr>
+
+                        {expanded && (
+                          <tr>
+                            <td colSpan={8} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              {/* Sized to the visible row, not the scrolling table. */}
+                              <div className="w-[100cqw]">
+                                <RowPanel
+                                  icon={FileText}
+                                  title="Item Details"
+                                  note={`${t.lines.length} ${t.lines.length === 1 ? 'line' : 'lines'} on ${t.transferNumber}`}
+                                >
+                                  <table className="subtable w-full table-fixed">
+                                    <thead className="sticky top-0 z-10">
+                                      <tr>
+                                        {TRANSFER_COLS.map((c) => (
+                                          <th key={c.label} style={{ width: c.width }} className={c.numeric ? 'text-right' : undefined}>
+                                            {c.label}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {t.lines.map((l) => (
+                                        <tr key={l.id}>
+                                          <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
+                                          <td>
+                                            <div className="text-foreground truncate text-xs" title={l.item.name}>
+                                              {l.item.name}
+                                            </div>
+                                          </td>
+                                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                            {qty(l.qty)} {l.item.uom?.symbol ?? ''}
+                                          </td>
+                                          <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                            {l.unitRate === null ? '—' : qty(l.unitRate)}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                  {t.notes && (
+                                    <p className="border-border text-muted-foreground border-t px-3 py-2 text-[11px]">{t.notes}</p>
+                                  )}
+                                </RowPanel>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </ScrollableTable>
+          </div>
+        ) : (
+          <div className="list-scope">
+            <ScrollableTable>
+              <table className="data-table table-compact min-w-full">
+                <thead>
+                  <tr className="bg-secondary">
+                    <th style={{ width: 30 }} />
+                    <th className="whitespace-nowrap">Number</th>
+                    <th className="whitespace-nowrap">Counted</th>
+                    <th className="whitespace-nowrap">Store</th>
+                    <th className="whitespace-nowrap">Why</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Counted</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Corrected</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {adjustments.map((a) => {
+                    const expanded = open === a.id
+                    const changed = a.lines.filter((l) => Number(l.difference) !== 0).length
+
+                    return (
+                      <Fragment key={a.id}>
+                        <tr>
+                          <td>
+                            <button
+                              className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
+                              onClick={() => setOpen(expanded ? null : a.id)}
+                              title={expanded ? 'Hide items' : 'Show items'}
+                              aria-label={`${expanded ? 'Hide' : 'Show'} items on ${a.adjustmentNumber}`}
+                              aria-expanded={expanded}
+                            >
+                              {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </td>
+                          <td className="whitespace-nowrap">
+                            <span className="font-mono text-xs font-semibold text-teal-400">{a.adjustmentNumber}</span>
+                          </td>
+                          <td className="whitespace-nowrap text-xs">
+                            {formatDate(a.adjustmentDate)}
+                            {a.madeBy && (
+                              <div className="text-muted-foreground text-[10px]">
+                                by {a.madeBy.name}
+                              </div>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap text-sm">{a.warehouse.name}</td>
+                          <td className="text-muted-foreground max-w-[260px] text-xs">{a.reason}</td>
+                          <td className="text-right text-sm tabular-nums">{a.lines.length}</td>
+                          <td className="whitespace-nowrap text-right">
+                            {changed > 0 ? (
+                              <span className="badge-warning">{changed}</span>
+                            ) : (
+                              <span className="badge-success">all matched</span>
                             )}
                           </td>
                         </tr>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th style={{ width: 30 }} />
-                  <th>Number</th>
-                  <th>Counted</th>
-                  <th>Store</th>
-                  <th>Why</th>
-                  <th style={{ textAlign: 'right' }}>Counted</th>
-                  <th style={{ textAlign: 'right' }}>Corrected</th>
-                </tr>
-              </thead>
-              <tbody>
-                {adjustments.map((a) => {
-                  const expanded = open === a.id
-                  const changed = a.lines.filter((l) => Number(l.difference) !== 0).length
 
-                  return (
-                    <Fragment key={a.id}>
-                      <tr>
-                        <td>
-                          <button
-                            className="btn-ghost p-1"
-                            onClick={() => setOpen(expanded ? null : a.id)}
-                            aria-label={expanded ? 'Hide items' : 'Show items'}
-                          >
-                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                          </button>
-                        </td>
-                        <td className="font-mono text-xs text-teal-400">{a.adjustmentNumber}</td>
-                        <td className="text-xs">
-                          {formatDate(a.adjustmentDate)}
-                          {a.madeBy && (
-                            <div className="text-muted-foreground text-[10px]">
-                              by {a.madeBy.name}
-                            </div>
-                          )}
-                        </td>
-                        <td className="text-sm">{a.warehouse.name}</td>
-                        <td className="text-muted-foreground max-w-[260px] text-xs">{a.reason}</td>
-                        <td className="text-right text-sm tabular-nums">{a.lines.length}</td>
-                        <td className="text-right">
-                          {changed > 0 ? (
-                            <span className="badge-warning">{changed}</span>
-                          ) : (
-                            <span className="badge-success">all matched</span>
-                          )}
-                        </td>
-                      </tr>
-
-                      {expanded && (
-                        <tr>
-                          <td colSpan={7} className="bg-secondary/40 p-0">
-                            <table className="data-table w-full">
-                              <thead>
-                                <tr>
-                                  <th>Item</th>
-                                  <th style={{ textAlign: 'right' }}>Book said</th>
-                                  <th style={{ textAlign: 'right' }}>Counted</th>
-                                  <th style={{ textAlign: 'right' }}>Difference</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {a.lines.map((l) => {
-                                  const d = Number(l.difference)
-                                  return (
-                                    <tr key={l.id}>
-                                      <td>
-                                        <div className="text-sm">{l.item.name}</div>
-                                        <div className="text-muted-foreground font-mono text-[10px]">
-                                          {l.item.code}
-                                        </div>
-                                      </td>
-                                      <td className="text-right text-sm tabular-nums">
-                                        {qty(l.bookQty)}
-                                      </td>
-                                      <td className="text-right text-sm tabular-nums">
-                                        {qty(l.countedQty)} {l.item.uom?.symbol ?? ''}
-                                      </td>
-                                      <td className="text-right text-sm tabular-nums">
-                                        {d === 0 ? (
-                                          <span className="text-muted-foreground">matched</span>
-                                        ) : (
-                                          <span
-                                            className={d > 0 ? 'text-emerald-400' : 'text-red-400'}
-                                          >
-                                            {d > 0 ? '+' : ''}
-                                            {qty(d)}
-                                          </span>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  )
-                                })}
-                              </tbody>
-                            </table>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
+                        {expanded && (
+                          <tr>
+                            <td colSpan={7} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              {/* Sized to the visible row, not the scrolling table. */}
+                              <div className="w-[100cqw]">
+                                <RowPanel
+                                  icon={FileText}
+                                  title="Item Details"
+                                  note={`${a.lines.length} ${a.lines.length === 1 ? 'line' : 'lines'} on ${a.adjustmentNumber}`}
+                                >
+                                  <table className="subtable w-full table-fixed">
+                                    <thead className="sticky top-0 z-10">
+                                      <tr>
+                                        {ADJUSTMENT_COLS.map((c) => (
+                                          <th key={c.label} style={{ width: c.width }} className={c.numeric ? 'text-right' : undefined}>
+                                            {c.label}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {a.lines.map((l) => {
+                                        const d = Number(l.difference)
+                                        return (
+                                          <tr key={l.id}>
+                                            <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
+                                            <td>
+                                              <div className="text-foreground truncate text-xs" title={l.item.name}>
+                                                {l.item.name}
+                                              </div>
+                                            </td>
+                                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                              {qty(l.bookQty)}
+                                            </td>
+                                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                              {qty(l.countedQty)} {l.item.uom?.symbol ?? ''}
+                                            </td>
+                                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                                              {d === 0 ? (
+                                                <span className="text-muted-foreground">matched</span>
+                                              ) : (
+                                                <span
+                                                  className={d > 0 ? 'text-emerald-400' : 'text-red-400'}
+                                                >
+                                                  {d > 0 ? '+' : ''}
+                                                  {qty(d)}
+                                                </span>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </RowPanel>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </ScrollableTable>
           </div>
         )}
       </div>

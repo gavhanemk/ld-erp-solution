@@ -1,7 +1,7 @@
 import { Router } from 'express'
-import { prisma, type Prisma } from '@ld-erp/database'
+import { prisma, Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { getPrintHeader } from '../lib/printData'
@@ -14,16 +14,21 @@ import {
   transferStock,
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
+import * as customerMaterialImport from '../services/customerMaterialImport.service'
+import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
+  cancelCustomerReturnSchema,
   cancelJobWorkChallanSchema,
   cancelTransferSchema,
   createCustomerGrnSchema,
+  createCustomerReturnSchema,
   createJobWorkChallanSchema,
   createJobWorkReturnSchema,
   createRequisitionSchema,
   requisitionSourcingSchema,
+  requisitionPlanSchema,
   issueRequisitionSchema,
   openingStockSchema,
   rejectRequisitionSchema,
@@ -53,9 +58,46 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
     search: str(req.query.q),
   }), reorderStatus(prisma)])
 
+  // What each item is, for the screen's filters: its type, its main category
+  // and sub-category, and the department that uses it. Read once for every
+  // item on the list, the ones to reorder with nothing anywhere included.
+  const itemIds = [...new Set([...rows.map((r) => r.itemId), ...reorder.map((r) => r.itemId)])]
+  const items = await prisma.item.findMany({
+    where: { id: { in: itemIds } },
+    select: {
+      id: true,
+      type: true,
+      category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+      department: { select: { id: true, name: true } },
+    },
+  })
+  const about = new Map(
+    items.map((i) => {
+      // An item filed under a sub-category has its main category above it;
+      // one filed straight under a main category has no sub-category.
+      const main = i.category.parent ?? { id: i.category.id, name: i.category.name }
+      const sub = i.category.parent ? { id: i.category.id, name: i.category.name } : null
+      return [
+        i.id,
+        {
+          itemType: i.type,
+          mainCategoryId: main.id,
+          mainCategoryName: main.name,
+          subCategoryId: sub?.id ?? null,
+          subCategoryName: sub?.name ?? null,
+          departmentId: i.department?.id ?? null,
+          departmentName: i.department?.name ?? null,
+        },
+      ]
+    }),
+  )
+
   res.json({
     success: true,
-    data: rows,
+    data: rows.map((r) => ({ ...r, ...about.get(r.itemId) })),
+    // Every item that needs reordering, so the screen can show one with
+    // nothing in any store (it has no row above) and count them as it filters.
+    reorder: reorder.filter((r) => r.isLow).map((r) => ({ ...r, ...about.get(r.itemId) })),
     summary: {
       lines: rows.length,
       // Only our own stock has a value to us. A customer's fabric sitting in
@@ -119,54 +161,273 @@ router.get('/stock/:itemId', requirePermission(MODULE, 'view'), async (req, res)
   })
 })
 
+// ── The dashboard ───────────────────────────────────────────────────────────
+
+/** Stock, movement, requisitions and job work in one call, for the inventory dashboard. */
+router.get('/dashboard', requirePermission(MODULE, 'view'), async (req, res) => {
+  const data = await inventoryDashboard({
+    warehouseId: str(req.query.warehouseId),
+    days: Number(req.query.days) || 30,
+  })
+  res.json({ success: true, data })
+})
+
 // ── The ledger ──────────────────────────────────────────────────────────────
+
+/*
+ * The ledger's filters. Each is a column of the movement, or of the item it
+ * moved, and several values of one mean "any of these". They are applied in
+ * SQL rather than in the browser: the ledger only ever grows, and a year of a
+ * running mill is far more rows than a page should ever read.
+ */
+const LEDGER_FILTERS = [
+  'store', 'movement', 'document', 'direction', 'owner', 'category', 'sub', 'department', 'itemType',
+] as const
+type LedgerFilter = (typeof LEDGER_FILTERS)[number]
+
+/** What a movement is, for each filter. 'none' stands for "not set". */
+const LEDGER_VALUE: Record<LedgerFilter, Prisma.Sql> = {
+  store: Prisma.sql`s."warehouseId"`,
+  movement: Prisma.sql`s."transactionType"::text`,
+  document: Prisma.sql`COALESCE(s."referenceType", 'none')`,
+  direction: Prisma.sql`CASE WHEN s."inQty" > 0 THEN 'in' ELSE 'out' END`,
+  owner: Prisma.sql`s.ownership::text`,
+  // An item filed under a sub-category belongs to that one's main category.
+  category: Prisma.sql`COALESCE(c."parentId", c.id)`,
+  sub: Prisma.sql`CASE WHEN c."parentId" IS NULL THEN 'none' ELSE c.id END`,
+  department: Prisma.sql`COALESCE(i."departmentId", 'none')`,
+  itemType: Prisma.sql`i.type::text`,
+}
+
+/** The name to show for a value, where the database holds it. */
+const LEDGER_LABEL: Partial<Record<LedgerFilter, Prisma.Sql>> = {
+  store: Prisma.sql`w.name`,
+  category: Prisma.sql`COALESCE(pc.name, c.name)`,
+  sub: Prisma.sql`CASE WHEN c."parentId" IS NULL THEN NULL ELSE c.name END`,
+  department: Prisma.sql`d.name`,
+}
+
+const LEDGER_FROM = Prisma.sql`
+  FROM ld_erp.stock_ledger s
+  JOIN ld_erp.items i            ON i.id = s."itemId"
+  JOIN ld_erp.item_categories c  ON c.id = i."categoryId"
+  LEFT JOIN ld_erp.item_categories pc ON pc.id = c."parentId"
+  LEFT JOIN ld_erp.departments d ON d.id = i."departmentId"
+  JOIN ld_erp.warehouses w       ON w.id = s."warehouseId"
+  LEFT JOIN ld_erp.customers oc  ON oc.id = s."ownerCustomerId"`
+
+/** A filter's picked values from the query string: `store=a,b` or `store=a&store=b`. */
+const pickedOf = (v: unknown): string[] =>
+  (Array.isArray(v) ? v : [v])
+    .filter((x): x is string => typeof x === 'string')
+    .flatMap((x) => x.split(','))
+    .map((x) => x.trim())
+    .filter(Boolean)
+
+function ledgerQuery(query: Record<string, unknown>) {
+  const base: Prisma.Sql[] = []
+  const itemId = str(query.itemId)
+  if (itemId) base.push(Prisma.sql`s."itemId" = ${itemId}`)
+  // The old single-value names still work, for links made before the filters.
+  const legacy: Partial<Record<LedgerFilter, unknown>> = { store: query.warehouseId, movement: query.type }
+
+  const from = str(query.from)
+  const to = str(query.to)
+  if (from && !Number.isNaN(Date.parse(from))) base.push(Prisma.sql`s."transactionDate" >= ${new Date(from)}`)
+  // An end date means the whole of that day, not midnight at its start.
+  if (to && !Number.isNaN(Date.parse(to)))
+    base.push(Prisma.sql`s."transactionDate" <= ${new Date(new Date(to).setHours(23, 59, 59, 999))}`)
+
+  // Every word has to be somewhere: "tape fabric" finds tape in the fabric godown.
+  for (const word of (str(query.search) ?? '').toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8)) {
+    const like = `%${word}%`
+    base.push(Prisma.sql`(
+      i.name ILIKE ${like} OR i.code ILIKE ${like} OR w.name ILIKE ${like}
+      OR COALESCE(s.notes, '') ILIKE ${like} OR COALESCE(oc.name, '') ILIKE ${like}
+      OR c.name ILIKE ${like} OR COALESCE(pc.name, '') ILIKE ${like} OR COALESCE(d.name, '') ILIKE ${like})`)
+  }
+
+  const picked = Object.fromEntries(
+    LEDGER_FILTERS.map((k) => [k, pickedOf(query[k] ?? legacy[k])]),
+  ) as Record<LedgerFilter, string[]>
+
+  /** Every condition, bar the one filter a dropdown is counting for. */
+  const where = (skip?: LedgerFilter) => {
+    const parts = [...base]
+    for (const k of LEDGER_FILTERS) {
+      if (k === skip || !picked[k].length) continue
+      parts.push(Prisma.sql`${LEDGER_VALUE[k]} IN (${Prisma.join(picked[k])})`)
+    }
+    return parts.length ? Prisma.sql`WHERE ${Prisma.join(parts, ' AND ')}` : Prisma.empty
+  }
+  return { where, picked }
+}
 
 /**
  * Every movement, newest first.
  *
  * This is the answer to "why does it say 340 when I counted 300". It is read
  * only and always will be: a ledger somebody can edit is not a ledger.
+ *
+ * Alongside the page it returns what the filters leave in total (movements,
+ * value in and out), the value in and out by day, and for each filter how many
+ * movements each of its values would leave given the others.
  */
 router.get('/ledger', requirePermission(MODULE, 'view'), async (req, res) => {
-  const page = Math.max(1, Number(req.query.page) || 1)
-  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  // An export takes every row at once, up to a sensible ceiling.
+  const exporting = req.query.export === '1'
+  const page = exporting ? 1 : Math.max(1, Number(req.query.page) || 1)
+  const limit = exporting ? 10000 : Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  const { where, picked } = ledgerQuery(req.query as Record<string, unknown>)
+  const all = where()
 
-  const where: Record<string, unknown> = {}
-  if (str(req.query.itemId)) where.itemId = str(req.query.itemId)
-  if (str(req.query.warehouseId)) where.warehouseId = str(req.query.warehouseId)
-  if (str(req.query.type)) where.transactionType = str(req.query.type)
+  const idsQuery = prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT s.id ${LEDGER_FROM} ${all}
+    ORDER BY s."transactionDate" DESC, s."createdAt" DESC
+    LIMIT ${limit} OFFSET ${(page - 1) * limit}`
 
-  const from = str(req.query.from)
-  const to = str(req.query.to)
-  if (from || to) {
-    where.transactionDate = {
-      ...(from ? { gte: new Date(from) } : {}),
-      // An end date means the whole of that day, not midnight at its start.
-      ...(to ? { lte: new Date(new Date(to).setHours(23, 59, 59, 999)) } : {}),
-    }
+  /*
+   * In and out are counted leaving the in/out filter aside, so picking "came
+   * in" still says what went out; everything else is for what is on screen.
+   */
+  const dir = picked.direction.length
+    ? Prisma.sql`${LEDGER_VALUE.direction} IN (${Prisma.join(picked.direction)})`
+    : Prisma.sql`TRUE`
+  const summaryQuery = prisma.$queryRaw<
+    Array<{
+      total: number; ins: number; outs: number; inValue: number; outValue: number
+      items: number; stores: number; first: Date | null; last: Date | null
+    }>
+  >`
+    SELECT
+      COUNT(*) FILTER (WHERE ${dir})::int                            AS total,
+      COUNT(*) FILTER (WHERE s."inQty" > 0)::int                     AS ins,
+      COUNT(*) FILTER (WHERE s."inQty" <= 0)::int                    AS outs,
+      COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
+      COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue",
+      COUNT(DISTINCT s."itemId") FILTER (WHERE ${dir})::int          AS items,
+      COUNT(DISTINCT s."warehouseId") FILTER (WHERE ${dir})::int     AS stores,
+      MIN(s."transactionDate") FILTER (WHERE ${dir})                 AS first,
+      MAX(s."transactionDate") FILTER (WHERE ${dir})                 AS last
+    ${LEDGER_FROM} ${where('direction')}`
+
+  if (exporting) {
+    const [ids, [summary]] = await Promise.all([idsQuery, summaryQuery])
+    res.json({ success: true, data: await ledgerRows(ids.map((r) => r.id)), summary })
+    return
   }
 
-  const [rows, total] = await Promise.all([
-    prisma.stockLedger.findMany({
-      where,
-      include: {
-        item: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
-        warehouse: { select: { id: true, name: true } },
-        ownerCustomer: { select: { id: true, name: true } },
-      },
-      orderBy: [{ transactionDate: 'desc' }, { createdAt: 'desc' }],
-      skip: (page - 1) * limit,
-      take: limit,
-    }),
-    prisma.stockLedger.count({ where }),
+  // By day, in India's day rather than the server's: a receipt at 1 am IST is
+  // that day's receipt, not the day before's.
+  const seriesQuery = prisma.$queryRaw<Array<{ day: string; inValue: number; outValue: number; moves: number }>>`
+    SELECT
+      to_char((s."transactionDate" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS day,
+      COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
+      COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue",
+      COUNT(*)::int AS moves
+    ${LEDGER_FROM} ${all}
+    GROUP BY 1 ORDER BY 1`
+
+  const facetQueries = LEDGER_FILTERS.map(
+    (k) => prisma.$queryRaw<Array<{ value: string; label: string | null; count: number }>>`
+      SELECT ${LEDGER_VALUE[k]} AS value, MAX(${LEDGER_LABEL[k] ?? Prisma.sql`NULL::text`}) AS label, COUNT(*)::int AS count
+      ${LEDGER_FROM} ${where(k)}
+      GROUP BY 1`,
+  )
+
+  const [ids, [summary], series, analysis, ...facetRows] = await Promise.all([
+    idsQuery, summaryQuery, seriesQuery,
+    req.query.analysis === '1' ? ledgerAnalysis(all) : Promise.resolve(undefined),
+    ...facetQueries,
   ])
+  const facets = Object.fromEntries(LEDGER_FILTERS.map((k, n) => [k, facetRows[n]]))
 
   res.json({
     success: true,
-    data: rows,
-    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+    data: await ledgerRows(ids.map((r) => r.id)),
+    pagination: { page, limit, total: summary.total, pages: Math.ceil(summary.total / limit) || 1 },
+    summary,
+    series,
+    facets,
+    ...(analysis ? { analysis } : {}),
   })
 })
+
+type LedgerGroup = {
+  value: string; label: string | null; moves: number; ins: number; outs: number; inValue: number; outValue: number
+}
+
+/**
+ * For the ledger's dashboard: what the filters leave, cut by store, category,
+ * department and document, and the items that moved the most value.
+ */
+async function ledgerAnalysis(all: Prisma.Sql) {
+  const sums = Prisma.sql`
+    COUNT(*)::int AS moves,
+    COUNT(*) FILTER (WHERE s."inQty" > 0)::int AS ins,
+    COUNT(*) FILTER (WHERE s."inQty" <= 0)::int AS outs,
+    COALESCE(SUM(s."inQty"  * COALESCE(s."unitRate", 0)), 0)::float8 AS "inValue",
+    COALESCE(SUM(s."outQty" * COALESCE(s."unitRate", 0)), 0)::float8 AS "outValue"`
+  const moved = Prisma.sql`SUM((s."inQty" + s."outQty") * COALESCE(s."unitRate", 0))`
+  const by = (k: LedgerFilter) => prisma.$queryRaw<LedgerGroup[]>`
+    SELECT ${LEDGER_VALUE[k]} AS value, MAX(${LEDGER_LABEL[k] ?? Prisma.sql`NULL::text`}) AS label, ${sums}
+    ${LEDGER_FROM} ${all}
+    GROUP BY 1
+    ORDER BY ${moved} DESC, moves DESC`
+  const [byStore, byCategory, byDepartment, byDocument, topItems] = await Promise.all([
+    by('store'), by('category'), by('department'), by('document'),
+    prisma.$queryRaw<Array<LedgerGroup & { code: string; uom: string; inQty: number; outQty: number }>>`
+      SELECT s."itemId" AS value, MAX(i.name) AS label, MAX(i.code) AS code, MAX(u.symbol) AS uom,
+        COALESCE(SUM(s."inQty"), 0)::float8 AS "inQty", COALESCE(SUM(s."outQty"), 0)::float8 AS "outQty", ${sums}
+      ${LEDGER_FROM}
+      JOIN ld_erp.uom u ON u.id = i."uomId"
+      ${all}
+      GROUP BY 1
+      ORDER BY ${moved} DESC, moves DESC
+      LIMIT 10`,
+  ])
+  return { byStore, byCategory, byDepartment, byDocument, topItems }
+}
+
+/** The movements with these ids, in that order, with what each item is. */
+async function ledgerRows(ids: string[]) {
+  if (!ids.length) return []
+  const rows = await prisma.stockLedger.findMany({
+    where: { id: { in: ids } },
+    include: {
+      item: {
+        select: {
+          id: true, code: true, name: true, type: true,
+          uom: { select: { symbol: true } },
+          category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+          department: { select: { id: true, name: true } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      ownerCustomer: { select: { id: true, name: true } },
+    },
+  })
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  return ids.flatMap((id) => {
+    const r = byId.get(id)
+    if (!r) return []
+    const cat = r.item.category
+    const rate = r.unitRate === null ? null : Number(r.unitRate)
+    const qty = Number(r.inQty) > 0 ? Number(r.inQty) : Number(r.outQty)
+    return [{
+      ...r,
+      itemType: r.item.type,
+      mainCategoryId: cat.parent?.id ?? cat.id,
+      mainCategoryName: cat.parent?.name ?? cat.name,
+      subCategoryId: cat.parent ? cat.id : null,
+      subCategoryName: cat.parent ? cat.name : null,
+      departmentId: r.item.department?.id ?? null,
+      departmentName: r.item.department?.name ?? null,
+      // What the movement was worth, at the rate it moved at.
+      value: rate === null ? null : round2(qty * rate),
+    }]
+  })
+}
 
 /** Stock value, cut by warehouse and by category, for the accounts side. */
 router.get('/valuation', requirePermission(MODULE, 'view'), async (_req, res) => {
@@ -654,6 +915,13 @@ router.patch(
 
 // ── Material requisitions ───────────────────────────────────────────────────
 
+/**
+ * How much of a line is to be bought. Lines decided before the store could
+ * set a quantity have none; there PURCHASE meant the whole line.
+ */
+const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }) =>
+  l.purchaseQty !== null ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
   mo: { select: { id: true, moNumber: true } },
@@ -664,9 +932,15 @@ const mrInclude = {
   lines: {
     include: {
       item: {
-        select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+        select: {
+          id: true, code: true, name: true, uom: { select: { symbol: true } },
+          // For the list's item panel: category and sub-category in their own columns.
+          category: { select: { name: true, parent: { select: { name: true } } } },
+        },
       },
       warehouse: { select: { id: true, name: true } },
+      // Whose material the line draws, when it is a customer's.
+      ownerCustomer: { select: { id: true, name: true } },
     },
   },
 }
@@ -738,19 +1012,161 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
     })),
   )
 
-  res.json({ success: true, data: { ...mr, available } })
+  res.json({ success: true, data: { ...mr, available, bought: await boughtFor(mr.lines) } })
+})
+
+/**
+ * What has been ordered and received against each line's indent, so the
+ * fulfil window can say what is already on its way.
+ */
+async function boughtFor(
+  lines: Array<{ id: string; purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }>,
+) {
+  const orders = await prisma.purchaseOrderLine.findMany({
+    where: { mrLineId: { in: lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' } } },
+    select: {
+      mrLineId: true,
+      qty: true,
+      po: { select: { poNumber: true } },
+      grnLines: { select: { receivedQty: true, grn: { select: { status: true } } } },
+    },
+  })
+  return lines.map((l) => {
+    const mine = orders.filter((o) => o.mrLineId === l.id)
+    return {
+      lineId: l.id,
+      buyQty: buyQtyOf(l),
+      orderedQty: round3(mine.reduce((t, o) => t + Number(o.qty), 0)),
+      receivedQty: round3(
+        mine.reduce(
+          (t, o) => t + o.grnLines.filter((g) => g.grn.status !== 'CANCELLED').reduce((n, g) => n + Number(g.receivedQty), 0),
+          0,
+        ),
+      ),
+      poNumbers: [...new Set(mine.map((o) => o.po.poNumber))],
+    }
+  })
+}
+
+/**
+ * The live figures the fulfil window needs: every store's balance of this
+ * requisition's items, what has been ordered and received against its lines,
+ * and each line's latest issued and buy quantities.
+ *
+ * The window already has the requisition itself from the list, so this reads
+ * only figures, in four small queries sent together. On a remote database
+ * every trip costs close to half a second, and fetching the requisition again
+ * with its people, items and categories was four or five trips in a row.
+ */
+router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
+  const id = req.params.id
+  const [lines, stock, orderRows, received, handovers, activity] = await Promise.all([
+    prisma.$queryRaw<
+      Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
+    >`
+      SELECT l.id, l."requestedQty"::float8 AS "requestedQty", l."issuedQty"::float8 AS "issuedQty",
+             l."purchaseQty"::float8 AS "purchaseQty", l.fulfilment::text AS fulfilment
+      FROM ld_erp.material_requisition_lines l
+      WHERE l."mrId" = ${id}`,
+    prisma.$queryRaw<
+      Array<{ itemId: string; warehouseId: string; warehouseName: string; ownership: string; ownerCustomerId: string | null; qty: number }>
+    >`
+      SELECT s."itemId", s."warehouseId", w.name AS "warehouseName", s."ownership"::text AS "ownership",
+             s."ownerCustomerId", SUM(s."inQty" - s."outQty")::float8 AS "qty"
+      FROM ld_erp.stock_ledger s
+      JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
+      WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+      GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
+      HAVING SUM(s."inQty" - s."outQty") > 0`,
+    // Each order line raised against these lines. Cancelled orders have bought nothing.
+    prisma.$queryRaw<Array<{ mrLineId: string; poId: string; poNumber: string; poDate: Date; qty: number; receivedQty: number }>>`
+      SELECT pol."mrLineId", po.id AS "poId", po."poNumber", po."poDate", pol.qty::float8 AS "qty",
+             pol."receivedQty"::float8 AS "receivedQty"
+      FROM ld_erp.purchase_order_lines pol
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND po.status::text <> 'CANCELLED'
+      ORDER BY po."poDate"`,
+    // Cancelled receipts booked nothing in.
+    prisma.$queryRaw<Array<{ mrLineId: string; qty: number }>>`
+      SELECT pol."mrLineId", SUM(gl."receivedQty")::float8 AS "qty"
+      FROM ld_erp.grn_lines gl
+      JOIN ld_erp.grn g ON g.id = gl."grnId"
+      JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND po.status::text <> 'CANCELLED' AND g.status::text <> 'CANCELLED'
+      GROUP BY pol."mrLineId"`,
+    // Every hand-over against it, from whichever rack.
+    prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; warehouseName: string; qty: number; at: Date }>>`
+      SELECT s."itemId", s."ownership"::text AS "ownership", s."ownerCustomerId", w.name AS "warehouseName",
+             (s."outQty" - s."inQty")::float8 AS "qty", s."transactionDate" AS "at"
+      FROM ld_erp.stock_ledger s
+      JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
+      WHERE s."referenceType" = 'MATERIAL_REQUISITION' AND s."referenceId" = ${id}
+      ORDER BY s."transactionDate", s."createdAt"`,
+    // Who did what to it, and when, from the audit trail.
+    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; closeReason: string | null; toBuy: string[] | null }>>`
+      SELECT a."createdAt" AS "at", a.action, u.name AS "who",
+             a.after -> 'handedOverNow' AS "handedOver", a.after -> 'plan' AS "plan",
+             a.after ->> 'closeReason' AS "closeReason",
+             -- The old issue-or-buy answer: which items it marked to be bought.
+             (SELECT ARRAY_AGG(l -> 'item' ->> 'name') FROM jsonb_array_elements(a.after::jsonb -> 'lines') l
+               WHERE l ->> 'fulfilment' = 'PURCHASE') AS "toBuy"
+      FROM ld_erp.audit_logs a
+      JOIN ld_erp.users u ON u.id = a."userId"
+      WHERE a."entityType" = 'MaterialRequisition' AND a."entityId" = ${id}
+      ORDER BY a."createdAt"`,
+  ])
+  if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+  const bought = lines.map((l) => {
+    const mine = orderRows.filter((o) => o.mrLineId === l.id)
+    return {
+      lineId: l.id,
+      buyQty: l.purchaseQty !== null ? l.purchaseQty : l.fulfilment === 'PURCHASE' ? l.requestedQty : 0,
+      orderedQty: round3(mine.reduce((t, o) => t + o.qty, 0)),
+      receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
+      poNumbers: [...new Set(mine.map((o) => o.poNumber))],
+      orders: mine.map((o) => ({ poId: o.poId, poNumber: o.poNumber, poDate: o.poDate, qty: o.qty, receivedQty: o.receivedQty })),
+    }
+  })
+
+  // The trail in words: raised, approved, what was set to be bought, what was
+  // handed over and by whom, closed. The plan is kept by line so the window
+  // can name the item.
+  const events = activity.map((a) => ({
+    at: a.at,
+    who: a.who,
+    action: a.action,
+    handedOver: Array.isArray(a.handedOver) ? (a.handedOver as string[]) : null,
+    plan: Array.isArray(a.plan) ? (a.plan as Array<{ lineId: string; buyQty: number }>) : null,
+    closeReason: a.closeReason,
+    toBuy: a.toBuy,
+  }))
+
+  res.json({ success: true, data: { lines, bought, stock, handovers, events } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createRequisitionSchema.parse(req.body)
 
   const mr = await prisma.$transaction(async (tx) => {
-    const [department, warehouse] = await Promise.all([
+    // Each line's store: its own, or the requisition's when the caller sent one for all.
+    const storeOf = (l: (typeof data.lines)[number]) => (l.warehouseId || data.warehouseId)!
+    const storeIds = [...new Set(data.lines.map(storeOf))]
+    const [department, stores] = await Promise.all([
       tx.department.findUnique({ where: { id: data.departmentId } }),
-      tx.warehouse.findUnique({ where: { id: data.warehouseId } }),
+      tx.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true } }),
     ])
     if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
-    if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
+    if (stores.length !== storeIds.length) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+
+    const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
+    if (owners.length) {
+      const found = await tx.customer.count({ where: { id: { in: owners } } })
+      if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
+    }
 
     const mrNumber = await nextDocumentNumber(tx, 'MR')
 
@@ -770,10 +1186,10 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
             // customer's fabric would be issued out of our own balance of the
             // same cloth.
             ownership: l.ownership ?? 'OWNED',
-            ownerCustomerId: l.ownerCustomerId ?? null,
-            // One store per requisition, chosen once on the header in the UI
-            // and copied down, so there is still only one place it is stored.
-            warehouseId: data.warehouseId,
+            ownerCustomerId: l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null,
+            // The store this line is asked of. The form picks it per item,
+            // from the stores that hold it; issuing and the slip read it here.
+            warehouseId: storeOf(l),
             purpose: l.purpose ?? null,
           })),
         },
@@ -920,6 +1336,91 @@ router.patch(
   },
 )
 
+/**
+ * The store's plan: how much of each line to buy.
+ *
+ * Replaces the all-or-nothing issue-or-buy answer. A line can now be issued in
+ * part and bought for the rest, bought whole, or bought over. The buy
+ * quantity is what the buyer sees on the indent; it can never be set below
+ * what has already been ordered against it, because that order exists.
+ */
+router.patch(
+  '/requisitions/:id/plan',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const data = requisitionPlanSchema.parse(req.body)
+
+    const after = await prisma.$transaction(async (tx) => {
+      await lockRequisition(tx, req.params.id)
+      const mr = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } },
+      })
+      if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+      if (mr.status !== 'APPROVED') {
+        throw new AppError(
+          mr.status === 'PENDING' ? 'This requisition has not been approved yet.' : 'This requisition was refused.',
+          400,
+          'NOT_APPROVED',
+        )
+      }
+      if (mr.closedAt) throw new AppError(`${mr.mrNumber} was closed, so nothing more is bought for it.`, 400, 'CLOSED')
+
+      const own = new Map(mr.lines.map((l) => [l.id, l]))
+      const ordered = await tx.purchaseOrderLine.groupBy({
+        by: ['mrLineId'],
+        where: { mrLineId: { in: data.lines.map((l) => l.lineId) }, po: { status: { not: 'CANCELLED' } } },
+        _sum: { qty: true },
+      })
+      const orderedOf = new Map(ordered.map((o) => [o.mrLineId, Number(o._sum.qty ?? 0)]))
+
+      for (const l of data.lines) {
+        const line = own.get(l.lineId)
+        if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+        // A customer's cloth is theirs to send, never ours to buy.
+        if (line.ownership === 'CUSTOMER_OWNED' && l.buyQty > 0) {
+          throw new AppError(`${line.item.name} is a customer's material, so it cannot be bought. Ask them to send the rest.`, 400, 'CUSTOMER_MATERIAL')
+        }
+        const already = orderedOf.get(l.lineId) ?? 0
+        if (l.buyQty + 1e-9 < already) {
+          throw new AppError(
+            `${line.item.name}: ${qtyText(already)} ${line.item.uom?.symbol ?? ''} is already ordered, so the quantity to buy cannot go below that. Cancel the order first to buy less.`.replace(/\s+/g, ' '),
+            400,
+            'ALREADY_ORDERED',
+          )
+        }
+      }
+
+      await Promise.all(
+        data.lines.map((l) =>
+          tx.materialRequisitionLine.update({
+            where: { id: l.lineId },
+            data: { purchaseQty: round3(l.buyQty), fulfilment: l.buyQty > 0 ? 'PURCHASE' : 'FROM_STOCK' },
+          }),
+        ),
+      )
+      return tx.materialRequisition.findUniqueOrThrow({ where: { id: mr.id }, include: mrInclude })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: req.params.id,
+      after: { ...after, plan: data.lines },
+    })
+
+    const buying = data.lines.filter((l) => l.buyQty > 0).length
+    res.json({
+      success: true,
+      data: after,
+      message: buying
+        ? `${buying} ${buying === 1 ? 'line is' : 'lines are'} on the indent for the buyer, under Select from indent on a new purchase order.`
+        : 'Nothing to buy on this requisition.',
+    })
+  },
+)
+
 router.patch(
   '/requisitions/:id/approve',
   requirePermission(MODULE, 'approve'),
@@ -939,8 +1440,11 @@ router.patch(
     }
 
     // docs/04-business-rules.md, section 7. Nobody signs off their own request,
-    // and this is the only place that rule can actually be held.
-    if (before.raisedById && before.raisedById === req.user!.id) {
+    // and this is the only place that rule can actually be held — except the
+    // Admin, who may, because in a small mill the owner often raises and
+    // approves in one go. The audit log says when that happened.
+    const selfApproved = Boolean(before.raisedById && before.raisedById === req.user!.id)
+    if (selfApproved && !isAdmin(req.user)) {
       throw new AppError(
         'You raised this requisition, so somebody else has to approve it.',
         403,
@@ -967,7 +1471,7 @@ router.patch(
       entityType: 'MaterialRequisition',
       entityId: after.id,
       before,
-      after,
+      after: selfApproved ? { ...after, note: 'Approved by the Admin who raised it' } : after,
     })
 
     res.json({ success: true, message: `${after.mrNumber} approved.`, data: after })
@@ -1094,15 +1598,17 @@ router.post(
       }
 
       // docs/04-business-rules.md, section 7: raised, approved and issued by
-      // three different people.
-      if (mr.raisedById && mr.raisedById === req.user!.id) {
+      // three different people — except the Admin, as for approving; the
+      // audit entry says so.
+      const admin = isAdmin(req.user)
+      if (!admin && mr.raisedById && mr.raisedById === req.user!.id) {
         throw new AppError(
           'You raised this requisition, so somebody else in the store has to hand the material over.',
           403,
           'SELF_ISSUE',
         )
       }
-      if (mr.approvedById && mr.approvedById === req.user!.id) {
+      if (!admin && mr.approvedById && mr.approvedById === req.user!.id) {
         throw new AppError(
           'You approved this requisition, so somebody else in the store has to hand the material over.',
           403,
@@ -1110,30 +1616,48 @@ router.post(
         )
       }
 
-      const askedFor = new Map(body.lines?.map((l) => [l.lineId, l.issueQty]) ?? [])
+      /*
+       * What to hand over, and from where. With no lines named, everything
+       * still owed, from each line's own store. Named, only what is named: a
+       * line may come once per store, to be made up from several racks.
+       */
+      const plan = new Map<string, Array<{ qty: number; warehouseId: string }>>()
+      if (body.lines) {
+        for (const a of body.lines) {
+          if (!(a.issueQty > 0)) continue
+          const line = mr.lines.find((l) => l.id === a.lineId)
+          if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+          const list = plan.get(a.lineId) ?? []
+          list.push({ qty: a.issueQty, warehouseId: a.warehouseId || line.warehouseId })
+          plan.set(a.lineId, list)
+        }
+      } else {
+        for (const line of mr.lines) {
+          const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
+          if (owed > 0) plan.set(line.id, [{ qty: owed, warehouseId: line.warehouseId }])
+        }
+      }
+
+      const storeNames = new Map(
+        (await tx.warehouse.findMany({
+          where: { id: { in: [...new Set([...plan.values()].flat().map((a) => a.warehouseId))] } },
+          select: { id: true, name: true },
+        })).map((w) => [w.id, w.name]),
+      )
       const handedOver: string[] = []
 
       for (const line of mr.lines) {
-        /*
-         * A line marked for purchase is not the store's to answer.
-         *
-         * It is on this requisition to tell the buyer what to order, and there
-         * is nothing on the rack behind it. Skipped rather than refused: a
-         * requisition routinely mixes the two.
-         */
-        if (line.fulfilment === 'PURCHASE') continue
+        const parts = plan.get(line.id)
+        if (!parts?.length) continue
 
+        // A line being bought is still owed to the department: what is bought
+        // comes into the store and is handed over from there like the rest.
         const unit = line.item.uom?.symbol ?? ''
         const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
-        if (owed <= 0) continue
-
-        // Not named in the request: everything still owed on it.
-        const qty = askedFor.get(line.id) ?? owed
-        if (qty <= 0) continue
-
-        if (qty > owed + 1e-9) {
+        const total = round3(parts.reduce((t, a) => t + a.qty, 0))
+        if (total > owed + 1e-9) {
           throw new AppError(
-            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(qty)}. Raise a new requisition for more.`.replace(
+            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(total)}. Raise a new requisition for more.`.replace(
               /\s+/g,
               ' ',
             ),
@@ -1141,30 +1665,35 @@ router.post(
             'OVER_ISSUE',
           )
         }
+        if (!storeNames.size || parts.some((a) => !storeNames.has(a.warehouseId))) {
+          throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+        }
 
-        // recordMovement refuses if the rack is short, and names the shortfall.
-        await recordMovement(tx, {
-          itemId: line.itemId,
-          warehouseId: line.warehouseId,
-          transactionType: 'ISSUE',
-          direction: 'OUT',
-          qty,
-          // Hand the ownership straight through. The stock service keeps a
-          // customer's cloth and our own in separate balances, so issuing the
-          // wrong one would take stock nobody asked for.
-          ownership: line.ownership,
-          ownerCustomerId: line.ownerCustomerId,
-          referenceType: 'MATERIAL_REQUISITION',
-          referenceId: mr.id,
-          transactionDate: when,
-          notes: `${mr.mrNumber} → ${mr.department.name}`,
-        })
+        for (const a of parts) {
+          // recordMovement refuses if that rack is short, and names the shortfall.
+          await recordMovement(tx, {
+            itemId: line.itemId,
+            warehouseId: a.warehouseId,
+            transactionType: 'ISSUE',
+            direction: 'OUT',
+            qty: a.qty,
+            // Hand the ownership straight through. The stock service keeps a
+            // customer's cloth and our own in separate balances, so issuing the
+            // wrong one would take stock nobody asked for.
+            ownership: line.ownership,
+            ownerCustomerId: line.ownerCustomerId,
+            referenceType: 'MATERIAL_REQUISITION',
+            referenceId: mr.id,
+            transactionDate: when,
+            notes: `${mr.mrNumber} → ${mr.department.name}${a.warehouseId !== line.warehouseId ? ` (from ${storeNames.get(a.warehouseId)})` : ''}`,
+          })
+          handedOver.push(`${qtyText(a.qty)} ${unit} ${line.item.name}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
+        }
 
         await tx.materialRequisitionLine.update({
           where: { id: line.id },
-          data: { issuedQty: { increment: qty } },
+          data: { issuedQty: { increment: total } },
         })
-        handedOver.push(`${qtyText(qty)} ${unit} ${line.item.name}`.replace(/\s+/g, ' '))
       }
 
       if (handedOver.length === 0) {
@@ -1179,9 +1708,7 @@ router.post(
       // issuedBy is whoever handed over the last of it; each part is in the
       // stock ledger with its own date, and in the audit trail with its person.
       const lines = await tx.materialRequisitionLine.findMany({ where: { mrId: mr.id } })
-      const stillOwed = lines.filter(
-        (l) => l.fulfilment !== 'PURCHASE' && Number(l.issuedQty) < Number(l.requestedQty) - 1e-9,
-      ).length
+      const stillOwed = lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty) - 1e-9).length
       if (stillOwed === 0) {
         await tx.materialRequisition.update({
           where: { id: mr.id },
@@ -1463,95 +1990,105 @@ const jobWorkInclude = {
  * that everywhere the ledger is read rather than only on the two screens that
  * remember to filter. The quantity is real; the value is not ours to claim.
  */
-router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const data = createCustomerGrnSchema.parse(req.body)
+/**
+ * One customer receipt, written and put on the books: the document, its lines,
+ * and a CUSTOMER_OWNED movement for each. Shared by the form and the import,
+ * so a receipt from a spreadsheet is checked and booked exactly as one typed in.
+ */
+async function createCustomerGrn(
+  tx: Prisma.TransactionClient,
+  data: ReturnType<typeof createCustomerGrnSchema.parse>,
+  userId: string | null,
+) {
   const when = data.receiptDate ?? new Date()
+  const [customer, warehouse] = await Promise.all([
+    tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true, isActive: true } }),
+    tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true, isActive: true } }),
+  ])
+  if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+  if (!warehouse.isActive) {
+    throw new AppError(
+      `${warehouse.name} is no longer in use. Pick another store for these goods.`,
+      400,
+      'WAREHOUSE_INACTIVE',
+    )
+  }
 
-  const grn = await prisma.$transaction(async (tx) => {
-    const [customer, warehouse] = await Promise.all([
-      tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true, isActive: true } }),
-      tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true, isActive: true } }),
-    ])
-    if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
-    if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
-    if (!warehouse.isActive) {
+  if (data.soId) {
+    const so = await tx.salesOrder.findUnique({
+      where: { id: data.soId },
+      select: { id: true, customerId: true, soNumber: true },
+    })
+    if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
+    if (so.customerId !== data.customerId) {
       throw new AppError(
-        `${warehouse.name} is no longer in use. Pick another store for these goods.`,
+        `${so.soNumber} belongs to a different customer. Pick the right order, or leave it blank.`,
         400,
-        'WAREHOUSE_INACTIVE',
+        'ORDER_NOT_THEIRS',
       )
     }
+  }
 
-    if (data.soId) {
-      const so = await tx.salesOrder.findUnique({
-        where: { id: data.soId },
-        select: { id: true, customerId: true, soNumber: true },
-      })
-      if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
-      if (so.customerId !== data.customerId) {
-        throw new AppError(
-          `${so.soNumber} belongs to a different customer. Pick the right order, or leave it blank.`,
-          400,
-          'ORDER_NOT_THEIRS',
-        )
-      }
-    }
+  const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
 
-    const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
-
-    const created = await tx.customerGRN.create({
-      data: {
-        grnNumber,
-        customerId: data.customerId,
-        soId: data.soId ?? null,
-        warehouseId: data.warehouseId,
-        receiptDate: when,
-        challanNumber: data.challanNumber ?? null,
-        challanDate: data.challanDate ?? null,
-        gateEntryNumber: data.gateEntryNumber ?? null,
-        gateEntryDate: data.gateEntryDate ?? null,
-        vehicleNo: data.vehicleNo ?? null,
-        transporter: data.transporter ?? null,
-        notes: data.notes ?? null,
-        receivedById: req.user?.id ?? null,
-        lines: {
-          create: data.lines.map((l) => ({
-            itemId: l.itemId,
-            challanQty: l.challanQty,
-            receivedQty: l.receivedQty,
-            batchNumber: l.batchNumber ?? null,
-            markings: l.markings ?? null,
-          })),
-        },
+  const created = await tx.customerGRN.create({
+    data: {
+      grnNumber,
+      customerId: data.customerId,
+      soId: data.soId ?? null,
+      warehouseId: data.warehouseId,
+      receiptDate: when,
+      challanNumber: data.challanNumber ?? null,
+      challanDate: data.challanDate ?? null,
+      gateEntryNumber: data.gateEntryNumber ?? null,
+      gateEntryDate: data.gateEntryDate ?? null,
+      vehicleNo: data.vehicleNo ?? null,
+      transporter: data.transporter ?? null,
+      notes: data.notes ?? null,
+      receivedById: userId,
+      lines: {
+        create: data.lines.map((l) => ({
+          itemId: l.itemId,
+          challanQty: l.challanQty,
+          receivedQty: l.receivedQty,
+          batchNumber: l.batchNumber ?? null,
+          markings: l.markings ?? null,
+        })),
       },
-      include: { lines: true },
-    })
-
-    for (const line of created.lines) {
-      await recordMovement(tx, {
-        itemId: line.itemId,
-        warehouseId: data.warehouseId,
-        transactionType: 'CUSTOMER_MATERIAL',
-        direction: 'IN',
-        qty: Number(line.receivedQty),
-        // Not ours, so it carries no value to us and never reaches the stock
-        // figure or the balance sheet.
-        unitRate: 0,
-        ownership: 'CUSTOMER_OWNED',
-        ownerCustomerId: data.customerId,
-        batchNumber: line.batchNumber,
-        referenceType: 'CUSTOMER_GRN',
-        referenceId: created.id,
-        transactionDate: when,
-        notes: `${grnNumber}: ${customer.name}`,
-      })
-    }
-
-    return tx.customerGRN.findUniqueOrThrow({
-      where: { id: created.id },
-      include: customerGrnInclude,
-    })
+    },
+    include: { lines: true },
   })
+
+  for (const line of created.lines) {
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: data.warehouseId,
+      transactionType: 'CUSTOMER_MATERIAL',
+      direction: 'IN',
+      qty: Number(line.receivedQty),
+      // Not ours, so it carries no value to us and never reaches the stock
+      // figure or the balance sheet.
+      unitRate: 0,
+      ownership: 'CUSTOMER_OWNED',
+      ownerCustomerId: data.customerId,
+      batchNumber: line.batchNumber,
+      referenceType: 'CUSTOMER_GRN',
+      referenceId: created.id,
+      transactionDate: when,
+      notes: `${grnNumber}: ${customer.name}`,
+    })
+  }
+
+  return tx.customerGRN.findUniqueOrThrow({
+    where: { id: created.id },
+    include: customerGrnInclude,
+  })
+}
+
+router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createCustomerGrnSchema.parse(req.body)
+  const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null))
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -1605,6 +2142,172 @@ router.get('/customer-grn', requirePermission(MODULE, 'view'), async (req, res) 
     success: true,
     data: rows,
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  })
+})
+
+/*
+ * Every line of every receipt, one row each, with the receipt's own details
+ * and what the item is — for the screen's table, filters, figures and export,
+ * which all work on the same rows. Alongside, what of each customer's is still
+ * in our stores now, from the ledger. Ahead of /customer-grn/:id.
+ */
+router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [receipts, held] = await Promise.all([
+    prisma.customerGRN.findMany({
+      orderBy: [{ receiptDate: 'desc' }, { createdAt: 'desc' }],
+      take: 2000,
+      include: {
+        customer: { select: { id: true, name: true } },
+        so: { select: { id: true, soNumber: true } },
+        warehouse: { select: { id: true, name: true } },
+        receivedBy: { select: { id: true, name: true } },
+        lines: {
+          include: {
+            item: {
+              select: {
+                id: true, code: true, name: true, type: true, uom: { select: { symbol: true } },
+                category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+                department: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
+    }),
+    onHand(prisma, { ownership: 'CUSTOMER_OWNED' }),
+  ])
+
+  type ItemAbout = {
+    type: string
+    category: { id: string; name: string; parent: { id: string; name: string } | null }
+    department: { id: string; name: string } | null
+  }
+  const about = (it: ItemAbout) => ({
+    itemType: it.type,
+    mainCategoryId: it.category.parent?.id ?? it.category.id,
+    mainCategoryName: it.category.parent?.name ?? it.category.name,
+    subCategoryId: it.category.parent ? it.category.id : null,
+    subCategoryName: it.category.parent ? it.category.name : null,
+    departmentId: it.department?.id ?? null,
+    departmentName: it.department?.name ?? null,
+  })
+
+  const data = receipts.flatMap((r) =>
+    r.lines.map((l) => ({
+      id: l.id,
+      receiptId: r.id,
+      grnNumber: r.grnNumber,
+      receiptDate: r.receiptDate,
+      challanNumber: r.challanNumber,
+      challanDate: r.challanDate,
+      gateEntryNumber: r.gateEntryNumber,
+      vehicleNo: r.vehicleNo,
+      transporter: r.transporter,
+      notes: r.notes,
+      cancelledAt: r.cancelledAt,
+      cancelReason: r.cancelReason,
+      customerId: r.customer.id,
+      customerName: r.customer.name,
+      soNumber: r.so?.soNumber ?? null,
+      warehouseId: r.warehouse.id,
+      warehouseName: r.warehouse.name,
+      receivedByName: r.receivedBy?.name ?? null,
+      lineCount: r.lines.length,
+      itemId: l.item.id,
+      itemCode: l.item.code,
+      itemName: l.item.name,
+      uom: l.item.uom?.symbol ?? '',
+      ...about(l.item),
+      challanQty: Number(l.challanQty),
+      receivedQty: Number(l.receivedQty),
+      batchNumber: l.batchNumber,
+      markings: l.markings,
+    })),
+  )
+
+  const heldIds = [...new Set(held.map((h) => h.itemId))]
+  const heldItems = await prisma.item.findMany({
+    where: { id: { in: heldIds } },
+    select: {
+      id: true, type: true,
+      category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+      department: { select: { id: true, name: true } },
+    },
+  })
+  const heldAbout = new Map(heldItems.map((i) => [i.id, about(i)]))
+
+  res.json({
+    success: true,
+    data,
+    held: held.map((h) => ({
+      itemId: h.itemId,
+      itemCode: h.itemCode,
+      itemName: h.itemName,
+      uom: h.uom,
+      warehouseId: h.warehouseId,
+      warehouseName: h.warehouseName,
+      customerId: h.ownerCustomerId,
+      customerName: h.ownerName,
+      qty: h.qty,
+      lastMovedAt: h.lastMovedAt,
+      ...heldAbout.get(h.itemId),
+    })),
+  })
+})
+
+// ── Customer receipts from a spreadsheet ────────────────────────────────────
+
+router.get('/customer-grn/import-template', requirePermission(MODULE, 'create'), async (req, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await customerMaterialImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'customer-material-with-receipts.xlsx' : 'customer-material-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/customer-grn/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = customerMaterialImport.importBody.parse(req.body)
+  const rows = await customerMaterialImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const { plans, receipts } = await customerMaterialImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    receipts: receipts.length,
+    lines: receipts.reduce((n, r) => n + (r.lines as unknown[]).length, 0),
+    skipped: plans.filter((p) => p.skipped).length,
+    problems: plans.filter((p) => p.problems.length > 0).length,
+  }
+  if (!confirm) return res.json({ success: true, data: { summary, rows: plans } })
+  if (summary.problems) {
+    throw new AppError('Some rows have problems. Fix them in the sheet and try again; nothing was imported.', 400, 'IMPORT_PROBLEMS')
+  }
+
+  // All or nothing: one bad receipt and none of them are booked.
+  const created = await prisma.$transaction(
+    async (tx) => {
+      const out: Array<{ code: string; name: string }> = []
+      for (const r of receipts) {
+        const grn = await createCustomerGrn(tx, createCustomerGrnSchema.parse(r), req.user?.id ?? null)
+        out.push({ code: grn.grnNumber, name: `${grn.customer.name} · ${grn.lines.length} ${grn.lines.length === 1 ? 'item' : 'items'}` })
+      }
+      return out
+    },
+    { timeout: 120000, maxWait: 20000 },
+  )
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'CustomerGRNImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} ${created.length === 1 ? 'receipt' : 'receipts'}.`
+      : 'Nothing to import: every receipt in the sheet is already in the system.',
+    data: { summary, created },
   })
 })
 
@@ -1685,6 +2388,272 @@ router.patch(
     res.json({
       success: true,
       message: `${after.grnNumber} cancelled and the material taken back off the books.`,
+      data: after,
+    })
+  },
+)
+
+// ── A customer's material going back to them ────────────────────────────────
+
+const RETURN_REASON_LABEL: Record<string, string> = {
+  LEFTOVER: 'Left over after their order',
+  REJECTED: 'Rejected at inspection',
+  EXCESS: 'More than their challan',
+  OTHER: 'Other',
+}
+
+/**
+ * Sending a customer's own material back to them unworked.
+ *
+ * Every line moves CUSTOMER_OWNED stock of that customer out of the one store.
+ * The stock service refuses more than their balance there and names what is
+ * left, so a return can never take our own cloth, or another customer's.
+ */
+router.post('/customer-return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createCustomerReturnSchema.parse(req.body)
+  const when = data.returnDate ?? new Date()
+
+  const created = await prisma.$transaction(async (tx) => {
+    const [customer, warehouse] = await Promise.all([
+      tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true } }),
+      tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true } }),
+    ])
+    if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
+    if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+
+    if (data.grnId) {
+      const grn = await tx.customerGRN.findUnique({
+        where: { id: data.grnId },
+        select: { customerId: true, grnNumber: true, cancelledAt: true },
+      })
+      if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+      if (grn.customerId !== data.customerId) {
+        throw new AppError(`${grn.grnNumber} is a different customer's receipt.`, 400, 'RECEIPT_NOT_THEIRS')
+      }
+      if (grn.cancelledAt) {
+        throw new AppError(`${grn.grnNumber} was cancelled, so nothing came in on it.`, 400, 'RECEIPT_CANCELLED')
+      }
+    }
+
+    const items = await tx.item.findMany({
+      where: { id: { in: data.lines.map((l) => l.itemId) } },
+      select: { id: true, hsnCode: true },
+    })
+    const hsnOf = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+    const returnNumber = await nextDocumentNumber(tx, 'CMR', when)
+    const doc = await tx.customerMaterialReturn.create({
+      data: {
+        returnNumber,
+        customerId: data.customerId,
+        grnId: data.grnId ?? null,
+        warehouseId: data.warehouseId,
+        returnDate: when,
+        reason: data.reason,
+        vehicleNo: data.vehicleNo ?? null,
+        transporter: data.transporter ?? null,
+        lrNumber: data.lrNumber ?? null,
+        notes: data.notes ?? null,
+        createdById: req.user?.id ?? null,
+        lines: {
+          create: data.lines.map((l) => ({
+            itemId: l.itemId,
+            qty: l.qty,
+            hsnCode: hsnOf.get(l.itemId) ?? null,
+            notes: l.notes ?? null,
+          })),
+        },
+      },
+      include: { lines: true },
+    })
+
+    for (const line of doc.lines) {
+      await recordMovement(tx, {
+        itemId: line.itemId,
+        warehouseId: data.warehouseId,
+        transactionType: 'RETURN',
+        direction: 'OUT',
+        qty: Number(line.qty),
+        ownership: 'CUSTOMER_OWNED',
+        ownerCustomerId: data.customerId,
+        referenceType: 'CUSTOMER_RETURN',
+        referenceId: doc.id,
+        transactionDate: when,
+        notes: `${returnNumber}: back to ${customer.name} (${RETURN_REASON_LABEL[data.reason].toLowerCase()})`,
+      })
+    }
+
+    return { ...doc, customerName: customer.name }
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'CustomerMaterialReturn',
+    entityId: created.id,
+    after: created,
+  })
+
+  res.status(201).json({
+    success: true,
+    message: `${created.returnNumber} saved. ${created.lines.length} ${created.lines.length === 1 ? 'item has' : 'items have'} gone back to ${created.customerName} and off our books.`,
+    data: created,
+  })
+})
+
+/*
+ * Every line of every return, one row each, with the return's details and
+ * what the item is — for the Returns tab, its filters, figures and export.
+ */
+router.get('/customer-return/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const returns = await prisma.customerMaterialReturn.findMany({
+    orderBy: [{ returnDate: 'desc' }, { createdAt: 'desc' }],
+    take: 2000,
+    include: {
+      customer: { select: { id: true, name: true } },
+      grn: { select: { id: true, grnNumber: true } },
+      warehouse: { select: { id: true, name: true } },
+      createdBy: { select: { id: true, name: true } },
+      lines: {
+        include: {
+          item: {
+            select: {
+              id: true, code: true, name: true, uom: { select: { symbol: true } },
+              category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+              department: { select: { id: true, name: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const data = returns.flatMap((r) =>
+    r.lines.map((l) => ({
+      id: l.id,
+      returnId: r.id,
+      returnNumber: r.returnNumber,
+      returnDate: r.returnDate,
+      reason: r.reason,
+      reasonLabel: RETURN_REASON_LABEL[r.reason] ?? r.reason,
+      grnNumber: r.grn?.grnNumber ?? null,
+      vehicleNo: r.vehicleNo,
+      transporter: r.transporter,
+      lrNumber: r.lrNumber,
+      notes: r.notes,
+      cancelledAt: r.cancelledAt,
+      cancelReason: r.cancelReason,
+      customerId: r.customer.id,
+      customerName: r.customer.name,
+      warehouseId: r.warehouse.id,
+      warehouseName: r.warehouse.name,
+      createdByName: r.createdBy?.name ?? null,
+      lineCount: r.lines.length,
+      itemId: l.item.id,
+      itemCode: l.item.code,
+      itemName: l.item.name,
+      uom: l.item.uom?.symbol ?? '',
+      hsnCode: l.hsnCode,
+      mainCategoryId: l.item.category.parent?.id ?? l.item.category.id,
+      mainCategoryName: l.item.category.parent?.name ?? l.item.category.name,
+      subCategoryName: l.item.category.parent ? l.item.category.name : null,
+      departmentId: l.item.department?.id ?? null,
+      departmentName: l.item.department?.name ?? null,
+      qty: Number(l.qty),
+      lineNotes: l.notes,
+    })),
+  )
+
+  res.json({ success: true, data })
+})
+
+/**
+ * The delivery challan that goes with the customer's material. Under Rule 55
+ * a movement that is not a supply still travels on a challan naming both
+ * parties, with each item's HSN and quantity.
+ */
+router.get('/customer-return/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const doc = await prisma.customerMaterialReturn.findUnique({
+    where: { id: req.params.id },
+    include: {
+      customer: {
+        select: {
+          id: true, name: true, code: true, gstin: true, phone: true,
+          billingAddress: true, billingCity: true, billingState: true, billingStateCode: true, billingPincode: true,
+          shippingAddress: true, shippingCity: true, shippingState: true, shippingStateCode: true, shippingPincode: true,
+        },
+      },
+      grn: { select: { grnNumber: true, receiptDate: true, challanNumber: true, challanDate: true } },
+      warehouse: { select: { id: true, name: true, address: true } },
+      createdBy: { select: { id: true, name: true } },
+      cancelledBy: { select: { id: true, name: true } },
+      lines: { include: { item: itemLineSelect } },
+    },
+  })
+  if (!doc) throw new AppError('That return does not exist', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('CMR')
+  res.json({ success: true, data: { ...header, doc: { ...doc, reasonLabel: RETURN_REASON_LABEL[doc.reason] ?? doc.reason } } })
+})
+
+/**
+ * Taking a return back: the lorry never left, or the customer sent it back.
+ * The material comes back onto our racks under the customer's name.
+ */
+router.patch(
+  '/customer-return/:id/cancel',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = cancelCustomerReturnSchema.parse(req.body ?? {})
+
+    const after = await prisma.$transaction(async (tx) => {
+      const before = await tx.customerMaterialReturn.findUnique({
+        where: { id: req.params.id },
+        include: { lines: true },
+      })
+      if (!before) throw new AppError('That return does not exist', 404, 'NOT_FOUND')
+      if (before.cancelledAt) {
+        throw new AppError(
+          `${before.returnNumber} was already cancelled on ${before.cancelledAt.toLocaleDateString('en-IN')}.`,
+          400,
+          'ALREADY_CANCELLED',
+        )
+      }
+
+      for (const line of before.lines) {
+        await recordMovement(tx, {
+          itemId: line.itemId,
+          warehouseId: before.warehouseId,
+          transactionType: 'CUSTOMER_MATERIAL',
+          direction: 'IN',
+          qty: Number(line.qty),
+          unitRate: 0,
+          ownership: 'CUSTOMER_OWNED',
+          ownerCustomerId: before.customerId,
+          referenceType: 'CUSTOMER_RETURN_CANCELLED',
+          referenceId: before.id,
+          transactionDate: new Date(),
+          notes: `${before.returnNumber} cancelled: ${reason}`,
+        })
+      }
+
+      return tx.customerMaterialReturn.update({
+        where: { id: before.id },
+        data: { cancelledAt: new Date(), cancelledById: req.user?.id ?? null, cancelReason: reason },
+      })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'CustomerMaterialReturn',
+      entityId: after.id,
+      after,
+    })
+
+    res.json({
+      success: true,
+      message: `${after.returnNumber} cancelled. The material is back on our racks under the customer's name.`,
       data: after,
     })
   },
@@ -1832,6 +2801,141 @@ router.get('/job-work', requirePermission(MODULE, 'view'), async (req, res) => {
     data: rows,
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   })
+})
+
+/*
+ * Every line of every job-work challan, one row each: the challan's details,
+ * what the item is, and how much of it has been settled by returns, wasted,
+ * and is still out. The screen's table, filters, figures, export and dashboard
+ * all read these same rows. Ahead of /job-work/:id.
+ */
+router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const challans = await prisma.jobWorkChallan.findMany({
+    orderBy: [{ challanDate: 'desc' }, { createdAt: 'desc' }],
+    take: 2000,
+    include: {
+      jobWorker: { select: { id: true, name: true, code: true, city: true } },
+      fromWarehouse: { select: { id: true, name: true } },
+      toWarehouse: { select: { id: true, name: true } },
+      sentBy: { select: { id: true, name: true } },
+      lines: {
+        include: {
+          item: {
+            select: {
+              id: true, code: true, name: true, type: true, uom: { select: { symbol: true } },
+              category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+              department: { select: { id: true, name: true } },
+            },
+          },
+          returnLines: {
+            include: {
+              item: { select: { id: true, name: true, uom: { select: { symbol: true } } } },
+              jobWorkReturn: { select: { returnNumber: true, returnDate: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const r3 = (v: number) => Math.round(v * 1000) / 1000
+  const data = challans.flatMap((c) =>
+    c.lines.map((l) => {
+      const it = l.item
+      const sent = Number(l.qty)
+      const settled = l.returnLines.reduce((t, r) => t + Number(r.consumedQty), 0)
+      const wasted = l.returnLines.reduce((t, r) => t + Number(r.wastedQty), 0)
+      // What came back as itself, and what came back made into something else.
+      const madeBy = new Map<string, { itemName: string; uom: string; qty: number }>()
+      for (const r of l.returnLines) {
+        if (r.itemId === l.itemId) continue
+        const cur = madeBy.get(r.itemId) ?? { itemName: r.item.name, uom: r.item.uom?.symbol ?? '', qty: 0 }
+        cur.qty += Number(r.receivedQty)
+        madeBy.set(r.itemId, cur)
+      }
+      const dates = l.returnLines.map((r) => r.jobWorkReturn.returnDate.getTime())
+      return {
+        id: l.id,
+        challanId: c.id,
+        challanNumber: c.challanNumber,
+        challanDate: c.challanDate,
+        process: c.process,
+        status: c.status,
+        cancelReason: c.cancelReason,
+        expectedBackOn: c.expectedBackOn,
+        vehicleNo: c.vehicleNo,
+        transporter: c.transporter,
+        lrNumber: c.lrNumber,
+        notes: c.notes,
+        sentByName: c.sentBy?.name ?? null,
+        lineCount: c.lines.length,
+        jobWorkerId: c.jobWorker.id,
+        jobWorkerName: c.jobWorker.name,
+        jobWorkerCity: c.jobWorker.city,
+        fromWarehouseId: c.fromWarehouse.id,
+        fromWarehouseName: c.fromWarehouse.name,
+        toWarehouseId: c.toWarehouse.id,
+        toWarehouseName: c.toWarehouse.name,
+        itemId: it.id,
+        itemCode: it.code,
+        itemName: it.name,
+        itemType: it.type,
+        uom: it.uom?.symbol ?? '',
+        hsnCode: l.hsnCode,
+        mainCategoryId: it.category.parent?.id ?? it.category.id,
+        mainCategoryName: it.category.parent?.name ?? it.category.name,
+        subCategoryId: it.category.parent ? it.category.id : null,
+        subCategoryName: it.category.parent ? it.category.name : null,
+        departmentId: it.department?.id ?? null,
+        departmentName: it.department?.name ?? null,
+        sentQty: sent,
+        unitRate: Number(l.unitRate ?? 0),
+        settledQty: r3(settled),
+        backSameQty: r3(l.returnLines.filter((r) => r.itemId === l.itemId).reduce((t, r) => t + Number(r.receivedQty), 0)),
+        madeInto: [...madeBy.values()].map((m) => ({ ...m, qty: r3(m.qty) })),
+        wastedQty: r3(wasted),
+        // A cancelled challan brought everything back to the store it left.
+        stillOutQty: c.status === 'CANCELLED' ? 0 : Math.max(0, r3(sent - settled)),
+        returnNumbers: [...new Set(l.returnLines.map((r) => r.jobWorkReturn.returnNumber))],
+        lastReturnAt: dates.length ? new Date(Math.max(...dates)) : null,
+        // Each return on its own day, for charting what came back when.
+        settledBy: l.returnLines.map((r) => ({ at: r.jobWorkReturn.returnDate, qty: Number(r.consumedQty) })),
+      }
+    }),
+  )
+
+  res.json({ success: true, data })
+})
+
+/**
+ * The delivery challan that travels with our goods to a job worker.
+ *
+ * Rule 55 of the CGST Rules asks it to name both parties with their GSTIN and
+ * address, and each item with its HSN, quantity and value — without it the
+ * movement reads as a taxable sale. Everything the page prints comes in this
+ * one call, letterhead included.
+ */
+router.get('/job-work/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const challan = await prisma.jobWorkChallan.findUnique({
+    where: { id: req.params.id },
+    include: {
+      jobWorker: {
+        select: {
+          id: true, name: true, code: true, gstin: true, phone: true, address: true,
+          city: true, state: true, stateCode: true, pincode: true,
+        },
+      },
+      fromWarehouse: { select: { id: true, name: true, address: true } },
+      toWarehouse: { select: { id: true, name: true } },
+      sentBy: { select: { id: true, name: true } },
+      cancelledBy: { select: { id: true, name: true } },
+      lines: { include: { item: itemLineSelect } },
+    },
+  })
+  if (!challan) throw new AppError('That challan does not exist', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('JW')
+  res.json({ success: true, data: { ...header, challan } })
 })
 
 router.get('/job-work/:id', requirePermission(MODULE, 'view'), async (req, res) => {

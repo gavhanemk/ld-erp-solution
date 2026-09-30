@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { isAdmin, requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { decidePending } from '../services/requisition.service'
 import { rejectRequisitionSchema } from '../schemas/inventory.schemas'
@@ -44,7 +44,7 @@ router.post('/:type/:id/approve', guard('approve'), async (req: AuthRequest, res
   const id = req.params.id
   const userId = req.user!.id
 
-  const result = await approve(type, id, userId)
+  const result = await approve(type, id, userId, isAdmin(req.user))
 
   await writeAuditLog(req, {
     module: MODULE_FOR[type],
@@ -80,7 +80,7 @@ router.post('/:type/:id/reject', guard('approve'), async (req: AuthRequest, res)
   res.json({ success: true, message: `${result.number} rejected`, data: result.after })
 })
 
-async function approve(type: DocumentType, id: string, userId: string) {
+async function approve(type: DocumentType, id: string, userId: string, admin = false) {
   if (type === 'PO') {
     const before = await prisma.purchaseOrder.findUnique({ where: { id } })
     if (!before || before.deletedAt) {
@@ -119,7 +119,8 @@ async function approve(type: DocumentType, id: string, userId: string) {
   }
   // Same rule as the inventory screen enforces. Approving from the inbox is a
   // different door into the same decision, and it cannot be the unlocked one.
-  if (before.raisedById && before.raisedById === userId) {
+  // The Admin may approve their own, as on the inventory screen.
+  if (before.raisedById && before.raisedById === userId && !admin) {
     throw new AppError(
       'You raised this requisition, so somebody else has to approve it.',
       403,

@@ -71,6 +71,27 @@ export const openingStockSchema = z.object({
  * Asking it on the requisition form instead, as this once did, puts the answer
  * in the hands of the only person in the building who cannot know it.
  */
+/**
+ * The store's plan for an approved requisition: how much of each line to buy.
+ *
+ * Any amount from nothing upward — part of what is short, all of it, the whole
+ * line, or more than was asked with the extra going into stock. What is
+ * handed over from the racks is the issue, a separate step.
+ */
+export const requisitionPlanSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        lineId: id('a line'),
+        buyQty: z
+          .number({ invalid_type_error: 'The quantity to buy has to be a number' })
+          .min(0, 'The quantity to buy cannot be negative')
+          .max(9_999_999),
+      }),
+    )
+    .min(1, 'Nothing to change'),
+})
+
 export const requisitionSourcingSchema = z.object({
   lines: z
     .array(
@@ -125,7 +146,11 @@ export const transferSchema = z.object({
 export const createRequisitionSchema = z.object({
   departmentId: id('the department asking'),
   moId: z.string().optional().nullable(),
-  warehouseId: id('the store to draw from'),
+  /**
+   * One store for every line, as older callers send it. A line may name its
+   * own instead — the form now picks the store per item, from where it is.
+   */
+  warehouseId: z.string().optional().nullable(),
   requiredDate: z.coerce.date().optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
@@ -133,6 +158,8 @@ export const createRequisitionSchema = z.object({
       z.object({
         itemId: id('an item'),
         requestedQty: qty,
+        /** The store this line is asked of. Falls back to the requisition's. */
+        warehouseId: z.string().optional().nullable(),
         purpose: z.string().max(300).optional().nullable(),
         /**
          * Whose material to draw. Defaults to ours, which is what every
@@ -144,6 +171,26 @@ export const createRequisitionSchema = z.object({
     )
     .min(1, 'Add at least one item'),
 })
+  .superRefine((data, ctx) => {
+    // A customer's material names the customer; our own names nobody. And one
+    // line per item and owner: two lines drawing the same balance would both
+    // be checked against the whole of it.
+    const seen = new Set<string>()
+    data.lines.forEach((l, i) => {
+      if (!l.warehouseId && !data.warehouseId) {
+        ctx.addIssue({ code: 'custom', path: ['lines', i, 'warehouseId'], message: `Line ${i + 1}: pick the store to ask` })
+      }
+      const theirs = l.ownership === 'CUSTOMER_OWNED'
+      if (theirs && !l.ownerCustomerId) {
+        ctx.addIssue({ code: 'custom', path: ['lines', i, 'ownerCustomerId'], message: `Line ${i + 1}: say whose material it is` })
+      }
+      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}|${l.warehouseId ?? data.warehouseId}`
+      if (seen.has(k)) {
+        ctx.addIssue({ code: 'custom', path: ['lines', i, 'itemId'], message: `Line ${i + 1}: that item is already asked for from the same stock. Put it on one line.` })
+      }
+      seen.add(k)
+    })
+  })
 
 export const rejectRequisitionSchema = z.object({
   reason: z.string().min(5, 'Say why it is being refused').max(500),
@@ -170,6 +217,11 @@ export const issueRequisitionSchema = z.object({
         issueQty: z
           .number({ invalid_type_error: 'Quantity has to be a number' })
           .min(0, 'Quantity cannot be negative'),
+        /**
+         * The store it comes out of. Defaults to the line's own. A line may
+         * appear more than once, once per store, to be made up from several.
+         */
+        warehouseId: z.string().optional().nullable(),
       }),
     )
     .optional(),
@@ -248,6 +300,60 @@ export const cancelCustomerGrnSchema = z.object({
   reason: z
     .string()
     .min(5, 'Say why the receipt is being cancelled — one line is enough')
+    .max(500),
+})
+
+/** Why a customer's material is going back to them. */
+export const CUSTOMER_RETURN_REASONS = ['LEFTOVER', 'REJECTED', 'EXCESS', 'OTHER'] as const
+
+/**
+ * A customer's own material going back to them unworked. Every line comes out
+ * of one store, from that customer's balance of the item — the stock service
+ * refuses more than is there, and says how much is.
+ */
+export const createCustomerReturnSchema = z
+  .object({
+    customerId: id('the customer it goes back to'),
+    /** The receipt it came in on, when it is going back against one. */
+    grnId: z.string().optional().nullable(),
+    warehouseId: id('the store it leaves from'),
+    returnDate: z.coerce.date().optional(),
+    reason: z.enum(CUSTOMER_RETURN_REASONS, { errorMap: () => ({ message: 'Say why it is going back' }) }),
+    vehicleNo: z.string().max(20, 'That vehicle number is too long').optional().nullable(),
+    transporter: z.string().max(120).optional().nullable(),
+    lrNumber: z.string().max(50).optional().nullable(),
+    notes: z.string().max(1000).optional().nullable(),
+    lines: z
+      .array(
+        z.object({
+          itemId: id('an item'),
+          qty: z.coerce.number().positive('Enter how much is going back').max(9_999_999),
+          notes: z.string().max(200).optional().nullable(),
+        }),
+      )
+      .min(1, 'Add at least one item'),
+  })
+  .superRefine((data, ctx) => {
+    if (data.reason === 'OTHER' && !data.notes?.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['notes'], message: 'Say why it is going back' })
+    }
+    const seen = new Set<string>()
+    data.lines.forEach((line, i) => {
+      if (seen.has(line.itemId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'itemId'],
+          message: 'This item is already on the return. Put the whole quantity on one line.',
+        })
+      }
+      seen.add(line.itemId)
+    })
+  })
+
+export const cancelCustomerReturnSchema = z.object({
+  reason: z
+    .string()
+    .min(5, 'Say why the return is being cancelled — one line is enough')
     .max(500),
 })
 

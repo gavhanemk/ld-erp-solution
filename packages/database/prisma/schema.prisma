@@ -325,6 +325,8 @@ model User {
   @@map("users")
   customerGrnReceived  CustomerGRN[]    @relation("CustomerGRNReceivedBy")
   customerGrnCancelled CustomerGRN[]    @relation("CustomerGRNCancelledBy")
+  customerReturnsMade      CustomerMaterialReturn[] @relation("CustomerReturnCreatedBy")
+  customerReturnsCancelled CustomerMaterialReturn[] @relation("CustomerReturnCancelledBy")
   jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
   jobWorkCancelled     JobWorkChallan[] @relation("JobWorkChallanCancelledBy")
   jobWorkReturnsTaken  JobWorkReturn[]  @relation("JobWorkReturnReceivedBy")
@@ -613,6 +615,7 @@ model Item {
   @@index([departmentId])
   @@map("items")
   customerGrnLines    CustomerGRNLine[]    @relation("CustomerGRNLines")
+  customerReturnLines CustomerMaterialReturnLine[] @relation("CustomerReturnLines")
   jobWorkChallanLines JobWorkChallanLine[] @relation("JobWorkChallanLines")
   jobWorkReturnLines  JobWorkReturnLine[]  @relation("JobWorkReturnLines")
 }
@@ -856,6 +859,7 @@ model Customer {
   creditNotes  CreditNote[]
   ownedStock   StockLedger[]  @relation("CustomerOwnedStock")
   suppliedMaterial CustomerGRN[] @relation("CustomerSuppliedMaterial")
+  materialReturned CustomerMaterialReturn[] @relation("CustomerMaterialReturned")
   materialRequisitionLines MaterialRequisitionLine[] @relation("CustomerMaterialRequisitionLines")
 
   @@index([code])
@@ -973,6 +977,7 @@ model Warehouse {
 
   @@map("warehouses")
   customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
+  customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturns")
   jobWorkSentFrom          JobWorkChallan[] @relation("JobWorkChallanFrom")
   jobWorkSentTo            JobWorkChallan[] @relation("JobWorkChallanTo")
   jobWorkReturnLines       JobWorkReturnLine[] @relation("JobWorkReturnLines")
@@ -2169,6 +2174,16 @@ model MaterialRequisitionLine {
   /// every line written before this existed meant.
   fulfilment RequisitionFulfilment @default(FROM_STOCK)
 
+  /// How much of this line the store has decided to buy — the indent.
+  ///
+  /// Not tied to what is short: a line can be half issued from the rack and
+  /// half bought, bought whole with stock on the rack kept for something else,
+  /// or bought over, the extra going into stock. Null on lines decided before
+  /// this existed, where PURCHASE meant the whole quantity asked for. Set
+  /// together with `fulfilment`, which stays PURCHASE whenever any is bought
+  /// so everything that reads it still finds the line on the indent.
+  purchaseQty Decimal? @db.Decimal(10, 3)
+
   /// The enquiry lines raised against this one.
   ///
   /// Shown to the buyer, but never subtracted from what the request still
@@ -2343,7 +2358,8 @@ model CustomerGRN {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
-  lines CustomerGRNLine[]
+  lines   CustomerGRNLine[]
+  returns CustomerMaterialReturn[]
 
   @@index([customerId])
   @@index([receiptDate])
@@ -2368,6 +2384,70 @@ model CustomerGRNLine {
   markings    String?
 
   @@map("customer_grn_lines")
+}
+
+/// A customer's own material going back to them unworked: what was left over
+/// after their order, what was rejected at inspection, or what came in over
+/// their challan.
+///
+/// Not a purchase return. That one sends our goods back to a supplier against
+/// their bill and raises a debit note; this sends the customer's goods back to
+/// the customer, with no bill behind it and no money on either side. It is the
+/// only way their material leaves our books other than being issued to the
+/// floor, so without it every leftover roll would sit on the stock screen under
+/// their name for ever.
+///
+/// Every line moves CUSTOMER_OWNED stock of that customer out of one store,
+/// which is what stops us returning more than we hold of theirs — or returning
+/// our own cloth by mistake.
+model CustomerMaterialReturn {
+  id            String       @id @default(cuid())
+  returnNumber  String       @unique
+  customerId    String
+  customer      Customer     @relation("CustomerMaterialReturned", fields: [customerId], references: [id])
+  /// The receipt it came in on, when it is going back against one.
+  grnId         String?
+  grn           CustomerGRN? @relation(fields: [grnId], references: [id])
+  returnDate    DateTime     @default(now())
+  /// One store for the whole return: it is loaded from one place.
+  warehouseId   String
+  warehouse     Warehouse    @relation("CustomerMaterialReturns", fields: [warehouseId], references: [id])
+  /// LEFTOVER, REJECTED, EXCESS or OTHER. Checked by the API rather than an
+  /// enum, so a new reason is not a migration.
+  reason        String
+  vehicleNo     String?
+  transporter   String?
+  lrNumber      String?
+  notes         String?
+  createdById   String?
+  createdBy     User?        @relation("CustomerReturnCreatedBy", fields: [createdById], references: [id])
+  /// Set when the return is taken back: the goods are back on our racks.
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?        @relation("CustomerReturnCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason  String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  lines CustomerMaterialReturnLine[]
+
+  @@index([customerId])
+  @@index([returnDate])
+  @@map("customer_material_returns")
+}
+
+model CustomerMaterialReturnLine {
+  id       String                 @id @default(cuid())
+  returnId String
+  return   CustomerMaterialReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  itemId   String
+  item     Item                   @relation("CustomerReturnLines", fields: [itemId], references: [id])
+  qty      Decimal                @db.Decimal(10, 3)
+  /// Copied from the item when the return is raised, for the challan.
+  hsnCode  String?
+  notes    String?
+
+  @@map("customer_material_return_lines")
 }
 
 /// Our own fabric sent out to an outside unit for processing.

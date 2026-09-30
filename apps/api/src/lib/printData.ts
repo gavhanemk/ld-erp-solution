@@ -53,6 +53,7 @@ const DEFAULT_TITLES: Record<string, string> = {
   ENQ: 'PURCHASE REQUISITION',
   DC: 'DELIVERY CHALLAN',
   JW: 'DELIVERY CHALLAN (JOB WORK)',
+  CMR: 'DELIVERY CHALLAN (RETURN)',
   // Our own booking record of a supplier's invoice, not a tax invoice we issue.
   // Calling it one on paper would be claiming to have raised it.
   PB: 'PURCHASE BILL',

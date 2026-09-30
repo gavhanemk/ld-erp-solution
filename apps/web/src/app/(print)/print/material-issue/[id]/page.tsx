@@ -13,6 +13,7 @@ import {
   GREY,
   INK,
   MUTED,
+  NAVY,
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
@@ -47,8 +48,11 @@ interface Payload {
       issuedQty: string
       purpose: string | null
       fulfilment?: 'FROM_STOCK' | 'PURCHASE'
+      purchaseQty?: string | number | null
       item: { code: string; name: string; uom: { symbol: string } }
       warehouse: { name: string }
+      ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+      ownerCustomer?: { name: string } | null
     }>
   }
   handovers: Array<{
@@ -118,7 +122,10 @@ export default function PrintMaterialIssue() {
         : null
 
   const rows = mr.lines.map((l, i) => {
-    const toBuy = l.fulfilment === 'PURCHASE'
+    // Being bought: still owed to the department, handed over from the store once it arrives.
+    const buying =
+      l.purchaseQty !== null && l.purchaseQty !== undefined ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+    const toBuy = buying > 0
     const owed = Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
     return {
       key: l.id,
@@ -128,9 +135,14 @@ export default function PrintMaterialIssue() {
         desc: (
           <>
             <div style={{ fontWeight: 600 }}>{l.item.name}</div>
+            {l.ownership === 'CUSTOMER_OWNED' && (
+              <div style={{ fontSize: '8.5px', fontWeight: 700, color: NAVY, marginTop: '1px' }}>
+                {l.ownerCustomer?.name ?? 'Customer'}&apos;s material — not ours
+              </div>
+            )}
             {(l.purpose || toBuy) && (
               <div style={{ fontSize: '8.5px', color: MUTED, marginTop: '1px' }}>
-                {toBuy ? 'To be bought — not from the store' : l.purpose}
+                {[l.purpose, toBuy ? `${qty(buying)} being bought` : null].filter(Boolean).join(' · ')}
               </div>
             )}
           </>
@@ -139,7 +151,7 @@ export default function PrintMaterialIssue() {
         uom: <span style={{ fontSize: '9px', color: GREY }}>{l.item.uom.symbol}</span>,
         asked: qty(l.requestedQty),
         given: <strong>{qty(l.issuedQty)}</strong>,
-        owed: toBuy ? '—' : owed > 0 ? qty(owed) : '—',
+        owed: owed > 0 ? qty(owed) : '—',
       },
     }
   })
