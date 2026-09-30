@@ -924,7 +924,11 @@ const mrInclude = {
   lines: {
     include: {
       item: {
-        select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
+        select: {
+          id: true, code: true, name: true, uom: { select: { symbol: true } },
+          // For the list's item panel: category and sub-category in their own columns.
+          category: { select: { name: true, parent: { select: { name: true } } } },
+        },
       },
       warehouse: { select: { id: true, name: true } },
       // Whose material the line draws, when it is a customer's.

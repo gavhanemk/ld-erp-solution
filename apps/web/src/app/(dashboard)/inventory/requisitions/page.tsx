@@ -2,14 +2,16 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
-  Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer,
+  Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
 } from 'lucide-react'
-import Link from 'next/link'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { IssueDialog } from '@/components/inventory/IssueDialog'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { formatDate } from '@/lib/utils'
+import { RowPanel } from '@/components/tables/RowPanel'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { formatDate, itemsPreview } from '@/lib/utils'
 
 /**
  * Material requisitions: asked for, allowed, handed over.
@@ -28,7 +30,13 @@ interface Line {
       existed, which all meant the rack. */
   fulfilment?: 'FROM_STOCK' | 'PURCHASE'
   purpose: string | null
-  item: { id: string; code: string; name: string; uom: { symbol: string } }
+  item: {
+    id: string
+    code: string
+    name: string
+    uom: { symbol: string }
+    category?: { name: string; parent: { name: string } | null } | null
+  }
   warehouse: { id: string; name: string }
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomer?: { id: string; name: string } | null
@@ -109,7 +117,7 @@ function stage(
 
   if (!mr.issuedAt) {
     return {
-      label: 'Approved — not collected',
+      label: 'To be issued',
       cls: 'badge-info',
       // Raised, approved and issued by three different people, so the two
       // who have had their say are told it is somebody else's turn.
@@ -122,6 +130,67 @@ function stage(
   }
 
   return { label: 'Issued', cls: 'badge-success' }
+}
+
+/**
+ * Asked, issued and still owed, per unit. Metres and pieces are never added
+ * together; a requisition for both shows both. Lines to be bought are owed by
+ * the buyer, not the store, so they are counted apart.
+ */
+function qtyByUnit(lines: Line[]) {
+  const m = new Map<string, { uom: string; asked: number; issued: number; owed: number; toBuy: number }>()
+  for (const l of lines) {
+    const u = l.item.uom.symbol
+    const cur = m.get(u) ?? { uom: u, asked: 0, issued: 0, owed: 0, toBuy: 0 }
+    const asked = Number(l.requestedQty)
+    const issued = Number(l.issuedQty)
+    cur.asked += asked
+    cur.issued += issued
+    if (l.fulfilment === 'PURCHASE') cur.toBuy += Math.max(0, asked - issued)
+    else cur.owed += Math.max(0, asked - issued)
+    m.set(u, cur)
+  }
+  return [...m.values()]
+}
+
+type UnitGroup = ReturnType<typeof qtyByUnit>[number]
+
+/** The item panel's columns, as shares of the row, so the table fits the panel it opens in. */
+const ITEM_COLS = [
+  { label: 'Code', width: '10%' },
+  { label: 'Item', width: '20%' },
+  { label: 'Category', width: '10%' },
+  { label: 'Sub-cat.', width: '10%' },
+  { label: 'Whose', width: '9%' },
+  { label: 'From', width: '11%' },
+  { label: 'What for', width: '12%' },
+  { label: 'Asked', width: '7%', numeric: true },
+  { label: 'Issued', width: '6%', numeric: true },
+  { label: 'Owed', width: '5%', numeric: true },
+]
+/** While the store decides each line: the same, with what is on the rack and the answer. */
+const DECIDING_COLS = [
+  { label: 'Code', width: '8%' },
+  { label: 'Item', width: '15%' },
+  { label: 'Category', width: '8%' },
+  { label: 'Sub-cat.', width: '8%' },
+  { label: 'Whose', width: '7%' },
+  { label: 'From', width: '9%' },
+  { label: 'What for', width: '9%' },
+  { label: 'Asked', width: '7%', numeric: true },
+  { label: 'Issued', width: '5%', numeric: true },
+  { label: 'Owed', width: '5%', numeric: true },
+  { label: 'In store', width: '7%', numeric: true },
+  { label: 'Answer it from', width: '12%' },
+]
+
+/** One figure per unit on one line: "1,000 mtr · 250 pcs", or null when all are nil. */
+const unitLine = (groups: UnitGroup[], pick: (g: UnitGroup) => number) => {
+  const parts = groups
+    .map((g) => ({ uom: g.uom, v: pick(g) }))
+    .filter((g) => g.v > 0)
+    .map((g) => `${qtyFmt(g.v)} ${g.uom}`)
+  return parts.length ? parts.join(' · ') : null
 }
 
 export default function RequisitionsPage() {
@@ -288,6 +357,158 @@ export default function RequisitionsPage() {
     !mr.issuedAt &&
     (isMine || can('inventory', 'edit') || can('inventory', 'approve'))
 
+  /** What one row needs to draw itself, worked out once for the card and the table alike. */
+  const rowFacts = (mr: Requisition) => {
+    // The server refuses these too; hiding a button just avoids offering a door that is certain to be shut.
+    const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
+    const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
+    const s = stage(mr, isMine, iApproved, admin)
+    const canDecide = mr.status === 'PENDING' && !mr.closedAt && (!isMine || admin)
+    const canIssue =
+      mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt && !isMine && !iApproved &&
+      mr.lines.some((l) => l.fulfilment !== 'PURCHASE')
+    const actions: RowAction[] = []
+    if (canDecide)
+      actions.push({ key: 'refuse', label: 'Refuse', icon: <X size={14} />, onClick: () => setAsking({ mr, kind: 'reject' }), danger: true })
+    if (mr.status === 'APPROVED')
+      actions.push({ key: 'slip', label: 'Print issue slip', icon: <Printer size={14} />, href: `/print/material-issue/${mr.id}`, newTab: true })
+    if (mayClose(mr, isMine))
+      actions.push({
+        key: 'close',
+        label: partlyIssued(mr) ? 'Close — the rest is not needed' : 'Cancel requisition',
+        icon: <Ban size={14} />,
+        onClick: () => setAsking({ mr, kind: 'close' }),
+        danger: true,
+      })
+    return { isMine, iApproved, s, canDecide, canIssue, actions, groups: qtyByUnit(mr.lines) }
+  }
+  type Facts = ReturnType<typeof rowFacts>
+
+  /** The one thing most likely to be done next to this row, as a button. */
+  const primaryAction = (mr: Requisition, r: Facts) =>
+    r.canDecide ? (
+      <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => void act(mr, 'approve')} disabled={busy === mr.id}>
+        <Check size={13} /> Approve
+      </button>
+    ) : r.canIssue ? (
+      <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => setIssuing(mr)} disabled={busy === mr.id}>
+        <PackageCheck size={13} /> Issue
+      </button>
+    ) : null
+
+  /** The panel under an opened row: every line as a proper table, as on the purchase lists. */
+  const itemPanel = (mr: Requisition, r: Facts) => {
+    // While approved and not yet handed over, the store decides each line: off the rack, or bought.
+    const deciding = mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt
+    return (
+      <RowPanel icon={FileText} title="Item Details" note={`${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} on ${mr.mrNumber}`}>
+        <table className="subtable w-full table-fixed">
+          <thead className="sticky top-0 z-10">
+            <tr>
+              {(deciding ? DECIDING_COLS : ITEM_COLS).map((c) => (
+                <th key={c.label} style={{ width: c.width }} className={c.numeric ? 'text-right' : undefined}>
+                  {c.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {mr.lines.map((l) => {
+              const cat = l.item.category
+              const asked = Number(l.requestedQty)
+              const issued = Number(l.issuedQty)
+              const owed = Math.max(0, asked - issued)
+              const have = onHand[l.id]
+              const short = have !== undefined && have < asked
+              const pick = sourcing[l.id] ?? l.fulfilment ?? 'FROM_STOCK'
+              return (
+                <tr key={l.id}>
+                  <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
+                  <td>
+                    <div className="text-foreground truncate text-xs" title={l.item.name}>
+                      {l.item.name}
+                    </div>
+                  </td>
+                  <td className="truncate text-xs">{cat?.parent?.name ?? cat?.name ?? <span className="text-muted-foreground">—</span>}</td>
+                  <td className="truncate text-xs">{cat?.parent ? cat.name : <span className="text-muted-foreground">—</span>}</td>
+                  <td className="truncate text-xs">
+                    {l.ownership === 'CUSTOMER_OWNED' ? (
+                      <span className="text-sky-400">{l.ownerCustomer?.name ?? 'Customer'}&apos;s</span>
+                    ) : (
+                      <span className="text-muted-foreground">Our own</span>
+                    )}
+                  </td>
+                  <td className="truncate text-xs">
+                    {l.fulfilment === 'PURCHASE' ? <span className="font-medium text-sky-500">To be bought</span> : l.warehouse.name}
+                  </td>
+                  <td className="truncate text-xs" title={l.purpose ?? undefined}>
+                    {l.purpose ?? <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    {qtyFmt(asked)} {l.item.uom.symbol}
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    {issued > 0 ? <span className="text-emerald-500">{qtyFmt(issued)}</span> : <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    {mr.closedAt || mr.status === 'REJECTED' || owed === 0 ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <span className="text-amber-500">{qtyFmt(owed)}</span>
+                    )}
+                  </td>
+                  {deciding && (
+                    <>
+                      <td className={`whitespace-nowrap text-right text-xs tabular-nums ${short ? 'font-medium text-red-400' : ''}`}>
+                        {loadingStock ? '…' : have === undefined ? '—' : qtyFmt(have)}
+                      </td>
+                      <td>
+                        <select
+                          className="form-input h-7 w-full px-2 py-0 text-xs"
+                          value={pick}
+                          onChange={(e) => setSourcing((prev) => ({ ...prev, [l.id]: e.target.value as 'FROM_STOCK' | 'PURCHASE' }))}
+                          aria-label={`How to answer ${l.item.name}`}
+                        >
+                          <option value="FROM_STOCK">Issue from store</option>
+                          <option value="PURCHASE">Buy it</option>
+                        </select>
+                      </td>
+                    </>
+                  )}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+        <div className="border-border text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-[11px]">
+          <span>
+            {r.s.next && <>{r.s.next} </>}
+            {mr.approvedBy && <>Approved by {mr.approvedBy.name}. </>}
+            {mr.issuedBy && mr.issuedAt && <>Handed over by {mr.issuedBy.name} on {formatDate(mr.issuedAt)}. </>}
+            {mr.closedAt && (
+              <>
+                {mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Closed' : 'Cancelled'}
+                {mr.closedBy && <> by {mr.closedBy.name}</>} on {formatDate(mr.closedAt)}
+                {mr.closeReason && <>: {mr.closeReason}</>}.{' '}
+              </>
+            )}
+            {mr.notes && <>Note: {mr.notes}</>}
+          </span>
+          {deciding && (
+            <button
+              className="btn-primary ml-auto h-7 px-2.5 text-xs disabled:opacity-50"
+              onClick={() => void saveSourcing(mr)}
+              disabled={savingSourcing}
+              title="Save which lines the store issues and which go to the buyer"
+            >
+              {savingSourcing ? 'Saving…' : 'Save answers'}
+            </button>
+          )}
+        </div>
+      </RowPanel>
+    )
+  }
+
   return (
     <div className="space-y-5">
       <div className="page-header">
@@ -355,316 +576,186 @@ export default function RequisitionsPage() {
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
-              <thead>
-                <tr>
-                  <th style={{ width: 30 }} />
-                  <th>Number</th>
-                  <th>Department</th>
-                  <th>Raised</th>
-                  <th style={{ textAlign: 'right' }}>Items</th>
-                  <th>Stage</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((mr) => {
-                  const expanded = open === mr.id
-                  // The server refuses this too; hiding the button just avoids
-                  // offering somebody a door that is certain to be shut.
-                  const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
-                  const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
-                  const s = stage(mr, isMine, iApproved, admin)
+          <div className="list-scope">
+            {/* On a phone each requisition is a card; the table is for a wider list. */}
+            <div className="list-cards divide-border divide-y">
+              {rows.map((mr) => {
+                const r = rowFacts(mr)
+                const expanded = open === mr.id
+                return (
+                  <div key={mr.id} className="p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-xs font-semibold text-teal-400">{mr.mrNumber}</span>
+                          <span className={r.s.cls}>{r.s.label}</span>
+                        </div>
+                        <p className="text-foreground mt-1 font-medium leading-snug">{mr.department.name}</p>
+                      </div>
+                      <span className="text-muted-foreground shrink-0 text-right text-xs">
+                        {mr.lines.length} {mr.lines.length === 1 ? 'item' : 'items'}
+                      </span>
+                    </div>
+                    <dl className="mt-2.5 grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+                      <dt className="text-muted-foreground">Raised</dt>
+                      <dd className="text-foreground min-w-0">
+                        {formatDate(mr.requestDate)}
+                        {mr.raisedBy && <span className="text-muted-foreground"> · {mr.raisedBy.name}</span>}
+                      </dd>
+                      <dt className="text-muted-foreground">Asked</dt>
+                      <dd className="text-foreground min-w-0 tabular-nums">{unitLine(r.groups, (g) => g.asked) ?? '—'}</dd>
+                      <dt className="text-muted-foreground">Still owed</dt>
+                      <dd className="min-w-0 tabular-nums text-amber-500">
+                        {mr.closedAt || mr.status === 'REJECTED' ? <span className="text-muted-foreground">—</span> : (unitLine(r.groups, (g) => g.owed) ?? '—')}
+                      </dd>
+                    </dl>
+                    {r.s.next && <p className="text-muted-foreground mt-2 text-[11px]">{r.s.next}</p>}
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        onClick={() => setOpen(expanded ? null : mr.id)}
+                        className="bg-primary/10 text-primary hover:bg-primary/20 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors"
+                        aria-expanded={expanded}
+                      >
+                        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        {expanded ? 'Hide items' : 'Show items'}
+                      </button>
+                      <div className="flex items-center gap-1.5">
+                        {primaryAction(mr, r)}
+                        {r.actions.length > 0 && <ActionMenu label={`Actions for ${mr.mrNumber}`} items={r.actions} />}
+                      </div>
+                    </div>
+                    {expanded && <div className="mt-2.5">{itemPanel(mr, r)}</div>}
+                  </div>
+                )
+              })}
+            </div>
 
-                  return (
-                    <Fragment key={mr.id}>
-                      <tr key={mr.id}>
-                        <td>
-                          <button
-                            className="btn-ghost p-1"
-                            onClick={() => setOpen(expanded ? null : mr.id)}
-                            aria-label={expanded ? 'Hide items' : 'Show items'}
-                          >
-                            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                          </button>
-                        </td>
-                        <td className="font-mono text-xs text-teal-400">{mr.mrNumber}</td>
-                        <td className="text-sm">{mr.department.name}</td>
-                        <td className="text-xs">
-                          {formatDate(mr.requestDate)}
-                          {mr.raisedBy && (
-                            <div className="text-[10px] text-muted-foreground">
-                              by {mr.raisedBy.name}
-                            </div>
-                          )}
-                        </td>
-                        <td className="text-right tabular-nums text-sm">{mr.lines.length}</td>
-                        <td>
-                          <span className={s.cls}>{s.label}</span>
-                          {mr.status === 'REJECTED' && mr.rejectionReason && (
-                            <div className="text-[10px] text-muted-foreground max-w-[200px] truncate">
-                              {mr.rejectionReason}
-                            </div>
-                          )}
-                          {s.next && (
-                            <div className="mt-1 max-w-[240px] text-[10px] text-muted-foreground">
-                              {s.next}
-                            </div>
-                          )}
-                        </td>
-                        <td className="text-right whitespace-nowrap">
-                          <div className="flex justify-end gap-1">
-                            {mr.status === 'PENDING' && !mr.closedAt && (!isMine || admin) && (
-                              <>
-                                <button
-                                  className="btn-ghost p-1.5 hover:text-emerald-400"
-                                  onClick={() => void act(mr, 'approve')}
-                                  disabled={busy === mr.id}
-                                  title="Approve"
-                                  aria-label={`Approve ${mr.mrNumber}`}
-                                >
-                                  <Check size={15} />
-                                </button>
-                                <button
-                                  className="btn-ghost p-1.5 hover:text-red-400"
-                                  onClick={() => setAsking({ mr, kind: 'reject' })}
-                                  disabled={busy === mr.id}
-                                  title="Refuse"
-                                  aria-label={`Refuse ${mr.mrNumber}`}
-                                >
-                                  <X size={15} />
-                                </button>
-                              </>
-                            )}
-                            {mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt && !isMine && !iApproved && (
+            <div className="list-rows w-full">
+              <ScrollableTable>
+                <table className="data-table table-compact min-w-full">
+                  <thead>
+                    <tr className="bg-secondary">
+                      <th style={{ width: 30 }} />
+                      <th className="whitespace-nowrap">Requisition</th>
+                      <th className="whitespace-nowrap">Department</th>
+                      <th className="whitespace-nowrap">Raised</th>
+                      <th className="whitespace-nowrap">Items</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked qty</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued qty</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still owed</th>
+                      <th className="whitespace-nowrap">Status</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((mr) => {
+                      const r = rowFacts(mr)
+                      const expanded = open === mr.id
+                      const late =
+                        mr.requiredDate && !mr.issuedAt && !mr.closedAt && mr.status !== 'REJECTED' &&
+                        new Date(mr.requiredDate).toLocaleDateString('en-CA') < new Date().toLocaleDateString('en-CA')
+                      const owed = unitLine(r.groups, (g) => g.owed)
+                      const toBuy = unitLine(r.groups, (g) => g.toBuy)
+                      const p = itemsPreview(mr.lines.map((l) => l.item.name))
+                      return (
+                        <Fragment key={mr.id}>
+                          <tr>
+                            <td>
                               <button
-                                className="btn-ghost p-1.5 hover:text-teal-400"
-                                onClick={() => setIssuing(mr)}
-                                disabled={busy === mr.id}
-                                title="Hand the material over"
-                                aria-label={`Issue ${mr.mrNumber}`}
+                                className="bg-primary/10 text-primary hover:bg-primary/20 flex h-7 w-7 items-center justify-center rounded-lg transition-colors"
+                                onClick={() => setOpen(expanded ? null : mr.id)}
+                                title={expanded ? 'Hide items' : 'Show items'}
+                                aria-label={`${expanded ? 'Hide' : 'Show'} items on ${mr.mrNumber}`}
+                                aria-expanded={expanded}
                               >
-                                <PackageCheck size={15} />
+                                {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                               </button>
-                            )}
-                            {/* The slip the department signs for what it was handed. */}
-                            {mr.status === 'APPROVED' && (
-                              <Link
-                                href={`/print/material-issue/${mr.id}`}
-                                className="btn-ghost inline-flex p-1.5 hover:text-teal-400"
-                                title="Print the issue slip"
-                                aria-label={`Print ${mr.mrNumber}`}
-                              >
-                                <Printer size={15} />
-                              </Link>
-                            )}
-                            {mayClose(mr, isMine) && (
-                              <button
-                                className="btn-ghost p-1.5 hover:text-red-400"
-                                onClick={() => setAsking({ mr, kind: 'close' })}
-                                disabled={busy === mr.id}
-                                title={partlyIssued(mr) ? 'Close — the rest is not needed' : 'Cancel'}
-                                aria-label={`${partlyIssued(mr) ? 'Close' : 'Cancel'} ${mr.mrNumber}`}
-                              >
-                                <Ban size={15} />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-
-                      {expanded && (
-                        <tr key={`${mr.id}-lines`}>
-                          <td colSpan={7} className="bg-secondary/40">
-                            <div className="px-4 py-3 space-y-2">
-                              {/* ── What the store can answer ──────────────
-
-                                Only on an approved requisition that has not
-                                been issued, because that is the moment the
-                                question is live: before approval it may yet be
-                                refused, and after issue the stock has moved.
-
-                                The mill's old ERP asks it here too — on
-                                *Approved Material Requisition*, with Issue Raw
-                                Material and Create Indent side by side — and
-                                that is the right screen for it. Whoever raised
-                                the requisition is asking for material; they
-                                cannot know what is on the rack. The store
-                                keeper can, and the figure is beside every line
-                                while they decide. */}
-                              {mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt && (
-                                <div className="border-border bg-card mb-3 rounded-lg border">
-                                  <div className="border-border flex flex-wrap items-center gap-2 border-b px-3 py-2">
-                                    <h4 className="text-foreground text-xs font-semibold">
-                                      What the store can give
-                                    </h4>
-                                    <span className="text-muted-foreground text-[11px]">
-                                      {loadingStock
-                                        ? 'checking the rack…'
-                                        : 'Anything the store has not got goes to the buyer.'}
-                                    </span>
-                                    <button
-                                      className="btn-primary ml-auto h-7 px-2.5 text-xs disabled:opacity-50"
-                                      onClick={() => void saveSourcing(mr)}
-                                      disabled={savingSourcing}
-                                    >
-                                      {savingSourcing ? 'Saving…' : 'Save'}
-                                    </button>
-                                  </div>
-                                  <table className="w-full text-sm">
-                                    <thead>
-                                      <tr className="bg-secondary border-border border-b">
-                                        <th className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider">
-                                          Item
-                                        </th>
-                                        <th className="text-muted-foreground px-3 py-1.5 text-right text-[10px] font-semibold uppercase tracking-wider">
-                                          Asked
-                                        </th>
-                                        <th className="text-muted-foreground px-3 py-1.5 text-right text-[10px] font-semibold uppercase tracking-wider">
-                                          In store
-                                        </th>
-                                        <th className="text-muted-foreground px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wider">
-                                          Answer it from
-                                        </th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {mr.lines.map((l) => {
-                                        const have = onHand[l.id]
-                                        const asked = Number(l.requestedQty)
-                                        const short = have !== undefined && have < asked
-                                        const pick = sourcing[l.id] ?? l.fulfilment ?? 'FROM_STOCK'
-                                        return (
-                                          <tr
-                                            key={l.id}
-                                            className="border-border/40 border-b last:border-0"
-                                          >
-                                            <td className="text-foreground px-3 py-1.5 text-xs">
-                                              {l.item.name}
-                                              <span className="text-muted-foreground ml-2 font-mono text-[10px]">
-                                                {l.item.code}
-                                              </span>
-                                              {l.ownership === 'CUSTOMER_OWNED' && (
-                                                <span className="ml-2 text-[10px] text-sky-400">
-                                                  {l.ownerCustomer?.name ?? 'customer'}&apos;s material
-                                                </span>
-                                              )}
-                                            </td>
-                                            <td className="text-foreground px-3 py-1.5 text-right text-xs tabular-nums">
-                                              {qtyFmt(asked)} {l.item.uom.symbol}
-                                            </td>
-                                            {/* Red when there is not enough, which
-                                              is the only number on this row that
-                                              decides anything. */}
-                                            <td
-                                              className={`px-3 py-1.5 text-right text-xs tabular-nums ${
-                                                short ? 'text-red-400' : 'text-foreground'
-                                              }`}
-                                            >
-                                              {have === undefined ? '—' : qtyFmt(have)}
-                                            </td>
-                                            <td className="px-3 py-1.5">
-                                              <select
-                                                className="form-input h-7 w-40 px-2 py-0 text-xs"
-                                                value={pick}
-                                                onChange={(e) =>
-                                                  setSourcing((prev) => ({
-                                                    ...prev,
-                                                    [l.id]: e.target.value as
-                                                      | 'FROM_STOCK'
-                                                      | 'PURCHASE',
-                                                  }))
-                                                }
-                                                aria-label={`How to answer ${l.item.name}`}
-                                              >
-                                                <option value="FROM_STOCK">Issue from store</option>
-                                                <option value="PURCHASE">Buy it</option>
-                                              </select>
-                                            </td>
-                                          </tr>
-                                        )
-                                      })}
-                                    </tbody>
-                                  </table>
+                            </td>
+                            <td className="whitespace-nowrap">
+                              {mr.status === 'APPROVED' ? (
+                                <a
+                                  href={`/print/material-issue/${mr.id}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                                  title="Open the issue slip"
+                                >
+                                  {mr.mrNumber}
+                                </a>
+                              ) : (
+                                <span className="font-mono text-xs font-semibold text-teal-400">{mr.mrNumber}</span>
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap text-sm">{mr.department.name}</td>
+                            <td className="whitespace-nowrap text-xs">
+                              {formatDate(mr.requestDate)}
+                              {mr.raisedBy && <div className="text-muted-foreground text-[10px]">by {mr.raisedBy.name}</div>}
+                              {/* When it is wanted by, where somebody said: red once that day has gone. */}
+                              {mr.requiredDate && (
+                                <div className={`text-[10px] ${late ? 'font-medium text-red-400' : 'text-muted-foreground'}`}>
+                                  needed by {formatDate(mr.requiredDate)}
+                                  {late && ' · past due'}
                                 </div>
                               )}
-
-                              {mr.lines.map((l) => (
-                                <div
-                                  key={l.id}
-                                  className="flex flex-wrap items-baseline justify-between gap-3 text-sm"
-                                >
-                                  <div>
-                                    <span className="text-foreground">{l.item.name}</span>
-                                    <span className="ml-2 text-[10px] text-muted-foreground font-mono">
-                                      {l.item.code} ·{' '}
-                                      {l.fulfilment === 'PURCHASE'
-                                        ? 'to be bought'
-                                        : `from ${l.warehouse.name}`}
-                                    </span>
-                                    {l.ownership === 'CUSTOMER_OWNED' && (
-                                      <span className="ml-2 text-[10px] text-sky-400">
-                                        {l.ownerCustomer?.name ?? 'customer'}&apos;s material
-                                      </span>
-                                    )}
-                                    {/* A line the store cannot answer. Said here
-                                      so whoever issues the requisition is not
-                                      left hunting a rack for something that was
-                                      never on it. */}
-                                    {l.fulfilment === 'PURCHASE' && (
-                                      <span className="badge-info ml-2">Purchase</span>
-                                    )}
-                                    {l.purpose && (
-                                      <div className="text-[11px] text-muted-foreground">
-                                        {l.purpose}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div className="tabular-nums text-xs">
-                                    asked {qtyFmt(Number(l.requestedQty))} {l.item.uom.symbol}
-                                    {Number(l.issuedQty) > 0 && (
-                                      <span className="ml-2 text-emerald-400">
-                                        issued {qtyFmt(Number(l.issuedQty))}
-                                      </span>
-                                    )}
-                                    {Number(l.issuedQty) > 0 &&
-                                      Number(l.issuedQty) < Number(l.requestedQty) && (
-                                        <span className="ml-2 text-amber-500">
-                                          owed{' '}
-                                          {qtyFmt(Number(l.requestedQty) - Number(l.issuedQty))}
-                                        </span>
-                                      )}
-                                  </div>
-                                </div>
-                              ))}
-
-                              <div className="pt-2 border-t border-border text-[11px] text-muted-foreground">
-                                {mr.approvedBy && <>Approved by {mr.approvedBy.name}. </>}
-                                {mr.issuedBy && mr.issuedAt && (
-                                  <>
-                                    Handed over by {mr.issuedBy.name} on{' '}
-                                    {formatDate(mr.issuedAt)}.
-                                  </>
-                                )}
-                                {mr.closedAt && (
-                                  <>
-                                    {mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Closed' : 'Cancelled'}
-                                    {mr.closedBy && <> by {mr.closedBy.name}</>} on {formatDate(mr.closedAt)}
-                                    {mr.closeReason && <>: {mr.closeReason}</>}.{' '}
-                                  </>
-                                )}
-                                {mr.notes && <div className="mt-1">{mr.notes}</div>}
+                            </td>
+                            <td className="text-xs">
+                              <div className="text-foreground whitespace-nowrap">
+                                {mr.lines.length} {mr.lines.length === 1 ? 'item' : 'items'}
                               </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
+                              <div className="text-muted-foreground max-w-[9rem] truncate text-[10px] leading-tight" title={p.full}>
+                                {p.shown}
+                                {p.extra}
+                              </div>
+                            </td>
+                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                              {unitLine(r.groups, (g) => g.asked) ?? '—'}
+                            </td>
+                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                              {unitLine(r.groups, (g) => g.issued) ?? <span className="text-muted-foreground">—</span>}
+                            </td>
+                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                              {mr.closedAt || mr.status === 'REJECTED' ? (
+                                <span className="text-muted-foreground">—</span>
+                              ) : (
+                                <>
+                                  {owed ? <span className="font-medium text-amber-500">{owed}</span> : !toBuy && <span className="text-muted-foreground">—</span>}
+                                  {toBuy && <div className="text-[10px] text-sky-500">{toBuy} to buy</div>}
+                                </>
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap">
+                              <span className={r.s.cls} title={r.s.next}>
+                                {r.s.label}
+                              </span>
+                              {mr.status === 'REJECTED' && mr.rejectionReason && (
+                                <div className="text-muted-foreground max-w-[200px] truncate text-[10px]" title={mr.rejectionReason}>
+                                  {mr.rejectionReason}
+                                </div>
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap text-right">
+                              <div className="flex justify-end gap-1.5">
+                                {primaryAction(mr, r)}
+                                {r.actions.length > 0 && <ActionMenu label={`Actions for ${mr.mrNumber}`} items={r.actions} />}
+                              </div>
+                            </td>
+                          </tr>
+
+                          {expanded && (
+                            <tr>
+                              <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                {/* Sized to the visible row, not the scrolling table; see the purchase lists. */}
+                                <div className="w-[100cqw]">{itemPanel(mr, r)}</div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </ScrollableTable>
+            </div>
           </div>
         )}
       </div>
