@@ -125,7 +125,11 @@ export const transferSchema = z.object({
 export const createRequisitionSchema = z.object({
   departmentId: id('the department asking'),
   moId: z.string().optional().nullable(),
-  warehouseId: id('the store to draw from'),
+  /**
+   * One store for every line, as older callers send it. A line may name its
+   * own instead — the form now picks the store per item, from where it is.
+   */
+  warehouseId: z.string().optional().nullable(),
   requiredDate: z.coerce.date().optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
@@ -133,6 +137,8 @@ export const createRequisitionSchema = z.object({
       z.object({
         itemId: id('an item'),
         requestedQty: qty,
+        /** The store this line is asked of. Falls back to the requisition's. */
+        warehouseId: z.string().optional().nullable(),
         purpose: z.string().max(300).optional().nullable(),
         /**
          * Whose material to draw. Defaults to ours, which is what every
@@ -150,11 +156,14 @@ export const createRequisitionSchema = z.object({
     // be checked against the whole of it.
     const seen = new Set<string>()
     data.lines.forEach((l, i) => {
+      if (!l.warehouseId && !data.warehouseId) {
+        ctx.addIssue({ code: 'custom', path: ['lines', i, 'warehouseId'], message: `Line ${i + 1}: pick the store to ask` })
+      }
       const theirs = l.ownership === 'CUSTOMER_OWNED'
       if (theirs && !l.ownerCustomerId) {
         ctx.addIssue({ code: 'custom', path: ['lines', i, 'ownerCustomerId'], message: `Line ${i + 1}: say whose material it is` })
       }
-      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}`
+      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}|${l.warehouseId ?? data.warehouseId}`
       if (seen.has(k)) {
         ctx.addIssue({ code: 'custom', path: ['lines', i, 'itemId'], message: `Line ${i + 1}: that item is already asked for from the same stock. Put it on one line.` })
       }

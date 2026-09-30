@@ -1011,12 +1011,15 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
   const data = createRequisitionSchema.parse(req.body)
 
   const mr = await prisma.$transaction(async (tx) => {
-    const [department, warehouse] = await Promise.all([
+    // Each line's store: its own, or the requisition's when the caller sent one for all.
+    const storeOf = (l: (typeof data.lines)[number]) => (l.warehouseId || data.warehouseId)!
+    const storeIds = [...new Set(data.lines.map(storeOf))]
+    const [department, stores] = await Promise.all([
       tx.department.findUnique({ where: { id: data.departmentId } }),
-      tx.warehouse.findUnique({ where: { id: data.warehouseId } }),
+      tx.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true } }),
     ])
     if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
-    if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
+    if (stores.length !== storeIds.length) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
 
     const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
     if (owners.length) {
@@ -1043,9 +1046,9 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
             // same cloth.
             ownership: l.ownership ?? 'OWNED',
             ownerCustomerId: l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null,
-            // One store per requisition, chosen once on the header in the UI
-            // and copied down, so there is still only one place it is stored.
-            warehouseId: data.warehouseId,
+            // The store this line is asked of. The form picks it per item,
+            // from the stores that hold it; issuing and the slip read it here.
+            warehouseId: storeOf(l),
             purpose: l.purpose ?? null,
           })),
         },
