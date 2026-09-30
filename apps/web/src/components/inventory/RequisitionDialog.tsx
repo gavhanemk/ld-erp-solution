@@ -146,10 +146,10 @@ export function RequisitionDialog({
   }, [stock, warehouseId])
 
   /**
-   * The other store holding most of our own stock of an item. When this store
-   * has none, that is usually a transfer away rather than a purchase.
+   * Our own stock of an item in every other store, most first. What this store
+   * lacks can often be moved across rather than bought.
    */
-  const elsewhere = (itemId: string) => {
+  const otherStores = (itemId: string) => {
     const by = new Map<string, { name: string; qty: number }>()
     for (const r of stock) {
       if (r.itemId !== itemId || r.warehouseId === warehouseId || r.ownership !== 'OWNED' || r.qty <= 0) continue
@@ -157,7 +157,26 @@ export function RequisitionDialog({
       cur.qty += r.qty
       by.set(r.warehouseId, cur)
     }
-    return [...by.values()].sort((a, b) => b.qty - a.qty)[0] ?? null
+    return [...by.values()].sort((a, b) => b.qty - a.qty)
+  }
+
+  /**
+   * Where the quantity asked for would come from: this store first, then the
+   * other stores (largest first) by transfer, and whatever is still short has
+   * to be bought. Worked out on the quantity actually typed, so the note never
+   * promises a transfer that cannot cover it.
+   */
+  const planFor = (itemId: string, here: number, asked: number) => {
+    const fromHere = Math.min(here, asked)
+    let need = asked - fromHere
+    const moves: Array<{ name: string; qty: number; has: number }> = []
+    for (const o of otherStores(itemId)) {
+      if (need <= 0) break
+      const take = Math.min(o.qty, need)
+      moves.push({ name: o.name, qty: take, has: o.qty })
+      need -= take
+    }
+    return { fromHere, moves, toBuy: Math.max(0, need) }
   }
 
   const setLine = (index: number, patch: Partial<Line>) =>
@@ -306,8 +325,8 @@ export function RequisitionDialog({
             <thead>
               <tr>
                 <th style={{ width: 36 }}>#</th>
-                <th style={{ width: '30%' }}>Item</th>
-                <th style={{ width: '24%' }}>Whose material</th>
+                <th style={{ width: '36%' }}>Item</th>
+                <th style={{ width: '20%' }}>Whose material</th>
                 <th style={{ textAlign: 'right' }}>Quantity</th>
                 <th>What for</th>
                 <th style={{ width: 40 }} />
@@ -351,26 +370,90 @@ export function RequisitionDialog({
                     {have !== null &&
                       (() => {
                         const asked = Number(line.requestedQty) || 0
-                        const other = line.owner === 'OWNED' && have < Math.max(asked, 1e-9) ? elsewhere(line.itemId) : null
-                        const tone = have <= 0 ? 'bg-red-500/10 text-red-500' : short ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                        // A customer's cloth is never bought; the gap is theirs to send.
-                        const ours = line.owner === 'OWNED'
-                        const text =
-                          have <= 0
-                            ? ours
-                              ? 'None in this store · will have to be bought'
-                              : 'None of theirs in this store'
-                            : short
-                              ? ours
-                                ? `Only ${fmt(have)} ${unit} in store · ${fmt(asked - have)} ${unit} to buy`
-                                : `Only ${fmt(have)} ${unit} of theirs here · ${fmt(asked - have)} ${unit} short`
-                              : `${fmt(have)} ${unit} ${ours ? 'in store' : 'of theirs here'}`
+                        const badge = (tone: string, text: string) => (
+                          <span className={`inline-block rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tone}`}>{text}</span>
+                        )
+                        const GREEN = 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                        const AMBER = 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                        const RED = 'bg-red-500/10 text-red-500'
+
+                        // A customer's cloth is never bought or moved in from our stock; the gap is theirs to send.
+                        if (line.owner !== 'OWNED') {
+                          return (
+                            <div className="mt-1">
+                              {have <= 0
+                                ? badge(RED, 'None of theirs in this store')
+                                : asked > have
+                                  ? badge(AMBER, `Only ${fmt(have)} ${unit} of theirs here · ${fmt(asked - have)} ${unit} short`)
+                                  : badge(GREEN, `${fmt(have)} ${unit} of theirs here`)}
+                            </div>
+                          )
+                        }
+
+                        const others = otherStores(line.itemId)
+                        const elsewhereTotal = others.reduce((t, o) => t + o.qty, 0)
+
+                        // No quantity yet: just say what there is, here and elsewhere.
+                        if (!asked) {
+                          return (
+                            <div className="mt-1 space-y-0.5">
+                              {have > 0 ? badge(GREEN, `${fmt(have)} ${unit} in this store`) : badge(RED, 'None in this store')}
+                              {elsewhereTotal > 0 && (
+                                <div className="text-[11px] text-muted-foreground">
+                                  {fmt(elsewhereTotal)} {unit} in other stores ({others.slice(0, 2).map((o) => o.name).join(', ')}
+                                  {others.length > 2 ? ` +${others.length - 2}` : ''})
+                                </div>
+                              )}
+                            </div>
+                          )
+                        }
+
+                        if (asked <= have) return <div className="mt-1">{badge(GREEN, `Enough in this store · ${fmt(have)} ${unit} there`)}</div>
+
+                        // Short here: show where the rest would come from, line by line.
+                        const plan = planFor(line.itemId, have, asked)
                         return (
-                          <div className="mt-1 space-y-0.5">
-                            <span className={`inline-block rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tone}`}>{text}</span>
-                            {other && (
-                              <div className="text-[11px] text-muted-foreground">
-                                {fmt(other.qty)} {unit} in {other.name}: a transfer may be quicker than buying
+                          <div className="mt-1 space-y-1">
+                            {plan.toBuy > 0
+                              ? badge(RED, `${fmt(plan.toBuy)} ${unit} will have to be bought`)
+                              : badge(AMBER, 'Short in this store · the rest is in another store')}
+                            <table className="w-full max-w-[22rem] text-[11px] tabular-nums">
+                              <tbody>
+                                <tr>
+                                  <td className="pr-2 text-muted-foreground">From this store</td>
+                                  <td className="whitespace-nowrap text-right text-foreground">
+                                    {fmt(plan.fromHere)} {unit}
+                                  </td>
+                                </tr>
+                                {plan.moves.map((m) => (
+                                  <tr key={m.name}>
+                                    <td className="max-w-[14rem] truncate pr-2 text-muted-foreground" title={`${m.name} has ${fmt(m.has)} ${unit}`}>
+                                      Move from {m.name}
+                                    </td>
+                                    <td className="whitespace-nowrap text-right text-amber-600 dark:text-amber-400">
+                                      {fmt(m.qty)} {unit}
+                                    </td>
+                                  </tr>
+                                ))}
+                                {plan.toBuy > 0 && (
+                                  <tr>
+                                    <td className="pr-2 font-medium text-red-500">To buy</td>
+                                    <td className="whitespace-nowrap text-right font-medium text-red-500">
+                                      {fmt(plan.toBuy)} {unit}
+                                    </td>
+                                  </tr>
+                                )}
+                                <tr className="border-t border-border">
+                                  <td className="pr-2 pt-0.5 text-muted-foreground">Asked</td>
+                                  <td className="whitespace-nowrap pt-0.5 text-right font-medium text-foreground">
+                                    {fmt(asked)} {unit}
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                            {plan.moves.length > 0 && (
+                              <div className="text-[10px] text-muted-foreground">
+                                Moving stock is a store transfer, done before the issue. The approver decides.
                               </div>
                             )}
                           </div>
