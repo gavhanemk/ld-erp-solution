@@ -15,6 +15,7 @@ import {
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
+import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
@@ -155,6 +156,17 @@ router.get('/stock/:itemId', requirePermission(MODULE, 'view'), async (req, res)
       movements,
     },
   })
+})
+
+// ── The dashboard ───────────────────────────────────────────────────────────
+
+/** Stock, movement, requisitions and job work in one call, for the inventory dashboard. */
+router.get('/dashboard', requirePermission(MODULE, 'view'), async (req, res) => {
+  const data = await inventoryDashboard({
+    warehouseId: str(req.query.warehouseId),
+    days: Number(req.query.days) || 30,
+  })
+  res.json({ success: true, data })
 })
 
 // ── The ledger ──────────────────────────────────────────────────────────────
