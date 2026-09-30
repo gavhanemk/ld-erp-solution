@@ -13,6 +13,7 @@ import {
   GREY,
   INK,
   MUTED,
+  NAVY,
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
@@ -49,6 +50,8 @@ interface Payload {
       fulfilment?: 'FROM_STOCK' | 'PURCHASE'
       item: { code: string; name: string; uom: { symbol: string } }
       warehouse: { name: string }
+      ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+      ownerCustomer?: { name: string } | null
     }>
   }
   handovers: Array<{
@@ -128,6 +131,11 @@ export default function PrintMaterialIssue() {
         desc: (
           <>
             <div style={{ fontWeight: 600 }}>{l.item.name}</div>
+            {l.ownership === 'CUSTOMER_OWNED' && (
+              <div style={{ fontSize: '8.5px', fontWeight: 700, color: NAVY, marginTop: '1px' }}>
+                {l.ownerCustomer?.name ?? 'Customer'}&apos;s material — not ours
+              </div>
+            )}
             {(l.purpose || toBuy) && (
               <div style={{ fontSize: '8.5px', color: MUTED, marginTop: '1px' }}>
                 {toBuy ? 'To be bought — not from the store' : l.purpose}

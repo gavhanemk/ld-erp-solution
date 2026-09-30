@@ -913,6 +913,8 @@ const mrInclude = {
         select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
       },
       warehouse: { select: { id: true, name: true } },
+      // Whose material the line draws, when it is a customer's.
+      ownerCustomer: { select: { id: true, name: true } },
     },
   },
 }
@@ -998,6 +1000,12 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
     if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
     if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
 
+    const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
+    if (owners.length) {
+      const found = await tx.customer.count({ where: { id: { in: owners } } })
+      if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
+    }
+
     const mrNumber = await nextDocumentNumber(tx, 'MR')
 
     return tx.materialRequisition.create({
@@ -1016,7 +1024,7 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
             // customer's fabric would be issued out of our own balance of the
             // same cloth.
             ownership: l.ownership ?? 'OWNED',
-            ownerCustomerId: l.ownerCustomerId ?? null,
+            ownerCustomerId: l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null,
             // One store per requisition, chosen once on the header in the UI
             // and copied down, so there is still only one place it is stored.
             warehouseId: data.warehouseId,

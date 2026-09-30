@@ -30,6 +30,8 @@ interface Line {
   purpose: string | null
   item: { id: string; code: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
+  ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomer?: { id: string; name: string } | null
 }
 
 interface Requisition {
@@ -538,6 +540,11 @@ export default function RequisitionsPage() {
                                               <span className="text-muted-foreground ml-2 font-mono text-[10px]">
                                                 {l.item.code}
                                               </span>
+                                              {l.ownership === 'CUSTOMER_OWNED' && (
+                                                <span className="ml-2 text-[10px] text-sky-400">
+                                                  {l.ownerCustomer?.name ?? 'customer'}&apos;s material
+                                                </span>
+                                              )}
                                             </td>
                                             <td className="text-foreground px-3 py-1.5 text-right text-xs tabular-nums">
                                               {qtyFmt(asked)} {l.item.uom.symbol}
@@ -591,6 +598,11 @@ export default function RequisitionsPage() {
                                         ? 'to be bought'
                                         : `from ${l.warehouse.name}`}
                                     </span>
+                                    {l.ownership === 'CUSTOMER_OWNED' && (
+                                      <span className="ml-2 text-[10px] text-sky-400">
+                                        {l.ownerCustomer?.name ?? 'customer'}&apos;s material
+                                      </span>
+                                    )}
                                     {/* A line the store cannot answer. Said here
                                       so whoever issues the requisition is not
                                       left hunting a rack for something that was

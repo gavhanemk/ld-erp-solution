@@ -12,6 +12,9 @@ export interface IssueLine {
   fulfilment?: 'FROM_STOCK' | 'PURCHASE'
   item: { id: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
+  /** Whose material the line draws. Absent or OWNED is ours. */
+  ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomer?: { id: string; name: string } | null
 }
 
 const fmt = (v: number) =>
@@ -62,10 +65,15 @@ export function IssueDialog({
     void Promise.all(
       fromStock.map(async (l) => {
         try {
-          const res = await api.get<{ data: Array<{ warehouseId: string; qty: number }> }>(
-            `/inventory/stock?itemId=${l.item.id}&warehouseId=${l.warehouse.id}&ownership=OWNED`,
+          // A customer's material is its own balance: our cloth on the same
+          // rack is not theirs to hand over, nor theirs ours.
+          const theirs = l.ownership === 'CUSTOMER_OWNED'
+          const res = await api.get<{ data: Array<{ warehouseId: string; qty: number; ownerCustomerId?: string | null }> }>(
+            `/inventory/stock?itemId=${l.item.id}&warehouseId=${l.warehouse.id}&ownership=${theirs ? 'CUSTOMER_OWNED' : 'OWNED'}`,
           )
-          const row = res.data.find((r) => r.warehouseId === l.warehouse.id)
+          const row = res.data.find(
+            (r) => r.warehouseId === l.warehouse.id && (!theirs || r.ownerCustomerId === l.ownerCustomer?.id),
+          )
           return [l.id, Number(row?.qty ?? 0)] as const
         } catch {
           return [l.id, NaN] as const
@@ -173,7 +181,12 @@ export function IssueDialog({
                   <tr key={l.id} className={done ? 'opacity-50' : ''}>
                     <td className="px-3 py-2">
                       <div className="text-foreground font-medium">{l.item.name}</div>
-                      <div className="text-muted-foreground text-[11px]">{l.warehouse.name}</div>
+                      <div className="text-muted-foreground text-[11px]">
+                        {l.warehouse.name}
+                        {l.ownership === 'CUSTOMER_OWNED' && (
+                          <span className="text-sky-400"> · {l.ownerCustomer?.name ?? 'customer'}&apos;s material</span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{fmt(Number(l.requestedQty))}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{fmt(Number(l.issuedQty))}</td>

@@ -144,6 +144,23 @@ export const createRequisitionSchema = z.object({
     )
     .min(1, 'Add at least one item'),
 })
+  .superRefine((data, ctx) => {
+    // A customer's material names the customer; our own names nobody. And one
+    // line per item and owner: two lines drawing the same balance would both
+    // be checked against the whole of it.
+    const seen = new Set<string>()
+    data.lines.forEach((l, i) => {
+      const theirs = l.ownership === 'CUSTOMER_OWNED'
+      if (theirs && !l.ownerCustomerId) {
+        ctx.addIssue({ code: 'custom', path: ['lines', i, 'ownerCustomerId'], message: `Line ${i + 1}: say whose material it is` })
+      }
+      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}`
+      if (seen.has(k)) {
+        ctx.addIssue({ code: 'custom', path: ['lines', i, 'itemId'], message: `Line ${i + 1}: that item is already asked for from the same stock. Put it on one line.` })
+      }
+      seen.add(k)
+    })
+  })
 
 export const rejectRequisitionSchema = z.object({
   reason: z.string().min(5, 'Say why it is being refused').max(500),
