@@ -2276,6 +2276,110 @@ router.get('/job-work', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+/*
+ * Every line of every job-work challan, one row each: the challan's details,
+ * what the item is, and how much of it has been settled by returns, wasted,
+ * and is still out. The screen's table, filters, figures, export and dashboard
+ * all read these same rows. Ahead of /job-work/:id.
+ */
+router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const challans = await prisma.jobWorkChallan.findMany({
+    orderBy: [{ challanDate: 'desc' }, { createdAt: 'desc' }],
+    take: 2000,
+    include: {
+      jobWorker: { select: { id: true, name: true, code: true, city: true } },
+      fromWarehouse: { select: { id: true, name: true } },
+      toWarehouse: { select: { id: true, name: true } },
+      sentBy: { select: { id: true, name: true } },
+      lines: {
+        include: {
+          item: {
+            select: {
+              id: true, code: true, name: true, type: true, uom: { select: { symbol: true } },
+              category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+              department: { select: { id: true, name: true } },
+            },
+          },
+          returnLines: {
+            include: {
+              item: { select: { id: true, name: true, uom: { select: { symbol: true } } } },
+              jobWorkReturn: { select: { returnNumber: true, returnDate: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const r3 = (v: number) => Math.round(v * 1000) / 1000
+  const data = challans.flatMap((c) =>
+    c.lines.map((l) => {
+      const it = l.item
+      const sent = Number(l.qty)
+      const settled = l.returnLines.reduce((t, r) => t + Number(r.consumedQty), 0)
+      const wasted = l.returnLines.reduce((t, r) => t + Number(r.wastedQty), 0)
+      // What came back as itself, and what came back made into something else.
+      const madeBy = new Map<string, { itemName: string; uom: string; qty: number }>()
+      for (const r of l.returnLines) {
+        if (r.itemId === l.itemId) continue
+        const cur = madeBy.get(r.itemId) ?? { itemName: r.item.name, uom: r.item.uom?.symbol ?? '', qty: 0 }
+        cur.qty += Number(r.receivedQty)
+        madeBy.set(r.itemId, cur)
+      }
+      const dates = l.returnLines.map((r) => r.jobWorkReturn.returnDate.getTime())
+      return {
+        id: l.id,
+        challanId: c.id,
+        challanNumber: c.challanNumber,
+        challanDate: c.challanDate,
+        process: c.process,
+        status: c.status,
+        cancelReason: c.cancelReason,
+        expectedBackOn: c.expectedBackOn,
+        vehicleNo: c.vehicleNo,
+        transporter: c.transporter,
+        lrNumber: c.lrNumber,
+        notes: c.notes,
+        sentByName: c.sentBy?.name ?? null,
+        lineCount: c.lines.length,
+        jobWorkerId: c.jobWorker.id,
+        jobWorkerName: c.jobWorker.name,
+        jobWorkerCity: c.jobWorker.city,
+        fromWarehouseId: c.fromWarehouse.id,
+        fromWarehouseName: c.fromWarehouse.name,
+        toWarehouseId: c.toWarehouse.id,
+        toWarehouseName: c.toWarehouse.name,
+        itemId: it.id,
+        itemCode: it.code,
+        itemName: it.name,
+        itemType: it.type,
+        uom: it.uom?.symbol ?? '',
+        hsnCode: l.hsnCode,
+        mainCategoryId: it.category.parent?.id ?? it.category.id,
+        mainCategoryName: it.category.parent?.name ?? it.category.name,
+        subCategoryId: it.category.parent ? it.category.id : null,
+        subCategoryName: it.category.parent ? it.category.name : null,
+        departmentId: it.department?.id ?? null,
+        departmentName: it.department?.name ?? null,
+        sentQty: sent,
+        unitRate: Number(l.unitRate ?? 0),
+        settledQty: r3(settled),
+        backSameQty: r3(l.returnLines.filter((r) => r.itemId === l.itemId).reduce((t, r) => t + Number(r.receivedQty), 0)),
+        madeInto: [...madeBy.values()].map((m) => ({ ...m, qty: r3(m.qty) })),
+        wastedQty: r3(wasted),
+        // A cancelled challan brought everything back to the store it left.
+        stillOutQty: c.status === 'CANCELLED' ? 0 : Math.max(0, r3(sent - settled)),
+        returnNumbers: [...new Set(l.returnLines.map((r) => r.jobWorkReturn.returnNumber))],
+        lastReturnAt: dates.length ? new Date(Math.max(...dates)) : null,
+        // Each return on its own day, for charting what came back when.
+        settledBy: l.returnLines.map((r) => ({ at: r.jobWorkReturn.returnDate, qty: Number(r.consumedQty) })),
+      }
+    }),
+  )
+
+  res.json({ success: true, data })
+})
+
 /**
  * The delivery challan that travels with our goods to a job worker.
  *
