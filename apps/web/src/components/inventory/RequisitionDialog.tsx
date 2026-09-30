@@ -113,6 +113,23 @@ export function RequisitionDialog({
     }
     return { ours, theirs: [...theirs.values()].sort((a, b) => a.name.localeCompare(b.name)) }
   }
+  /**
+   * Customers holding this item in some other store. Shown greyed in the
+   * "whose" list so it is plain why they cannot be picked: their cloth is not
+   * at this counter.
+   */
+  const theirsElsewhere = (itemId: string) => {
+    const by = new Map<string, { key: string; name: string; store: string; qty: number }>()
+    for (const r of stock) {
+      if (r.itemId !== itemId || r.warehouseId === warehouseId || r.ownership !== 'CUSTOMER_OWNED' || !r.ownerCustomerId || r.qty <= 0) continue
+      const key = `${r.ownerCustomerId}|${r.warehouseId}`
+      const cur = by.get(key) ?? { key, name: r.ownerName ?? 'Customer', store: r.warehouseName, qty: 0 }
+      cur.qty += r.qty
+      by.set(key, cur)
+    }
+    return [...by.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }
+
   const availableFor = (l: Line) => {
     const o = ownersOf(l.itemId)
     return l.owner === 'OWNED' ? o.ours : (o.theirs.find((t) => t.id === l.owner)?.qty ?? 0)
@@ -371,9 +388,21 @@ export function RequisitionDialog({
                       <option value="OWNED">Our own</option>
                       {owners.theirs.map((t) => (
                         <option key={t.id} value={t.id}>
-                          {t.name}&apos;s
+                          {t.name}&apos;s · {fmt(t.qty)} {unit} here
                         </option>
                       ))}
+                      {/* Theirs, but in another store: shown so it is clear why it cannot be picked. */}
+                      {line.itemId &&
+                        theirsElsewhere(line.itemId).map((t) => (
+                          <option key={t.key} value="" disabled>
+                            {t.name}&apos;s · {fmt(t.qty)} {unit} in {t.store}, not this store
+                          </option>
+                        ))}
+                      {line.itemId && owners.theirs.length === 0 && theirsElsewhere(line.itemId).length === 0 && (
+                        <option value="" disabled>
+                          No customer&apos;s material of this item with us
+                        </option>
+                      )}
                       {/* Kept while its store is changed, so the choice is not silently lost. */}
                       {line.owner !== 'OWNED' && !owners.theirs.some((t) => t.id === line.owner) && (
                         <option value={line.owner}>Customer&apos;s material (none here)</option>
