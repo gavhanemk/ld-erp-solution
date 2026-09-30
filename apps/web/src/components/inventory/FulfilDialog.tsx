@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, PackageCheck, Package, ShoppingCart, Warehouse, Info } from 'lucide-react'
+import { Loader2, PackageCheck, Package, ShoppingCart, Warehouse, Info, History } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -54,7 +54,33 @@ interface Bought {
   orderedQty: number
   receivedQty: number
   poNumbers: string[]
+  orders?: Array<{ poId: string; poNumber: string; poDate: string; qty: number; receivedQty: number }>
 }
+
+/** One hand-over against the requisition, from the stock ledger. */
+interface Handover {
+  itemId: string
+  ownership: string
+  ownerCustomerId: string | null
+  warehouseName: string
+  qty: number
+  at: string
+}
+
+/** One entry in the requisition's audit trail. */
+interface TrailEvent {
+  at: string
+  who: string
+  action: string
+  handedOver: string[] | null
+  plan: Array<{ lineId: string; buyQty: number }> | null
+  closeReason: string | null
+  /** From the old issue-or-buy answer: the items it marked to be bought. */
+  toBuy?: string[] | null
+}
+
+const when = (d: string) =>
+  new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' })
 
 interface StockRow {
   itemId: string
@@ -84,6 +110,8 @@ export function FulfilDialog({
   const [mr, setMr] = useState<Requisition | null>(initial)
   const [bought, setBought] = useState<Bought[]>([])
   const [stock, setStock] = useState<StockRow[]>([])
+  const [handovers, setHandovers] = useState<Handover[]>([])
+  const [events, setEvents] = useState<TrailEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -104,6 +132,8 @@ export function FulfilDialog({
             lines: Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: Line['fulfilment'] }>
             bought: Bought[]
             stock: StockRow[]
+            handovers: Handover[]
+            events: TrailEvent[]
           }
         }>(`/inventory/requisitions/${mrId}/fulfil`)
         if (cancelled) return
@@ -122,6 +152,8 @@ export function FulfilDialog({
         )
         setBought(res.data.bought ?? [])
         setStock(res.data.stock ?? [])
+        setHandovers(res.data.handovers ?? [])
+        setEvents(res.data.events ?? [])
       } catch (err) {
         if (!cancelled) setError(err instanceof ApiError ? err.message : 'Could not open the requisition.')
       } finally {
@@ -362,6 +394,57 @@ export function FulfilDialog({
                   ))}
                 </div>
 
+                {(() => {
+                  // This line's hand-overs: same item, same owner.
+                  const given = handovers.filter(
+                    (h) =>
+                      h.itemId === l.item.id &&
+                      (theirs ? h.ownership === 'CUSTOMER_OWNED' && h.ownerCustomerId === l.ownerCustomer?.id : h.ownership === 'OWNED'),
+                  )
+                  const orders = was?.orders ?? []
+                  if (!given.length && !orders.length && !(was && was.buyQty > 0)) return null
+                  return (
+                    <div className="mb-3 rounded-lg border border-border bg-secondary/40 px-3 py-2">
+                      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold text-foreground">
+                        <History size={12} className="text-muted-foreground" /> So far
+                      </div>
+                      <ul className="space-y-0.5 text-[11px] text-muted-foreground">
+                        {given.map((h, n) => (
+                          <li key={`h${n}`}>
+                            <span className="tabular-nums text-foreground">{when(h.at)}</span> · handed over{' '}
+                            <b className="font-semibold text-emerald-600 dark:text-emerald-400">
+                              {fmt(h.qty)} {unit}
+                            </b>{' '}
+                            from {h.warehouseName}
+                          </li>
+                        ))}
+                        {was && was.buyQty > 0 && (
+                          <li>
+                            On the indent for the buyer:{' '}
+                            <b className="font-semibold text-sky-600 dark:text-sky-400">
+                              {fmt(was.buyQty)} {unit}
+                            </b>
+                            {!orders.length && ' · not ordered yet'}
+                          </li>
+                        )}
+                        {orders.map((o) => (
+                          <li key={o.poId}>
+                            <span className="tabular-nums text-foreground">{formatDate(o.poDate)}</span> · ordered{' '}
+                            <b className="font-semibold text-foreground">
+                              {fmt(o.qty)} {unit}
+                            </b>{' '}
+                            on{' '}
+                            <a href={`/print/purchase-order/${o.poId}`} target="_blank" rel="noreferrer" className="font-mono text-teal-500 hover:underline">
+                              {o.poNumber}
+                            </a>
+                            {o.receivedQty > 0 ? ` · ${fmt(o.receivedQty)} received` : ' · not received yet'}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                })()}
+
                 <div className="grid gap-4 lg:grid-cols-5">
                   {/* Hand over now, from any rack that has it. */}
                   <div className="lg:col-span-3">
@@ -508,6 +591,47 @@ export function FulfilDialog({
               </Section>
             )
           })}
+
+          {events.length > 0 && (
+            <Section icon={History} title="Activity">
+              <ol className="space-y-1.5">
+                {events.map((e, n) => {
+                  const what =
+                    e.action === 'CREATE'
+                      ? 'raised it'
+                      : e.action === 'APPROVE'
+                        ? 'approved it'
+                        : e.action === 'REJECT'
+                          ? 'refused it'
+                          : e.handedOver?.length
+                            ? `handed over ${e.handedOver.join(', ')}`
+                            : e.plan
+                              ? `set what to buy: ${
+                                  e.plan
+                                    .map((p) => {
+                                      const l = mr.lines.find((x) => x.id === p.lineId)
+                                      return l ? `${fmt(p.buyQty)} ${l.item.uom.symbol} ${l.item.name}` : null
+                                    })
+                                    .filter(Boolean)
+                                    .join(', ') || 'nothing'
+                                }`
+                              : e.closeReason
+                                ? `closed it: ${e.closeReason}`
+                                : e.toBuy?.length
+                                  ? `marked ${e.toBuy.join(', ')} to be bought (the whole line)`
+                                  : 'updated it'
+                  return (
+                    <li key={n} className="flex gap-3 text-xs">
+                      <span className="w-28 shrink-0 tabular-nums text-muted-foreground">{when(e.at)}</span>
+                      <span className="text-foreground">
+                        <b className="font-semibold">{e.who}</b> {what}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ol>
+            </Section>
+          )}
 
           <p className="px-1 text-[11px] text-muted-foreground">
             What is bought appears for the buyer under <b>Select from indent</b> on a new purchase order. When it arrives on a goods receipt,

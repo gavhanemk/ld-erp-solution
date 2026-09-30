@@ -1060,7 +1060,7 @@ async function boughtFor(
  */
 router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
   const id = req.params.id
-  const [lines, stock, ordered, received] = await Promise.all([
+  const [lines, stock, orderRows, received, handovers, activity] = await Promise.all([
     prisma.$queryRaw<
       Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
     >`
@@ -1078,14 +1078,15 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
-    // Cancelled orders have bought nothing.
-    prisma.$queryRaw<Array<{ mrLineId: string; qty: number; poNumbers: string[] }>>`
-      SELECT pol."mrLineId", SUM(pol.qty)::float8 AS "qty", ARRAY_AGG(DISTINCT po."poNumber") AS "poNumbers"
+    // Each order line raised against these lines. Cancelled orders have bought nothing.
+    prisma.$queryRaw<Array<{ mrLineId: string; poId: string; poNumber: string; poDate: Date; qty: number; receivedQty: number }>>`
+      SELECT pol."mrLineId", po.id AS "poId", po."poNumber", po."poDate", pol.qty::float8 AS "qty",
+             pol."receivedQty"::float8 AS "receivedQty"
       FROM ld_erp.purchase_order_lines pol
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
         AND po.status::text <> 'CANCELLED'
-      GROUP BY pol."mrLineId"`,
+      ORDER BY po."poDate"`,
     // Cancelled receipts booked nothing in.
     prisma.$queryRaw<Array<{ mrLineId: string; qty: number }>>`
       SELECT pol."mrLineId", SUM(gl."receivedQty")::float8 AS "qty"
@@ -1096,18 +1097,55 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
         AND po.status::text <> 'CANCELLED' AND g.status::text <> 'CANCELLED'
       GROUP BY pol."mrLineId"`,
+    // Every hand-over against it, from whichever rack.
+    prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; warehouseName: string; qty: number; at: Date }>>`
+      SELECT s."itemId", s."ownership"::text AS "ownership", s."ownerCustomerId", w.name AS "warehouseName",
+             (s."outQty" - s."inQty")::float8 AS "qty", s."transactionDate" AS "at"
+      FROM ld_erp.stock_ledger s
+      JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
+      WHERE s."referenceType" = 'MATERIAL_REQUISITION' AND s."referenceId" = ${id}
+      ORDER BY s."transactionDate", s."createdAt"`,
+    // Who did what to it, and when, from the audit trail.
+    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; closeReason: string | null; toBuy: string[] | null }>>`
+      SELECT a."createdAt" AS "at", a.action, u.name AS "who",
+             a.after -> 'handedOverNow' AS "handedOver", a.after -> 'plan' AS "plan",
+             a.after ->> 'closeReason' AS "closeReason",
+             -- The old issue-or-buy answer: which items it marked to be bought.
+             (SELECT ARRAY_AGG(l -> 'item' ->> 'name') FROM jsonb_array_elements(a.after::jsonb -> 'lines') l
+               WHERE l ->> 'fulfilment' = 'PURCHASE') AS "toBuy"
+      FROM ld_erp.audit_logs a
+      JOIN ld_erp.users u ON u.id = a."userId"
+      WHERE a."entityType" = 'MaterialRequisition' AND a."entityId" = ${id}
+      ORDER BY a."createdAt"`,
   ])
   if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
 
-  const bought = lines.map((l) => ({
-    lineId: l.id,
-    buyQty: l.purchaseQty !== null ? l.purchaseQty : l.fulfilment === 'PURCHASE' ? l.requestedQty : 0,
-    orderedQty: round3(ordered.find((o) => o.mrLineId === l.id)?.qty ?? 0),
-    receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
-    poNumbers: ordered.find((o) => o.mrLineId === l.id)?.poNumbers ?? [],
+  const bought = lines.map((l) => {
+    const mine = orderRows.filter((o) => o.mrLineId === l.id)
+    return {
+      lineId: l.id,
+      buyQty: l.purchaseQty !== null ? l.purchaseQty : l.fulfilment === 'PURCHASE' ? l.requestedQty : 0,
+      orderedQty: round3(mine.reduce((t, o) => t + o.qty, 0)),
+      receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
+      poNumbers: [...new Set(mine.map((o) => o.poNumber))],
+      orders: mine.map((o) => ({ poId: o.poId, poNumber: o.poNumber, poDate: o.poDate, qty: o.qty, receivedQty: o.receivedQty })),
+    }
+  })
+
+  // The trail in words: raised, approved, what was set to be bought, what was
+  // handed over and by whom, closed. The plan is kept by line so the window
+  // can name the item.
+  const events = activity.map((a) => ({
+    at: a.at,
+    who: a.who,
+    action: a.action,
+    handedOver: Array.isArray(a.handedOver) ? (a.handedOver as string[]) : null,
+    plan: Array.isArray(a.plan) ? (a.plan as Array<{ lineId: string; buyQty: number }>) : null,
+    closeReason: a.closeReason,
+    toBuy: a.toBuy,
   }))
 
-  res.json({ success: true, data: { lines, bought, stock } })
+  res.json({ success: true, data: { lines, bought, stock, handovers, events } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {

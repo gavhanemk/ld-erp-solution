@@ -88,7 +88,7 @@ function stage(
   isMine: boolean,
   iApproved = false,
   admin = false
-): { label: string; cls: string; next?: string } {
+): { label: string; cls: string; next?: string; waiting?: boolean } {
   if (mr.closedAt) {
     const some = mr.lines.some((l) => Number(l.issuedQty) > 0)
     return {
@@ -108,6 +108,22 @@ function stage(
           ? 'You raised it. As admin you can approve it yourself, or leave it for someone else.'
           : 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
         : 'Yours to approve or refuse.',
+    }
+  }
+
+  // Everything still owed is on the indent: the next move is the buyer's.
+  const owedLines = mr.lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty))
+  if (
+    !mr.issuedAt &&
+    owedLines.length &&
+    owedLines.every((l) => buyQtyOf(l) >= Number(l.requestedQty) - Number(l.issuedQty) - 1e-9)
+  ) {
+    const given = mr.lines.some((l) => Number(l.issuedQty) > 0)
+    return {
+      label: 'Waiting for purchase',
+      cls: 'badge-info',
+      next: `${given ? 'Part handed over; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Fulfil to hand it over.`,
+      waiting: true,
     }
   }
 
@@ -301,7 +317,12 @@ export default function RequisitionsPage() {
         <Check size={13} /> Approve
       </button>
     ) : r.canFulfil ? (
-      <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => setFulfilling(mr)} disabled={busy === mr.id} title="Hand it over, buy what is short, or both">
+      <button
+        className={`${r.s.waiting ? 'btn-secondary' : 'btn-primary'} h-7 px-2.5 text-xs`}
+        onClick={() => setFulfilling(mr)}
+        disabled={busy === mr.id}
+        title={r.s.waiting ? 'Waiting on the buyer; open it to see what has happened, or change the plan' : 'Hand it over, buy what is short, or both'}
+      >
         <PackageCheck size={13} /> Fulfil
       </button>
     ) : null
