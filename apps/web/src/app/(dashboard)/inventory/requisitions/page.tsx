@@ -1,13 +1,17 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock,
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { FulfilDialog } from '@/components/inventory/FulfilDialog'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
+import { KpiTile, TONE } from '@/components/dashboard/DashKit'
+import { Pagination } from '@/components/tables/Pagination'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
@@ -20,6 +24,9 @@ import { formatDate, itemsPreview } from '@/lib/utils'
  * different days in a mill. A requisition approved on Monday and still sitting
  * unissued on Thursday is a cutting room waiting, and lumping it in with the
  * ones already collected would hide that completely.
+ *
+ * The list is filtered on the screen, like job work and customer material: the
+ * whole set is small, and a filter can then say how many each choice leaves.
  */
 
 interface Line {
@@ -64,6 +71,9 @@ interface Requisition {
   lines: Line[]
 }
 
+const dayKey = (d: Date | string) => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86400000)
+
 /** Something from the store is still owed on it, and some has been handed over. */
 const partlyIssued = (mr: Requisition) =>
   mr.lines.some((l) => Number(l.issuedQty) > 0) &&
@@ -77,79 +87,70 @@ const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
 
 /**
- * What this requisition is waiting for, and who has to do it.
+ * Where a requisition stands. One word each, in the order they happen, so the
+ * status filter and the figures read the same as the badge on the row.
+ */
+type StageKey = 'approval' | 'handover' | 'partly' | 'purchase' | 'issued' | 'closed' | 'cancelled' | 'refused'
+
+const STAGE: Record<StageKey, { label: string; cls: string; who: string }> = {
+  approval: { label: 'Waiting for approval', cls: 'badge-warning', who: 'Approver' },
+  handover: { label: 'To be issued', cls: 'badge-info', who: 'Store' },
+  partly: { label: 'Part issued', cls: 'badge-warning', who: 'Store' },
+  purchase: { label: 'Waiting for purchase', cls: 'badge-info', who: 'Buyer' },
+  issued: { label: 'Issued', cls: 'badge-success', who: '' },
+  closed: { label: 'Closed — part issued', cls: 'badge-neutral', who: '' },
+  cancelled: { label: 'Cancelled', cls: 'badge-neutral', who: '' },
+  refused: { label: 'Refused', cls: 'badge-danger', who: '' },
+}
+const STAGE_ORDER = Object.keys(STAGE) as StageKey[]
+/** Still somebody's to do. */
+const OPEN_STAGES: StageKey[] = ['approval', 'handover', 'partly', 'purchase']
+
+function stageKey(mr: Requisition): StageKey {
+  if (mr.closedAt) return mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'closed' : 'cancelled'
+  if (mr.status === 'REJECTED') return 'refused'
+  if (mr.status === 'PENDING') return 'approval'
+  if (mr.issuedAt) return 'issued'
+  // Everything still owed is on the indent: the next move is the buyer's.
+  const owedLines = mr.lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty))
+  if (owedLines.length && owedLines.every((l) => buyQtyOf(l) >= Number(l.requestedQty) - Number(l.issuedQty) - 1e-9))
+    return 'purchase'
+  return partlyIssued(mr) ? 'partly' : 'handover'
+}
+
+/**
+ * What happens next, and who has to do it, in a sentence.
  *
  * The status on its own was not enough. "Waiting for approval" is true, but it
  * leaves the person who raised it looking for a button that is deliberately not
- * there — so the stage now says whose move it is and where they make it.
+ * there — so this says whose move it is and where they make it.
  */
-function stage(
-  mr: Requisition,
-  isMine: boolean,
-  iApproved = false,
-  admin = false
-): { label: string; cls: string; next?: string; waiting?: boolean } {
-  if (mr.closedAt) {
-    const some = mr.lines.some((l) => Number(l.issuedQty) > 0)
-    return {
-      label: some ? 'Closed — part issued' : 'Cancelled',
-      cls: 'badge-neutral',
-      next: `${mr.closeReason ?? ''}${mr.closedBy ? ` — ${mr.closedBy.name}` : ''}`,
-    }
-  }
-  if (mr.status === 'REJECTED') return { label: 'Refused', cls: 'badge-danger' }
-
-  if (mr.status === 'PENDING') {
-    return {
-      label: 'Waiting for approval',
-      cls: 'badge-warning',
-      next: isMine
+function nextStep(mr: Requisition, key: StageKey, isMine: boolean, iApproved: boolean, admin: boolean): string | undefined {
+  switch (key) {
+    case 'closed':
+    case 'cancelled':
+      return `${mr.closeReason ?? ''}${mr.closedBy ? ` — ${mr.closedBy.name}` : ''}` || undefined
+    case 'approval':
+      return isMine
         ? admin
           ? 'You raised it. As admin you can approve it yourself, or leave it for someone else.'
           : 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
-        : 'Yours to approve or refuse.',
+        : 'Yours to approve or refuse.'
+    case 'purchase':
+      return `${mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Part handed over; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Fulfil to hand it over.`
+    case 'partly': {
+      const full = mr.lines.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
+      return `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} handed over in full. Press Fulfil to hand over the rest, or close it if it is no longer wanted.`
     }
-  }
-
-  // Everything still owed is on the indent: the next move is the buyer's.
-  const owedLines = mr.lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty))
-  if (
-    !mr.issuedAt &&
-    owedLines.length &&
-    owedLines.every((l) => buyQtyOf(l) >= Number(l.requestedQty) - Number(l.issuedQty) - 1e-9)
-  ) {
-    const given = mr.lines.some((l) => Number(l.issuedQty) > 0)
-    return {
-      label: 'Waiting for purchase',
-      cls: 'badge-info',
-      next: `${given ? 'Part handed over; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Fulfil to hand it over.`,
-      waiting: true,
-    }
-  }
-
-  if (!mr.issuedAt && partlyIssued(mr)) {
-    const full = mr.lines.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
-    return {
-      label: 'Part issued',
-      cls: 'badge-warning',
-      next: `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} handed over in full. Press Fulfil to hand over the rest, or close it if it is no longer wanted.`,
-    }
-  }
-
-  if (!mr.issuedAt) {
-    return {
-      label: 'To be issued',
-      cls: 'badge-info',
+    case 'handover':
       // Raised, approved and issued by three different people (the Admin may
       // do all three), so the two who have had their say are told whose turn it is.
-      next:
-        (isMine || iApproved) && !admin
-          ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store hands it over. You can still press Fulfil to set what to buy.`
-          : 'Press Fulfil to hand it over from the stores that have it, and to buy what is short.',
-    }
+      return (isMine || iApproved) && !admin
+        ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store hands it over. You can still press Fulfil to set what to buy.`
+        : 'Press Fulfil to hand it over from the stores that have it, and to buy what is short.'
+    default:
+      return undefined
   }
-
-  return { label: 'Issued', cls: 'badge-success' }
 }
 
 /**
@@ -198,43 +199,96 @@ const unitLine = (groups: UnitGroup[], pick: (g: UnitGroup) => number) => {
   return parts.length ? parts.join(' · ') : null
 }
 
+/** When it is wanted by, against today. Only an open requisition can be late. */
+type NeedKey = 'late' | 'soon' | 'later' | 'nodate' | 'done'
+const NEED_LABEL: Record<NeedKey, string> = {
+  late: 'Past the needed-by date',
+  soon: 'Needed within 3 days',
+  later: 'Needed later',
+  nodate: 'No date given',
+  done: 'Finished',
+}
+
+function presetRange(p: string): { from: string; to: string } {
+  const now = new Date()
+  const today = dayKey(now)
+  const back = (days: number) => dayKey(new Date(now.getTime() - days * 86400000))
+  switch (p) {
+    case 'today':
+      return { from: today, to: today }
+    case '7d':
+      return { from: back(6), to: today }
+    case '30d':
+      return { from: back(29), to: today }
+    case 'month':
+      return { from: `${today.slice(0, 8)}01`, to: today }
+    case 'fy': {
+      const y = Number(today.slice(0, 4)) - (Number(today.slice(5, 7)) < 4 ? 1 : 0)
+      return { from: `${y}-04-01`, to: today }
+    }
+    default:
+      return { from: '', to: '' }
+  }
+}
+
+const PRESETS = [
+  { key: 'all', label: 'All time' },
+  { key: 'today', label: 'Today' },
+  { key: '7d', label: '7 days' },
+  { key: '30d', label: '30 days' },
+  { key: 'month', label: 'This month' },
+  { key: 'fy', label: 'This FY' },
+  { key: 'custom', label: 'Custom dates' },
+]
+
+const PAGE = 50
+
+type FilterKey = 'stage' | 'department' | 'raisedBy' | 'store' | 'category' | 'need'
+
 export default function RequisitionsPage() {
   const me = currentUser()
   // The Admin may approve a requisition they raised themselves; the server says the same.
   const admin = me?.role === 'Admin'
 
   const [rows, setRows] = useState<Requisition[]>([])
-  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   const [search, setSearch] = useState('')
-  const [debounced, setDebounced] = useState('')
-  const [status, setStatus] = useState('')
+  const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({})
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [preset, setPreset] = useState('all')
+  const [page, setPage] = useState(1)
+
   const [open, setOpen] = useState<string | null>(null)
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
 
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(search), 350)
-    return () => clearTimeout(t)
-  }, [search])
+  const today = dayKey(new Date())
 
+  const latest = useRef(0)
   const load = useCallback(async () => {
+    const id = ++latest.current
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ limit: '50' })
-      if (debounced) qs.set('q', debounced)
-      if (status) qs.set('status', status)
-      const res = await api.get<Paginated<Requisition>>(`/inventory/requisitions?${qs}`)
-      setRows(res.data)
-      setTotal(res.pagination.total)
+      // Every requisition, a page of 200 at a time: the filters and their counts work on the whole set.
+      const all: Requisition[] = []
+      for (let p = 1; ; p++) {
+        const res = await api.get<Paginated<Requisition>>(`/inventory/requisitions?limit=200&page=${p}`)
+        all.push(...res.data)
+        if (p >= res.pagination.pages) break
+      }
+      if (id !== latest.current) return
+      setRows(all)
     } catch (err) {
+      if (id !== latest.current) return
       setError(
         err instanceof ApiError
           ? err.status === 403
@@ -244,13 +298,177 @@ export default function RequisitionsPage() {
       )
       setRows([])
     } finally {
-      setLoading(false)
+      if (id === latest.current) setLoading(false)
     }
-  }, [debounced, status])
+  }, [])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    setPage(1)
+  }, [search, picked, from, to])
+
+  /* ── what each row is, worked out once ── */
+  const facts = useMemo(() => {
+    const m = new Map<string, { stage: StageKey; need: NeedKey; daysLate: number; groups: UnitGroup[] }>()
+    for (const mr of rows) {
+      const stage = stageKey(mr)
+      const due = mr.requiredDate ? dayKey(mr.requiredDate) : null
+      const daysLate = due ? daysBetween(due, today) : 0
+      const need: NeedKey = !OPEN_STAGES.includes(stage)
+        ? 'done'
+        : !due
+          ? 'nodate'
+          : daysLate > 0
+            ? 'late'
+            : daysLate >= -3
+              ? 'soon'
+              : 'later'
+      m.set(mr.id, { stage, need, daysLate, groups: qtyByUnit(mr.lines) })
+    }
+    return m
+  }, [rows, today])
+  const fact = (mr: Requisition) => facts.get(mr.id)!
+
+  /** The values a row has for each filter; a requisition can draw on several stores and categories. */
+  const valuesOf: Record<FilterKey, (mr: Requisition) => string[]> = useMemo(
+    () => ({
+      stage: (mr) => [facts.get(mr.id)?.stage ?? 'issued'],
+      department: (mr) => [mr.department.id],
+      raisedBy: (mr) => [mr.raisedBy?.id ?? 'none'],
+      store: (mr) => [...new Set(mr.lines.map((l) => l.warehouse.id))],
+      category: (mr) => [...new Set(mr.lines.map((l) => l.item.category?.parent?.name ?? l.item.category?.name ?? 'none'))],
+      need: (mr) => [facts.get(mr.id)?.need ?? 'done'],
+    }),
+    [facts],
+  )
+
+  const FILTERS: Array<{ key: FilterKey; label: string; labelOf: (mr: Requisition, value: string) => string; order?: string[] }> = [
+    { key: 'stage', label: 'Status', labelOf: (_, v) => STAGE[v as StageKey].label, order: STAGE_ORDER },
+    { key: 'department', label: 'Department', labelOf: (mr) => mr.department.name },
+    { key: 'raisedBy', label: 'Raised by', labelOf: (mr) => mr.raisedBy?.name ?? 'Not recorded' },
+    { key: 'store', label: 'Store', labelOf: (mr, v) => mr.lines.find((l) => l.warehouse.id === v)?.warehouse.name ?? v },
+    { key: 'category', label: 'Category', labelOf: (_, v) => (v === 'none' ? 'No category' : v) },
+    { key: 'need', label: 'Needed by', labelOf: (_, v) => NEED_LABEL[v as NeedKey], order: Object.keys(NEED_LABEL) },
+  ]
+
+  const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const matchesSearch = useCallback(
+    (mr: Requisition) => {
+      if (!words.length) return true
+      const hay = `${mr.mrNumber} ${mr.department.name} ${mr.raisedBy?.name ?? ''} ${mr.approvedBy?.name ?? ''} ${mr.notes ?? ''} ${mr.lines
+        .map((l) => `${l.item.code} ${l.item.name} ${l.purpose ?? ''} ${l.ownerCustomer?.name ?? ''}`)
+        .join(' ')}`.toLowerCase()
+      return words.every((w) => hay.includes(w))
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [search],
+  )
+  const inPeriod = useCallback(
+    (mr: Requisition) => {
+      const d = dayKey(mr.requestDate)
+      return (!from || d >= from) && (!to || d <= to)
+    },
+    [from, to],
+  )
+
+  /** Whether a row passes every filter except `skip` (a filter never narrows its own counts). */
+  const passes = useCallback(
+    (mr: Requisition, skip?: FilterKey) =>
+      inPeriod(mr) &&
+      matchesSearch(mr) &&
+      (Object.entries(picked) as Array<[FilterKey, string[]]>).every(
+        ([k, values]) => k === skip || !values?.length || valuesOf[k](mr).some((v) => values.includes(v)),
+      ),
+    [picked, matchesSearch, inPeriod, valuesOf],
+  )
+
+  const shown = useMemo(() => rows.filter((mr) => passes(mr)), [rows, passes])
+
+  const choicesFor = (key: FilterKey): FilterChoice[] | undefined => {
+    if (loading && !rows.length) return undefined
+    const def = FILTERS.find((f) => f.key === key)!
+    const labels = new Map<string, string>()
+    const counts = new Map<string, number>()
+    for (const mr of rows) {
+      const ok = passes(mr, key)
+      for (const v of valuesOf[key](mr)) {
+        if (!labels.has(v)) labels.set(v, def.labelOf(mr, v))
+        if (ok) counts.set(v, (counts.get(v) ?? 0) + 1)
+      }
+    }
+    const rank = (v: string) => (def.order ? def.order.indexOf(v) : 0)
+    return [...labels.entries()]
+      .map(([value, label]) => ({ value, label, count: counts.get(value) ?? 0 }))
+      .sort((a, b) =>
+        def.order
+          ? rank(a.value) - rank(b.value)
+          : a.value === 'none'
+            ? 1
+            : b.value === 'none'
+              ? -1
+              : a.label.localeCompare(b.label),
+      )
+  }
+
+  const setFilter = (key: FilterKey, values: string[]) => setPicked((p) => ({ ...p, [key]: values }))
+  const sameAs = (a: string[] | undefined, b: string[]) => (a?.length ?? 0) === b.length && b.every((v) => a?.includes(v))
+  const toggleTo = (key: FilterKey, values: string[]) =>
+    setPicked((p) => ({ ...p, [key]: sameAs(p[key], values) ? [] : values }))
+  const isSet = (key: FilterKey, values: string[]) => sameAs(picked[key], values)
+
+  const chips = FILTERS.flatMap((f) => {
+    const values = picked[f.key] ?? []
+    if (!values.length) return []
+    const choices = choicesFor(f.key) ?? []
+    return values.map((v) => ({ key: f.key, value: v, text: `${f.label}: ${choices.find((c) => c.value === v)?.label ?? '…'}` }))
+  })
+  const narrowed = chips.length > 0 || words.length > 0 || !!from || !!to
+  const clearAll = () => {
+    setPicked({})
+    setSearch('')
+    setFrom('')
+    setTo('')
+    setPreset('all')
+  }
+  const pickPreset = (key: string) => {
+    setPreset(key)
+    if (key === 'custom') return
+    const r = presetRange(key)
+    setFrom(r.from)
+    setTo(r.to)
+  }
+
+  /* ── the figures: each counts what the other filters leave, so a tile never hides itself ── */
+  const figures = useMemo(() => {
+    const byStage = rows.filter((mr) => passes(mr, 'stage'))
+    const inStage = (keys: StageKey[]) => byStage.filter((mr) => keys.includes(fact(mr).stage))
+    const approval = inStage(['approval'])
+    const handover = inStage(['handover', 'partly'])
+    const purchase = inStage(['purchase'])
+    const late = rows.filter((mr) => passes(mr, 'need') && fact(mr).need === 'late')
+    // Totals per unit across the requisitions, never adding metres to pieces.
+    const sum = (rs: Requisition[], pick: (g: UnitGroup) => number) => {
+      const m = new Map<string, number>()
+      for (const g of rs.flatMap((mr) => fact(mr).groups)) m.set(g.uom, (m.get(g.uom) ?? 0) + pick(g))
+      const parts = [...m.entries()].filter(([, v]) => v > 0).map(([uom, v]) => `${qtyFmt(v)} ${uom}`)
+      return parts.length ? parts.join(' · ') : null
+    }
+    const oldest = approval.length ? Math.max(...approval.map((mr) => daysBetween(dayKey(mr.requestDate), today))) : 0
+    return {
+      approval: approval.length,
+      oldestApproval: oldest,
+      handover: handover.length,
+      handoverQty: sum(handover, (g) => Math.max(0, g.owed - g.toBuy)),
+      purchase: purchase.length,
+      purchaseQty: sum(purchase, (g) => g.toBuy),
+      late: late.length,
+      mostLate: late.length ? Math.max(...late.map((mr) => fact(mr).daysLate)) : 0,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, passes, facts, today])
 
   const act = async (mr: Requisition, what: 'approve' | 'reject' | 'close', reason?: string) => {
     setBusy(mr.id)
@@ -275,6 +493,56 @@ export default function RequisitionsPage() {
     }
   }
 
+  /** What the filters leave, as a spreadsheet: one row per item, with its requisition beside it. */
+  const exportRows = async () => {
+    setExporting(true)
+    try {
+      const XLSX = await import('xlsx')
+      const sheet = XLSX.utils.json_to_sheet(
+        shown.flatMap((mr) => {
+          const f = fact(mr)
+          return mr.lines.map((l) => {
+            const asked = Number(l.requestedQty)
+            const issued = Number(l.issuedQty)
+            const open = OPEN_STAGES.includes(f.stage)
+            return {
+              Requisition: mr.mrNumber,
+              Date: dayKey(mr.requestDate),
+              Department: mr.department.name,
+              'Raised By': mr.raisedBy?.name ?? '',
+              'Approved By': mr.approvedBy?.name ?? '',
+              'Needed By': mr.requiredDate ? dayKey(mr.requiredDate) : '',
+              Status: STAGE[f.stage].label,
+              'Waiting On': STAGE[f.stage].who,
+              'Item Code': l.item.code,
+              'Item Name': l.item.name,
+              Category: l.item.category?.parent?.name ?? l.item.category?.name ?? '',
+              'Sub Category': l.item.category?.parent ? l.item.category.name : '',
+              Whose: l.ownership === 'CUSTOMER_OWNED' ? (l.ownerCustomer?.name ?? 'Customer') : 'Our own',
+              Store: l.warehouse.name,
+              Unit: l.item.uom.symbol,
+              Asked: asked,
+              Issued: issued,
+              'Still Owed': open ? Math.max(0, asked - issued) : 0,
+              'To Buy': buyQtyOf(l),
+              'What For': l.purpose ?? '',
+              Note: mr.notes ?? '',
+              'Refusal / Close Reason': mr.rejectionReason ?? mr.closeReason ?? '',
+            }
+          })
+        }),
+      )
+      sheet['!cols'] = [16, 11, 16, 18, 18, 11, 20, 10, 14, 30, 16, 16, 16, 22, 6, 9, 9, 10, 9, 22, 24, 26].map((wch) => ({ wch }))
+      const book = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(book, sheet, 'Requisitions')
+      XLSX.writeFile(book, `material-requisitions-${today}.xlsx`)
+    } catch {
+      setError('Could not build the spreadsheet.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   // The person who raised it may withdraw it; the store or an approver may
   // close it. The server holds the same rule.
   const mayClose = (mr: Requisition, isMine: boolean) =>
@@ -288,7 +556,8 @@ export default function RequisitionsPage() {
     // The server refuses these too; hiding a button just avoids offering a door that is certain to be shut.
     const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
     const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
-    const s = stage(mr, isMine, iApproved, admin)
+    const f = fact(mr)
+    const s = { ...STAGE[f.stage], next: nextStep(mr, f.stage, isMine, iApproved, admin), waiting: f.stage === 'purchase' }
     const canDecide = mr.status === 'PENDING' && !mr.closedAt && (!isMine || admin)
     // Approved with something still owed: the store hands it over, buys it, or both.
     const canFulfil =
@@ -306,7 +575,7 @@ export default function RequisitionsPage() {
         onClick: () => setAsking({ mr, kind: 'close' }),
         danger: true,
       })
-    return { isMine, iApproved, s, canDecide, canFulfil, actions, groups: qtyByUnit(mr.lines) }
+    return { ...f, isMine, iApproved, s, canDecide, canFulfil, actions }
   }
   type Facts = ReturnType<typeof rowFacts>
 
@@ -365,9 +634,7 @@ export default function RequisitionsPage() {
                       <span className="text-muted-foreground">Our own</span>
                     )}
                   </td>
-                  <td className="truncate text-xs">
-                    {l.warehouse.name}
-                  </td>
+                  <td className="truncate text-xs">{l.warehouse.name}</td>
                   <td className="truncate text-xs" title={l.purpose ?? undefined}>
                     {l.purpose ?? <span className="text-muted-foreground">—</span>}
                   </td>
@@ -404,6 +671,7 @@ export default function RequisitionsPage() {
                 {mr.closeReason && <>: {mr.closeReason}</>}.{' '}
               </>
             )}
+            {mr.status === 'REJECTED' && mr.rejectionReason && <>Refused: {mr.rejectionReason}. </>}
             {mr.notes && <>Note: {mr.notes}</>}
           </span>
           {r.canFulfil && (
@@ -416,16 +684,52 @@ export default function RequisitionsPage() {
     )
   }
 
+  /** "Needed by", red once the day has gone while it is still open. */
+  const neededBy = (mr: Requisition, r: Facts) =>
+    mr.requiredDate ? (
+      <span className={r.need === 'late' ? 'font-medium text-red-500' : r.need === 'soon' ? 'text-amber-500' : undefined}>
+        {formatDate(mr.requiredDate)}
+        {r.need === 'late' && <span className="block text-[10px]">{r.daysLate} {r.daysLate === 1 ? 'day' : 'days'} late</span>}
+      </span>
+    ) : (
+      <span className="text-muted-foreground">—</span>
+    )
+
+  const dash = <span className="text-muted-foreground">—</span>
+  /** A figure per unit, one unit to a line, so a column stays narrow when a requisition mixes metres and pieces. */
+  const unitStack = (groups: UnitGroup[], pick: (g: UnitGroup) => number, cls?: string) => {
+    const parts = groups.filter((g) => pick(g) > 0)
+    return parts.length
+      ? parts.map((g) => (
+          <div key={g.uom} className={cls}>
+            {qtyFmt(pick(g))} {g.uom}
+          </div>
+        ))
+      : dash
+  }
+
+  const pages = Math.ceil(shown.length / PAGE) || 1
+  const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
+  const COLS = 14
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <div className="page-header">
         <div>
           <h1 className="page-title">Material Requisitions</h1>
           <p className="page-subtitle">What the floor has asked the store for</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => void exportRows()}
+            disabled={exporting || shown.length === 0}
+            title={narrowed ? 'Export the requisitions the filters leave' : 'Export every requisition'}
+          >
+            {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
           <button className="btn-primary" onClick={() => setDialog(true)}>
             <Plus size={15} /> New requisition
@@ -434,59 +738,184 @@ export default function RequisitionsPage() {
       </div>
 
       {error && (
-        <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-          <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-          <p className="text-sm text-red-400">{error}</p>
+        <div className="flex items-start gap-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3">
+          <AlertCircle size={16} className="mt-0.5 shrink-0 text-red-400" />
+          <p className="flex-1 text-sm text-red-400">{error}</p>
+          <button type="button" onClick={() => setError(null)} className="text-red-400" aria-label="Dismiss">
+            <X size={14} />
+          </button>
         </div>
       )}
       {message && (
-        <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5">
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
         </div>
       )}
 
-      <div className="glass-card p-0 overflow-hidden">
-        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-border">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border flex-1 min-w-[220px] max-w-sm">
+      {/* Each tile is a filter: click to show only those, click again to show all. */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <KpiTile
+          icon={Hourglass}
+          tone={TONE.amber}
+          label="Waiting for approval"
+          value={String(figures.approval)}
+          valueClass={figures.approval ? 'text-amber-500' : 'text-foreground'}
+          sub={
+            isSet('stage', ['approval'])
+              ? 'showing only these · click to show all'
+              : figures.approval
+                ? `oldest raised ${figures.oldestApproval === 0 ? 'today' : `${figures.oldestApproval} ${figures.oldestApproval === 1 ? 'day' : 'days'} ago`}`
+                : 'nothing to approve'
+          }
+          onClick={() => toggleTo('stage', ['approval'])}
+          active={isSet('stage', ['approval'])}
+        />
+        <KpiTile
+          icon={PackageCheck}
+          tone={TONE.teal}
+          label="To be handed over"
+          value={String(figures.handover)}
+          sub={
+            isSet('stage', ['handover', 'partly'])
+              ? 'showing only these · click to show all'
+              : figures.handover
+                ? `${figures.handoverQty ?? 'nothing'} for the store to give`
+                : 'nothing waiting at the store'
+          }
+          onClick={() => toggleTo('stage', ['handover', 'partly'])}
+          active={isSet('stage', ['handover', 'partly'])}
+        />
+        <KpiTile
+          icon={ShoppingCart}
+          tone={TONE.sky}
+          label="Waiting for purchase"
+          value={String(figures.purchase)}
+          sub={
+            isSet('stage', ['purchase'])
+              ? 'showing only these · click to show all'
+              : figures.purchase
+                ? `${figures.purchaseQty ?? 'nothing'} on the indent`
+                : 'nothing waiting on the buyer'
+          }
+          onClick={() => toggleTo('stage', ['purchase'])}
+          active={isSet('stage', ['purchase'])}
+        />
+        <KpiTile
+          icon={AlarmClock}
+          tone={TONE.rose}
+          label="Past the needed-by date"
+          value={String(figures.late)}
+          valueClass={figures.late ? 'text-rose-500' : 'text-foreground'}
+          sub={
+            isSet('need', ['late'])
+              ? 'showing only these · click to show all'
+              : figures.late
+                ? `the latest is ${figures.mostLate} ${figures.mostLate === 1 ? 'day' : 'days'} late`
+                : 'nothing late'
+          }
+          onClick={() => toggleTo('need', ['late'])}
+          active={isSet('need', ['late'])}
+        />
+      </div>
+
+      {/* Raised so an open dropdown lies over the table below. */}
+      <div className="glass-card relative z-30 space-y-2 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex h-10 min-w-[200px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
             <Search size={14} className="text-muted-foreground" />
             <input
-              className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
-              placeholder="Search number or department..."
+              className="flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+              placeholder="Search number, department, person, item..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search requisitions"
             />
+            {search && (
+              <button type="button" onClick={() => setSearch('')} aria-label="Clear search" className="text-muted-foreground">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <div className="flex h-10 items-center gap-1 rounded-lg border border-border bg-secondary px-2">
+            <CalendarDays size={14} className="shrink-0 text-muted-foreground" />
+            <input
+              type="date"
+              className="w-[118px] bg-transparent text-sm text-foreground outline-none"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => {
+                setFrom(e.target.value)
+                setPreset('custom')
+              }}
+              aria-label="From"
+              title="Raised from"
+            />
+            <span className="text-xs text-muted-foreground">to</span>
+            <input
+              type="date"
+              className="w-[118px] bg-transparent text-sm text-foreground outline-none"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => {
+                setTo(e.target.value)
+                setPreset('custom')
+              }}
+              aria-label="To"
+              title="Raised up to"
+            />
           </div>
           <select
-            className="form-input h-9 w-44"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            aria-label="Filter by status"
+            className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
+            value={preset}
+            onChange={(e) => pickPreset(e.target.value)}
+            aria-label="Period"
           >
-            <option value="">All</option>
-            <option value="PENDING">Waiting for approval</option>
-            <option value="APPROVED">Approved — to hand over</option>
-            <option value="PARTLY">Part issued</option>
-            <option value="ISSUED">Issued in full</option>
-            <option value="CLOSED">Cancelled or closed</option>
-            <option value="REJECTED">Refused</option>
+            {PRESETS.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
+              </option>
+            ))}
           </select>
-          <span className="text-xs text-muted-foreground ml-auto">{total} requisitions</span>
+          {FILTERS.map((f) => (
+            <FilterMenu key={f.key} label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
+          ))}
         </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {chips.map((c) => (
+            <button
+              key={`${c.key}-${c.value}`}
+              type="button"
+              onClick={() => setFilter(c.key, (picked[c.key] ?? []).filter((v) => v !== c.value))}
+              className="flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-foreground"
+            >
+              {c.text} <X size={11} />
+            </button>
+          ))}
+          {narrowed && (
+            <button type="button" onClick={clearAll} className="text-xs text-teal-500 hover:underline">
+              Clear all
+            </button>
+          )}
+          <span className="ml-auto text-xs text-muted-foreground">
+            {narrowed ? `${shown.length} of ${rows.length}` : rows.length} {rows.length === 1 ? 'requisition' : 'requisitions'}
+          </span>
+        </div>
+      </div>
 
+      <div className="glass-card overflow-hidden p-0">
         {loading && rows.length === 0 ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
-        ) : rows.length === 0 ? (
+        ) : shown.length === 0 ? (
           <div className="px-4 py-10 text-center">
             <p className="text-sm text-muted-foreground">
-              Nothing here. A requisition is how the cutting room asks the store for fabric.
+              {narrowed ? 'Nothing matches that.' : 'Nothing here. A requisition is how the cutting room asks the store for fabric.'}
             </p>
           </div>
         ) : (
-          <div className="list-scope">
+          <div className={`list-scope transition-opacity ${loading ? 'opacity-60' : ''}`}>
             {/* On a phone each requisition is a card; the table is for a wider list. */}
             <div className="list-cards divide-border divide-y">
-              {rows.map((mr) => {
+              {pageRows.map((mr) => {
                 const r = rowFacts(mr)
                 const expanded = open === mr.id
                 return (
@@ -504,17 +933,36 @@ export default function RequisitionsPage() {
                       </span>
                     </div>
                     <dl className="mt-2.5 grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-                      <dt className="text-muted-foreground">Raised</dt>
-                      <dd className="text-foreground min-w-0">
-                        {formatDate(mr.requestDate)}
-                        {mr.raisedBy && <span className="text-muted-foreground"> · {mr.raisedBy.name}</span>}
-                      </dd>
+                      <dt className="text-muted-foreground">Date</dt>
+                      <dd className="text-foreground min-w-0">{formatDate(mr.requestDate)}</dd>
+                      <dt className="text-muted-foreground">Raised by</dt>
+                      <dd className="text-foreground min-w-0">{mr.raisedBy?.name ?? '—'}</dd>
+                      {mr.requiredDate && (
+                        <>
+                          <dt className="text-muted-foreground">Needed by</dt>
+                          <dd className="min-w-0">{neededBy(mr, r)}</dd>
+                        </>
+                      )}
                       <dt className="text-muted-foreground">Asked</dt>
                       <dd className="text-foreground min-w-0 tabular-nums">{unitLine(r.groups, (g) => g.asked) ?? '—'}</dd>
+                      <dt className="text-muted-foreground">Issued</dt>
+                      <dd className="min-w-0 tabular-nums text-emerald-500">{unitLine(r.groups, (g) => g.issued) ?? dash}</dd>
                       <dt className="text-muted-foreground">Still owed</dt>
                       <dd className="min-w-0 tabular-nums text-amber-500">
-                        {mr.closedAt || mr.status === 'REJECTED' ? <span className="text-muted-foreground">—</span> : (unitLine(r.groups, (g) => g.owed) ?? '—')}
+                        {OPEN_STAGES.includes(r.stage) ? (unitLine(r.groups, (g) => g.owed) ?? dash) : dash}
                       </dd>
+                      {OPEN_STAGES.includes(r.stage) && unitLine(r.groups, (g) => g.toBuy) && (
+                        <>
+                          <dt className="text-muted-foreground">To buy</dt>
+                          <dd className="min-w-0 tabular-nums text-sky-500">{unitLine(r.groups, (g) => g.toBuy)}</dd>
+                        </>
+                      )}
+                      {r.s.who && (
+                        <>
+                          <dt className="text-muted-foreground">Waiting on</dt>
+                          <dd className="text-foreground min-w-0">{r.s.who}</dd>
+                        </>
+                      )}
                     </dl>
                     {r.s.next && <p className="text-muted-foreground mt-2 text-[11px]">{r.s.next}</p>}
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
@@ -543,27 +991,28 @@ export default function RequisitionsPage() {
                   <thead>
                     <tr className="bg-secondary">
                       <th style={{ width: 30 }} />
-                      <th className="whitespace-nowrap">Requisition</th>
+                      <th className="whitespace-nowrap">Req. No.</th>
+                      <th className="whitespace-nowrap">Date</th>
                       <th className="whitespace-nowrap">Department</th>
-                      <th className="whitespace-nowrap">Raised</th>
+                      <th className="whitespace-nowrap">Raised by</th>
                       <th className="whitespace-nowrap">Items</th>
-                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked qty</th>
-                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued qty</th>
+                      <th className="whitespace-nowrap">Store</th>
+                      <th className="whitespace-nowrap">Needed by</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still owed</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>To buy</th>
                       <th className="whitespace-nowrap">Status</th>
                       <th />
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((mr) => {
+                    {pageRows.map((mr) => {
                       const r = rowFacts(mr)
                       const expanded = open === mr.id
-                      const late =
-                        mr.requiredDate && !mr.issuedAt && !mr.closedAt && mr.status !== 'REJECTED' &&
-                        new Date(mr.requiredDate).toLocaleDateString('en-CA') < new Date().toLocaleDateString('en-CA')
-                      const owed = unitLine(r.groups, (g) => g.owed)
-                      const toBuy = unitLine(r.groups, (g) => g.toBuy)
+                      const live = OPEN_STAGES.includes(r.stage)
                       const p = itemsPreview(mr.lines.map((l) => l.item.name))
+                      const stores = [...new Set(mr.lines.map((l) => l.warehouse.name))]
                       return (
                         <Fragment key={mr.id}>
                           <tr>
@@ -593,42 +1042,29 @@ export default function RequisitionsPage() {
                                 <span className="font-mono text-xs font-semibold text-teal-400">{mr.mrNumber}</span>
                               )}
                             </td>
-                            <td className="whitespace-nowrap text-sm">{mr.department.name}</td>
-                            <td className="whitespace-nowrap text-xs">
-                              {formatDate(mr.requestDate)}
-                              {mr.raisedBy && <div className="text-muted-foreground text-[10px]">by {mr.raisedBy.name}</div>}
-                              {/* When it is wanted by, where somebody said: red once that day has gone. */}
-                              {mr.requiredDate && (
-                                <div className={`text-[10px] ${late ? 'font-medium text-red-400' : 'text-muted-foreground'}`}>
-                                  needed by {formatDate(mr.requiredDate)}
-                                  {late && ' · past due'}
-                                </div>
-                              )}
+                            <td className="whitespace-nowrap text-xs">{formatDate(mr.requestDate)}</td>
+                            <td className="whitespace-nowrap text-xs">{mr.department.name}</td>
+                            <td className="whitespace-nowrap text-xs">{mr.raisedBy?.name ?? dash}</td>
+                            <td className="text-xs">
+                              <div className="text-foreground max-w-[9rem] truncate" title={p.full}>
+                                {p.shown}
+                                {p.extra && <span className="text-muted-foreground">{p.extra}</span>}
+                              </div>
                             </td>
                             <td className="text-xs">
-                              <div className="text-foreground whitespace-nowrap">
-                                {mr.lines.length} {mr.lines.length === 1 ? 'item' : 'items'}
-                              </div>
-                              <div className="text-muted-foreground max-w-[9rem] truncate text-[10px] leading-tight" title={p.full}>
-                                {p.shown}
-                                {p.extra}
+                              <div className="max-w-[8rem] truncate" title={stores.join(', ')}>
+                                {stores[0]}
+                                {stores.length > 1 && <span className="text-muted-foreground"> +{stores.length - 1}</span>}
                               </div>
                             </td>
+                            <td className="whitespace-nowrap text-xs">{neededBy(mr, r)}</td>
+                            <td className="whitespace-nowrap text-right text-xs tabular-nums">{unitStack(r.groups, (g) => g.asked)}</td>
+                            <td className="whitespace-nowrap text-right text-xs tabular-nums">{unitStack(r.groups, (g) => g.issued, 'text-emerald-500')}</td>
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                              {unitLine(r.groups, (g) => g.asked) ?? '—'}
+                              {live ? unitStack(r.groups, (g) => g.owed, 'font-medium text-amber-500') : dash}
                             </td>
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                              {unitLine(r.groups, (g) => g.issued) ?? <span className="text-muted-foreground">—</span>}
-                            </td>
-                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                              {mr.closedAt || mr.status === 'REJECTED' ? (
-                                <span className="text-muted-foreground">—</span>
-                              ) : (
-                                <>
-                                  {owed ? <span className="font-medium text-amber-500">{owed}</span> : !toBuy && <span className="text-muted-foreground">—</span>}
-                                  {toBuy && <div className="text-[10px] text-sky-500">{toBuy} to buy</div>}
-                                </>
-                              )}
+                              {live ? unitStack(r.groups, (g) => g.toBuy, 'text-sky-500') : dash}
                             </td>
                             <td className="whitespace-nowrap">
                               <span className={r.s.cls} title={r.s.next}>
@@ -650,7 +1086,7 @@ export default function RequisitionsPage() {
 
                           {expanded && (
                             <tr>
-                              <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                              <td colSpan={COLS} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                                 {/* Sized to the visible row, not the scrolling table; see the purchase lists. */}
                                 <div className="w-[100cqw]">{itemPanel(mr, r)}</div>
                               </td>
@@ -663,6 +1099,7 @@ export default function RequisitionsPage() {
                 </table>
               </ScrollableTable>
             </div>
+            <Pagination page={page} pages={pages} onPageChange={setPage} />
           </div>
         )}
       </div>

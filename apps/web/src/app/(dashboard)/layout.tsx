@@ -86,9 +86,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             the old padding was 12% of the width.
 
             `min-w-0` here and on the column above, so neither refuses to
-            go narrower than its content's own minimum. */}
-        <main className="min-w-0 flex-1 overflow-auto p-4 sm:p-6">
-          <div className="mx-auto min-w-0 max-w-[1600px] animate-fade-in">
+            go narrower than its content's own minimum.
+
+            No width cap: on a wide screen the lists use all of it, rather
+            than sitting in a 1600px column with empty space either side. */}
+        <main className="min-w-0 flex-1 overflow-auto p-4 sm:p-6 lg:px-4">
+          <div className="min-w-0 animate-fade-in">
             {children}
           </div>
         </main>
