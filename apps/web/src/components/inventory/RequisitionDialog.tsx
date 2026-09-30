@@ -299,19 +299,38 @@ export function RequisitionDialog({
           : badge(GREEN, `${fmt(have)} ${unit} of theirs here`)
     }
 
-    if (!asked) return owners.ours > 0 ? badge(GREEN, `${fmt(owners.ours)} ${unit} in this store`) : badge(RED, 'None of ours in this store')
-    if (asked <= owners.ours) return badge(GREEN, `Enough in this store · ${fmt(owners.ours)} ${unit} there`)
+    const storeName = warehouses.find((w) => w.id === line.warehouseId)?.name ?? 'this store'
+    const elsewhere = storesHolding(line.itemId)
+      .filter((s) => s.id !== line.warehouseId)
+      .reduce((t, s) => t + s.ours, 0)
+
+    // Not on any rack of ours: whatever store is picked, it has to be bought and comes in there.
+    if (owners.ours <= 0 && elsewhere <= 0) {
+      return (
+        <div className="space-y-0.5">
+          {badge(RED, asked ? `All ${fmt(asked)} ${unit} will have to be bought` : 'Not in stock in any store · it will have to be bought')}
+          <p className="text-[11px] text-muted-foreground">It will come in to {storeName} when bought, and be handed over from there.</p>
+        </div>
+      )
+    }
+
+    if (!asked) {
+      return owners.ours > 0
+        ? badge(GREEN, `${fmt(owners.ours)} ${unit} in ${storeName}`)
+        : badge(AMBER, `None in ${storeName} · ${fmt(elsewhere)} ${unit} in other stores`)
+    }
+    if (asked <= owners.ours) return badge(GREEN, `Enough in ${storeName} · ${fmt(owners.ours)} ${unit} there`)
 
     const plan = planFor(line.itemId, line.warehouseId, asked)
     return (
       <div className="flex flex-wrap items-start gap-x-4 gap-y-1">
         {plan.toBuy > 0
           ? badge(RED, `${fmt(plan.toBuy)} ${unit} will have to be bought`)
-          : badge(AMBER, 'Short in this store · the rest is in another store')}
+          : badge(AMBER, `Short in ${storeName} · the rest is in another store`)}
         <table className="text-[11px] tabular-nums">
           <tbody>
             <tr>
-              <td className="pr-3 text-muted-foreground">From this store</td>
+              <td className="pr-3 text-muted-foreground">From {storeName}</td>
               <td className="whitespace-nowrap text-right text-foreground">
                 {fmt(plan.fromHere)} {unit}
               </td>
