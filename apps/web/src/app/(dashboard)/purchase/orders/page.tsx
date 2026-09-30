@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Plus,
   Pencil,
@@ -18,7 +18,9 @@ import {
   Info,
   PackageCheck,
   Paperclip,
+  LayoutDashboard,
 } from 'lucide-react'
+import Link from 'next/link'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import {
   PurchaseOrderDialog,
@@ -159,6 +161,12 @@ export default function PurchaseOrdersPage() {
    */
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
+    // Arriving from the dashboard, which links to one order by its number.
+    const q = params.get('q')
+    if (q) {
+      setSearch(q)
+      setDebounced(q)
+    }
     const id = params.get('fromEnquiry')
     const quoteId = params.get('fromQuote')
     if (!id || !quoteId) return
@@ -228,14 +236,25 @@ export default function PurchaseOrdersPage() {
     return () => clearTimeout(t)
   }, [search])
 
+  /*
+   * Only the newest request may fill the list. Two loads can be in flight at
+   * once — the page's first, unfiltered one and the one a search starts — and
+   * whichever answered last used to win, so a slow first reply could paint the
+   * whole list over a search that had already narrowed it.
+   */
+  const latestLoad = useRef(0)
+
   const load = useCallback(async () => {
+    const ticket = ++latestLoad.current
     setLoading(true)
     setError(null)
     try {
       const res = await api.get<Paginated<PurchaseOrder>>(query(page, rowsPerPage))
+      if (ticket !== latestLoad.current) return
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
+      if (ticket !== latestLoad.current) return
       setError(
         err instanceof ApiError
           ? err.status === 403
@@ -245,7 +264,7 @@ export default function PurchaseOrdersPage() {
       )
       setRows([])
     } finally {
-      setLoading(false)
+      if (ticket === latestLoad.current) setLoading(false)
     }
   }, [debounced, status, supplierId, itemId, fromDate, toDate, page, rowsPerPage])
 
@@ -599,6 +618,9 @@ The supplier already has this order. If it was real and fell through, cancel it 
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          <Link href="/purchase/dashboard" className="btn-secondary" aria-label="Dashboard">
+            <LayoutDashboard size={15} /> <span className="hidden md:inline">Dashboard</span>
+          </Link>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
           <button
             className="btn-primary"
