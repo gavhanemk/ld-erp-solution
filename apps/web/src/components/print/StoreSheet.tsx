@@ -152,6 +152,7 @@ export function StoreSheet({
   signatures,
   footerNote,
   options,
+  copyLabel,
 }: {
   company: Record<string, string | null>
   title: string
@@ -174,6 +175,8 @@ export function StoreSheet({
   footerNote: string
   /** Screen-only controls above the sheet, never printed. */
   options?: React.ReactNode
+  /** Which copy this is — "Original for the job worker" — printed over the number. */
+  copyLabel?: string | null
 }) {
   const address = [company.address, company.city, company.state, company.pincode].filter(Boolean).join(', ')
   const cell = (align: SheetColumn['align'] = 'left'): React.CSSProperties => ({
@@ -272,6 +275,23 @@ export function StoreSheet({
             </div>
           </div>
           <div style={{ textAlign: 'right' }}>
+            {copyLabel && (
+              <div
+                style={{
+                  display: 'inline-block',
+                  border: `1px solid ${NAVY}`,
+                  color: NAVY,
+                  fontSize: '8.5px',
+                  fontWeight: 700,
+                  letterSpacing: '.08em',
+                  textTransform: 'uppercase',
+                  padding: '2px 6px',
+                  marginBottom: '4px',
+                }}
+              >
+                {copyLabel}
+              </div>
+            )}
             <div style={{ fontSize: '15px', fontWeight: 800, color: NAVY, ...CODE }}>{number}</div>
             <Eyebrow style={{ color: GREY, marginTop: '2px' }}>{dateLabel}</Eyebrow>
             <div style={{ fontSize: '11px', fontWeight: 600, ...NUM }}>{date}</div>

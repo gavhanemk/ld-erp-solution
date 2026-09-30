@@ -2256,6 +2256,37 @@ router.get('/job-work', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+/**
+ * The delivery challan that travels with our goods to a job worker.
+ *
+ * Rule 55 of the CGST Rules asks it to name both parties with their GSTIN and
+ * address, and each item with its HSN, quantity and value — without it the
+ * movement reads as a taxable sale. Everything the page prints comes in this
+ * one call, letterhead included.
+ */
+router.get('/job-work/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const challan = await prisma.jobWorkChallan.findUnique({
+    where: { id: req.params.id },
+    include: {
+      jobWorker: {
+        select: {
+          id: true, name: true, code: true, gstin: true, phone: true, address: true,
+          city: true, state: true, stateCode: true, pincode: true,
+        },
+      },
+      fromWarehouse: { select: { id: true, name: true, address: true } },
+      toWarehouse: { select: { id: true, name: true } },
+      sentBy: { select: { id: true, name: true } },
+      cancelledBy: { select: { id: true, name: true } },
+      lines: { include: { item: itemLineSelect } },
+    },
+  })
+  if (!challan) throw new AppError('That challan does not exist', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('JW')
+  res.json({ success: true, data: { ...header, challan } })
+})
+
 router.get('/job-work/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const row = await prisma.jobWorkChallan.findUnique({
     where: { id: req.params.id },

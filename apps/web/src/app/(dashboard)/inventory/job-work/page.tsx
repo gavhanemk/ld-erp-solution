@@ -1,7 +1,9 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
+import Link from 'next/link'
 import {
+  Printer,
   Plus,
   Search,
   RefreshCw,
@@ -307,6 +309,15 @@ export default function JobWorkPage() {
                         </td>
                         <td className="whitespace-nowrap text-right">
                           <div className="flex justify-end gap-1">
+                            {/* The GST challan that travels with the goods. */}
+                            <Link
+                              href={`/print/job-work/${c.id}`}
+                              className="btn-ghost inline-flex p-1.5 hover:text-teal-400"
+                              title="Print the job-work challan"
+                              aria-label={`Print ${c.challanNumber}`}
+                            >
+                              <Printer size={15} />
+                            </Link>
                             {(c.status === 'SENT' || c.status === 'PARTLY_BACK') && (
                               <button
                                 className="btn-ghost p-1.5 hover:text-teal-400"
