@@ -15,6 +15,8 @@ import { CustomerReturnDialog } from '@/components/inventory/CustomerReturnDialo
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { ActionMenu } from '@/components/tables/ActionMenu'
 import {
   ArrivalGauge, CategoryDonut, CustomerBars, ReceiptTrend, StoreColumns,
 } from '@/components/inventory/MaterialCharts'
@@ -801,24 +803,26 @@ function CustomerMaterialScreen() {
                 </p>
               </div>
             ) : (
-              <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`}>
-                <table className="data-table w-full [&>tbody>tr>td]:px-2.5 [&>thead>tr>th]:px-2.5">
+              <div className={`transition-opacity ${loading ? 'opacity-60' : ''}`}>
+                <ScrollableTable>
+                <table className="data-table table-compact min-w-full">
                   <thead>
-                    <tr>
-                      <th>Receipt</th>
-                      <th>Customer</th>
-                      <th>Their challan</th>
-                      <th>Store</th>
-                      <th>Code</th>
-                      <th>Item</th>
-                      <th>Category</th>
-                      <th>Sub-cat.</th>
-                      <th>Dept.</th>
-                      <th style={{ textAlign: 'right' }}>Challan</th>
-                      <th style={{ textAlign: 'right' }}>Arrived</th>
-                      <th style={{ textAlign: 'right' }}>Short / extra</th>
-                      <th>Status</th>
-                      <th>Markings</th>
+                    <tr className="bg-secondary">
+                      <th className="whitespace-nowrap">Receipt</th>
+                      <th className="whitespace-nowrap">Customer</th>
+                      <th className="whitespace-nowrap">Their challan</th>
+                      <th className="whitespace-nowrap">Store</th>
+                      <th className="whitespace-nowrap">Code</th>
+                      <th className="whitespace-nowrap">Item</th>
+                      <th className="whitespace-nowrap">Category</th>
+                      <th className="whitespace-nowrap">Sub-cat.</th>
+                      <th className="whitespace-nowrap">Dept.</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Challan</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Arrived</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Short / extra</th>
+                      <th className="whitespace-nowrap">Status</th>
+                      <th className="whitespace-nowrap">Markings</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
@@ -827,7 +831,7 @@ function CustomerMaterialScreen() {
                       return (
                         <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined}>
                           <td className="whitespace-nowrap">
-                            <div className="font-mono text-xs text-foreground">{r.grnNumber}</div>
+                            <div className="font-mono text-xs font-semibold text-teal-400">{r.grnNumber}</div>
                             <div className="text-[10px] text-muted-foreground" title={r.receivedByName ? `Received by ${r.receivedByName}` : undefined}>
                               {formatDate(r.receiptDate)}
                             </div>
@@ -877,31 +881,38 @@ function CustomerMaterialScreen() {
                                 )}
                               </>
                             ) : (
-                              <div className="flex items-center gap-1">
-                                <span className="badge-success">Received</span>
-                                {!r.cancelledAt && (
-                                  <button
-                                    type="button"
-                                    className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                                    onClick={() => void cancel(r)}
-                                    disabled={busy === r.receiptId}
-                                    title={`Cancel ${r.grnNumber} (all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'})`}
-                                    aria-label={`Cancel ${r.grnNumber}`}
-                                  >
-                                    {busy === r.receiptId ? <Loader2 size={15} className="animate-spin" /> : <Ban size={15} />}
-                                  </button>
-                                )}
-                              </div>
+                              <span className="badge-success">Received</span>
                             )}
                           </td>
                           <td className="max-w-[160px] truncate text-xs text-muted-foreground" title={r.markings ?? undefined}>
                             {r.markings ?? '—'}
+                          </td>
+                          <td className="whitespace-nowrap text-right">
+                            {/* A cancelled receipt has nothing left to do. */}
+                            {!r.cancelledAt && (
+                              <div className="flex justify-end gap-1.5">
+                                <ActionMenu
+                                  label={`Actions for ${r.grnNumber}`}
+                                  items={[
+                                    {
+                                      key: 'cancel',
+                                      label: `Cancel receipt (all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'})`,
+                                      icon: busy === r.receiptId ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />,
+                                      onClick: () => void cancel(r),
+                                      danger: true,
+                                      disabled: busy === r.receiptId,
+                                    },
+                                  ]}
+                                />
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )
                     })}
                   </tbody>
                 </table>
+                </ScrollableTable>
               </div>
             )}
             <Pagination page={page} pages={pages} onPageChange={setPage} />
@@ -952,28 +963,38 @@ function CustomerMaterialScreen() {
                 </p>
               </div>
             ) : (
-              <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`}>
-                <table className="data-table w-full [&>tbody>tr>td]:px-2.5 [&>thead>tr>th]:px-2.5">
+              <div className={`transition-opacity ${loading ? 'opacity-60' : ''}`}>
+                <ScrollableTable>
+                <table className="data-table table-compact min-w-full">
                   <thead>
-                    <tr>
-                      <th>Return</th>
-                      <th>Customer</th>
-                      <th>Why</th>
-                      <th>From store</th>
-                      <th>Code</th>
-                      <th>Item</th>
-                      <th>Category</th>
-                      <th>HSN</th>
-                      <th style={{ textAlign: 'right' }}>Qty</th>
-                      <th>Vehicle</th>
-                      <th>Status</th>
+                    <tr className="bg-secondary">
+                      <th className="whitespace-nowrap">Return</th>
+                      <th className="whitespace-nowrap">Customer</th>
+                      <th className="whitespace-nowrap">Why</th>
+                      <th className="whitespace-nowrap">From store</th>
+                      <th className="whitespace-nowrap">Code</th>
+                      <th className="whitespace-nowrap">Item</th>
+                      <th className="whitespace-nowrap">Category</th>
+                      <th className="whitespace-nowrap">HSN</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Qty</th>
+                      <th className="whitespace-nowrap">Vehicle</th>
+                      <th className="whitespace-nowrap">Status</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
                     {returnPageRows.map((r) => (
                       <tr key={r.id} className={r.cancelledAt ? 'opacity-60' : undefined}>
                         <td className="whitespace-nowrap">
-                          <div className="font-mono text-xs text-foreground">{r.returnNumber}</div>
+                          <a
+                            href={`/print/customer-return/${r.returnId}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                            title="Open the printed challan"
+                          >
+                            {r.returnNumber}
+                          </a>
                           <div className="text-[10px] text-muted-foreground" title={r.createdByName ? `By ${r.createdByName}` : undefined}>
                             {formatDate(r.returnDate)}
                           </div>
@@ -1004,39 +1025,41 @@ function CustomerMaterialScreen() {
                           {r.lrNumber && <div className="text-[10px] text-muted-foreground">LR {r.lrNumber}</div>}
                         </td>
                         <td className="whitespace-nowrap">
-                          <div className="flex items-center gap-1">
-                            {r.cancelledAt ? <span className="badge-neutral">Cancelled</span> : <span className="badge-success">Returned</span>}
-                            <Link
-                              href={`/print/customer-return/${r.returnId}`}
-                              className="btn-ghost inline-flex p-1.5 text-muted-foreground hover:text-teal-400"
-                              title="Print the delivery challan"
-                              aria-label={`Print ${r.returnNumber}`}
-                            >
-                              <Printer size={15} />
-                            </Link>
-                            {!r.cancelledAt && (
-                              <button
-                                type="button"
-                                className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                                onClick={() => void cancelReturn(r)}
-                                disabled={busy === r.returnId}
-                                title={`Cancel ${r.returnNumber} (all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'})`}
-                                aria-label={`Cancel ${r.returnNumber}`}
-                              >
-                                {busy === r.returnId ? <Loader2 size={15} className="animate-spin" /> : <Ban size={15} />}
-                              </button>
-                            )}
-                          </div>
+                          {r.cancelledAt ? <span className="badge-neutral">Cancelled</span> : <span className="badge-success">Returned</span>}
                           {r.cancelReason && (
                             <div className="max-w-[160px] truncate text-[10px] text-muted-foreground" title={r.cancelReason}>
                               {r.cancelReason}
                             </div>
                           )}
                         </td>
+                        <td className="whitespace-nowrap text-right">
+                          <div className="flex justify-end gap-1.5">
+                            {/* Print is always there; cancel only while the return stands. */}
+                            <ActionMenu
+                              label={`Actions for ${r.returnNumber}`}
+                              items={[
+                                { key: 'print', label: 'View / print', icon: <Printer size={14} />, href: `/print/customer-return/${r.returnId}`, newTab: true },
+                                ...(r.cancelledAt
+                                  ? []
+                                  : [
+                                      {
+                                        key: 'cancel',
+                                        label: `Cancel return (all ${r.lineCount} ${r.lineCount === 1 ? 'item' : 'items'})`,
+                                        icon: busy === r.returnId ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />,
+                                        onClick: () => void cancelReturn(r),
+                                        danger: true,
+                                        disabled: busy === r.returnId,
+                                      },
+                                    ]),
+                              ]}
+                            />
+                          </div>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                </ScrollableTable>
               </div>
             )}
             <Pagination page={page} pages={returnPages} onPageChange={setPage} />
@@ -1116,17 +1139,17 @@ function CustomerMaterialScreen() {
             {heldShown.length === 0 ? (
               <p className="px-4 py-8 text-center text-xs text-muted-foreground">No customer material in our stores.</p>
             ) : (
-              <div className="mt-2 overflow-x-auto">
-                <table className="data-table w-full [&>tbody>tr>td]:px-3 [&>thead>tr>th]:px-3">
+              <ScrollableTable className="mt-2">
+                <table className="data-table table-compact min-w-full">
                   <thead>
-                    <tr>
-                      <th>Customer</th>
-                      <th>Code</th>
-                      <th>Item</th>
-                      <th>Category</th>
-                      <th>Store</th>
-                      <th style={{ textAlign: 'right' }}>Still here</th>
-                      <th>Last moved</th>
+                    <tr className="bg-secondary">
+                      <th className="whitespace-nowrap">Customer</th>
+                      <th className="whitespace-nowrap">Code</th>
+                      <th className="whitespace-nowrap">Item</th>
+                      <th className="whitespace-nowrap">Category</th>
+                      <th className="whitespace-nowrap">Store</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still here</th>
+                      <th className="whitespace-nowrap">Last moved</th>
                       <th />
                     </tr>
                   </thead>
@@ -1146,21 +1169,23 @@ function CustomerMaterialScreen() {
                           <td className="whitespace-nowrap text-xs text-muted-foreground">
                             {h.lastMovedAt ? formatDate(h.lastMovedAt) : '—'}
                           </td>
-                          <td className="text-right">
-                            <button
-                              type="button"
-                              className="btn-ghost inline-flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-teal-400"
-                              onClick={() => setReturning({ customerId: h.customerId, warehouseId: h.warehouseId, itemId: h.itemId })}
-                              title={`Send this back to ${h.customerName}`}
-                            >
-                              <Undo2 size={14} /> Return
-                            </button>
+                          <td className="whitespace-nowrap text-right">
+                            <div className="flex justify-end gap-1.5">
+                              <button
+                                type="button"
+                                className="btn-primary h-7 px-2.5 text-xs"
+                                onClick={() => setReturning({ customerId: h.customerId, warehouseId: h.warehouseId, itemId: h.itemId })}
+                                title={`Send this back to ${h.customerName}`}
+                              >
+                                <Undo2 size={13} /> Return
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
             )}
           </div>
         </>

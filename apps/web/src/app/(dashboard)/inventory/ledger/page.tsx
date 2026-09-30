@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
 import {
@@ -831,18 +832,18 @@ function LedgerScreen() {
             ) : analysis.topItems.length === 0 ? (
               <p className="px-4 py-8 text-center text-xs text-muted-foreground">Nothing to show.</p>
             ) : (
-              <div className="mt-2 overflow-x-auto">
-                <table className="data-table w-full [&>tbody>tr>td]:px-3 [&>thead>tr>th]:px-3">
+              <ScrollableTable className="mt-2">
+                <table className="data-table table-compact min-w-full">
                   <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>Code</th>
-                      <th>Item</th>
-                      <th style={{ textAlign: 'right' }}>Came in</th>
-                      <th style={{ textAlign: 'right' }}>Went out</th>
-                      <th style={{ textAlign: 'right' }}>Value in</th>
-                      <th style={{ textAlign: 'right' }}>Value out</th>
-                      <th style={{ textAlign: 'right' }}>Movements</th>
+                    <tr className="bg-secondary">
+                      <th className="whitespace-nowrap">#</th>
+                      <th className="whitespace-nowrap">Code</th>
+                      <th className="whitespace-nowrap">Item</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Came in</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Went out</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value in</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value out</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Movements</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -872,7 +873,7 @@ function LedgerScreen() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
             )}
           </div>
         </>
@@ -891,24 +892,24 @@ function LedgerScreen() {
             </p>
           </div>
         ) : (
-          <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`}>
-            <table className="data-table w-full [&>tbody>tr>td]:px-2.5 [&>thead>tr>th]:px-2.5">
+          <ScrollableTable className={`transition-opacity ${loading ? 'opacity-60' : ''}`}>
+            <table className="data-table table-compact min-w-full">
               <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>What</th>
-                  <th>Code</th>
-                  <th>Item</th>
-                  <th>Category</th>
-                  <th>Sub-cat.</th>
-                  <th>Dept.</th>
-                  <th>Store</th>
-                  <th style={{ textAlign: 'right' }}>In</th>
-                  <th style={{ textAlign: 'right' }}>Out</th>
-                  <th style={{ textAlign: 'right' }}>Balance</th>
-                  <th style={{ textAlign: 'right' }}>Rate</th>
-                  <th style={{ textAlign: 'right' }}>Value</th>
-                  <th>Note</th>
+                <tr className="bg-secondary">
+                  <th className="whitespace-nowrap">Time</th>
+                  <th className="whitespace-nowrap">What</th>
+                  <th className="whitespace-nowrap">Code</th>
+                  <th className="whitespace-nowrap">Item</th>
+                  <th className="whitespace-nowrap">Category</th>
+                  <th className="whitespace-nowrap">Sub-cat.</th>
+                  <th className="whitespace-nowrap">Dept.</th>
+                  <th className="whitespace-nowrap">Store</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>In</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Out</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Balance</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Rate</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value</th>
+                  <th className="whitespace-nowrap">Note</th>
                 </tr>
               </thead>
               <tbody>
@@ -989,7 +990,7 @@ function LedgerScreen() {
                 })}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
         )}
 
         <Pagination page={page} pages={res?.pagination.pages ?? 1} onPageChange={setPage} busy={loading} />

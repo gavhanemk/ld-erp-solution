@@ -12,6 +12,7 @@ import { api, ApiError, masterResource } from '@/lib/api'
 import { StockMoveDialog, type MoveMode } from '@/components/inventory/StockMoveDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
 
 /**
  * What is on hand, right now, everywhere.
@@ -501,25 +502,25 @@ function StockScreen() {
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
+          <ScrollableTable>
+            <table className="data-table table-compact min-w-full">
               <thead>
-                <tr>
-                  <th>Code</th>
-                  <th>Item</th>
-                  <th>Category</th>
-                  <th>Sub-category</th>
-                  <th>Department</th>
-                  <th>Store</th>
-                  <th style={{ textAlign: 'right' }}>On hand</th>
-                  <th style={{ textAlign: 'right' }}>Rate</th>
-                  <th style={{ textAlign: 'right' }}>Value</th>
+                <tr className="bg-secondary">
+                  <th className="whitespace-nowrap">Code</th>
+                  <th className="whitespace-nowrap">Item</th>
+                  <th className="whitespace-nowrap">Category</th>
+                  <th className="whitespace-nowrap">Sub-category</th>
+                  <th className="whitespace-nowrap">Department</th>
+                  <th className="whitespace-nowrap">Store</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>On hand</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Rate</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value</th>
                 </tr>
               </thead>
               <tbody>
                 {shown.map((r) => (
                   <tr key={`${r.itemId}-${r.warehouseId}-${r.ownerName ?? ''}`}>
-                    <td className="whitespace-nowrap font-mono text-xs text-teal-500">{r.itemCode}</td>
+                    <td className="whitespace-nowrap font-mono text-xs font-semibold text-teal-400">{r.itemCode}</td>
                     <td>
                       <Link
                         href={`/inventory/stock/${r.itemId}`}
@@ -572,7 +573,7 @@ function StockScreen() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
         )}
       </div>
 

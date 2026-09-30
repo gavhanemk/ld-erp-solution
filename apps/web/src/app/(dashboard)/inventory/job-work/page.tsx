@@ -13,6 +13,8 @@ import { SendJobWorkDialog, ReceiveJobWorkDialog } from '@/components/inventory/
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { DashCard, Highlights, KpiTile, TONE, inr, qtyFmt, qtyLine } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import {
   DaysOutBars, DueDonut, GstClock, ProcessPie, SentBackTrend, WasteColumns, WorkerBars,
 } from '@/components/inventory/JobWorkCharts'
@@ -932,25 +934,27 @@ function JobWorkScreen() {
                 </p>
               </div>
             ) : (
-              <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-60' : ''}`}>
-                <table className="data-table w-full [&>tbody>tr>td]:px-2.5 [&>thead>tr>th]:px-2.5">
+              <div className={`transition-opacity ${loading ? 'opacity-60' : ''}`}>
+                <ScrollableTable>
+                <table className="data-table table-compact min-w-full">
                   <thead>
-                    <tr>
-                      <th>Challan</th>
-                      <th>Job worker</th>
-                      <th>Work</th>
-                      <th>Code</th>
-                      <th>Item</th>
-                      <th>Category</th>
-                      <th>Sub-cat.</th>
-                      <th>HSN</th>
-                      <th style={{ textAlign: 'right' }}>Sent</th>
-                      <th style={{ textAlign: 'right' }}>Back</th>
-                      <th style={{ textAlign: 'right' }}>Wasted</th>
-                      <th style={{ textAlign: 'right' }}>Still out</th>
-                      <th>Due back</th>
-                      <th>GST limit</th>
-                      <th>Status</th>
+                    <tr className="bg-secondary">
+                      <th className="whitespace-nowrap">Challan</th>
+                      <th className="whitespace-nowrap">Job worker</th>
+                      <th className="whitespace-nowrap">Work</th>
+                      <th className="whitespace-nowrap">Code</th>
+                      <th className="whitespace-nowrap">Item</th>
+                      <th className="whitespace-nowrap">Category</th>
+                      <th className="whitespace-nowrap">Sub-cat.</th>
+                      <th className="whitespace-nowrap">HSN</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Sent</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Back</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Wasted</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still out</th>
+                      <th className="whitespace-nowrap">Due back</th>
+                      <th className="whitespace-nowrap">GST limit</th>
+                      <th className="whitespace-nowrap">Status</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
@@ -959,10 +963,31 @@ function JobWorkScreen() {
                       const out = r.stillOutQty > 0
                       const open = r.status === 'SENT' || r.status === 'PARTLY_BACK'
                       const untouched = r.status === 'SENT' && challanLines(r.challanId).every((l) => l.settledQty === 0)
+                      // Print is always there; cancel only while nothing has come back.
+                      const actions: RowAction[] = [
+                        { key: 'print', label: 'View / print', icon: <Printer size={14} />, href: `/print/job-work/${r.challanId}`, newTab: true },
+                      ]
+                      if (untouched)
+                        actions.push({
+                          key: 'cancel',
+                          label: 'Cancel challan',
+                          icon: busy === r.challanId ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />,
+                          onClick: () => void cancel(r),
+                          danger: true,
+                          disabled: busy === r.challanId,
+                        })
                       return (
                         <tr key={r.id} className={r.status === 'CANCELLED' ? 'opacity-60' : undefined}>
                           <td className="whitespace-nowrap">
-                            <div className="font-mono text-xs text-foreground">{r.challanNumber}</div>
+                            <a
+                              href={`/print/job-work/${r.challanId}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                              title="Open the printed challan"
+                            >
+                              {r.challanNumber}
+                            </a>
                             <div className="text-[10px] text-muted-foreground" title={r.sentByName ? `Sent by ${r.sentByName}` : undefined}>
                               {formatDate(r.challanDate)}
                             </div>
@@ -1050,51 +1075,35 @@ function JobWorkScreen() {
                             )}
                           </td>
                           <td className="whitespace-nowrap">
-                            <div className="flex items-center gap-1">
-                              <span className={STATUS_CLASS[r.status]}>{STATUS_LABEL[r.status]}</span>
-                              <Link
-                                href={`/print/job-work/${r.challanId}`}
-                                className="btn-ghost inline-flex p-1.5 text-muted-foreground hover:text-teal-400"
-                                title="Print the job-work challan"
-                                aria-label={`Print ${r.challanNumber}`}
-                              >
-                                <Printer size={15} />
-                              </Link>
-                              {open && (
-                                <button
-                                  type="button"
-                                  className="btn-ghost p-1.5 text-muted-foreground hover:text-teal-400"
-                                  onClick={() => setReceiving(r.challanId)}
-                                  title="Record what has come back"
-                                  aria-label={`Take back ${r.challanNumber}`}
-                                >
-                                  <PackageCheck size={15} />
-                                </button>
-                              )}
-                              {untouched && (
-                                <button
-                                  type="button"
-                                  className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                                  onClick={() => void cancel(r)}
-                                  disabled={busy === r.challanId}
-                                  title={`Cancel ${r.challanNumber} and bring the goods back`}
-                                  aria-label={`Cancel ${r.challanNumber}`}
-                                >
-                                  {busy === r.challanId ? <Loader2 size={15} className="animate-spin" /> : <Ban size={15} />}
-                                </button>
-                              )}
-                            </div>
+                            <span className={STATUS_CLASS[r.status]}>{STATUS_LABEL[r.status]}</span>
                             {r.cancelReason && (
                               <div className="max-w-[160px] truncate text-[10px] text-muted-foreground" title={r.cancelReason}>
                                 {r.cancelReason}
                               </div>
                             )}
                           </td>
+                          <td className="whitespace-nowrap text-right">
+                            <div className="flex justify-end gap-1.5">
+                              {open && (
+                                <button
+                                  type="button"
+                                  className="btn-primary h-7 px-2.5 text-xs"
+                                  onClick={() => setReceiving(r.challanId)}
+                                  title="Record what has come back"
+                                  aria-label={`Take back ${r.challanNumber}`}
+                                >
+                                  <PackageCheck size={13} /> Take back
+                                </button>
+                              )}
+                              <ActionMenu label={`Actions for ${r.challanNumber}`} items={actions} />
+                            </div>
+                          </td>
                         </tr>
                       )
                     })}
                   </tbody>
                 </table>
+                </ScrollableTable>
               </div>
             )}
             <Pagination page={page} pages={pages} onPageChange={setPage} />
@@ -1218,25 +1227,35 @@ function JobWorkScreen() {
             {chase.length === 0 ? (
               <p className="px-4 py-8 text-center text-xs text-muted-foreground">Nothing to chase. Everything out is on time.</p>
             ) : (
-              <div className="mt-2 overflow-x-auto">
-                <table className="data-table w-full [&>tbody>tr>td]:px-3 [&>thead>tr>th]:px-3">
+              <ScrollableTable className="mt-2">
+                <table className="data-table table-compact min-w-full">
                   <thead>
-                    <tr>
-                      <th>Challan</th>
-                      <th>Job worker</th>
-                      <th>Work</th>
-                      <th>Still out</th>
-                      <th style={{ textAlign: 'right' }}>Value</th>
-                      <th style={{ textAlign: 'right' }}>Days out</th>
-                      <th>Due back</th>
-                      <th>GST limit</th>
+                    <tr className="bg-secondary">
+                      <th className="whitespace-nowrap">Challan</th>
+                      <th className="whitespace-nowrap">Job worker</th>
+                      <th className="whitespace-nowrap">Work</th>
+                      <th className="whitespace-nowrap">Still out</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Days out</th>
+                      <th className="whitespace-nowrap">Due back</th>
+                      <th className="whitespace-nowrap">GST limit</th>
                       <th />
                     </tr>
                   </thead>
                   <tbody>
                     {chase.map((c) => (
                       <tr key={c.r.challanId}>
-                        <td className="whitespace-nowrap font-mono text-xs text-foreground">{c.r.challanNumber}</td>
+                        <td className="whitespace-nowrap">
+                          <a
+                            href={`/print/job-work/${c.r.challanId}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="font-mono text-xs font-semibold text-teal-400 hover:underline"
+                            title="Open the printed challan"
+                          >
+                            {c.r.challanNumber}
+                          </a>
+                        </td>
                         <td className="text-sm">{c.r.jobWorkerName}</td>
                         <td className="text-xs capitalize">{c.r.process}</td>
                         <td className="text-xs tabular-nums">{qtyLine(c.qty)}</td>
@@ -1251,29 +1270,29 @@ function JobWorkScreen() {
                           {c.gstLeft < 0 ? `${-c.gstLeft} days past` : `${c.gstLeft} days left`}
                         </td>
                         <td className="whitespace-nowrap text-right">
-                          <button
-                            type="button"
-                            className="btn-ghost p-1.5 text-muted-foreground hover:text-teal-400"
-                            onClick={() => setReceiving(c.r.challanId)}
-                            title="Record what has come back"
-                            aria-label={`Take back ${c.r.challanNumber}`}
-                          >
-                            <PackageCheck size={15} />
-                          </button>
-                          <Link
-                            href={`/print/job-work/${c.r.challanId}`}
-                            className="btn-ghost inline-flex p-1.5 text-muted-foreground hover:text-teal-400"
-                            title="Print the job-work challan"
-                            aria-label={`Print ${c.r.challanNumber}`}
-                          >
-                            <Printer size={15} />
-                          </Link>
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              type="button"
+                              className="btn-primary h-7 px-2.5 text-xs"
+                              onClick={() => setReceiving(c.r.challanId)}
+                              title="Record what has come back"
+                              aria-label={`Take back ${c.r.challanNumber}`}
+                            >
+                              <PackageCheck size={13} /> Take back
+                            </button>
+                            <ActionMenu
+                              label={`Actions for ${c.r.challanNumber}`}
+                              items={[
+                                { key: 'print', label: 'View / print', icon: <Printer size={14} />, href: `/print/job-work/${c.r.challanId}`, newTab: true },
+                              ]}
+                            />
+                          </div>
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
             )}
           </div>
         </>

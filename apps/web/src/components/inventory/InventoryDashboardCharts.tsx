@@ -578,13 +578,14 @@ export function BreakdownTable({ categories, departments }: { categories: BreakR
       <div className="overflow-x-auto">
         <table className="w-full min-w-[640px] text-sm">
           <thead>
-            <tr className="border-b border-border text-left text-[11px] uppercase tracking-wide text-muted-foreground">
-              <th className="py-2 pr-2 font-medium">{by === 'category' ? 'Category' : 'Department'}</th>
-              <th className="px-2 py-2 text-right font-medium">Items</th>
-              <th className="px-2 py-2 text-right font-medium">Lines</th>
-              <th className="px-2 py-2 text-right font-medium">Quantity on hand</th>
-              <th className="px-2 py-2 text-right font-medium">Value</th>
-              <th className="w-40 py-2 pl-2 font-medium">Share of value</th>
+            {/* The same header as every list in the app: a grey strip, small capitals. */}
+            <tr className="border-b border-border bg-secondary text-left text-xs uppercase tracking-wider text-muted-foreground">
+              <th className="whitespace-nowrap px-3 py-2 font-semibold">{by === 'category' ? 'Category' : 'Department'}</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-semibold">Items</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-semibold">Lines</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-semibold">Quantity on hand</th>
+              <th className="whitespace-nowrap px-3 py-2 text-right font-semibold">Value</th>
+              <th className="w-40 whitespace-nowrap px-3 py-2 font-semibold">Share of value</th>
             </tr>
           </thead>
           <tbody>
@@ -594,18 +595,18 @@ export function BreakdownTable({ categories, departments }: { categories: BreakR
               return (
                 <Fragment key={r.name}>
                   <tr className="cursor-pointer border-b border-border/60 hover:bg-secondary/50" onClick={() => toggle(r.name)}>
-                    <td className="py-2.5 pr-2">
+                    <td className="px-3 py-2">
                       <span className="flex items-center gap-2 font-medium text-foreground">
                         {isOpen ? <ChevronDown size={14} className="text-muted-foreground" /> : <ChevronRight size={14} className="text-muted-foreground" />}
                         <span className="h-2.5 w-2.5 rounded-sm" style={{ background: colour }} />
                         {r.name}
                       </span>
                     </td>
-                    <td className="px-2 text-right tabular-nums">{r.items}</td>
-                    <td className="px-2 text-right tabular-nums text-muted-foreground">{r.lines}</td>
-                    <td className="px-2">{qtyCell(r.qty)}</td>
-                    <td className="px-2 text-right font-semibold tabular-nums">{inr(r.value)}</td>
-                    <td className="py-2.5 pl-2">
+                    <td className="px-3 text-right tabular-nums">{r.items}</td>
+                    <td className="px-3 text-right tabular-nums text-muted-foreground">{r.lines}</td>
+                    <td className="px-3">{qtyCell(r.qty)}</td>
+                    <td className="px-3 text-right font-semibold tabular-nums">{inr(r.value)}</td>
+                    <td className="px-3 py-2">
                       <div className="flex items-center gap-2">
                         <div className="h-1.5 flex-1 rounded-full bg-secondary">
                           <div className="h-1.5 rounded-full" style={{ width: `${r.share}%`, background: colour }} />
@@ -617,12 +618,12 @@ export function BreakdownTable({ categories, departments }: { categories: BreakR
                   {isOpen &&
                     (r.children ?? []).map((c) => (
                       <tr key={`${r.name}-${c.name}`} className="border-b border-border/40 bg-secondary/30 text-xs">
-                        <td className="py-2 pl-10 pr-2 text-foreground">{c.name}</td>
-                        <td className="px-2 text-right tabular-nums">{c.items}</td>
-                        <td className="px-2 text-right tabular-nums text-muted-foreground">{c.lines}</td>
-                        <td className="px-2">{qtyCell(c.qty)}</td>
-                        <td className="px-2 text-right tabular-nums">{inr(c.value)}</td>
-                        <td className="py-2 pl-2">
+                        <td className="py-2 pl-12 pr-3 text-foreground">{c.name}</td>
+                        <td className="px-3 text-right tabular-nums">{c.items}</td>
+                        <td className="px-3 text-right tabular-nums text-muted-foreground">{c.lines}</td>
+                        <td className="px-3">{qtyCell(c.qty)}</td>
+                        <td className="px-3 text-right tabular-nums">{inr(c.value)}</td>
+                        <td className="px-3 py-2">
                           <div className="flex items-center gap-2">
                             <div className="h-1 flex-1 rounded-full bg-secondary">
                               <div className="h-1 rounded-full opacity-70" style={{ width: `${c.share}%`, background: colour }} />

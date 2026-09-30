@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { ArrowLeft, AlertCircle, RefreshCw } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
 
 /**
  * One item: where it is, and the last fifty things that happened to it.
@@ -69,6 +70,7 @@ const MOVEMENT: Record<string, string> = {
   TRANSFER: 'Transfer',
   ADJUSTMENT: 'Count',
   RETURN: 'Returned',
+  CUSTOMER_MATERIAL: "Customer's material",
 }
 
 const money = (v: number) =>
@@ -174,39 +176,41 @@ export default function StockItemPage() {
         {byWarehouse.length === 0 ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">None on hand anywhere.</p>
         ) : (
-          <table className="data-table w-full">
-            <thead>
-              <tr>
-                <th>Store</th>
-                <th style={{ textAlign: 'right' }}>Quantity</th>
-                <th style={{ textAlign: 'right' }}>Rate</th>
-                <th style={{ textAlign: 'right' }}>Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {byWarehouse.map((w) => (
-                <tr key={`${w.warehouseId}-${w.ownerName ?? ''}`}>
-                  <td>
-                    {w.warehouseName}
-                    {w.ownership === 'CUSTOMER_OWNED' && (
-                      <div className="text-[10px] text-sky-400">
-                        {w.ownerName ?? 'customer'}&apos;s material — not ours
-                      </div>
-                    )}
-                  </td>
-                  <td className="text-right tabular-nums">
-                    {qtyFmt(w.qty)} {item.uom.symbol}
-                  </td>
-                  <td className="text-right tabular-nums text-muted-foreground">
-                    {w.ownership === 'OWNED' ? `₹${money(w.avgRate)}` : '—'}
-                  </td>
-                  <td className="text-right tabular-nums font-semibold">
-                    {w.ownership === 'OWNED' ? `₹${money(w.value)}` : '—'}
-                  </td>
+          <ScrollableTable>
+            <table className="data-table table-compact min-w-full">
+              <thead>
+                <tr className="bg-secondary">
+                  <th className="whitespace-nowrap">Store</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Quantity</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Rate</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Value</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {byWarehouse.map((w) => (
+                  <tr key={`${w.warehouseId}-${w.ownerName ?? ''}`}>
+                    <td>
+                      {w.warehouseName}
+                      {w.ownership === 'CUSTOMER_OWNED' && (
+                        <div className="text-[10px] text-sky-400">
+                          {w.ownerName ?? 'customer'}&apos;s material — not ours
+                        </div>
+                      )}
+                    </td>
+                    <td className="text-right tabular-nums">
+                      {qtyFmt(w.qty)} {item.uom.symbol}
+                    </td>
+                    <td className="text-right tabular-nums text-muted-foreground">
+                      {w.ownership === 'OWNED' ? `₹${money(w.avgRate)}` : '—'}
+                    </td>
+                    <td className="text-right tabular-nums font-semibold">
+                      {w.ownership === 'OWNED' ? `₹${money(w.value)}` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ScrollableTable>
         )}
         {owned.length > 1 && (
           <p className="px-4 py-2 text-[11px] text-muted-foreground border-t border-border">
@@ -229,17 +233,17 @@ export default function StockItemPage() {
         {movements.length === 0 ? (
           <p className="px-4 py-8 text-sm text-muted-foreground">Nothing yet.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="data-table w-full">
+          <ScrollableTable>
+            <table className="data-table table-compact min-w-full">
               <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>What</th>
-                  <th>Store</th>
-                  <th style={{ textAlign: 'right' }}>In</th>
-                  <th style={{ textAlign: 'right' }}>Out</th>
-                  <th style={{ textAlign: 'right' }}>Balance</th>
-                  <th>Note</th>
+                <tr className="bg-secondary">
+                  <th className="whitespace-nowrap">Date</th>
+                  <th className="whitespace-nowrap">What</th>
+                  <th className="whitespace-nowrap">Store</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>In</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Out</th>
+                  <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Balance</th>
+                  <th className="whitespace-nowrap">Note</th>
                 </tr>
               </thead>
               <tbody>
@@ -272,7 +276,7 @@ export default function StockItemPage() {
                 })}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
         )}
       </div>
     </div>
