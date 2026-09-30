@@ -72,7 +72,8 @@ const qtyFmt = (v: number) =>
 function stage(
   mr: Requisition,
   isMine: boolean,
-  iApproved = false
+  iApproved = false,
+  admin = false
 ): { label: string; cls: string; next?: string } {
   if (mr.closedAt) {
     const some = mr.lines.some((l) => Number(l.issuedQty) > 0)
@@ -89,7 +90,9 @@ function stage(
       label: 'Waiting for approval',
       cls: 'badge-warning',
       next: isMine
-        ? 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
+        ? admin
+          ? 'You raised it. As admin you can approve it yourself, or leave it for someone else.'
+          : 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
         : 'Yours to approve or refuse.',
     }
   }
@@ -123,6 +126,8 @@ function stage(
 
 export default function RequisitionsPage() {
   const me = currentUser()
+  // The Admin may approve a requisition they raised themselves; the server says the same.
+  const admin = me?.role === 'Admin'
 
   const [rows, setRows] = useState<Requisition[]>([])
   const [total, setTotal] = useState(0)
@@ -370,7 +375,7 @@ export default function RequisitionsPage() {
                   // offering somebody a door that is certain to be shut.
                   const isMine = Boolean(me?.id && mr.raisedBy?.id === me.id)
                   const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
-                  const s = stage(mr, isMine, iApproved)
+                  const s = stage(mr, isMine, iApproved, admin)
 
                   return (
                     <Fragment key={mr.id}>
@@ -410,7 +415,7 @@ export default function RequisitionsPage() {
                         </td>
                         <td className="text-right whitespace-nowrap">
                           <div className="flex justify-end gap-1">
-                            {mr.status === 'PENDING' && !mr.closedAt && !isMine && (
+                            {mr.status === 'PENDING' && !mr.closedAt && (!isMine || admin) && (
                               <>
                                 <button
                                   className="btn-ghost p-1.5 hover:text-emerald-400"

@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { prisma, Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
+import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { getPrintHeader } from '../lib/printData'
@@ -1207,8 +1207,11 @@ router.patch(
     }
 
     // docs/04-business-rules.md, section 7. Nobody signs off their own request,
-    // and this is the only place that rule can actually be held.
-    if (before.raisedById && before.raisedById === req.user!.id) {
+    // and this is the only place that rule can actually be held — except the
+    // Admin, who may, because in a small mill the owner often raises and
+    // approves in one go. The audit log says when that happened.
+    const selfApproved = Boolean(before.raisedById && before.raisedById === req.user!.id)
+    if (selfApproved && !isAdmin(req.user)) {
       throw new AppError(
         'You raised this requisition, so somebody else has to approve it.',
         403,
@@ -1235,7 +1238,7 @@ router.patch(
       entityType: 'MaterialRequisition',
       entityId: after.id,
       before,
-      after,
+      after: selfApproved ? { ...after, note: 'Approved by the Admin who raised it' } : after,
     })
 
     res.json({ success: true, message: `${after.mrNumber} approved.`, data: after })

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { Loader2, Plus, Trash2, ClipboardList, FileText, Package } from 'lucide-react'
-import { api, ApiError, masterResource } from '@/lib/api'
+import { api, ApiError, currentUser, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 
@@ -169,7 +169,11 @@ export function RequisitionDialog({
           ownerCustomerId: l.owner === 'OWNED' ? null : l.owner,
         })),
       })
-      onSaved(`${res.data.mrNumber} raised. It needs someone else to approve it.`)
+      onSaved(
+        currentUser()?.role === 'Admin'
+          ? `${res.data.mrNumber} raised. As admin you can approve it straight away.`
+          : `${res.data.mrNumber} raised. It needs someone else to approve it.`,
+      )
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {
@@ -188,14 +192,18 @@ export function RequisitionDialog({
     <FormFrame
       icon={ClipboardList}
       title="New material requisition"
-      subtitle="A department asking the store for material. Somebody else approves it, and then the store hands it over."
+      subtitle="A department asking the store for material. Once it is approved, the store hands it over."
       primary={raise}
       footer={
         <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
           Cancel
         </button>
       }
-      footerNote="Someone else approves it, and decides what the store issues and what gets bought."
+      footerNote={
+        currentUser()?.role === 'Admin'
+          ? 'As admin you can approve it yourself. The approver decides what the store issues and what gets bought.'
+          : 'Someone else approves it, and decides what the store issues and what gets bought.'
+      }
       error={error}
       onClose={onClose}
       busy={saving}

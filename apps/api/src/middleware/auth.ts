@@ -16,6 +16,9 @@ export interface AuthRequest extends Request {
 /** Bypasses the permission matrix — the Admin role is always fully authorised. */
 const SUPER_ROLE = 'Admin'
 
+/** Whether this user holds the Admin role, which may approve its own requisitions. */
+export const isAdmin = (user?: { role?: string } | null) => user?.role === SUPER_ROLE
+
 export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization
 
