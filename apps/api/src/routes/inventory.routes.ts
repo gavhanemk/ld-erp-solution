@@ -28,6 +28,7 @@ import {
   createJobWorkReturnSchema,
   createRequisitionSchema,
   requisitionSourcingSchema,
+  requisitionPlanSchema,
   issueRequisitionSchema,
   openingStockSchema,
   rejectRequisitionSchema,
@@ -914,6 +915,13 @@ router.patch(
 
 // ── Material requisitions ───────────────────────────────────────────────────
 
+/**
+ * How much of a line is to be bought. Lines decided before the store could
+ * set a quantity have none; there PURCHASE meant the whole line.
+ */
+const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }) =>
+  l.purchaseQty !== null ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
   mo: { select: { id: true, moNumber: true } },
@@ -1004,7 +1012,34 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
     })),
   )
 
-  res.json({ success: true, data: { ...mr, available } })
+  // What has been ordered and received against each line's indent, so the
+  // fulfil window can say what is already on its way.
+  const orders = await prisma.purchaseOrderLine.findMany({
+    where: { mrLineId: { in: mr.lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' } } },
+    select: {
+      mrLineId: true,
+      qty: true,
+      po: { select: { poNumber: true } },
+      grnLines: { select: { receivedQty: true, grn: { select: { status: true } } } },
+    },
+  })
+  const bought = mr.lines.map((l) => {
+    const mine = orders.filter((o) => o.mrLineId === l.id)
+    return {
+      lineId: l.id,
+      buyQty: buyQtyOf(l),
+      orderedQty: round3(mine.reduce((t, o) => t + Number(o.qty), 0)),
+      receivedQty: round3(
+        mine.reduce(
+          (t, o) => t + o.grnLines.filter((g) => g.grn.status !== 'CANCELLED').reduce((n, g) => n + Number(g.receivedQty), 0),
+          0,
+        ),
+      ),
+      poNumbers: [...new Set(mine.map((o) => o.po.poNumber))],
+    }
+  })
+
+  res.json({ success: true, data: { ...mr, available, bought } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -1195,6 +1230,91 @@ router.patch(
   },
 )
 
+/**
+ * The store's plan: how much of each line to buy.
+ *
+ * Replaces the all-or-nothing issue-or-buy answer. A line can now be issued in
+ * part and bought for the rest, bought whole, or bought over. The buy
+ * quantity is what the buyer sees on the indent; it can never be set below
+ * what has already been ordered against it, because that order exists.
+ */
+router.patch(
+  '/requisitions/:id/plan',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const data = requisitionPlanSchema.parse(req.body)
+
+    const after = await prisma.$transaction(async (tx) => {
+      await lockRequisition(tx, req.params.id)
+      const mr = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } },
+      })
+      if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+      if (mr.status !== 'APPROVED') {
+        throw new AppError(
+          mr.status === 'PENDING' ? 'This requisition has not been approved yet.' : 'This requisition was refused.',
+          400,
+          'NOT_APPROVED',
+        )
+      }
+      if (mr.closedAt) throw new AppError(`${mr.mrNumber} was closed, so nothing more is bought for it.`, 400, 'CLOSED')
+
+      const own = new Map(mr.lines.map((l) => [l.id, l]))
+      const ordered = await tx.purchaseOrderLine.groupBy({
+        by: ['mrLineId'],
+        where: { mrLineId: { in: data.lines.map((l) => l.lineId) }, po: { status: { not: 'CANCELLED' } } },
+        _sum: { qty: true },
+      })
+      const orderedOf = new Map(ordered.map((o) => [o.mrLineId, Number(o._sum.qty ?? 0)]))
+
+      for (const l of data.lines) {
+        const line = own.get(l.lineId)
+        if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+        // A customer's cloth is theirs to send, never ours to buy.
+        if (line.ownership === 'CUSTOMER_OWNED' && l.buyQty > 0) {
+          throw new AppError(`${line.item.name} is a customer's material, so it cannot be bought. Ask them to send the rest.`, 400, 'CUSTOMER_MATERIAL')
+        }
+        const already = orderedOf.get(l.lineId) ?? 0
+        if (l.buyQty + 1e-9 < already) {
+          throw new AppError(
+            `${line.item.name}: ${qtyText(already)} ${line.item.uom?.symbol ?? ''} is already ordered, so the quantity to buy cannot go below that. Cancel the order first to buy less.`.replace(/\s+/g, ' '),
+            400,
+            'ALREADY_ORDERED',
+          )
+        }
+      }
+
+      await Promise.all(
+        data.lines.map((l) =>
+          tx.materialRequisitionLine.update({
+            where: { id: l.lineId },
+            data: { purchaseQty: round3(l.buyQty), fulfilment: l.buyQty > 0 ? 'PURCHASE' : 'FROM_STOCK' },
+          }),
+        ),
+      )
+      return tx.materialRequisition.findUniqueOrThrow({ where: { id: mr.id }, include: mrInclude })
+    })
+
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: req.params.id,
+      after: { ...after, plan: data.lines },
+    })
+
+    const buying = data.lines.filter((l) => l.buyQty > 0).length
+    res.json({
+      success: true,
+      data: after,
+      message: buying
+        ? `${buying} ${buying === 1 ? 'line is' : 'lines are'} on the indent for the buyer, under Select from indent on a new purchase order.`
+        : 'Nothing to buy on this requisition.',
+    })
+  },
+)
+
 router.patch(
   '/requisitions/:id/approve',
   requirePermission(MODULE, 'approve'),
@@ -1372,15 +1492,17 @@ router.post(
       }
 
       // docs/04-business-rules.md, section 7: raised, approved and issued by
-      // three different people.
-      if (mr.raisedById && mr.raisedById === req.user!.id) {
+      // three different people — except the Admin, as for approving; the
+      // audit entry says so.
+      const admin = isAdmin(req.user)
+      if (!admin && mr.raisedById && mr.raisedById === req.user!.id) {
         throw new AppError(
           'You raised this requisition, so somebody else in the store has to hand the material over.',
           403,
           'SELF_ISSUE',
         )
       }
-      if (mr.approvedById && mr.approvedById === req.user!.id) {
+      if (!admin && mr.approvedById && mr.approvedById === req.user!.id) {
         throw new AppError(
           'You approved this requisition, so somebody else in the store has to hand the material over.',
           403,
@@ -1388,30 +1510,48 @@ router.post(
         )
       }
 
-      const askedFor = new Map(body.lines?.map((l) => [l.lineId, l.issueQty]) ?? [])
+      /*
+       * What to hand over, and from where. With no lines named, everything
+       * still owed, from each line's own store. Named, only what is named: a
+       * line may come once per store, to be made up from several racks.
+       */
+      const plan = new Map<string, Array<{ qty: number; warehouseId: string }>>()
+      if (body.lines) {
+        for (const a of body.lines) {
+          if (!(a.issueQty > 0)) continue
+          const line = mr.lines.find((l) => l.id === a.lineId)
+          if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+          const list = plan.get(a.lineId) ?? []
+          list.push({ qty: a.issueQty, warehouseId: a.warehouseId || line.warehouseId })
+          plan.set(a.lineId, list)
+        }
+      } else {
+        for (const line of mr.lines) {
+          const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
+          if (owed > 0) plan.set(line.id, [{ qty: owed, warehouseId: line.warehouseId }])
+        }
+      }
+
+      const storeNames = new Map(
+        (await tx.warehouse.findMany({
+          where: { id: { in: [...new Set([...plan.values()].flat().map((a) => a.warehouseId))] } },
+          select: { id: true, name: true },
+        })).map((w) => [w.id, w.name]),
+      )
       const handedOver: string[] = []
 
       for (const line of mr.lines) {
-        /*
-         * A line marked for purchase is not the store's to answer.
-         *
-         * It is on this requisition to tell the buyer what to order, and there
-         * is nothing on the rack behind it. Skipped rather than refused: a
-         * requisition routinely mixes the two.
-         */
-        if (line.fulfilment === 'PURCHASE') continue
+        const parts = plan.get(line.id)
+        if (!parts?.length) continue
 
+        // A line being bought is still owed to the department: what is bought
+        // comes into the store and is handed over from there like the rest.
         const unit = line.item.uom?.symbol ?? ''
         const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
-        if (owed <= 0) continue
-
-        // Not named in the request: everything still owed on it.
-        const qty = askedFor.get(line.id) ?? owed
-        if (qty <= 0) continue
-
-        if (qty > owed + 1e-9) {
+        const total = round3(parts.reduce((t, a) => t + a.qty, 0))
+        if (total > owed + 1e-9) {
           throw new AppError(
-            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(qty)}. Raise a new requisition for more.`.replace(
+            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(total)}. Raise a new requisition for more.`.replace(
               /\s+/g,
               ' ',
             ),
@@ -1419,30 +1559,35 @@ router.post(
             'OVER_ISSUE',
           )
         }
+        if (!storeNames.size || parts.some((a) => !storeNames.has(a.warehouseId))) {
+          throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+        }
 
-        // recordMovement refuses if the rack is short, and names the shortfall.
-        await recordMovement(tx, {
-          itemId: line.itemId,
-          warehouseId: line.warehouseId,
-          transactionType: 'ISSUE',
-          direction: 'OUT',
-          qty,
-          // Hand the ownership straight through. The stock service keeps a
-          // customer's cloth and our own in separate balances, so issuing the
-          // wrong one would take stock nobody asked for.
-          ownership: line.ownership,
-          ownerCustomerId: line.ownerCustomerId,
-          referenceType: 'MATERIAL_REQUISITION',
-          referenceId: mr.id,
-          transactionDate: when,
-          notes: `${mr.mrNumber} → ${mr.department.name}`,
-        })
+        for (const a of parts) {
+          // recordMovement refuses if that rack is short, and names the shortfall.
+          await recordMovement(tx, {
+            itemId: line.itemId,
+            warehouseId: a.warehouseId,
+            transactionType: 'ISSUE',
+            direction: 'OUT',
+            qty: a.qty,
+            // Hand the ownership straight through. The stock service keeps a
+            // customer's cloth and our own in separate balances, so issuing the
+            // wrong one would take stock nobody asked for.
+            ownership: line.ownership,
+            ownerCustomerId: line.ownerCustomerId,
+            referenceType: 'MATERIAL_REQUISITION',
+            referenceId: mr.id,
+            transactionDate: when,
+            notes: `${mr.mrNumber} → ${mr.department.name}${a.warehouseId !== line.warehouseId ? ` (from ${storeNames.get(a.warehouseId)})` : ''}`,
+          })
+          handedOver.push(`${qtyText(a.qty)} ${unit} ${line.item.name}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
+        }
 
         await tx.materialRequisitionLine.update({
           where: { id: line.id },
-          data: { issuedQty: { increment: qty } },
+          data: { issuedQty: { increment: total } },
         })
-        handedOver.push(`${qtyText(qty)} ${unit} ${line.item.name}`.replace(/\s+/g, ' '))
       }
 
       if (handedOver.length === 0) {
@@ -1457,9 +1602,7 @@ router.post(
       // issuedBy is whoever handed over the last of it; each part is in the
       // stock ledger with its own date, and in the audit trail with its person.
       const lines = await tx.materialRequisitionLine.findMany({ where: { mrId: mr.id } })
-      const stillOwed = lines.filter(
-        (l) => l.fulfilment !== 'PURCHASE' && Number(l.issuedQty) < Number(l.requestedQty) - 1e-9,
-      ).length
+      const stillOwed = lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty) - 1e-9).length
       if (stillOwed === 0) {
         await tx.materialRequisition.update({
           where: { id: mr.id },

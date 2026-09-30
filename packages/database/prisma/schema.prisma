@@ -2174,6 +2174,16 @@ model MaterialRequisitionLine {
   /// every line written before this existed meant.
   fulfilment RequisitionFulfilment @default(FROM_STOCK)
 
+  /// How much of this line the store has decided to buy — the indent.
+  ///
+  /// Not tied to what is short: a line can be half issued from the rack and
+  /// half bought, bought whole with stock on the rack kept for something else,
+  /// or bought over, the extra going into stock. Null on lines decided before
+  /// this existed, where PURCHASE meant the whole quantity asked for. Set
+  /// together with `fulfilment`, which stays PURCHASE whenever any is bought
+  /// so everything that reads it still finds the line on the indent.
+  purchaseQty Decimal? @db.Decimal(10, 3)
+
   /// The enquiry lines raised against this one.
   ///
   /// Shown to the buyer, but never subtracted from what the request still

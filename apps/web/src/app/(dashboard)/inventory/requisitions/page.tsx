@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
-import { IssueDialog } from '@/components/inventory/IssueDialog'
+import { FulfilDialog } from '@/components/inventory/FulfilDialog'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
@@ -29,6 +29,8 @@ interface Line {
   /** Off the rack, or to be bought. Absent on rows written before the choice
       existed, which all meant the rack. */
   fulfilment?: 'FROM_STOCK' | 'PURCHASE'
+  /** How much of the line the store decided to buy. Null on lines decided before it could be set. */
+  purchaseQty?: string | number | null
   purpose: string | null
   item: {
     id: string
@@ -65,7 +67,11 @@ interface Requisition {
 /** Something from the store is still owed on it, and some has been handed over. */
 const partlyIssued = (mr: Requisition) =>
   mr.lines.some((l) => Number(l.issuedQty) > 0) &&
-  mr.lines.some((l) => l.fulfilment !== 'PURCHASE' && Number(l.issuedQty) < Number(l.requestedQty))
+  mr.lines.some((l) => Number(l.issuedQty) < Number(l.requestedQty))
+
+/** How much of a line is to be bought; the whole line where it was marked before a quantity could be set. */
+const buyQtyOf = (l: Line) =>
+  l.purchaseQty !== null && l.purchaseQty !== undefined ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
 
 const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -106,12 +112,11 @@ function stage(
   }
 
   if (!mr.issuedAt && partlyIssued(mr)) {
-    const fromStock = mr.lines.filter((l) => l.fulfilment !== 'PURCHASE')
-    const full = fromStock.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
+    const full = mr.lines.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
     return {
       label: 'Part issued',
       cls: 'badge-warning',
-      next: `${full} of ${fromStock.length} ${fromStock.length === 1 ? 'line' : 'lines'} handed over in full. The rest is still owed, or close it if it is no longer wanted.`,
+      next: `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} handed over in full. Press Fulfil to hand over the rest, or close it if it is no longer wanted.`,
     }
   }
 
@@ -119,13 +124,12 @@ function stage(
     return {
       label: 'To be issued',
       cls: 'badge-info',
-      // Raised, approved and issued by three different people, so the two
-      // who have had their say are told it is somebody else's turn.
-      next: isMine
-        ? 'You raised it, so somebody else in the store hands the material over.'
-        : iApproved
-          ? 'You approved it, so somebody else in the store hands the material over.'
-          : 'Nothing has moved yet. Press issue when the store hands the material over.',
+      // Raised, approved and issued by three different people (the Admin may
+      // do all three), so the two who have had their say are told whose turn it is.
+      next:
+        (isMine || iApproved) && !admin
+          ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store hands it over. You can still press Fulfil to set what to buy.`
+          : 'Press Fulfil to hand it over from the stores that have it, and to buy what is short.',
     }
   }
 
@@ -146,8 +150,8 @@ function qtyByUnit(lines: Line[]) {
     const issued = Number(l.issuedQty)
     cur.asked += asked
     cur.issued += issued
-    if (l.fulfilment === 'PURCHASE') cur.toBuy += Math.max(0, asked - issued)
-    else cur.owed += Math.max(0, asked - issued)
+    cur.owed += Math.max(0, asked - issued)
+    cur.toBuy += buyQtyOf(l)
     m.set(u, cur)
   }
   return [...m.values()]
@@ -161,29 +165,14 @@ const ITEM_COLS = [
   { label: 'Item', width: '20%' },
   { label: 'Category', width: '10%' },
   { label: 'Sub-cat.', width: '10%' },
-  { label: 'Whose', width: '9%' },
-  { label: 'From', width: '11%' },
-  { label: 'What for', width: '12%' },
+  { label: 'Whose', width: '8%' },
+  { label: 'Asked of', width: '10%' },
+  { label: 'What for', width: '10%' },
+  { label: 'To buy', width: '6%', numeric: true },
   { label: 'Asked', width: '7%', numeric: true },
   { label: 'Issued', width: '6%', numeric: true },
   { label: 'Owed', width: '5%', numeric: true },
 ]
-/** While the store decides each line: the same, with what is on the rack and the answer. */
-const DECIDING_COLS = [
-  { label: 'Code', width: '8%' },
-  { label: 'Item', width: '15%' },
-  { label: 'Category', width: '8%' },
-  { label: 'Sub-cat.', width: '8%' },
-  { label: 'Whose', width: '7%' },
-  { label: 'From', width: '9%' },
-  { label: 'What for', width: '9%' },
-  { label: 'Asked', width: '7%', numeric: true },
-  { label: 'Issued', width: '5%', numeric: true },
-  { label: 'Owed', width: '5%', numeric: true },
-  { label: 'In store', width: '7%', numeric: true },
-  { label: 'Answer it from', width: '12%' },
-]
-
 /** One figure per unit on one line: "1,000 mtr · 250 pcs", or null when all are nil. */
 const unitLine = (groups: UnitGroup[], pick: (g: UnitGroup) => number) => {
   const parts = groups
@@ -211,27 +200,13 @@ export default function RequisitionsPage() {
   const [open, setOpen] = useState<string | null>(null)
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
-  const [issuing, setIssuing] = useState<Requisition | null>(null)
+  const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
     return () => clearTimeout(t)
   }, [search])
-
-  /*
-   * What the store actually has, per line of the requisition that is open.
-   *
-   * Fetched when a row is expanded rather than with the list: it is a balance
-   * per item per warehouse, and working out forty of them to draw a list
-   * nobody has opened is forty queries thrown away.
-   */
-  const [onHand, setOnHand] = useState<Record<string, number>>({})
-  const [loadingStock, setLoadingStock] = useState(false)
-
-  /** The store keeper's answer per line, before it is saved. */
-  const [sourcing, setSourcing] = useState<Record<string, 'FROM_STOCK' | 'PURCHASE'>>({})
-  const [savingSourcing, setSavingSourcing] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -260,71 +235,6 @@ export default function RequisitionsPage() {
   useEffect(() => {
     void load()
   }, [load])
-
-  /*
-   * Opening an approved requisition loads what is on the rack beside it.
-   *
-   * The mill's old ERP shows a Stock Qty column on its indent form for exactly
-   * this reason: deciding whether something has to be bought without being
-   * told how much there is of it is guessing.
-   */
-  useEffect(() => {
-    const mr = rows.find((r) => r.id === open)
-    if (!mr || mr.status !== 'APPROVED' || mr.issuedAt) {
-      setOnHand({})
-      return
-    }
-
-    let cancelled = false
-    setLoadingStock(true)
-    void (async () => {
-      try {
-        const res = await api.get<{
-          data: { available?: Array<{ lineId: string; available: number }> }
-        }>(`/inventory/requisitions/${mr.id}`)
-        if (cancelled) return
-        const avail = (res as unknown as { data: { available?: Array<{ lineId: string; available: number }> } })
-          .data?.available
-        setOnHand(Object.fromEntries((avail ?? []).map((a) => [a.lineId, Number(a.available)])))
-      } catch {
-        if (!cancelled) setOnHand({})
-      } finally {
-        if (!cancelled) setLoadingStock(false)
-      }
-    })()
-
-    // Start from what is already recorded, so reopening a row shows the
-    // answers given last time rather than resetting them to the rack.
-    setSourcing(
-      Object.fromEntries(mr.lines.map((l) => [l.id, l.fulfilment ?? 'FROM_STOCK'])) as Record<
-        string,
-        'FROM_STOCK' | 'PURCHASE'
-      >
-    )
-
-    return () => {
-      cancelled = true
-    }
-  }, [open, rows])
-
-  /** Saves the store's answer for every line of one requisition. */
-  const saveSourcing = async (mr: Requisition) => {
-    setSavingSourcing(true)
-    setError(null)
-    setMessage(null)
-    try {
-      const res = await api.patch<{ message?: string }>(
-        `/inventory/requisitions/${mr.id}/sourcing`,
-        { lines: mr.lines.map((l) => ({ lineId: l.id, fulfilment: sourcing[l.id] ?? 'FROM_STOCK' })) }
-      )
-      await load()
-      if (res.message) setMessage(res.message)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save what the store decided.')
-    } finally {
-      setSavingSourcing(false)
-    }
-  }
 
   const act = async (mr: Requisition, what: 'approve' | 'reject' | 'close', reason?: string) => {
     setBusy(mr.id)
@@ -364,9 +274,9 @@ export default function RequisitionsPage() {
     const iApproved = Boolean(me?.id && mr.approvedBy?.id === me.id)
     const s = stage(mr, isMine, iApproved, admin)
     const canDecide = mr.status === 'PENDING' && !mr.closedAt && (!isMine || admin)
-    const canIssue =
-      mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt && !isMine && !iApproved &&
-      mr.lines.some((l) => l.fulfilment !== 'PURCHASE')
+    // Approved with something still owed: the store hands it over, buys it, or both.
+    const canFulfil =
+      mr.status === 'APPROVED' && !mr.closedAt && mr.lines.some((l) => Number(l.issuedQty) < Number(l.requestedQty))
     const actions: RowAction[] = []
     if (canDecide)
       actions.push({ key: 'refuse', label: 'Refuse', icon: <X size={14} />, onClick: () => setAsking({ mr, kind: 'reject' }), danger: true })
@@ -380,7 +290,7 @@ export default function RequisitionsPage() {
         onClick: () => setAsking({ mr, kind: 'close' }),
         danger: true,
       })
-    return { isMine, iApproved, s, canDecide, canIssue, actions, groups: qtyByUnit(mr.lines) }
+    return { isMine, iApproved, s, canDecide, canFulfil, actions, groups: qtyByUnit(mr.lines) }
   }
   type Facts = ReturnType<typeof rowFacts>
 
@@ -390,22 +300,20 @@ export default function RequisitionsPage() {
       <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => void act(mr, 'approve')} disabled={busy === mr.id}>
         <Check size={13} /> Approve
       </button>
-    ) : r.canIssue ? (
-      <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => setIssuing(mr)} disabled={busy === mr.id}>
-        <PackageCheck size={13} /> Issue
+    ) : r.canFulfil ? (
+      <button className="btn-primary h-7 px-2.5 text-xs" onClick={() => setFulfilling(mr)} disabled={busy === mr.id} title="Hand it over, buy what is short, or both">
+        <PackageCheck size={13} /> Fulfil
       </button>
     ) : null
 
   /** The panel under an opened row: every line as a proper table, as on the purchase lists. */
   const itemPanel = (mr: Requisition, r: Facts) => {
-    // While approved and not yet handed over, the store decides each line: off the rack, or bought.
-    const deciding = mr.status === 'APPROVED' && !mr.issuedAt && !mr.closedAt
     return (
       <RowPanel icon={FileText} title="Item Details" note={`${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} on ${mr.mrNumber}`}>
         <table className="subtable w-full table-fixed">
           <thead className="sticky top-0 z-10">
             <tr>
-              {(deciding ? DECIDING_COLS : ITEM_COLS).map((c) => (
+              {ITEM_COLS.map((c) => (
                 <th key={c.label} style={{ width: c.width }} className={c.numeric ? 'text-right' : undefined}>
                   {c.label}
                 </th>
@@ -418,9 +326,7 @@ export default function RequisitionsPage() {
               const asked = Number(l.requestedQty)
               const issued = Number(l.issuedQty)
               const owed = Math.max(0, asked - issued)
-              const have = onHand[l.id]
-              const short = have !== undefined && have < asked
-              const pick = sourcing[l.id] ?? l.fulfilment ?? 'FROM_STOCK'
+              const buying = buyQtyOf(l)
               return (
                 <tr key={l.id}>
                   <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
@@ -439,10 +345,13 @@ export default function RequisitionsPage() {
                     )}
                   </td>
                   <td className="truncate text-xs">
-                    {l.fulfilment === 'PURCHASE' ? <span className="font-medium text-sky-500">To be bought</span> : l.warehouse.name}
+                    {l.warehouse.name}
                   </td>
                   <td className="truncate text-xs" title={l.purpose ?? undefined}>
                     {l.purpose ?? <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    {buying > 0 ? <span className="text-sky-500">{qtyFmt(buying)}</span> : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="whitespace-nowrap text-right text-xs tabular-nums">
                     {qtyFmt(asked)} {l.item.uom.symbol}
@@ -457,24 +366,6 @@ export default function RequisitionsPage() {
                       <span className="text-amber-500">{qtyFmt(owed)}</span>
                     )}
                   </td>
-                  {deciding && (
-                    <>
-                      <td className={`whitespace-nowrap text-right text-xs tabular-nums ${short ? 'font-medium text-red-400' : ''}`}>
-                        {loadingStock ? '…' : have === undefined ? '—' : qtyFmt(have)}
-                      </td>
-                      <td>
-                        <select
-                          className="form-input h-7 w-full px-2 py-0 text-xs"
-                          value={pick}
-                          onChange={(e) => setSourcing((prev) => ({ ...prev, [l.id]: e.target.value as 'FROM_STOCK' | 'PURCHASE' }))}
-                          aria-label={`How to answer ${l.item.name}`}
-                        >
-                          <option value="FROM_STOCK">Issue from store</option>
-                          <option value="PURCHASE">Buy it</option>
-                        </select>
-                      </td>
-                    </>
-                  )}
                 </tr>
               )
             })}
@@ -494,14 +385,9 @@ export default function RequisitionsPage() {
             )}
             {mr.notes && <>Note: {mr.notes}</>}
           </span>
-          {deciding && (
-            <button
-              className="btn-primary ml-auto h-7 px-2.5 text-xs disabled:opacity-50"
-              onClick={() => void saveSourcing(mr)}
-              disabled={savingSourcing}
-              title="Save which lines the store issues and which go to the buyer"
-            >
-              {savingSourcing ? 'Saving…' : 'Save answers'}
+          {r.canFulfil && (
+            <button className="btn-primary ml-auto h-7 px-2.5 text-xs" onClick={() => setFulfilling(mr)}>
+              <PackageCheck size={13} /> Fulfil
             </button>
           )}
         </div>
@@ -760,14 +646,12 @@ export default function RequisitionsPage() {
         )}
       </div>
 
-      {issuing && (
-        <IssueDialog
-          mrId={issuing.id}
-          mrNumber={issuing.mrNumber}
-          lines={issuing.lines}
-          onClose={() => setIssuing(null)}
+      {fulfilling && (
+        <FulfilDialog
+          mrId={fulfilling.id}
+          onClose={() => setFulfilling(null)}
           onDone={(msg) => {
-            setIssuing(null)
+            setFulfilling(null)
             setMessage(msg)
             void load()
           }}

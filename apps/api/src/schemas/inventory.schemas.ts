@@ -71,6 +71,27 @@ export const openingStockSchema = z.object({
  * Asking it on the requisition form instead, as this once did, puts the answer
  * in the hands of the only person in the building who cannot know it.
  */
+/**
+ * The store's plan for an approved requisition: how much of each line to buy.
+ *
+ * Any amount from nothing upward — part of what is short, all of it, the whole
+ * line, or more than was asked with the extra going into stock. What is
+ * handed over from the racks is the issue, a separate step.
+ */
+export const requisitionPlanSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        lineId: id('a line'),
+        buyQty: z
+          .number({ invalid_type_error: 'The quantity to buy has to be a number' })
+          .min(0, 'The quantity to buy cannot be negative')
+          .max(9_999_999),
+      }),
+    )
+    .min(1, 'Nothing to change'),
+})
+
 export const requisitionSourcingSchema = z.object({
   lines: z
     .array(
@@ -196,6 +217,11 @@ export const issueRequisitionSchema = z.object({
         issueQty: z
           .number({ invalid_type_error: 'Quantity has to be a number' })
           .min(0, 'Quantity cannot be negative'),
+        /**
+         * The store it comes out of. Defaults to the line's own. A line may
+         * appear more than once, once per store, to be made up from several.
+         */
+        warehouseId: z.string().optional().nullable(),
       }),
     )
     .optional(),
