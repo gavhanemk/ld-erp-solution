@@ -12,7 +12,9 @@ import {
  * carry their figures on them, and a click on a part filters by it.
  */
 
-export const PALETTE = ['#14b8a6', '#38bdf8', '#f59e0b', '#a78bfa', '#34d399', '#fb7185', '#818cf8', '#a3e635', '#fb923c', '#22d3ee']
+import { ChartTip, EmptyChart, PALETTE } from '@/components/dashboard/DashKit'
+
+export { PALETTE }
 
 export interface Slice {
   value: string
@@ -25,29 +27,9 @@ const labelStyle = { fontSize: 10, fontWeight: 600 }
 const count0 = (v: unknown) => (Number(v) ? Number(v).toLocaleString('en-IN') : '')
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-function Tip({ active, payload, label }: any) {
-  if (!active || !payload?.length) return null
-  return (
-    <div className="glass-card space-y-1 px-3 py-2 text-xs shadow-lg">
-      {label !== undefined && <p className="font-semibold text-foreground">{label}</p>}
-      {payload.map((p: any) => (
-        <div key={p.dataKey ?? p.name} className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full" style={{ background: p.color ?? p.payload?.fill }} />
-          <span className="text-muted-foreground">{p.name}:</span>
-          <span className="font-semibold tabular-nums text-foreground">{Number(p.value).toLocaleString('en-IN')}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
+const Tip = (props: any) => <ChartTip {...props} money={false} />
 
-function Empty({ h }: { h: number }) {
-  return (
-    <div className="flex items-center justify-center text-xs text-muted-foreground" style={{ height: h }}>
-      Nothing to show.
-    </div>
-  )
-}
+const Empty = ({ h }: { h: number }) => <EmptyChart h={h} />
 
 /** Items and receipts over time, as two soft areas. */
 export function ReceiptTrend({

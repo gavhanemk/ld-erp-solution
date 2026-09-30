@@ -34,7 +34,7 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
   from.setHours(0, 0, 0, 0)
   const store = warehouseId ? Prisma.sql`AND s."warehouseId" = ${warehouseId}` : Prisma.empty
 
-  const [rows, reorder, daily, mix, movers, mrPending, mrApproved, mrPartly, mrIssued, mrRejected, challans] =
+  const [rows, reorder, daily, mix, movers, unitFlow, mrPending, mrApproved, mrPartly, mrIssued, mrRejected, challans] =
     await Promise.all([
       onHand(prisma, { warehouseId }),
       reorderStatus(prisma),
@@ -66,6 +66,17 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
         GROUP BY s."itemId"
         ORDER BY SUM((s."inQty" + s."outQty") * COALESCE(s."unitRate", 0)) DESC, COUNT(*) DESC
         LIMIT 8`,
+      prisma.$queryRaw<Array<{ uom: string; inQty: number; outQty: number; moves: number }>>`
+        SELECT u.symbol AS uom,
+          COALESCE(SUM(s."inQty"), 0)::float8 AS "inQty",
+          COALESCE(SUM(s."outQty"), 0)::float8 AS "outQty",
+          COUNT(*)::int AS moves
+        FROM ld_erp.stock_ledger s
+        JOIN ld_erp.items i ON i.id = s."itemId"
+        JOIN ld_erp.uom u ON u.id = i."uomId"
+        WHERE s."transactionDate" >= ${since} ${store} AND s.ownership = 'OWNED'
+        GROUP BY u.symbol
+        ORDER BY COUNT(*) DESC`,
       prisma.materialRequisition.count({ where: { status: 'PENDING', closedAt: null } }),
       prisma.materialRequisition.count({
         where: { status: 'APPROVED', closedAt: null, issuedAt: null, lines: { none: { issuedQty: { gt: 0 } } } },
@@ -159,6 +170,68 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
   })()
 
   const byDepartment = groupBy((r) => about.get(r.itemId)?.department ?? 'No department')
+
+  /*
+   * Quantity alongside value. Quantities are only ever added within one unit:
+   * metres and pieces summed together would be a number that means nothing,
+   * so every quantity below is a set of per-unit totals.
+   */
+  type Tally = { name: string; value: number; lines: number; items: Set<string>; qty: Map<string, number> }
+  const tally = (name: string): Tally => ({ name, value: 0, lines: 0, items: new Set(), qty: new Map() })
+  const add = (t: Tally, r: (typeof owned)[number]) => {
+    t.value += r.value
+    t.lines += 1
+    t.items.add(r.itemId)
+    t.qty.set(r.uom, (t.qty.get(r.uom) ?? 0) + r.qty)
+  }
+  const out = (t: Tally) => ({
+    name: t.name,
+    value: round2(t.value),
+    lines: t.lines,
+    items: t.items.size,
+    share: stockValue ? Math.round((t.value / stockValue) * 1000) / 10 : 0,
+    qty: [...t.qty.entries()].map(([uom, q]) => ({ uom, qty: Math.round(q * 1000) / 1000 })).sort((a, b) => b.qty - a.qty),
+  })
+
+  const catMap = new Map<string, { t: Tally; subs: Map<string, Tally> }>()
+  const deptMap = new Map<string, { t: Tally; cats: Map<string, Tally> }>()
+  const unitMap = new Map<string, Tally>()
+  for (const r of owned) {
+    const a = about.get(r.itemId)
+    const cat = a?.category ?? r.categoryName
+    const sub = a?.sub ?? '(no sub-category)'
+    const dept = a?.department ?? 'No department'
+    const c = catMap.get(cat) ?? { t: tally(cat), subs: new Map() }
+    add(c.t, r)
+    const sc = c.subs.get(sub) ?? tally(sub)
+    add(sc, r)
+    c.subs.set(sub, sc)
+    catMap.set(cat, c)
+    const d = deptMap.get(dept) ?? { t: tally(dept), cats: new Map() }
+    add(d.t, r)
+    const dc = d.cats.get(cat) ?? tally(cat)
+    add(dc, r)
+    d.cats.set(cat, dc)
+    deptMap.set(dept, d)
+    const u = unitMap.get(r.uom) ?? tally(r.uom)
+    add(u, r)
+    unitMap.set(r.uom, u)
+  }
+  const breakdown = {
+    categories: [...catMap.values()]
+      .map((c) => ({ ...out(c.t), children: [...c.subs.values()].map(out).sort((a, b) => b.value - a.value) }))
+      .sort((a, b) => b.value - a.value),
+    departments: [...deptMap.values()]
+      .map((d) => ({ ...out(d.t), children: [...d.cats.values()].map(out).sort((a, b) => b.value - a.value) }))
+      .sort((a, b) => b.value - a.value),
+  }
+  const units = [...unitMap.values()].map((u) => ({
+    uom: u.name,
+    qty: Math.round((u.qty.get(u.name) ?? 0) * 1000) / 1000,
+    value: round2(u.value),
+    items: u.items.size,
+    lines: u.lines,
+  })).sort((a, b) => b.items - a.items)
   const byType = groupBy((r) => about.get(r.itemId)?.type ?? 'OTHER')
 
   // ── ageing: how long since each line last moved ──
@@ -289,6 +362,9 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
       moves: series.reduce((t, d) => t + d.moves, 0),
     },
     byStore,
+    breakdown,
+    units,
+    unitFlow: unitFlow.map((u) => ({ ...u, inQty: Math.round(u.inQty * 1000) / 1000, outQty: Math.round(u.outQty * 1000) / 1000 })),
     byCategory,
     byDepartment,
     byType,

@@ -5,6 +5,7 @@ import {
   PolarGrid, PolarRadiusAxis, Radar, RadarChart, ReferenceLine, ResponsiveContainer, Tooltip, Treemap,
   XAxis, YAxis,
 } from 'recharts'
+import { ChartTip, EmptyChart, IN_COLOUR, OUT_COLOUR, PALETTE } from '@/components/dashboard/DashKit'
 
 /**
  * The stock ledger dashboard's charts, one kind for each question: bars and a
@@ -24,9 +25,7 @@ export interface LedgerGroup {
   outValue: number
 }
 
-export const IN_COLOUR = '#10b981'
-export const OUT_COLOUR = '#f87171'
-const PALETTE = ['#14b8a6', '#38bdf8', '#f59e0b', '#a78bfa', '#34d399', '#fb7185', '#818cf8', '#a3e635', '#fb923c', '#22d3ee']
+export { IN_COLOUR, OUT_COLOUR }
 
 /** ₹ short enough for an axis: 12.5 L, 3.2 Cr, 45 K. */
 export const shortRupees = (v: number) => {
@@ -66,31 +65,10 @@ function barLabel(colour: string, format: (v: number) => string, floor = 0, belo
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-function Tip({ active, payload, label, money = true }: any) {
-  if (!active || !payload?.length) return null
-  return (
-    <div className="glass-card space-y-1 px-3 py-2 text-xs shadow-lg">
-      {label !== undefined && <p className="font-semibold text-foreground">{label}</p>}
-      {payload.map((p: any) => (
-        <div key={p.dataKey ?? p.name} className="flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full" style={{ background: p.color ?? p.payload?.fill }} />
-          <span className="text-muted-foreground">{p.name}:</span>
-          <span className="font-semibold tabular-nums text-foreground">
-            {money && p.dataKey !== 'moves' ? shortRupees(Math.abs(p.value)) : Number(p.value).toLocaleString('en-IN')}
-          </span>
-        </div>
-      ))}
-    </div>
-  )
-}
+/** The shared dashboard tooltip; `money` off for counts. */
+const Tip = (props: any) => <ChartTip {...props} />
 
-function Empty({ h }: { h: number }) {
-  return (
-    <div className="flex items-center justify-center text-xs text-muted-foreground" style={{ height: h }}>
-      Nothing to show.
-    </div>
-  )
-}
+const Empty = ({ h }: { h: number }) => <EmptyChart h={h} />
 
 /** Value in above the line, out below it, and the number of movements as a line on its own scale. */
 export function FlowChart({
@@ -105,7 +83,27 @@ export function FlowChart({
   // Labels read while the bars that have any are few; past that they collide.
   // Empty days carry no label, so a month with five busy days is labelled.
   const labelled = rows.filter((b) => b.inValue || b.outValue || b.moves).length <= 20
-  const floor = Math.max(...rows.map((b) => Math.max(b.inValue, b.outValue))) * 0.03
+  // A tenth of the biggest bar: slivers under that stay bare rather than
+  // stacking their labels on the zero line.
+  const floor = Math.max(...rows.map((b) => Math.max(b.inValue, b.outValue))) * 0.1
+  const movesOf = new Map(rows.map((b) => [b.label, b.moves]))
+  /* The date, and under it how many movements that bar holds: one row of
+     figures lined up with the bars, rather than labels on a line crossing them. */
+  const DateTick = (props: any) => {
+    const n = movesOf.get(props.payload?.value) ?? 0
+    return (
+      <g transform={`translate(${props.x},${props.y})`}>
+        <text y={10} textAnchor="middle" fontSize={11} fill="currentColor">
+          {props.payload?.value}
+        </text>
+        {labelled && rows.length <= 16 && n > 0 && (
+          <text y={24} textAnchor="middle" fontSize={10} fontWeight={600} fill="#f59e0b">
+            {n} mv
+          </text>
+        )}
+      </g>
+    )
+  }
   return (
     <div className="text-muted-foreground">
       <ResponsiveContainer width="100%" height={240}>
@@ -118,8 +116,19 @@ export function FlowChart({
             if (b) onPick(b.from, b.to)
           }}
         >
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.15} vertical={false} />
-          <XAxis dataKey="label" tick={axis} tickLine={false} axisLine={false} minTickGap={16} />
+          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} vertical={false} />
+          {/* Every bar gets its date and count while they fit (weeks, months, a
+              short run of days); past that the axis thins and the counts are
+              in the tooltip. */}
+          <XAxis
+            dataKey="label"
+            tick={<DateTick />}
+            tickLine={false}
+            axisLine={false}
+            interval={rows.length <= 16 ? 0 : 'preserveStartEnd'}
+            minTickGap={rows.length <= 16 ? 0 : 16}
+            height={labelled ? 38 : 24}
+          />
           <YAxis yAxisId="v" tick={axis} tickLine={false} axisLine={false} tickFormatter={shortRupees} width={76} />
           <YAxis yAxisId="n" orientation="right" tick={axis} tickLine={false} axisLine={false} allowDecimals={false} width={28} />
           <ReferenceLine yAxisId="v" y={0} stroke="currentColor" strokeOpacity={0.4} />
@@ -131,9 +140,7 @@ export function FlowChart({
           <Bar yAxisId="v" dataKey="out" name="Value out" stackId="f" fill={OUT_COLOUR} radius={[0, 0, 3, 3]} maxBarSize={28} cursor="pointer">
             {labelled && <LabelList dataKey="out" content={barLabel(OUT_COLOUR, shortRupees, floor, true)} />}
           </Bar>
-          <Line yAxisId="n" type="monotone" dataKey="moves" name="Movements" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2 }}>
-            {labelled && <LabelList dataKey="moves" position="top" offset={8} formatter={count0} style={{ ...labelStyle, fill: '#d97706' }} />}
-          </Line>
+          <Line yAxisId="n" type="monotone" dataKey="moves" name="Movements" stroke="#f59e0b" strokeWidth={2} dot={{ r: 2.5, fill: '#f59e0b' }} />
         </ComposedChart>
       </ResponsiveContainer>
     </div>

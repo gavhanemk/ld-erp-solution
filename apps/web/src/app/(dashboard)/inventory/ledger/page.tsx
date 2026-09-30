@@ -6,10 +6,12 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   AlertCircle, RefreshCw, Search, X, Download, Loader2, Activity, ArrowDownToLine,
   ArrowUpFromLine, Users, CalendarDays, LayoutDashboard, List, Scale, Flame, Boxes, Gauge,
+  LineChart, PieChart as PieIcon, Warehouse as WarehouseIcon, LayoutGrid, Radar as RadarIcon, FileText,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
+import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
 import {
   CategoryTreemap, DepartmentRadar, DocumentBars, FlowChart, MovementDonut, StoreColumns,
 } from '@/components/inventory/LedgerCharts'
@@ -265,23 +267,24 @@ function buckets(series: Day[], from: string, to: string) {
 }
 
 /** A titled card around one chart, with a line on how to read it. */
+/** A titled card around one chart: the shared dashboard card. */
 function ChartCard({
   title,
   hint,
+  icon,
   className = '',
   children,
 }: {
   title: string
   hint: string
+  icon?: React.ElementType
   className?: string
   children: ReactNode
 }) {
   return (
-    <div className={`glass-card p-4 ${className}`}>
-      <p className="text-sm font-medium text-foreground">{title}</p>
-      <p className="mb-2 text-[11px] text-muted-foreground">{hint}</p>
+    <DashCard title={title} hint={hint} icon={icon} className={className}>
       {children}
-    </div>
+    </DashCard>
   )
 }
 
@@ -512,8 +515,6 @@ function LedgerScreen() {
     }
   }
 
-  const card = (active: boolean) =>
-    `glass-card p-4 text-left transition-colors hover:border-primary/50 ${active ? 'border-primary ring-2 ring-primary/30' : ''}`
 
   // The search and dropdowns, the same on both tabs. Raised so an open
   // dropdown lies over whatever is below it.
@@ -695,136 +696,116 @@ function LedgerScreen() {
 
       {/* Four figures for what the filters leave, each a filter itself. */}
       {view === 'movements' && (
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <button type="button" className={card(false)} onClick={clearAll} title="Clear every filter">
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Activity size={13} /> Movements
-          </p>
-          <p className="mt-1 text-lg font-bold text-foreground tabular-nums sm:text-2xl">
-            {(summary?.total ?? 0).toLocaleString('en-IN')}
-          </p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {summary ? `${summary.items} items · ${summary.stores} stores` : '…'}
-            {narrowed ? ' · click to show all' : ''}
-          </p>
-        </button>
-        <button type="button" className={card(isOnly('direction', 'in'))} onClick={() => toggleOnly('direction', 'in')}>
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <ArrowDownToLine size={13} className="text-emerald-400" /> Came in
-          </p>
-          <p className="mt-1 text-lg font-bold text-emerald-500 tabular-nums sm:text-2xl">{rupees(summary?.inValue ?? 0)}</p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {isOnly('direction', 'in') ? 'showing only these · click to show all' : `${summary?.ins ?? 0} movements in`}
-          </p>
-        </button>
-        <button type="button" className={card(isOnly('direction', 'out'))} onClick={() => toggleOnly('direction', 'out')}>
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <ArrowUpFromLine size={13} className="text-red-400" /> Went out
-          </p>
-          <p className="mt-1 text-lg font-bold text-red-400 tabular-nums sm:text-2xl">{rupees(summary?.outValue ?? 0)}</p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {isOnly('direction', 'out') ? 'showing only these · click to show all' : `${summary?.outs ?? 0} movements out`}
-          </p>
-        </button>
-        <button
-          type="button"
-          className={card(isOnly('owner', 'CUSTOMER_OWNED'))}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <KpiTile
+          icon={Activity}
+          tone={TONE.teal}
+          label="Movements"
+          value={(summary?.total ?? 0).toLocaleString('en-IN')}
+          sub={`${summary ? `${summary.items} items · ${summary.stores} stores` : '…'}${narrowed ? ' · click to show all' : ''}`}
+          onClick={clearAll}
+          title="Clear every filter"
+        />
+        <KpiTile
+          icon={ArrowDownToLine}
+          tone={TONE.emerald}
+          label="Came in"
+          value={rupees(summary?.inValue ?? 0)}
+          valueClass="text-emerald-600 dark:text-emerald-400"
+          sub={isOnly('direction', 'in') ? 'showing only these · click to show all' : `${summary?.ins ?? 0} movements in`}
+          onClick={() => toggleOnly('direction', 'in')}
+          active={isOnly('direction', 'in')}
+        />
+        <KpiTile
+          icon={ArrowUpFromLine}
+          tone={TONE.rose}
+          label="Went out"
+          value={rupees(summary?.outValue ?? 0)}
+          valueClass="text-rose-500"
+          sub={isOnly('direction', 'out') ? 'showing only these · click to show all' : `${summary?.outs ?? 0} movements out`}
+          onClick={() => toggleOnly('direction', 'out')}
+          active={isOnly('direction', 'out')}
+        />
+        <KpiTile
+          icon={Users}
+          tone={TONE.sky}
+          label="Customers' material"
+          value={String(customerCount)}
+          sub={isOnly('owner', 'CUSTOMER_OWNED') ? 'showing only these · click to show all' : 'movements of job-work material'}
           onClick={() => toggleOnly('owner', 'CUSTOMER_OWNED')}
-        >
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Users size={13} /> Customers&apos; material
-          </p>
-          <p className="mt-1 text-lg font-bold text-sky-400 tabular-nums sm:text-2xl">{customerCount}</p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
-            {isOnly('owner', 'CUSTOMER_OWNED') ? 'showing only these · click to show all' : 'movements of job-work material'}
-          </p>
-        </button>
+          active={isOnly('owner', 'CUSTOMER_OWNED')}
+        />
       </div>
       )}
 
       {view === 'dashboard' && (
         <>
           {/* What the period says, in four lines. */}
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <div className="glass-card p-4">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Scale size={13} /> Net change
-              </p>
-              <p className={`mt-1 text-lg font-bold tabular-nums sm:text-2xl ${net >= 0 ? 'text-emerald-500' : 'text-red-400'}`}>
-                {net >= 0 ? '+' : ''}
-                {rupees(net)}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                in {rupees(summary?.inValue ?? 0)} · out {rupees(summary?.outValue ?? 0)}
-              </p>
-            </div>
-            <button
-              type="button"
-              className={card(false)}
-              disabled={!insight.busiest}
-              onClick={() => insight.busiest && showDay(insight.busiest.day)}
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <KpiTile
+              icon={Scale}
+              tone={net >= 0 ? TONE.emerald : TONE.rose}
+              label="Net change"
+              value={`${net >= 0 ? '+' : ''}${rupees(net)}`}
+              valueClass={net >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500'}
+              sub={`in ${rupees(summary?.inValue ?? 0)} · out ${rupees(summary?.outValue ?? 0)}`}
+            />
+            <KpiTile
+              icon={Flame}
+              tone={TONE.amber}
+              label="Busiest day"
+              value={insight.busiest ? dayTitle(insight.busiest.day).replace(/,? \d{4}$/, '') : '—'}
+              sub={insight.busiest ? `${insight.busiest.moves} movements · click to see them` : 'no movements'}
+              onClick={insight.busiest ? () => showDay(insight.busiest!.day) : undefined}
               title="Click to see that day"
-            >
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Flame size={13} className="text-amber-400" /> Busiest day
-              </p>
-              <p className="mt-1 text-lg font-bold text-foreground sm:text-2xl">
-                {insight.busiest ? dayTitle(insight.busiest.day).replace(/,? \d{4}$/, '') : '—'}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {insight.busiest ? `${insight.busiest.moves} movements · click to see them` : 'no movements'}
-              </p>
-            </button>
-            <button type="button" className={card(false)} onClick={() => setView('movements')} title="See the movements">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Boxes size={13} /> Items moved
-              </p>
-              <p className="mt-1 text-lg font-bold text-foreground tabular-nums sm:text-2xl">{summary?.items ?? 0}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                in {summary?.stores ?? 0} stores · {(summary?.total ?? 0).toLocaleString('en-IN')} movements
-              </p>
-            </button>
-            <div className="glass-card p-4">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Gauge size={13} /> Average a day
-              </p>
-              <p className="mt-1 text-lg font-bold text-foreground tabular-nums sm:text-2xl">
-                {insight.perDay.toLocaleString('en-IN', { maximumFractionDigits: 1 })}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                movements, over {insight.activeDays} {insight.activeDays === 1 ? 'day' : 'days'} with any
-              </p>
-            </div>
+            />
+            <KpiTile
+              icon={Boxes}
+              tone={TONE.blue}
+              label="Items moved"
+              value={String(summary?.items ?? 0)}
+              sub={`in ${summary?.stores ?? 0} stores · ${(summary?.total ?? 0).toLocaleString('en-IN')} movements`}
+              onClick={() => setView('movements')}
+              title="See the movements"
+            />
+            <KpiTile
+              icon={Gauge}
+              tone={TONE.violet}
+              label="Average a day"
+              value={insight.perDay.toLocaleString('en-IN', { maximumFractionDigits: 1 })}
+              sub={`movements, over ${insight.activeDays} ${insight.activeDays === 1 ? 'day' : 'days'} with any`}
+            />
           </div>
 
           {/* The shape of it: value in and out over the period, and what kind of movements they were. */}
           {/* A chart of its own kind for each question. Clicking a part filters by it. */}
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid gap-5 lg:grid-cols-3">
             <ChartCard
+              icon={LineChart}
               className="lg:col-span-2"
               title={`Flow ${bars[0] ? `by ${bars[0].unit}` : ''}`}
-              hint="value in above the line, out below it; the line is how many movements · click a bar to see that period"
+              hint="Value in above the line, out below it; the line and the figures under the dates are movements. Click a bar to see that period."
             >
               <FlowChart data={bars} onPick={(f, t) => { setFrom(f); setTo(t); setPreset('custom') }} />
             </ChartCard>
-            <ChartCard title="Mix of movements" hint="click a slice to show only those">
+            <ChartCard icon={PieIcon} title="Mix of movements" hint="Click a slice to show only those">
               <MovementDonut data={movementMix} picked={picked.movement ?? []} onPick={(v) => toggleOne('movement', v)} />
             </ChartCard>
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-2">
-            <ChartCard title="By store" hint="value in and out of each store · click a store to filter">
+          <div className="grid gap-5 lg:grid-cols-2">
+            <ChartCard icon={WarehouseIcon} title="By store" hint="Value in and out of each store. Click a store to filter.">
               <StoreColumns data={groups(analysis?.byStore)} onPick={(v) => toggleOne('store', v)} />
             </ChartCard>
-            <ChartCard title="By category" hint="the bigger the box, the more value moved · click one to filter">
+            <ChartCard icon={LayoutGrid} title="By category" hint="The bigger the box, the more value moved. Click one to filter.">
               <CategoryTreemap data={groups(analysis?.byCategory)} onPick={(v) => toggleOne('category', v)} />
             </ChartCard>
-            <ChartCard title="By department" hint="how many movements in and out for each department's items">
+            <ChartCard icon={RadarIcon} title="By department" hint="Movements in and out for each department's items">
               <DepartmentRadar
                 data={groups(analysis?.byDepartment, (g) => (g.value === 'none' ? 'No department' : null))}
               />
             </ChartCard>
-            <ChartCard title="By document" hint="what caused the movements · click one to filter">
+            <ChartCard icon={FileText} title="By document" hint="What caused the movements. Click one to filter.">
               <DocumentBars
                 data={groups(analysis?.byDocument, (g) => (g.value === 'none' ? 'No document' : docLabel(g.value)))}
                 onPick={(v) => toggleOne('document', v)}
@@ -833,10 +814,15 @@ function LedgerScreen() {
           </div>
 
           {/* The items that moved the most money, in and out together. */}
-          <div className="glass-card p-0 overflow-hidden">
-            <div className="flex items-baseline justify-between px-4 pt-4">
-              <p className="text-sm font-medium text-foreground">Items that moved the most value</p>
-              <p className="text-[11px] text-muted-foreground">top 10 · click one for its movements</p>
+          <div className="glass-card overflow-hidden rounded-xl p-0">
+            <div className="flex items-start gap-3 px-5 pt-5">
+              <span className="bg-primary/10 text-primary flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
+                <Boxes size={16} />
+              </span>
+              <div>
+                <h3 className="text-[15px] font-semibold leading-tight text-foreground">Items that moved the most value</h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">Top 10 — click one for its movements</p>
+              </div>
             </div>
             {!analysis ? (
               <p className="px-4 py-8 text-center text-xs text-muted-foreground">Loading...</p>

@@ -6,11 +6,13 @@ import Link from 'next/link'
 import {
   Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, FileSpreadsheet, CalendarDays,
   List, LayoutDashboard, FileText, Boxes, AlertTriangle, Users, Warehouse as WarehouseIcon, PackageCheck,
+  LineChart, Target, PieChart as PieIcon,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { CustomerMaterialDialog } from '@/components/inventory/CustomerMaterialDialog'
 import { ImportCustomerMaterialDialog } from '@/components/inventory/ImportCustomerMaterialDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
+import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
 import {
   ArrivalGauge, CategoryDonut, CustomerBars, ReceiptTrend, StoreColumns,
@@ -479,8 +481,6 @@ function CustomerMaterialScreen() {
     return [...m.values()].sort((a, b) => b.received + b.held - (a.received + a.held))
   })()
 
-  const card = (active: boolean) =>
-    `glass-card p-4 text-left transition-colors hover:border-primary/50 ${active ? 'border-primary ring-2 ring-primary/30' : ''}`
 
   const pages = Math.ceil(shown.length / PAGE) || 1
   const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
@@ -644,48 +644,36 @@ function CustomerMaterialScreen() {
 
       {view === 'receipts' && (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <button type="button" className={card(false)} onClick={clearAll} title="Clear every filter">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <FileText size={13} /> Receipts
-              </p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-foreground sm:text-2xl">{figures.receipts}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {figures.customers} {figures.customers === 1 ? 'customer' : 'customers'}
-                {narrowed ? ' · click to show all' : ''}
-              </p>
-            </button>
-            <div className="glass-card p-4">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Boxes size={13} /> Items received
-              </p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-foreground sm:text-2xl">{figures.items}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">one row each below</p>
-            </div>
-            <button
-              type="button"
-              className={card(isSet('arrival', ['short', 'excess']))}
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <KpiTile
+              icon={FileText}
+              tone={TONE.teal}
+              label="Receipts"
+              value={String(figures.receipts)}
+              sub={`${figures.customers} ${figures.customers === 1 ? 'customer' : 'customers'}${narrowed ? ' · click to show all' : ''}`}
+              onClick={clearAll}
+              title="Clear every filter"
+            />
+            <KpiTile icon={Boxes} tone={TONE.blue} label="Items received" value={String(figures.items)} sub="one row each below" />
+            <KpiTile
+              icon={AlertTriangle}
+              tone={TONE.amber}
+              label="Not as per challan"
+              value={String(figures.mismatched)}
+              valueClass={figures.mismatched ? 'text-amber-500' : 'text-foreground'}
+              sub={isSet('arrival', ['short', 'excess']) ? 'showing only these · click to show all' : 'items short or more than their challan'}
               onClick={() => toggleTo('arrival', ['short', 'excess'])}
-            >
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <AlertTriangle size={13} className="text-amber-400" /> Not as per challan
-              </p>
-              <p className={`mt-1 text-lg font-bold tabular-nums sm:text-2xl ${figures.mismatched ? 'text-amber-400' : 'text-foreground'}`}>
-                {figures.mismatched}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {isSet('arrival', ['short', 'excess']) ? 'showing only these · click to show all' : 'items short or more than their challan'}
-              </p>
-            </button>
-            <button type="button" className={card(isSet('status', ['cancelled']))} onClick={() => toggleTo('status', ['cancelled'])}>
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Ban size={13} /> Cancelled
-              </p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-foreground sm:text-2xl">{figures.cancelled}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {isSet('status', ['cancelled']) ? 'showing only these · click to show all' : 'receipts taken back off the books'}
-              </p>
-            </button>
+              active={isSet('arrival', ['short', 'excess'])}
+            />
+            <KpiTile
+              icon={Ban}
+              tone={TONE.rose}
+              label="Cancelled"
+              value={String(figures.cancelled)}
+              sub={isSet('status', ['cancelled']) ? 'showing only these · click to show all' : 'receipts taken back off the books'}
+              onClick={() => toggleTo('status', ['cancelled'])}
+              active={isSet('status', ['cancelled'])}
+            />
           </div>
 
           <div className="glass-card overflow-hidden p-0">
@@ -808,49 +796,36 @@ function CustomerMaterialScreen() {
 
       {view === 'dashboard' && (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <div className="glass-card p-4">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Users size={13} /> Customers&apos; material here
-              </p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-sky-400 sm:text-2xl">
-                {new Set(heldShown.map((h) => h.customerId)).size}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">customers with something in our stores now</p>
-            </div>
-            <div className="glass-card p-4">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <PackageCheck size={13} /> Items still with us
-              </p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-foreground sm:text-2xl">{heldShown.length}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">item and store together, listed below</p>
-            </div>
-            <div className="glass-card p-4">
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <FileText size={13} /> Received
-              </p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-foreground sm:text-2xl">{live.length}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                items on {new Set(live.map((r) => r.receiptId)).size} receipts
-              </p>
-            </div>
-            <button type="button" className={card(isSet('arrival', ['short']))} onClick={() => toggleTo('arrival', ['short'])}>
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <AlertTriangle size={13} className="text-red-400" /> Arrived short
-              </p>
-              <p className={`mt-1 text-lg font-bold tabular-nums sm:text-2xl ${arrival.short ? 'text-red-400' : 'text-foreground'}`}>
-                {arrival.short}
-              </p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
-                {live.length ? `${Math.round((arrival.short / live.length) * 100)}% of items · click to filter` : 'nothing received'}
-              </p>
-            </button>
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+            <KpiTile
+              icon={Users}
+              tone={TONE.sky}
+              label="Customers' material here"
+              value={String(new Set(heldShown.map((h) => h.customerId)).size)}
+              sub="customers with something in our stores now"
+            />
+            <KpiTile icon={PackageCheck} tone={TONE.teal} label="Items still with us" value={String(heldShown.length)} sub="item and store together, listed below" />
+            <KpiTile
+              icon={FileText}
+              tone={TONE.blue}
+              label="Received"
+              value={String(live.length)}
+              sub={`items on ${new Set(live.map((r) => r.receiptId)).size} receipts`}
+            />
+            <KpiTile
+              icon={AlertTriangle}
+              tone={TONE.rose}
+              label="Arrived short"
+              value={String(arrival.short)}
+              valueClass={arrival.short ? 'text-rose-500' : 'text-foreground'}
+              sub={live.length ? `${Math.round((arrival.short / live.length) * 100)}% of items · click to filter` : 'nothing received'}
+              onClick={() => toggleTo('arrival', ['short'])}
+              active={isSet('arrival', ['short'])}
+            />
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-3">
-            <div className="glass-card p-4 lg:col-span-2">
-              <p className="text-sm font-medium text-foreground">Receipts over time</p>
-              <p className="mb-2 text-[11px] text-muted-foreground">items and receipts booked in · click a point to see that period</p>
+          <div className="grid gap-5 lg:grid-cols-3">
+            <DashCard className="lg:col-span-2" icon={LineChart} title="Receipts over time" hint="Items and receipts booked in. Click a point to see that period.">
               <ReceiptTrend
                 data={trend}
                 onPick={(f, t) => {
@@ -859,39 +834,34 @@ function CustomerMaterialScreen() {
                   setPreset('custom')
                 }}
               />
-            </div>
-            <div className="glass-card p-4">
-              <p className="text-sm font-medium text-foreground">Against their challan</p>
-              <p className="mb-2 text-[11px] text-muted-foreground">how often what arrived matched their paperwork</p>
+            </DashCard>
+            <DashCard icon={Target} title="Against their challan" hint="How often what arrived matched their paperwork">
               <ArrivalGauge matched={arrival.match} short={arrival.short} excess={arrival.excess} onPick={(v) => toggleTo('arrival', [v])} />
-            </div>
+            </DashCard>
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-3">
-            <div className="glass-card p-4">
-              <p className="text-sm font-medium text-foreground">By customer</p>
-              <p className="mb-2 text-[11px] text-muted-foreground">items received · click one to filter</p>
+          <div className="grid gap-5 lg:grid-cols-3">
+            <DashCard icon={Users} title="By customer" hint="Items received. Click one to filter.">
               <CustomerBars data={slices('customer', (r) => r.customerName)} picked={picked.customer ?? []} onPick={(v) => toggleOne('customer', v)} />
-            </div>
-            <div className="glass-card p-4">
-              <p className="text-sm font-medium text-foreground">By category</p>
-              <p className="mb-2 text-[11px] text-muted-foreground">share of items received · click a slice to filter</p>
+            </DashCard>
+            <DashCard icon={PieIcon} title="By category" hint="Share of items received. Click a slice to filter.">
               <CategoryDonut data={slices('category', (r) => r.mainCategoryName)} picked={picked.category ?? []} onPick={(v) => toggleOne('category', v)} />
-            </div>
-            <div className="glass-card p-4">
-              <p className="text-sm font-medium text-foreground">By store</p>
-              <p className="mb-2 text-[11px] text-muted-foreground">items received, and items still there now</p>
+            </DashCard>
+            <DashCard icon={WarehouseIcon} title="By store" hint="Items received, and items still there now">
               <StoreColumns data={storeCols} onPick={(v) => toggleOne('store', v)} />
-            </div>
+            </DashCard>
           </div>
 
           {/* What the customer will ask about: what of theirs is still here. */}
-          <div className="glass-card overflow-hidden p-0">
-            <div className="flex items-baseline justify-between px-4 pt-4">
-              <p className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                <WarehouseIcon size={15} className="text-primary" /> Still with us
-              </p>
-              <p className="text-[11px] text-muted-foreground">from the stock ledger, today</p>
+          <div className="glass-card overflow-hidden rounded-xl p-0">
+            <div className="flex items-start gap-3 px-5 pt-5">
+              <span className="bg-primary/10 text-primary flex h-8 w-8 shrink-0 items-center justify-center rounded-lg">
+                <WarehouseIcon size={16} />
+              </span>
+              <div>
+                <h3 className="text-[15px] font-semibold leading-tight text-foreground">Still with us</h3>
+                <p className="mt-0.5 text-xs text-muted-foreground">What of each customer&apos;s is in our stores today, from the stock ledger</p>
+              </div>
             </div>
             {heldShown.length === 0 ? (
               <p className="px-4 py-8 text-center text-xs text-muted-foreground">No customer material in our stores.</p>
