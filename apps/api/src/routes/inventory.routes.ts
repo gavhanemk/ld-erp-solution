@@ -14,6 +14,7 @@ import {
   transferStock,
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
+import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
@@ -1708,95 +1709,105 @@ const jobWorkInclude = {
  * that everywhere the ledger is read rather than only on the two screens that
  * remember to filter. The quantity is real; the value is not ours to claim.
  */
-router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const data = createCustomerGrnSchema.parse(req.body)
+/**
+ * One customer receipt, written and put on the books: the document, its lines,
+ * and a CUSTOMER_OWNED movement for each. Shared by the form and the import,
+ * so a receipt from a spreadsheet is checked and booked exactly as one typed in.
+ */
+async function createCustomerGrn(
+  tx: Prisma.TransactionClient,
+  data: ReturnType<typeof createCustomerGrnSchema.parse>,
+  userId: string | null,
+) {
   const when = data.receiptDate ?? new Date()
+  const [customer, warehouse] = await Promise.all([
+    tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true, isActive: true } }),
+    tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true, isActive: true } }),
+  ])
+  if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+  if (!warehouse.isActive) {
+    throw new AppError(
+      `${warehouse.name} is no longer in use. Pick another store for these goods.`,
+      400,
+      'WAREHOUSE_INACTIVE',
+    )
+  }
 
-  const grn = await prisma.$transaction(async (tx) => {
-    const [customer, warehouse] = await Promise.all([
-      tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true, isActive: true } }),
-      tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true, isActive: true } }),
-    ])
-    if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
-    if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
-    if (!warehouse.isActive) {
+  if (data.soId) {
+    const so = await tx.salesOrder.findUnique({
+      where: { id: data.soId },
+      select: { id: true, customerId: true, soNumber: true },
+    })
+    if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
+    if (so.customerId !== data.customerId) {
       throw new AppError(
-        `${warehouse.name} is no longer in use. Pick another store for these goods.`,
+        `${so.soNumber} belongs to a different customer. Pick the right order, or leave it blank.`,
         400,
-        'WAREHOUSE_INACTIVE',
+        'ORDER_NOT_THEIRS',
       )
     }
+  }
 
-    if (data.soId) {
-      const so = await tx.salesOrder.findUnique({
-        where: { id: data.soId },
-        select: { id: true, customerId: true, soNumber: true },
-      })
-      if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
-      if (so.customerId !== data.customerId) {
-        throw new AppError(
-          `${so.soNumber} belongs to a different customer. Pick the right order, or leave it blank.`,
-          400,
-          'ORDER_NOT_THEIRS',
-        )
-      }
-    }
+  const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
 
-    const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
-
-    const created = await tx.customerGRN.create({
-      data: {
-        grnNumber,
-        customerId: data.customerId,
-        soId: data.soId ?? null,
-        warehouseId: data.warehouseId,
-        receiptDate: when,
-        challanNumber: data.challanNumber ?? null,
-        challanDate: data.challanDate ?? null,
-        gateEntryNumber: data.gateEntryNumber ?? null,
-        gateEntryDate: data.gateEntryDate ?? null,
-        vehicleNo: data.vehicleNo ?? null,
-        transporter: data.transporter ?? null,
-        notes: data.notes ?? null,
-        receivedById: req.user?.id ?? null,
-        lines: {
-          create: data.lines.map((l) => ({
-            itemId: l.itemId,
-            challanQty: l.challanQty,
-            receivedQty: l.receivedQty,
-            batchNumber: l.batchNumber ?? null,
-            markings: l.markings ?? null,
-          })),
-        },
+  const created = await tx.customerGRN.create({
+    data: {
+      grnNumber,
+      customerId: data.customerId,
+      soId: data.soId ?? null,
+      warehouseId: data.warehouseId,
+      receiptDate: when,
+      challanNumber: data.challanNumber ?? null,
+      challanDate: data.challanDate ?? null,
+      gateEntryNumber: data.gateEntryNumber ?? null,
+      gateEntryDate: data.gateEntryDate ?? null,
+      vehicleNo: data.vehicleNo ?? null,
+      transporter: data.transporter ?? null,
+      notes: data.notes ?? null,
+      receivedById: userId,
+      lines: {
+        create: data.lines.map((l) => ({
+          itemId: l.itemId,
+          challanQty: l.challanQty,
+          receivedQty: l.receivedQty,
+          batchNumber: l.batchNumber ?? null,
+          markings: l.markings ?? null,
+        })),
       },
-      include: { lines: true },
-    })
-
-    for (const line of created.lines) {
-      await recordMovement(tx, {
-        itemId: line.itemId,
-        warehouseId: data.warehouseId,
-        transactionType: 'CUSTOMER_MATERIAL',
-        direction: 'IN',
-        qty: Number(line.receivedQty),
-        // Not ours, so it carries no value to us and never reaches the stock
-        // figure or the balance sheet.
-        unitRate: 0,
-        ownership: 'CUSTOMER_OWNED',
-        ownerCustomerId: data.customerId,
-        batchNumber: line.batchNumber,
-        referenceType: 'CUSTOMER_GRN',
-        referenceId: created.id,
-        transactionDate: when,
-        notes: `${grnNumber}: ${customer.name}`,
-      })
-    }
-
-    return tx.customerGRN.findUniqueOrThrow({
-      where: { id: created.id },
-      include: customerGrnInclude,
-    })
+    },
+    include: { lines: true },
   })
+
+  for (const line of created.lines) {
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: data.warehouseId,
+      transactionType: 'CUSTOMER_MATERIAL',
+      direction: 'IN',
+      qty: Number(line.receivedQty),
+      // Not ours, so it carries no value to us and never reaches the stock
+      // figure or the balance sheet.
+      unitRate: 0,
+      ownership: 'CUSTOMER_OWNED',
+      ownerCustomerId: data.customerId,
+      batchNumber: line.batchNumber,
+      referenceType: 'CUSTOMER_GRN',
+      referenceId: created.id,
+      transactionDate: when,
+      notes: `${grnNumber}: ${customer.name}`,
+    })
+  }
+
+  return tx.customerGRN.findUniqueOrThrow({
+    where: { id: created.id },
+    include: customerGrnInclude,
+  })
+}
+
+router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createCustomerGrnSchema.parse(req.body)
+  const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null))
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -1850,6 +1861,172 @@ router.get('/customer-grn', requirePermission(MODULE, 'view'), async (req, res) 
     success: true,
     data: rows,
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+  })
+})
+
+/*
+ * Every line of every receipt, one row each, with the receipt's own details
+ * and what the item is — for the screen's table, filters, figures and export,
+ * which all work on the same rows. Alongside, what of each customer's is still
+ * in our stores now, from the ledger. Ahead of /customer-grn/:id.
+ */
+router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [receipts, held] = await Promise.all([
+    prisma.customerGRN.findMany({
+      orderBy: [{ receiptDate: 'desc' }, { createdAt: 'desc' }],
+      take: 2000,
+      include: {
+        customer: { select: { id: true, name: true } },
+        so: { select: { id: true, soNumber: true } },
+        warehouse: { select: { id: true, name: true } },
+        receivedBy: { select: { id: true, name: true } },
+        lines: {
+          include: {
+            item: {
+              select: {
+                id: true, code: true, name: true, type: true, uom: { select: { symbol: true } },
+                category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+                department: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
+    }),
+    onHand(prisma, { ownership: 'CUSTOMER_OWNED' }),
+  ])
+
+  type ItemAbout = {
+    type: string
+    category: { id: string; name: string; parent: { id: string; name: string } | null }
+    department: { id: string; name: string } | null
+  }
+  const about = (it: ItemAbout) => ({
+    itemType: it.type,
+    mainCategoryId: it.category.parent?.id ?? it.category.id,
+    mainCategoryName: it.category.parent?.name ?? it.category.name,
+    subCategoryId: it.category.parent ? it.category.id : null,
+    subCategoryName: it.category.parent ? it.category.name : null,
+    departmentId: it.department?.id ?? null,
+    departmentName: it.department?.name ?? null,
+  })
+
+  const data = receipts.flatMap((r) =>
+    r.lines.map((l) => ({
+      id: l.id,
+      receiptId: r.id,
+      grnNumber: r.grnNumber,
+      receiptDate: r.receiptDate,
+      challanNumber: r.challanNumber,
+      challanDate: r.challanDate,
+      gateEntryNumber: r.gateEntryNumber,
+      vehicleNo: r.vehicleNo,
+      transporter: r.transporter,
+      notes: r.notes,
+      cancelledAt: r.cancelledAt,
+      cancelReason: r.cancelReason,
+      customerId: r.customer.id,
+      customerName: r.customer.name,
+      soNumber: r.so?.soNumber ?? null,
+      warehouseId: r.warehouse.id,
+      warehouseName: r.warehouse.name,
+      receivedByName: r.receivedBy?.name ?? null,
+      lineCount: r.lines.length,
+      itemId: l.item.id,
+      itemCode: l.item.code,
+      itemName: l.item.name,
+      uom: l.item.uom?.symbol ?? '',
+      ...about(l.item),
+      challanQty: Number(l.challanQty),
+      receivedQty: Number(l.receivedQty),
+      batchNumber: l.batchNumber,
+      markings: l.markings,
+    })),
+  )
+
+  const heldIds = [...new Set(held.map((h) => h.itemId))]
+  const heldItems = await prisma.item.findMany({
+    where: { id: { in: heldIds } },
+    select: {
+      id: true, type: true,
+      category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+      department: { select: { id: true, name: true } },
+    },
+  })
+  const heldAbout = new Map(heldItems.map((i) => [i.id, about(i)]))
+
+  res.json({
+    success: true,
+    data,
+    held: held.map((h) => ({
+      itemId: h.itemId,
+      itemCode: h.itemCode,
+      itemName: h.itemName,
+      uom: h.uom,
+      warehouseId: h.warehouseId,
+      warehouseName: h.warehouseName,
+      customerId: h.ownerCustomerId,
+      customerName: h.ownerName,
+      qty: h.qty,
+      lastMovedAt: h.lastMovedAt,
+      ...heldAbout.get(h.itemId),
+    })),
+  })
+})
+
+// ── Customer receipts from a spreadsheet ────────────────────────────────────
+
+router.get('/customer-grn/import-template', requirePermission(MODULE, 'create'), async (req, res) => {
+  const withCurrent = req.query.withCurrent === 'true'
+  const buffer = await customerMaterialImport.buildTemplate(withCurrent)
+  const name = withCurrent ? 'customer-material-with-receipts.xlsx' : 'customer-material-import-template.xlsx'
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`)
+  res.send(buffer)
+})
+
+router.post('/customer-grn/import', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { fileName, file, confirm } = customerMaterialImport.importBody.parse(req.body)
+  const rows = await customerMaterialImport.readSheet(Buffer.from(file, 'base64'), fileName)
+  const { plans, receipts } = await customerMaterialImport.planImport(rows)
+  const summary = {
+    rows: plans.length,
+    receipts: receipts.length,
+    lines: receipts.reduce((n, r) => n + (r.lines as unknown[]).length, 0),
+    skipped: plans.filter((p) => p.skipped).length,
+    problems: plans.filter((p) => p.problems.length > 0).length,
+  }
+  if (!confirm) return res.json({ success: true, data: { summary, rows: plans } })
+  if (summary.problems) {
+    throw new AppError('Some rows have problems. Fix them in the sheet and try again; nothing was imported.', 400, 'IMPORT_PROBLEMS')
+  }
+
+  // All or nothing: one bad receipt and none of them are booked.
+  const created = await prisma.$transaction(
+    async (tx) => {
+      const out: Array<{ code: string; name: string }> = []
+      for (const r of receipts) {
+        const grn = await createCustomerGrn(tx, createCustomerGrnSchema.parse(r), req.user?.id ?? null)
+        out.push({ code: grn.grnNumber, name: `${grn.customer.name} · ${grn.lines.length} ${grn.lines.length === 1 ? 'item' : 'items'}` })
+      }
+      return out
+    },
+    { timeout: 120000, maxWait: 20000 },
+  )
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'CustomerGRNImport',
+    entityId: `IMPORT-${Date.now()}`,
+    after: { fileName, created },
+  })
+  res.status(201).json({
+    success: true,
+    message: created.length
+      ? `Imported ${created.length} ${created.length === 1 ? 'receipt' : 'receipts'}.`
+      : 'Nothing to import: every receipt in the sheet is already in the system.',
+    data: { summary, created },
   })
 })
 
