@@ -92,9 +92,11 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     ...(lineInCategory ? { lines: { some: lineInCategory } } : {}),
   }
 
-  // One read: the period (and the one before it, for comparison) plus every
-  // order that is still open whenever it was raised.
+  // One read: the period (and the one before it, for comparison), every order
+  // still open whenever it was raised, and the last year's orders — goods
+  // received and not yet billed are somebody's job whatever period is picked.
   const earliest = prevFrom ?? from
+  const yearAgo = new Date(today.getTime() - 365 * DAY_MS)
   const orders = await prisma.purchaseOrder.findMany({
     where: {
       ...base,
@@ -106,6 +108,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
             OR: [
               { poDate: { ...(earliest ? { gte: earliest } : {}), ...(to ? { lte: to } : {}) } },
               { status: { in: ['DRAFT', 'SENT', 'PARTIALLY_RECEIVED'] as const } },
+              { poDate: { gte: yearAgo } },
             ],
           }
         : {}),
@@ -121,12 +124,14 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
         ...(lineInCategory ? { where: lineInCategory } : {}),
         select: {
           qty: true,
+          unitRate: true,
           amount: true,
           shortClosed: true,
           item: {
             select: {
               id: true,
               name: true,
+              uom: { select: { symbol: true } },
               category: {
                 select: { id: true, name: true, parent: { select: { id: true, name: true } } },
               },
@@ -157,7 +162,15 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     let billed = 0
     let paid = 0
     const receipts = new Map<string, Date>()
-    const items: Array<{ id: string; name: string; category: { id: string; name: string }; value: number }> = []
+    const items: Array<{
+      id: string
+      name: string
+      uom: string
+      category: { id: string; name: string }
+      value: number
+      qty: number
+      rate: number
+    }> = []
 
     for (const l of o.lines) {
       const qty = Number(l.qty)
@@ -182,7 +195,15 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       }
       // Rolled up to the top of the tree: "Yarn", not "Yarn › 30s combed".
       const cat = l.item.category.parent ?? l.item.category
-      items.push({ id: l.item.id, name: l.item.name, category: { id: cat.id, name: cat.name }, value: amount })
+      items.push({
+        id: l.item.id,
+        name: l.item.name,
+        uom: l.item.uom?.symbol ?? '',
+        category: { id: cat.id, name: cat.name },
+        value: amount,
+        qty,
+        rate: Number(l.unitRate),
+      })
     }
 
     const receiptDates = [...receipts.values()].sort((a, b) => a.getTime() - b.getTime())
@@ -203,6 +224,8 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       pending: r2(pending),
       billed: r2(billed),
       paid: r2(paid),
+      // Goods in the gate with no supplier's bill against them yet.
+      unbilled: r2(Math.max(0, received - billed)),
       receiptDates,
       firstReceipt,
       onTime,
@@ -281,8 +304,17 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     receivedPct: r.ordered > 0 ? r.received / r.ordered : null,
   })
 
+  // Received but not billed, oldest delivery first to chase. A rupee of
+  // rounding between a receipt and its bill is not a bill to chase.
+  const unbilled = rows
+    .filter((r) => r.status !== 'CANCELLED' && r.unbilled >= 1 && r.receiptDates.length)
+    .map((r) => ({ ...r, sinceReceipt: daysBetween(r.receiptDates[r.receiptDates.length - 1], today) }))
+    .sort((a, b) => b.unbilled - a.unbilled)
+
   const now = {
     kpis: {
+      unbilledOrders: unbilled.length,
+      unbilledValue: r2(unbilled.reduce((s, r) => s + r.unbilled, 0)),
       openOrders: open.length,
       openValue: r2(open.reduce((s, r) => s + r.pending, 0)),
       overdueOrders: overdue.length,
@@ -302,6 +334,11 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       .map((r) => ({ ...brief(r), ageDays: daysBetween(r.poDate, today) }))
       .sort((a, b) => b.ageDays - a.ageDays)
       .slice(0, 8),
+    unbilled: unbilled.slice(0, 10).map((r) => ({
+      ...brief(r),
+      unbilled: r.unbilled,
+      sinceReceipt: r.sinceReceipt,
+    })),
   }
 
   /* =================== THE PERIOD =================== */
@@ -446,6 +483,89 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     })),
   }
 
+  /*
+   * One row per supplier: what was ordered from them in the period, how they
+   * delivered, and what is still outstanding with them today. The last two
+   * columns are not limited to the period — a supplier with nothing ordered
+   * this month can still owe goods, or a bill, from last month.
+   */
+  const card = new Map<
+    string,
+    (typeof suppliers)[number] & { open: number; unbilled: number; share: number | null }
+  >()
+  for (const s of suppliers) card.set(s.id, { ...s, open: 0, unbilled: 0, share: null })
+  const cardFor = (r: (typeof rows)[number]) => {
+    const got = card.get(r.supplier.id)
+    if (got) return got
+    const fresh = {
+      id: r.supplier.id,
+      name: r.supplier.name,
+      value: 0,
+      orders: 0,
+      onTime: 0,
+      late: 0,
+      onTimeRate: null,
+      avgLead: null,
+      open: 0,
+      unbilled: 0,
+      share: null,
+    }
+    card.set(r.supplier.id, fresh)
+    return fresh
+  }
+  for (const r of open) cardFor(r).open += r.pending
+  for (const r of unbilled) cardFor(r).unbilled += r.unbilled
+  const scorecard = [...card.values()]
+    .map((s) => ({
+      ...s,
+      open: r2(s.open),
+      unbilled: r2(s.unbilled),
+      share: orderedValue > 0 ? s.value / orderedValue : null,
+    }))
+    .sort((a, b) => b.value - a.value || b.open - a.open)
+
+  /*
+   * Price watch: an item bought more than once in the period, its latest rate
+   * against its usual one. The usual rate is weighted by quantity, so a
+   * sample of two metres does not count for as much as a roll of two thousand.
+   */
+  const rateLines = new Map<
+    string,
+    { id: string; name: string; uom: string; lines: Array<{ rate: number; qty: number; poNumber: string; date: Date }> }
+  >()
+  for (const r of [...live].sort((a, b) => a.poDate.getTime() - b.poDate.getTime())) {
+    for (const it of r.items) {
+      if (it.rate <= 0 || it.qty <= 0) continue
+      const e = rateLines.get(it.id) ?? { id: it.id, name: it.name, uom: it.uom, lines: [] }
+      e.lines.push({ rate: it.rate, qty: it.qty, poNumber: r.poNumber, date: r.poDate })
+      rateLines.set(it.id, e)
+    }
+  }
+  const priceWatch = [...rateLines.values()]
+    .filter((e) => e.lines.length >= 2)
+    .map((e) => {
+      const qty = e.lines.reduce((s, l) => s + l.qty, 0)
+      const avg = e.lines.reduce((s, l) => s + l.rate * l.qty, 0) / qty
+      const latest = e.lines[e.lines.length - 1]
+      const rates = e.lines.map((l) => l.rate)
+      return {
+        id: e.id,
+        name: e.name,
+        uom: e.uom,
+        buys: e.lines.length,
+        avgRate: r2(avg),
+        minRate: Math.min(...rates),
+        maxRate: Math.max(...rates),
+        latestRate: latest.rate,
+        latestPo: latest.poNumber,
+        latestDate: isoDay(latest.date),
+        change: avg > 0 ? latest.rate / avg - 1 : null,
+        history: e.lines.slice(-12).map((l) => ({ rate: l.rate, poNumber: l.poNumber, date: isoDay(l.date) })),
+      }
+    })
+    .sort((a, b) => Math.abs(b.change ?? 0) - Math.abs(a.change ?? 0))
+    .slice(0, 10)
+
   const prevValue = prev ? sum(prev, (r) => r.ordered) : null
   const change = (cur: number, before: number | null) =>
     before == null || before === 0 ? null : (cur - before) / before
@@ -485,10 +605,19 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
       )
     }
   }
-  if (orderedValue > 0 && receivedValue > 0 && billedValue < receivedValue * 0.8) {
+  if (unbilled.length) {
+    const oldest = unbilled.reduce((m, r) => (r.sinceReceipt > m.sinceReceipt ? r : m))
     insights.push(
-      `${inr(receivedValue - billedValue)} of goods received on these orders has not been billed yet — worth chasing the suppliers' invoices.`
+      `${inr(now.kpis.unbilledValue)} of goods is in the gate with no supplier's bill against it, across ${unbilled.length} ${unbilled.length === 1 ? 'order' : 'orders'} — the longest wait is ${oldest.poNumber} from ${oldest.supplier.name}, ${oldest.sinceReceipt} ${oldest.sinceReceipt === 1 ? 'day' : 'days'} since the goods came.`
     )
+  }
+  {
+    const rise = priceWatch.find((p) => (p.change ?? 0) >= 0.05)
+    if (rise) {
+      insights.push(
+        `${rise.name} was last bought at ₹${rise.latestRate.toLocaleString('en-IN')}${rise.uom ? `/${rise.uom}` : ''}, ${Math.round((rise.change ?? 0) * 100)}% above its usual ₹${rise.avgRate.toLocaleString('en-IN')} — worth a word with the supplier before the next order.`
+      )
+    }
   }
   if (drafts.length) {
     const oldest = now.drafts[0]
@@ -566,6 +695,8 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
         topItems,
         leadTime: leadBuckets,
         heatmap,
+        scorecard,
+        priceWatch,
         insights,
       },
     },

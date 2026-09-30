@@ -618,7 +618,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
           <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <Link href="/purchase/orders/dashboard" className="btn-secondary" aria-label="Dashboard">
+          <Link href="/purchase/dashboard" className="btn-secondary" aria-label="Dashboard">
             <LayoutDashboard size={15} /> <span className="hidden md:inline">Dashboard</span>
           </Link>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />

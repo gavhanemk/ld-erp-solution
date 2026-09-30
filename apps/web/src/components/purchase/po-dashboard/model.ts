@@ -27,6 +27,8 @@ export interface DashboardData {
   }
   now: {
     kpis: {
+      unbilledOrders: number
+      unbilledValue: number
       openOrders: number
       openValue: number
       overdueOrders: number
@@ -43,6 +45,7 @@ export interface DashboardData {
     overdue: Array<OrderBrief & { daysLate: number }>
     dueSoon: Array<OrderBrief & { dueIn: number }>
     drafts: Array<OrderBrief & { ageDays: number }>
+    unbilled: Array<OrderBrief & { unbilled: number; sinceReceipt: number }>
   }
   analysis: {
     kpis: {
@@ -86,9 +89,45 @@ export interface DashboardData {
       months: string[]
       rows: Array<{ id: string; name: string; values: Array<number | null> }>
     }
+    scorecard: Array<{
+      id: string
+      name: string
+      value: number
+      orders: number
+      share: number | null
+      onTime: number
+      late: number
+      onTimeRate: number | null
+      avgLead: number | null
+      open: number
+      unbilled: number
+    }>
+    priceWatch: Array<{
+      id: string
+      name: string
+      uom: string
+      buys: number
+      avgRate: number
+      minRate: number
+      maxRate: number
+      latestRate: number
+      latestPo: string
+      latestDate: string
+      change: number | null
+      history: Array<{ rate: number; poNumber: string; date: string }>
+    }>
     insights: string[]
   }
 }
+
+/** The dashboard's three views, each answering one kind of question. */
+export type View = 'overview' | 'suppliers' | 'items'
+
+export const VIEWS: Array<{ key: View; label: string; hint: string }> = [
+  { key: 'overview', label: 'Overview', hint: 'What to chase today, and how ordering has gone' },
+  { key: 'suppliers', label: 'Suppliers', hint: 'Who you buy from, and how they deliver' },
+  { key: 'items', label: 'Items & prices', hint: 'What the money goes on, and what it costs' },
+]
 
 /** Colour by meaning — the same tokens every report in the ERP uses. */
 export const TONE: Record<Tone, string> = {

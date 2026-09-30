@@ -192,17 +192,75 @@ export function ScheduleChart({
  */
 export function TrendChart({ trend }: { trend: DashboardData['analysis']['trend'] }) {
   const reduced = useReducedMotion()
+  // Rupees or a count of orders — two scales, so two views of one chart
+  // rather than a second axis nobody can read against the first.
+  const [measure, setMeasure] = useState<'value' | 'orders'>('value')
   if (!trend.length || !trend.some((t) => t.ordered > 0 || t.received > 0)) {
     return <Empty>No orders were raised in this period.</Empty>
   }
   const legend = (
-    <Legend
-      items={[
-        { label: 'Ordered (by order month)', colour: 'var(--viz-1)' },
-        { label: 'Received (by receipt month)', colour: 'var(--viz-2)' },
-      ]}
-    />
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      {measure === 'value' ? (
+        <Legend
+          items={[
+            { label: 'Ordered (by order month)', colour: 'var(--viz-1)' },
+            { label: 'Received (by receipt month)', colour: 'var(--viz-2)' },
+          ]}
+        />
+      ) : (
+        <p className="text-muted-foreground text-[11px]">Orders raised each month</p>
+      )}
+      <div className="bg-secondary/60 flex rounded-md p-0.5 text-[11px]" role="radiogroup" aria-label="Measure">
+        {(['value', 'orders'] as const).map((m) => (
+          <button
+            key={m}
+            role="radio"
+            aria-checked={measure === m}
+            onClick={() => setMeasure(m)}
+            className={`rounded px-2 py-0.5 font-medium transition-colors ${
+              measure === m ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {m === 'value' ? 'Value' : 'Orders'}
+          </button>
+        ))}
+      </div>
+    </div>
   )
+
+  if (measure === 'orders') {
+    return (
+      <>
+        {legend}
+        <div className="h-64 w-full">
+          <ResponsiveContainer>
+            <BarChart data={trend} margin={{ top: 8, right: 8, left: -16, bottom: 0 }} barCategoryGap="30%">
+              <CartesianGrid stroke={GRID} strokeOpacity={0.6} vertical={false} />
+              <XAxis dataKey="label" tick={AXIS} tickLine={false} axisLine={false} />
+              <YAxis tick={AXIS} tickLine={false} axisLine={false} allowDecimals={false} />
+              <Tooltip
+                cursor={{ fill: 'var(--hover-overlay-strong)' }}
+                content={({ active, payload, label }) => {
+                  if (!active || !payload?.length) return null
+                  const p = payload[0].payload as DashboardData['analysis']['trend'][number]
+                  return (
+                    <Tip
+                      title={String(label)}
+                      rows={[
+                        { label: 'Orders raised', value: String(p.orders), colour: 'var(--viz-1)' },
+                        { label: 'Worth', value: rupees(p.ordered) },
+                      ]}
+                    />
+                  )
+                }}
+              />
+              <Bar dataKey="orders" fill="var(--viz-1)" radius={[4, 4, 0, 0]} maxBarSize={48} isAnimationActive={!reduced} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </>
+    )
+  }
   const tip = ({ active, payload, label }: TooltipProps<number, string>) => {
     if (!active || !payload?.length) return null
     const p = payload[0].payload as DashboardData['analysis']['trend'][number]

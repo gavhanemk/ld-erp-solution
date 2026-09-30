@@ -83,7 +83,10 @@ const navItems: NavItem[] = [
   {
     label: 'Purchase', icon: Package,
     children: [
-      /* First, because it comes first: the buyer sends an enquiry, the
+      /* Ahead of the documents: where the day starts — what is late, what is
+         due, what is waiting to be sent or billed — before opening any list. */
+      { label: 'Dashboard', href: '/purchase/dashboard' },
+      /* Then the enquiry, because it comes first: the buyer sends an enquiry, the
          supplier answers with a proforma invoice, and the order is raised
          against its number. Optional — plenty of orders are placed at a rate
          already known — which is why it reads as a step and not a gate. */
