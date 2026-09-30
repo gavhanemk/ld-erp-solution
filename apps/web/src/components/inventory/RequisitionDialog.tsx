@@ -37,6 +37,7 @@ interface Line {
 interface StockRow {
   itemId: string
   warehouseId: string
+  warehouseName: string
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId: string | null
   ownerName: string | null
@@ -117,6 +118,31 @@ export function RequisitionDialog({
     return l.owner === 'OWNED' ? o.ours : (o.theirs.find((t) => t.id === l.owner)?.qty ?? 0)
   }
 
+  /** Our own stock of every item in the chosen store, for the item list itself. */
+  const oursHere = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const r of stock) {
+      if (r.warehouseId !== warehouseId || r.ownership !== 'OWNED' || r.qty <= 0) continue
+      m.set(r.itemId, (m.get(r.itemId) ?? 0) + r.qty)
+    }
+    return m
+  }, [stock, warehouseId])
+
+  /**
+   * The other store holding most of our own stock of an item. When this store
+   * has none, that is usually a transfer away rather than a purchase.
+   */
+  const elsewhere = (itemId: string) => {
+    const by = new Map<string, { name: string; qty: number }>()
+    for (const r of stock) {
+      if (r.itemId !== itemId || r.warehouseId === warehouseId || r.ownership !== 'OWNED' || r.qty <= 0) continue
+      const cur = by.get(r.warehouseId) ?? { name: r.warehouseName, qty: 0 }
+      cur.qty += r.qty
+      by.set(r.warehouseId, cur)
+    }
+    return [...by.values()].sort((a, b) => b.qty - a.qty)[0] ?? null
+  }
+
   const setLine = (index: number, patch: Partial<Line>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
 
@@ -169,7 +195,7 @@ export function RequisitionDialog({
           Cancel
         </button>
       }
-      footerNote="Three different people on purpose: who asks, who approves, who hands over."
+      footerNote="Someone else approves it, and decides what the store issues and what gets bought."
       error={error}
       onClose={onClose}
       busy={saving}
@@ -197,7 +223,7 @@ export function RequisitionDialog({
           </label>
           <label className="block min-w-0">
             <span className="form-label">
-              Draw from<span className="ml-0.5 text-red-500">*</span>
+              Store to ask<span className="ml-0.5 text-red-500">*</span>
             </span>
             <select
               className="form-input"
@@ -212,6 +238,9 @@ export function RequisitionDialog({
                 </option>
               ))}
             </select>
+            <span className="mt-1 block text-[11px] leading-snug text-muted-foreground">
+              The store that hands it over. What it lacks gets bought.
+            </span>
           </label>
           <label className="block min-w-0">
             <span className="form-label">Needed by</span>
@@ -278,12 +307,50 @@ export function RequisitionDialog({
                       aria-label={`Item on line ${i + 1}`}
                     >
                       <option value="">Choose an item...</option>
-                      {items.map((it) => (
-                        <option key={it.id} value={it.id}>
-                          {it.code} — {it.name}
-                        </option>
-                      ))}
+                      {items.map((it) => {
+                        const q = oursHere.get(it.id) ?? 0
+                        return (
+                          <option key={it.id} value={it.id}>
+                            {it.code} — {it.name}
+                            {warehouseId ? `  ·  ${q ? `${fmt(q)} ${it.uom?.symbol ?? ''} in store` : 'none in store'}` : ''}
+                          </option>
+                        )
+                      })}
                     </select>
+                    {/* What the store can hand over, said the moment the item is
+                      picked, so the person asking knows before they ask
+                      whether it will come off the rack or has to be bought. */}
+                    {line.itemId && !warehouseId && (
+                      <div className="mt-1 text-[11px] text-muted-foreground">Choose the store above to see its stock</div>
+                    )}
+                    {have !== null &&
+                      (() => {
+                        const asked = Number(line.requestedQty) || 0
+                        const other = line.owner === 'OWNED' && have < Math.max(asked, 1e-9) ? elsewhere(line.itemId) : null
+                        const tone = have <= 0 ? 'bg-red-500/10 text-red-500' : short ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                        // A customer's cloth is never bought; the gap is theirs to send.
+                        const ours = line.owner === 'OWNED'
+                        const text =
+                          have <= 0
+                            ? ours
+                              ? 'None in this store · will have to be bought'
+                              : 'None of theirs in this store'
+                            : short
+                              ? ours
+                                ? `Only ${fmt(have)} ${unit} in store · ${fmt(asked - have)} ${unit} to buy`
+                                : `Only ${fmt(have)} ${unit} of theirs here · ${fmt(asked - have)} ${unit} short`
+                              : `${fmt(have)} ${unit} ${ours ? 'in store' : 'of theirs here'}`
+                        return (
+                          <div className="mt-1 space-y-0.5">
+                            <span className={`inline-block rounded-md px-1.5 py-0.5 text-[11px] font-medium ${tone}`}>{text}</span>
+                            {other && (
+                              <div className="text-[11px] text-muted-foreground">
+                                {fmt(other.qty)} {unit} in {other.name}: a transfer may be quicker than buying
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })()}
                   </td>
                   <td className="px-3 py-2">
                     <select
@@ -323,14 +390,6 @@ export function RequisitionDialog({
                       />
                       <span className="text-muted-foreground w-8 text-left text-xs">{unit}</span>
                     </div>
-                    {have !== null && (
-                      <div
-                        className={`mt-0.5 whitespace-nowrap pr-10 text-[10px] ${short ? 'text-amber-400' : 'text-muted-foreground'}`}
-                        title={short ? 'Less than asked: the store can hand over part and owe the rest' : undefined}
-                      >
-                        {fmt(have)} {unit} here{short ? ' · short' : ''}
-                      </div>
-                    )}
                   </td>
                   <td className="px-3 py-2">
                     <input
