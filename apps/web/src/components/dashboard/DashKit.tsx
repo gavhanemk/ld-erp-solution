@@ -153,9 +153,11 @@ export function KpiTile({
         {body}
       </Link>
     )
+  // A button centres what is in it when the row stretches it, so a tile that
+  // filters sat lower than its neighbours; laid out as a column it starts at the top.
   if (onClick)
     return (
-      <button type="button" onClick={onClick} className={cls} title={title}>
+      <button type="button" onClick={onClick} className={cls.replace('block', 'flex flex-col justify-start')} title={title}>
         {body}
       </button>
     )
