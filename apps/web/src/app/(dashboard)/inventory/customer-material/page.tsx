@@ -44,6 +44,9 @@ interface LineRow {
   challanNumber: string | null
   challanDate: string | null
   gateEntryNumber: string | null
+  gateEntryDate?: string | null
+  billNumber?: string | null
+  billDate?: string | null
   vehicleNo: string | null
   transporter: string | null
   notes: string | null
@@ -69,6 +72,8 @@ interface LineRow {
   departmentName: string | null
   challanQty: number
   receivedQty: number
+  /** Of what arrived, how much failed the check. In their stock, flagged to go back. */
+  rejectedQty?: number
   batchNumber: string | null
   markings: string | null
 }
@@ -449,6 +454,9 @@ function CustomerMaterialScreen() {
           'Against Order': r.soNumber ?? '',
           Store: r.warehouseName,
           'Gate Entry No': r.gateEntryNumber ?? '',
+          'Gate Entry Date': r.gateEntryDate ? dayKey(r.gateEntryDate) : '',
+          'Their Bill No': r.billNumber ?? '',
+          'Their Bill Date': r.billDate ? dayKey(r.billDate) : '',
           'Vehicle No': r.vehicleNo ?? '',
           Transport: r.transporter ?? '',
           'Item Code': r.itemCode,
@@ -459,6 +467,8 @@ function CustomerMaterialScreen() {
           'Their Challan Qty': r.challanQty,
           'Arrived Qty': r.receivedQty,
           'Short / Excess': Number((r.receivedQty - r.challanQty).toFixed(3)),
+          'Rejected Qty': r.rejectedQty ?? 0,
+          'Accepted Qty': Number((r.receivedQty - (r.rejectedQty ?? 0)).toFixed(3)),
           Unit: r.uom,
           'Their Markings': r.markings ?? '',
           Status: r.cancelledAt ? 'Cancelled' : 'Active',
@@ -467,7 +477,7 @@ function CustomerMaterialScreen() {
           Note: r.notes ?? '',
         })),
       )
-      sheet['!cols'] = [15, 12, 26, 16, 14, 14, 20, 13, 13, 16, 14, 30, 18, 18, 14, 12, 12, 12, 7, 18, 10, 26, 18, 30].map((wch) => ({ wch }))
+      sheet['!cols'] = [15, 12, 26, 16, 14, 14, 20, 13, 13, 13, 13, 13, 16, 14, 30, 18, 18, 14, 12, 12, 12, 11, 11, 7, 18, 10, 26, 18, 30].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Customer Material')
       if (heldShown.length) {
@@ -820,6 +830,7 @@ function CustomerMaterialScreen() {
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Challan</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Arrived</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Short / extra</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Rejected</th>
                       <th className="whitespace-nowrap">Status</th>
                       <th className="whitespace-nowrap">Markings</th>
                       <th />
@@ -868,6 +879,19 @@ function CustomerMaterialScreen() {
                                 {diff > 0 ? '+' : '−'}
                                 {qtyFmt(Math.abs(diff))} {r.uom}
                               </span>
+                            )}
+                          </td>
+                          {/* Rejected at the gate: still in their stock, to go back on a return challan. */}
+                          <td
+                            className="whitespace-nowrap text-right text-sm tabular-nums"
+                            title={r.rejectedQty ? `Accepted ${qtyFmt(r.receivedQty - r.rejectedQty)} ${r.uom}. The rejected part is in their stock until it goes back on a return challan.` : undefined}
+                          >
+                            {r.rejectedQty ? (
+                              <span className="text-red-500">
+                                {qtyFmt(r.rejectedQty)} {r.uom}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
                             )}
                           </td>
                           <td className="whitespace-nowrap">

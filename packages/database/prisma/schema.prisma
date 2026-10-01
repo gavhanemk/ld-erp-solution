@@ -2341,6 +2341,10 @@ model CustomerGRN {
   /// The mill's own record of the lorry arriving at the gate.
   gateEntryNumber String?
   gateEntryDate   DateTime?
+  /// The customer's bill, where one comes with the goods. The old system asks
+  /// for it beside the challan; a job-work customer often sends one.
+  billNumber      String?
+  billDate        DateTime?
   vehicleNo       String?
   transporter     String?
   /// One store for the whole receipt: a customer's consignment is unloaded in
@@ -2378,6 +2382,10 @@ model CustomerGRNLine {
   /// difference between the two is the short or excess, worked out rather than
   /// typed — a storekeeper counting rolls should not also be doing subtraction.
   receivedQty Decimal     @db.Decimal(10, 3)
+  /// Of what arrived, how much failed the check at the gate. It still goes
+  /// into the customer's stock — it is on our floor — and is flagged so it can
+  /// go back on a return challan. Accepted is received less this.
+  rejectedQty Decimal     @default(0) @db.Decimal(10, 3)
   batchNumber String?
   /// Lot, shade, or whatever the customer wrote on the roll. Free text, because
   /// every customer marks their material differently.

@@ -62,7 +62,7 @@ export function SendJobWorkDialog({
         const [s, i, w] = await Promise.all([
           masterResource<Option>('suppliers').list({ limit: 300 }),
           masterResource<ItemOption>('items').list({ limit: 500 }),
-          masterResource<Option>('warehouses').list({ limit: 100 }),
+          masterResource<Option>('warehouses').list({ limit: 100, active: true }),
         ])
         if (cancelled) return
         setWorkers(s.data)
@@ -363,7 +363,7 @@ export function ReceiveJobWorkDialog({
       try {
         const [i, w] = await Promise.all([
           masterResource<ItemOption>('items').list({ limit: 500 }),
-          masterResource<Option>('warehouses').list({ limit: 100 }),
+          masterResource<Option>('warehouses').list({ limit: 100, active: true }),
         ])
         if (cancelled) return
         setItems(i.data)

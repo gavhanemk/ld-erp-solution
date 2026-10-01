@@ -257,6 +257,9 @@ export const createCustomerGrnSchema = z
     challanDate: z.coerce.date().optional().nullable(),
     gateEntryNumber: z.string().max(50).optional().nullable(),
     gateEntryDate: z.coerce.date().optional().nullable(),
+    /** The customer's bill, where one came with the goods. */
+    billNumber: z.string().max(50).optional().nullable(),
+    billDate: z.coerce.date().optional().nullable(),
     vehicleNo: z.string().max(20, 'That vehicle number is too long').optional().nullable(),
     transporter: z.string().max(120).optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
@@ -268,6 +271,8 @@ export const createCustomerGrnSchema = z
           challanQty: qty,
           /** What actually came off the lorry. */
           receivedQty: qty,
+          /** Of what arrived, how much failed the check. Still booked in, and flagged to go back. */
+          rejectedQty: z.coerce.number().min(0, 'Rejected cannot be below zero').max(9999999).optional().default(0),
           batchNumber: z.string().max(50).optional().nullable(),
           markings: z.string().max(200).optional().nullable(),
         })
@@ -285,6 +290,13 @@ export const createCustomerGrnSchema = z
         })
       }
       seen.add(line.itemId)
+      if ((line.rejectedQty ?? 0) > line.receivedQty) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'rejectedQty'],
+          message: 'More is rejected than arrived. Rejected is part of what arrived.',
+        })
+      }
     })
 
     if (!data.lines.some((l) => l.receivedQty > 0)) {

@@ -2043,6 +2043,8 @@ async function createCustomerGrn(
       challanDate: data.challanDate ?? null,
       gateEntryNumber: data.gateEntryNumber ?? null,
       gateEntryDate: data.gateEntryDate ?? null,
+      billNumber: data.billNumber ?? null,
+      billDate: data.billDate ?? null,
       vehicleNo: data.vehicleNo ?? null,
       transporter: data.transporter ?? null,
       notes: data.notes ?? null,
@@ -2052,6 +2054,7 @@ async function createCustomerGrn(
           itemId: l.itemId,
           challanQty: l.challanQty,
           receivedQty: l.receivedQty,
+          rejectedQty: l.rejectedQty ?? 0,
           batchNumber: l.batchNumber ?? null,
           markings: l.markings ?? null,
         })),
@@ -2102,12 +2105,20 @@ router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: Au
     (n, l) => n + (Number(l.receivedQty) !== Number(l.challanQty) ? 1 : 0),
     0,
   )
+  const rejected = grn.lines.filter((l) => Number(l.rejectedQty) > 0).length
 
   res.status(201).json({
     success: true,
-    message: short
-      ? `${grn.grnNumber} saved. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
-      : `${grn.grnNumber} saved. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
+    message: [
+      short
+        ? `${grn.grnNumber} saved. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
+        : `${grn.grnNumber} saved. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
+      rejected
+        ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material; it is in their stock until it goes back on a return challan.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
     data: grn,
   })
 })
@@ -2201,6 +2212,9 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       challanNumber: r.challanNumber,
       challanDate: r.challanDate,
       gateEntryNumber: r.gateEntryNumber,
+      gateEntryDate: r.gateEntryDate,
+      billNumber: r.billNumber,
+      billDate: r.billDate,
       vehicleNo: r.vehicleNo,
       transporter: r.transporter,
       notes: r.notes,
@@ -2220,6 +2234,7 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       ...about(l.item),
       challanQty: Number(l.challanQty),
       receivedQty: Number(l.receivedQty),
+      rejectedQty: Number(l.rejectedQty),
       batchNumber: l.batchNumber,
       markings: l.markings,
     })),
