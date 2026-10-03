@@ -32,7 +32,13 @@ interface Uom {
   name: string
 }
 
-/** The units an expense is most naturally counted in, best first. */
+/**
+ * The unit a head gets when the buyer leaves it as "Not needed".
+ *
+ * The item master requires a unit on every item, but most expense bills are one
+ * amount — quantity 1 — and asking for a unit there is a question with no
+ * answer. So it is optional on this form and filled from this list, best first.
+ */
 const PREFERRED_UNITS = ['nos', 'job', 'lot', 'each', 'pcs']
 
 export function NewExpenseHeadDialog({
@@ -62,26 +68,28 @@ export function NewExpenseHeadDialog({
   useEffect(() => {
     api
       .get<{ data: Uom[] }>('/masters/uoms?limit=100')
-      .then((r) => {
-        setUoms(r.data)
-        // Nobody should have to think about the unit of a rent bill.
-        const pick = PREFERRED_UNITS.map((s) =>
-          r.data.find((u) => u.symbol.toLowerCase() === s)
-        ).find(Boolean)
-        setUomId((cur) => cur || pick?.id || r.data[0]?.id || '')
-      })
+      .then((r) => setUoms(r.data))
       .catch(() => setError('Could not load the units. Close and try again.'))
   }, [])
+
+  /** What "Not needed" saves as. */
+  const fallbackUnit = useMemo(
+    () =>
+      PREFERRED_UNITS.map((s) => uoms.find((u) => u.symbol.toLowerCase() === s)).find(Boolean) ??
+      uoms[0] ??
+      null,
+    [uoms]
+  )
 
   const problems = useMemo(() => {
     const out: string[] = []
     if (!name.trim()) out.push('The expense head needs a name')
-    if (!uomId) out.push('Pick a unit')
+    if (!uomId && !fallbackUnit) out.push(uoms.length ? 'Pick a unit' : 'Loading the units…')
     if (sacCode && !/^[0-9]{4,8}$/.test(sacCode.trim())) {
       out.push('A SAC / HSN code is 4 to 8 digits, nothing else')
     }
     return out
-  }, [name, uomId, sacCode])
+  }, [name, uomId, uoms, fallbackUnit, sacCode])
 
   const save = useCallback(async () => {
     if (problems.length) return
@@ -101,7 +109,7 @@ export function NewExpenseHeadDialog({
         // Used up, never part of a garment — the closest of the item types.
         type: 'CONSUMABLE',
         categoryId: groupId || category.id,
-        uomId,
+        uomId: uomId || fallbackUnit?.id,
         ...(sacCode.trim() ? { hsnCode: sacCode.trim() } : {}),
         ...(description.trim() ? { description: description.trim() } : {}),
       })
@@ -111,7 +119,7 @@ export function NewExpenseHeadDialog({
     } finally {
       setSaving(false)
     }
-  }, [problems, expenseCategory, name, groupId, uomId, sacCode, description, onCreated])
+  }, [problems, expenseCategory, name, groupId, uomId, fallbackUnit, sacCode, description, onCreated])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -200,7 +208,7 @@ export function NewExpenseHeadDialog({
               )}
               <div>
                 <label className="form-label" htmlFor="eh-uom">
-                  Unit
+                  Unit <span className="text-muted-foreground font-normal">(optional)</span>
                 </label>
                 <select
                   id="eh-uom"
@@ -208,14 +216,14 @@ export function NewExpenseHeadDialog({
                   onChange={(e) => setUomId(e.target.value)}
                   className="form-input"
                 >
-                  {uoms.length === 0 && <option value="">Loading…</option>}
+                  <option value="">Not needed</option>
                   {uoms.map((u) => (
                     <option key={u.id} value={u.id}>
                       {u.symbol} · {u.name}
                     </option>
                   ))}
                 </select>
-                <p className="form-help">Usually 1 per bill.</p>
+                <p className="form-help">Only to count usage, e.g. units of power.</p>
               </div>
               <div>
                 <label className="form-label" htmlFor="eh-sac">
