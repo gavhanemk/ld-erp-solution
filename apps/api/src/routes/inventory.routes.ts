@@ -33,6 +33,8 @@ import {
   openingStockSchema,
   rejectRequisitionSchema,
   closeRequisitionSchema,
+  reserveRequisitionSchema,
+  releaseReservationSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
 
@@ -931,6 +933,8 @@ const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; r
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
   mo: { select: { id: true, moNumber: true } },
+  // The sales order the material is for, and its customer.
+  so: { select: { id: true, soNumber: true, customer: { select: { id: true, name: true } } } },
   raisedBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
   issuedBy: { select: { id: true, name: true } },
@@ -947,6 +951,8 @@ const mrInclude = {
       warehouse: { select: { id: true, name: true } },
       // Whose material the line draws, when it is a customer's.
       ownerCustomer: { select: { id: true, name: true } },
+      // Stock held on the rack for this line.
+      reservations: { where: { status: 'ACTIVE' as const }, select: { id: true, warehouseId: true, qty: true } },
     },
   },
 }
@@ -981,6 +987,8 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
     where.OR = [
       { mrNumber: { contains: q, mode: 'insensitive' } },
       { department: { name: { contains: q, mode: 'insensitive' } } },
+      { so: { soNumber: { contains: q, mode: 'insensitive' } } },
+      { so: { customer: { name: { contains: q, mode: 'insensitive' } } } },
     ]
   }
 
@@ -1066,7 +1074,7 @@ async function boughtFor(
  */
 router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
   const id = req.params.id
-  const [lines, stock, orderRows, received, handovers, activity, receipts, itemOrders] = await Promise.all([
+  const [lines, stock, orderRows, received, handovers, activity, receipts, itemOrders, reservations] = await Promise.all([
     prisma.$queryRaw<
       Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
     >`
@@ -1120,9 +1128,10 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE s."referenceType" = 'MATERIAL_REQUISITION' AND s."referenceId" = ${id}
       ORDER BY s."transactionDate", s."createdAt"`,
     // Who did what to it, and when, from the audit trail.
-    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; closeReason: string | null; toBuy: string[] | null }>>`
+    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; reservedNow: unknown; closeReason: string | null; toBuy: string[] | null }>>`
       SELECT a."createdAt" AS "at", a.action, u.name AS "who",
              a.after -> 'handedOverNow' AS "handedOver", a.after -> 'plan' AS "plan",
+             a.after -> 'reservedNow' AS "reservedNow",
              a.after ->> 'closeReason' AS "closeReason",
              -- The old issue-or-buy answer: which items it marked to be bought.
              (SELECT ARRAY_AGG(l -> 'item' ->> 'name') FROM jsonb_array_elements(a.after::jsonb -> 'lines') l
@@ -1159,6 +1168,18 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE pol."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
         AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
       ORDER BY po."poDate" DESC, po."createdAt" DESC`,
+    // Everything held on the racks for these items, by any requisition, with who it is for.
+    prisma.$queryRaw<
+      Array<{ id: string; itemId: string; warehouseId: string; mrLineId: string; mrId: string; mrNumber: string; qty: number; customerName: string | null; soNumber: string | null }>
+    >`
+      SELECT r.id, r."itemId", r."warehouseId", r."mrLineId", r."mrId", m."mrNumber", r.qty::float8 AS "qty",
+             c.name AS "customerName", so."soNumber"
+      FROM ld_erp.stock_reservations r
+      JOIN ld_erp.material_requisitions m ON m.id = r."mrId"
+      LEFT JOIN ld_erp.customers c ON c.id = r."customerId"
+      LEFT JOIN ld_erp.sales_orders so ON so.id = r."soId"
+      WHERE r.status::text = 'ACTIVE'
+        AND r."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})`,
   ])
   if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
 
@@ -1228,11 +1249,12 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     action: a.action,
     handedOver: Array.isArray(a.handedOver) ? (a.handedOver as string[]) : null,
     plan: Array.isArray(a.plan) ? (a.plan as Array<{ lineId: string; buyQty: number }>) : null,
+    reservedNow: Array.isArray(a.reservedNow) ? (a.reservedNow as string[]) : null,
     closeReason: a.closeReason,
     toBuy: a.toBuy,
   }))
 
-  res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys } })
+  res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys, reservations } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -1255,6 +1277,11 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
       if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
     }
 
+    if (data.soId) {
+      const so = await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true } })
+      if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
+    }
+
     const mrNumber = await nextDocumentNumber(tx, 'MR')
 
     return tx.materialRequisition.create({
@@ -1262,6 +1289,7 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
         mrNumber,
         departmentId: data.departmentId,
         moId: data.moId || null,
+        soId: data.soId || null,
         requiredDate: data.requiredDate ?? null,
         notes: data.notes ?? null,
         raisedById: req.user!.id,
@@ -1612,6 +1640,58 @@ router.patch(
 const qtyText = (n: number) => String(Number(n.toFixed(3)))
 
 /**
+ * What other requisitions hold of an item in a store. Reserved stock stays on
+ * the rack and in the stock figure; it is only kept from being given to anyone else.
+ */
+async function heldForOthers(tx: Prisma.TransactionClient, itemId: string, warehouseId: string, mrLineId: string) {
+  const rows = await tx.stockReservation.findMany({
+    where: { itemId, warehouseId, status: 'ACTIVE', mrLineId: { not: mrLineId } },
+    select: { qty: true, mr: { select: { mrNumber: true } }, customer: { select: { name: true } } },
+  })
+  return { qty: round3(rows.reduce((t, r) => t + Number(r.qty), 0)), rows }
+}
+
+/** Refuses to take stock that is held for another requisition, and says whose it is. */
+async function refuseIfHeldForOthers(
+  tx: Prisma.TransactionClient,
+  a: { itemId: string; warehouseId: string; mrLineId: string; qty: number; what: string; unit: string },
+) {
+  const held = await heldForOthers(tx, a.itemId, a.warehouseId, a.mrLineId)
+  if (held.qty <= 0) return
+  const onRack = (await balanceOf(tx, { itemId: a.itemId, warehouseId: a.warehouseId })).qty
+  const free = round3(Math.max(0, onRack - held.qty))
+  if (a.qty > free + 1e-9) {
+    const whose = held.rows
+      .map((r) => `${qtyText(Number(r.qty))} ${a.unit} for ${r.mr.mrNumber}${r.customer ? ` (${r.customer.name})` : ''}`)
+      .join(', ')
+    throw new AppError(
+      `${a.what}: only ${qtyText(free)} ${a.unit} is free. ${whose} is reserved. Release it on Inventory → Reservations, or take it from another store.`,
+      400,
+      'RESERVED_FOR_OTHERS',
+    )
+  }
+}
+
+/** Issuing against a line uses up what was held for it in that store; a line issued in full lets the rest go. */
+async function useUpReservations(
+  tx: Prisma.TransactionClient,
+  mrLineId: string,
+  parts: Array<{ qty: number; warehouseId: string }>,
+  lineDone: boolean,
+) {
+  const active = await tx.stockReservation.findMany({ where: { mrLineId, status: 'ACTIVE' } })
+  for (const r of active) {
+    const used = round3(parts.filter((p) => p.warehouseId === r.warehouseId).reduce((t, p) => t + p.qty, 0))
+    const left = lineDone ? 0 : round3(Math.max(0, Number(r.qty) - used))
+    if (left === Number(r.qty)) continue
+    await tx.stockReservation.update({
+      where: { id: r.id },
+      data: left > 0 ? { qty: left } : { qty: 0, status: 'CONSUMED' },
+    })
+  }
+}
+
+/**
  * Holds a requisition for the rest of the transaction.
  *
  * Everything that changes what can still be issued (an issue, a close) takes
@@ -1757,6 +1837,17 @@ router.post(
         }
 
         for (const a of parts) {
+          // Stock held for other requisitions is not ours to give here.
+          if (line.ownership !== 'CUSTOMER_OWNED') {
+            await refuseIfHeldForOthers(tx, {
+              itemId: line.itemId,
+              warehouseId: a.warehouseId,
+              mrLineId: line.id,
+              qty: a.qty,
+              what: `${line.item.name} in ${storeNames.get(a.warehouseId) ?? 'that store'}`,
+              unit,
+            })
+          }
           // recordMovement refuses if that rack is short, and names the shortfall.
           await recordMovement(tx, {
             itemId: line.itemId,
@@ -1781,6 +1872,8 @@ router.post(
           where: { id: line.id },
           data: { issuedQty: { increment: total } },
         })
+        // What was held for this line is used up by issuing it.
+        await useUpReservations(tx, line.id, parts, round3(owed - total) <= 1e-9)
       }
 
       if (handedOver.length === 0) {
@@ -1884,6 +1977,11 @@ router.post(
         where: { id: before.id },
         data: { closedAt: new Date(), closedById: req.user!.id, closeReason: reason },
       })
+      // Nothing more will be issued against it, so what was held for it goes back.
+      await tx.stockReservation.updateMany({
+        where: { mrId: before.id, status: 'ACTIVE' },
+        data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: `${before.mrNumber} closed: ${reason}` },
+      })
       const after = await tx.materialRequisition.findUniqueOrThrow({
         where: { id: before.id },
         include: mrInclude,
@@ -1910,6 +2008,243 @@ router.post(
     })
   },
 )
+
+/**
+ * Holding stock on the rack for an approved requisition, so nobody else is
+ * given it before this department collects it.
+ *
+ * Per line and store it sets the amount held (0 lets it go). It cannot hold
+ * more than the line still owes, nor more than the store has free — what other
+ * requisitions already hold is not free. The reservation carries the
+ * requisition's sales order and its customer, so the Reservations list can say
+ * who the material is held for.
+ */
+router.post(
+  '/requisitions/:id/reserve',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const body = reserveRequisitionSchema.parse(req.body ?? {})
+
+    const result = await prisma.$transaction(async (tx) => {
+      await lockRequisition(tx, req.params.id)
+      const mr = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: {
+          so: { select: { id: true, customerId: true } },
+          lines: {
+            include: {
+              item: { select: { name: true, uom: { select: { symbol: true } } } },
+              reservations: { where: { status: 'ACTIVE' } },
+            },
+          },
+        },
+      })
+      if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+      if (mr.closedAt) throw new AppError(`${mr.mrNumber} is closed, so nothing can be held for it.`, 400, 'CLOSED')
+      if (mr.status !== 'APPROVED')
+        throw new AppError('Stock can be reserved once the requisition is approved.', 400, 'NOT_APPROVED')
+      if (mr.issuedAt) throw new AppError(`${mr.mrNumber} is issued in full; there is nothing left to hold.`, 400, 'ALREADY_ISSUED')
+
+      const stores = new Map(
+        (await tx.warehouse.findMany({
+          where: { id: { in: [...new Set(body.lines.map((l) => l.warehouseId))] } },
+          select: { id: true, name: true },
+        })).map((w) => [w.id, w.name]),
+      )
+      const changed: string[] = []
+
+      for (const a of body.lines) {
+        const line = mr.lines.find((l) => l.id === a.lineId)
+        if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+        const storeName = stores.get(a.warehouseId)
+        if (!storeName) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+        const unit = line.item.uom?.symbol ?? ''
+        if (line.ownership === 'CUSTOMER_OWNED' && a.qty > 0) {
+          throw new AppError(
+            `${line.item.name} is the customer's own material — it is already theirs, so it is not reserved.`,
+            400,
+            'CUSTOMER_MATERIAL',
+          )
+        }
+
+        const current = line.reservations.find((r) => r.warehouseId === a.warehouseId)
+        const qty = round3(a.qty)
+        if (Number(current?.qty ?? 0) === qty) continue
+
+        if (qty > 0) {
+          // Not more than the line still owes, counting what is held in other stores.
+          const owed = round3(Number(line.requestedQty) - Number(line.issuedQty))
+          const elsewhere = round3(
+            line.reservations.filter((r) => r.warehouseId !== a.warehouseId).reduce((t, r) => t + Number(r.qty), 0),
+          )
+          if (qty + elsewhere > owed + 1e-9) {
+            throw new AppError(
+              `${line.item.name}: ${qtyText(owed)} ${unit} is still owed${elsewhere ? `, and ${qtyText(elsewhere)} is already held in another store` : ''}, so ${qtyText(qty)} cannot be held.`,
+              400,
+              'OVER_RESERVE',
+            )
+          }
+          // Not more than the store has free.
+          const onRack = (await balanceOf(tx, { itemId: line.itemId, warehouseId: a.warehouseId })).qty
+          const held = await heldForOthers(tx, line.itemId, a.warehouseId, line.id)
+          const free = round3(Math.max(0, onRack - held.qty))
+          if (qty > free + 1e-9) {
+            throw new AppError(
+              `${line.item.name}: ${storeName} has ${qtyText(free)} ${unit} free${held.qty ? ` (${qtyText(held.qty)} is held for other requisitions)` : ''}, so ${qtyText(qty)} cannot be held.`,
+              400,
+              'NOT_ENOUGH_FREE',
+            )
+          }
+        }
+
+        if (current) {
+          await tx.stockReservation.update({
+            where: { id: current.id },
+            data:
+              qty > 0
+                ? { qty, reservedQty: qty, reservedById: req.user!.id }
+                : { qty: 0, status: 'RELEASED', releasedAt: new Date(), releasedById: req.user!.id, releaseReason: 'Set to nothing in the fulfil window' },
+          })
+        } else if (qty > 0) {
+          await tx.stockReservation.create({
+            data: {
+              mrId: mr.id,
+              mrLineId: line.id,
+              itemId: line.itemId,
+              warehouseId: a.warehouseId,
+              soId: mr.so?.id ?? null,
+              customerId: mr.so?.customerId ?? null,
+              reservedQty: qty,
+              qty,
+              reservedById: req.user!.id,
+            },
+          })
+        }
+        changed.push(
+          qty > 0
+            ? `${qtyText(qty)} ${unit} ${line.item.name} in ${storeName}`.replace(/\s+/g, ' ')
+            : `released ${line.item.name} in ${storeName}`,
+        )
+      }
+
+      const after = await tx.materialRequisition.findUniqueOrThrow({ where: { id: mr.id }, include: mrInclude })
+      return { after, changed }
+    })
+
+    if (result.changed.length) {
+      await writeAuditLog(req, {
+        module: MODULE,
+        action: 'UPDATE',
+        entityType: 'MaterialRequisition',
+        entityId: result.after.id,
+        after: { ...result.after, reservedNow: result.changed },
+      })
+    }
+
+    res.json({
+      success: true,
+      message: result.changed.length
+        ? `Held for ${result.after.mrNumber}${result.after.so ? ` (${result.after.so.customer.name}, ${result.after.so.soNumber})` : ''}: ${result.changed.join(', ')}.`
+        : 'Nothing changed in what is held.',
+      data: result.after,
+    })
+  },
+)
+
+/**
+ * Everything held on the racks, with who it is for. Active by default;
+ * ?status=all includes what was used up or released.
+ */
+router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) => {
+  const all = str(req.query.status) === 'all'
+  const rows = await prisma.stockReservation.findMany({
+    where: all ? {} : { status: 'ACTIVE' },
+    orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+    take: 2000,
+    include: {
+      item: {
+        select: {
+          id: true, code: true, name: true, uom: { select: { symbol: true } },
+          category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
+        },
+      },
+      warehouse: { select: { id: true, name: true } },
+      mr: {
+        select: {
+          id: true, mrNumber: true, requiredDate: true, status: true, closedAt: true,
+          department: { select: { id: true, name: true } },
+        },
+      },
+      mrLine: { select: { requestedQty: true, issuedQty: true } },
+      so: { select: { id: true, soNumber: true } },
+      customer: { select: { id: true, name: true } },
+      reservedBy: { select: { name: true } },
+      releasedBy: { select: { name: true } },
+    },
+  })
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      id: r.id,
+      status: r.status,
+      qty: Number(r.qty),
+      reservedQty: Number(r.reservedQty),
+      itemId: r.item.id,
+      itemCode: r.item.code,
+      itemName: r.item.name,
+      uom: r.item.uom?.symbol ?? '',
+      mainCategoryName: r.item.category?.parent?.name ?? r.item.category?.name ?? '',
+      subCategoryName: r.item.category?.parent ? r.item.category.name : null,
+      warehouseId: r.warehouse.id,
+      warehouseName: r.warehouse.name,
+      mrId: r.mr.id,
+      mrNumber: r.mr.mrNumber,
+      neededBy: r.mr.requiredDate,
+      departmentId: r.mr.department.id,
+      departmentName: r.mr.department.name,
+      asked: Number(r.mrLine.requestedQty),
+      issued: Number(r.mrLine.issuedQty),
+      soNumber: r.so?.soNumber ?? null,
+      customerId: r.customer?.id ?? null,
+      customerName: r.customer?.name ?? null,
+      reservedBy: r.reservedBy?.name ?? null,
+      reservedAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      releasedBy: r.releasedBy?.name ?? null,
+      releasedAt: r.releasedAt,
+      releaseReason: r.releaseReason,
+    })),
+  })
+})
+
+/** Letting a reservation go: the stock is free for anyone again. */
+router.patch(
+  '/reservations/:id/release',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = releaseReservationSchema.parse(req.body ?? {})
+    const before = await prisma.stockReservation.findUnique({
+      where: { id: req.params.id },
+      include: { mr: { select: { id: true, mrNumber: true } }, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+    })
+    if (!before) throw new AppError('Reservation not found', 404, 'NOT_FOUND')
+    if (before.status !== 'ACTIVE') throw new AppError('That reservation is no longer held.', 409, 'NOT_ACTIVE')
+    const after = await prisma.stockReservation.update({
+      where: { id: before.id },
+      data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: reason },
+    })
+    const what = `released ${qtyText(Number(before.qty))} ${before.item.uom?.symbol ?? ''} ${before.item.name}`.replace(/\s+/g, ' ')
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: before.mr.id,
+      after: { reservedNow: [`${what}: ${reason}`] },
+    })
+    res.json({ success: true, message: `${before.mr.mrNumber}: ${what}. It is free for anyone again.`, data: after })
+  },
+)
+
 
 // ── Printed store papers ────────────────────────────────────────────────────
 //

@@ -322,6 +322,8 @@ model User {
 
   @@index([email])
   @@index([roleId])
+  stockReservations   StockReservation[] @relation("ReservationBy")
+  releasedReservations StockReservation[] @relation("ReservationReleasedBy")
   @@map("users")
   customerGrnReceived  CustomerGRN[]    @relation("CustomerGRNReceivedBy")
   customerGrnCancelled CustomerGRN[]    @relation("CustomerGRNCancelledBy")
@@ -613,6 +615,7 @@ model Item {
   @@index([code])
   @@index([type])
   @@index([departmentId])
+  reservations StockReservation[] @relation("ItemReservations")
   @@map("items")
   customerGrnLines    CustomerGRNLine[]    @relation("CustomerGRNLines")
   customerReturnLines CustomerMaterialReturnLine[] @relation("CustomerReturnLines")
@@ -863,6 +866,7 @@ model Customer {
   materialRequisitionLines MaterialRequisitionLine[] @relation("CustomerMaterialRequisitionLines")
 
   @@index([code])
+  stockReservations StockReservation[] @relation("ReservedForCustomer")
   @@map("customers")
 }
 
@@ -975,6 +979,7 @@ model Warehouse {
   purchaseNotes    PurchaseNote[]
   returnLines      PurchaseReturnLine[]
 
+  reservations StockReservation[] @relation("WarehouseReservations")
   @@map("warehouses")
   customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
   customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturns")
@@ -1105,6 +1110,8 @@ model SalesOrder {
   @@index([soNumber])
   @@index([customerId])
   @@index([status])
+  materialRequisitions MaterialRequisition[] @relation("MRSalesOrder")
+  stockReservations    StockReservation[]    @relation("ReservationSalesOrder")
   @@map("sales_orders")
   customerMaterial CustomerGRN[] @relation("SalesOrderCustomerMaterial")
 }
@@ -2115,6 +2122,10 @@ model MaterialRequisition {
   mrNumber        String              @unique
   moId            String?
   mo              ManufacturingOrder? @relation(fields: [moId], references: [id])
+  /// The sales order this material is for, when there is one. Stock reserved
+  /// against the requisition is held for that order's customer.
+  soId            String?
+  so              SalesOrder?         @relation("MRSalesOrder", fields: [soId], references: [id])
   departmentId    String
   department      Department          @relation(fields: [departmentId], references: [id])
   requestDate     DateTime            @default(now())
@@ -2145,6 +2156,9 @@ model MaterialRequisition {
   lines MaterialRequisitionLine[]
 
   @@index([status])
+  reservations StockReservation[]
+
+  @@index([soId])
   @@map("material_requisitions")
 }
 
@@ -2201,6 +2215,7 @@ model MaterialRequisitionLine {
   poLines PurchaseOrderLine[]
 
   @@index([fulfilment])
+  reservations StockReservation[]
   @@map("material_requisition_lines")
 }
 
@@ -3929,4 +3944,51 @@ model DocumentTemplate {
 
   @@unique([companyId, docType])
   @@map("document_templates")
+}
+
+/// Stock held on the rack for one requisition line.
+///
+/// It stays in the store and in the stock figure, but it is not offered to any
+/// other requisition. Issuing against the same line uses it up; releasing it,
+/// or closing the requisition, frees it. One active row per line and store:
+/// changing the amount updates that row rather than adding another.
+model StockReservation {
+  id            String                  @id @default(cuid())
+  mrId          String
+  mr            MaterialRequisition     @relation(fields: [mrId], references: [id])
+  mrLineId      String
+  mrLine        MaterialRequisitionLine @relation(fields: [mrLineId], references: [id])
+  itemId        String
+  item          Item                    @relation("ItemReservations", fields: [itemId], references: [id])
+  warehouseId   String
+  warehouse     Warehouse               @relation("WarehouseReservations", fields: [warehouseId], references: [id])
+  /// Who it is held for: the requisition's sales order and its customer.
+  soId          String?
+  so            SalesOrder?             @relation("ReservationSalesOrder", fields: [soId], references: [id])
+  customerId    String?
+  customer      Customer?               @relation("ReservedForCustomer", fields: [customerId], references: [id])
+  /// The amount last set, and how much of it is still held.
+  reservedQty   Decimal                 @db.Decimal(10, 3)
+  qty           Decimal                 @db.Decimal(10, 3)
+  status        ReservationStatus       @default(ACTIVE)
+  notes         String?
+  reservedById  String?
+  reservedBy    User?                   @relation("ReservationBy", fields: [reservedById], references: [id])
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  releasedAt    DateTime?
+  releasedById  String?
+  releasedBy    User?                   @relation("ReservationReleasedBy", fields: [releasedById], references: [id])
+  releaseReason String?
+
+  @@index([itemId, warehouseId, status])
+  @@index([mrId])
+  @@index([customerId])
+  @@map("stock_reservations")
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
 }

@@ -49,6 +49,8 @@ interface Line {
   warehouse: { id: string; name: string }
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomer?: { id: string; name: string } | null
+  /** Stock held on the rack for this line. */
+  reservations?: Array<{ id: string; warehouseId: string; qty: string | number }>
 }
 
 interface Requisition {
@@ -63,6 +65,8 @@ interface Requisition {
   department: { id: string; name: string }
   raisedBy: { id: string; name: string } | null
   approvedBy: { id: string; name: string } | null
+  /** The sales order the material is for, and its customer. */
+  so?: { id: string; soNumber: string; customer: { id: string; name: string } } | null
   issuedBy: { id: string; name: string } | null
   /** Cancelled, or closed with part still owed: nothing more is issued. */
   closedAt: string | null
@@ -183,16 +187,17 @@ type UnitGroup = ReturnType<typeof qtyByUnit>[number]
 
 /** The item panel's columns, as shares of the row, so the table fits the panel it opens in. */
 const ITEM_COLS = [
-  { label: 'Code', width: '10%' },
-  { label: 'Item', width: '20%' },
-  { label: 'Category', width: '10%' },
-  { label: 'Sub-cat.', width: '10%' },
+  { label: 'Code', width: '9%' },
+  { label: 'Item', width: '19%' },
+  { label: 'Category', width: '9%' },
+  { label: 'Sub-cat.', width: '9%' },
   { label: 'Whose', width: '8%' },
   { label: 'Asked of', width: '10%' },
-  { label: 'What for', width: '10%' },
-  { label: 'To buy', width: '6%', numeric: true },
+  { label: 'What for', width: '9%' },
   { label: 'Asked', width: '7%', numeric: true },
   { label: 'Issued', width: '6%', numeric: true },
+  { label: 'Reserved', width: '7%', numeric: true },
+  { label: 'To buy', width: '6%', numeric: true },
   { label: 'Owed', width: '5%', numeric: true },
 ]
 /** One figure per unit on one line: "1,000 mtr · 250 pcs", or null when all are nil. */
@@ -363,7 +368,7 @@ export default function RequisitionsPage() {
   const matchesSearch = useCallback(
     (mr: Requisition) => {
       if (!words.length) return true
-      const hay = `${mr.mrNumber} ${mr.department.name} ${mr.raisedBy?.name ?? ''} ${mr.approvedBy?.name ?? ''} ${mr.notes ?? ''} ${mr.lines
+      const hay = `${mr.mrNumber} ${mr.department.name} ${mr.so?.soNumber ?? ''} ${mr.so?.customer.name ?? ''} ${mr.raisedBy?.name ?? ''} ${mr.approvedBy?.name ?? ''} ${mr.notes ?? ''} ${mr.lines
         .map((l) => `${l.item.code} ${l.item.name} ${l.purpose ?? ''} ${l.ownerCustomer?.name ?? ''}`)
         .join(' ')}`.toLowerCase()
       return words.every((w) => hay.includes(w))
@@ -516,6 +521,8 @@ export default function RequisitionsPage() {
               Department: mr.department.name,
               'Raised By': mr.raisedBy?.name ?? '',
               'Approved By': mr.approvedBy?.name ?? '',
+              'Sales Order': mr.so?.soNumber ?? '',
+              Customer: mr.so?.customer.name ?? '',
               'Needed By': mr.requiredDate ? dayKey(mr.requiredDate) : '',
               Status: STAGE[f.stage].label,
               'Waiting On': STAGE[f.stage].who,
@@ -537,7 +544,7 @@ export default function RequisitionsPage() {
           })
         }),
       )
-      sheet['!cols'] = [16, 11, 16, 18, 18, 11, 20, 10, 14, 30, 16, 16, 16, 22, 6, 9, 9, 10, 9, 22, 24, 26].map((wch) => ({ wch }))
+      sheet['!cols'] = [16, 11, 16, 18, 18, 14, 24, 11, 20, 10, 14, 30, 16, 16, 16, 22, 6, 9, 9, 10, 9, 22, 24, 26].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Requisitions')
       XLSX.writeFile(book, `material-requisitions-${today}.xlsx`)
@@ -622,6 +629,7 @@ export default function RequisitionsPage() {
               const issued = Number(l.issuedQty)
               const owed = Math.max(0, asked - issued)
               const buying = buyQtyOf(l)
+              const held = (l.reservations ?? []).reduce((t, r) => t + Number(r.qty), 0)
               return (
                 <tr key={l.id}>
                   <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
@@ -644,13 +652,16 @@ export default function RequisitionsPage() {
                     {l.purpose ?? <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                    {buying > 0 ? <span className="text-sky-500">{qtyFmt(buying)}</span> : <span className="text-muted-foreground">—</span>}
-                  </td>
-                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
                     {qtyFmt(asked)} {l.item.uom.symbol}
                   </td>
                   <td className="whitespace-nowrap text-right text-xs tabular-nums">
                     {issued > 0 ? <span className="text-emerald-500">{qtyFmt(issued)}</span> : <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    {held > 0 ? <span className="text-violet-500">{qtyFmt(held)}</span> : <span className="text-muted-foreground">—</span>}
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    {buying > 0 ? <span className="text-sky-500">{qtyFmt(buying)}</span> : <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="whitespace-nowrap text-right text-xs tabular-nums">
                     {mr.closedAt || mr.status === 'REJECTED' || owed === 0 ? (
@@ -667,6 +678,7 @@ export default function RequisitionsPage() {
         <div className="border-border text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-[11px]">
           <span>
             {r.s.next && <>{r.s.next} </>}
+            {mr.so && <>For {mr.so.customer.name} ({mr.so.soNumber}). </>}
             {mr.approvedBy && <>Approved by {mr.approvedBy.name}. </>}
             {mr.issuedBy && mr.issuedAt && <>Issued by {mr.issuedBy.name} on {formatDate(mr.issuedAt)}. </>}
             {mr.closedAt && (

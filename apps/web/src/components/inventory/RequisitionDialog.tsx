@@ -97,6 +97,9 @@ export function RequisitionDialog({
   /** Off: only the department's items. On: every item, for the odd request outside it. */
   const [allItems, setAllItems] = useState(false)
   const [requiredDate, setRequiredDate] = useState('')
+  /** The sales order the material is for: what the store reserves is held for its customer. */
+  const [soId, setSoId] = useState('')
+  const [orders, setOrders] = useState<Array<{ id: string; soNumber: string; status: string; customer: { name: string } }>>([])
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<Line[]>([emptyLine()])
 
@@ -107,7 +110,7 @@ export function RequisitionDialog({
     let cancelled = false
     void (async () => {
       try {
-        const [i, d, w, st] = await Promise.all([
+        const [i, d, w, st, so] = await Promise.all([
           // Active only: a deactivated item, department or store is not offered
           // for anything new.
           masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
@@ -115,8 +118,13 @@ export function RequisitionDialog({
           masterResource<{ id: string; name: string }>('warehouses').list({ limit: 100, active: true }),
           // What is on each rack, ours and customers' apart.
           api.get<{ data: StockRow[] }>('/inventory/stock').catch(() => ({ data: [] as StockRow[] })),
+          // Sales orders still being worked on, for "For sales order".
+          api
+            .get<{ data: Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> }>('/sales/orders?limit=200')
+            .catch(() => ({ data: [] as Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> })),
         ])
         if (cancelled) return
+        setOrders(so.data.filter((o) => !['COMPLETED', 'CANCELLED'].includes(o.status)))
         setItems(i.data)
         setDepartments(d.data)
         setWarehouses(w.data)
@@ -246,6 +254,7 @@ export function RequisitionDialog({
       const res = await api.post<{ data: { mrNumber: string } }>('/inventory/requisitions', {
         departmentId,
         requiredDate: requiredDate || null,
+        soId: soId || null,
         notes: notes || null,
         lines: filled.map((l) => ({
           itemId: l.itemId,
@@ -385,7 +394,7 @@ export function RequisitionDialog({
       busy={saving}
     >
       <Section icon={FileText} title="Basic Details">
-        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block min-w-0">
             <span className="form-label">
               Department asking<span className="ml-0.5 text-red-500">*</span>
@@ -420,6 +429,20 @@ export function RequisitionDialog({
             )}
           </label>
           <label className="block min-w-0">
+            <span className="form-label">For sales order</span>
+            <select className="form-input" value={soId} onChange={(e) => setSoId(e.target.value)} disabled={loadingLists}>
+              <option value="">Not for a particular order</option>
+              {orders.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.soNumber} · {o.customer.name}
+                </option>
+              ))}
+            </select>
+            <span className="mt-1 block text-[11px] leading-snug text-muted-foreground">
+              Stock the store reserves for it is held for this customer.
+            </span>
+          </label>
+          <label className="block min-w-0">
             <span className="form-label">Needed by</span>
             <input type="date" className="form-input" value={requiredDate} onChange={(e) => setRequiredDate(e.target.value)} />
           </label>
@@ -429,7 +452,7 @@ export function RequisitionDialog({
               className="form-input placeholder:text-muted-foreground/60"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Against which order, or anything the store should know"
+              placeholder="Anything the store should know"
             />
           </label>
         </div>

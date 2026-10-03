@@ -44,6 +44,8 @@ interface Requisition {
   department: { id: string; name: string }
   raisedBy: { id: string; name: string } | null
   approvedBy: { id: string; name: string } | null
+  /** The sales order the material is for: what is reserved is held for its customer. */
+  so?: { id: string; soNumber: string; customer: { id: string; name: string } } | null
   lines: Line[]
 }
 
@@ -113,6 +115,21 @@ interface TrailEvent {
   closeReason: string | null
   /** From the old issue-or-buy answer: the items it marked to be bought. */
   toBuy?: string[] | null
+  /** What was reserved or released. */
+  reservedNow?: string[] | null
+}
+
+/** Stock held on a rack for a requisition line — this one's or another's. */
+interface HeldRow {
+  id: string
+  itemId: string
+  warehouseId: string
+  mrLineId: string
+  mrId: string
+  mrNumber: string
+  qty: number
+  customerName: string | null
+  soNumber: string | null
 }
 
 const when = (d: string) =>
@@ -156,6 +173,9 @@ export function FulfilDialog({
 
   /** Per line, per store: how much to hand over now. */
   const [issue, setIssue] = useState<Record<string, Record<string, string>>>({})
+  /** Per line, per store: how much to hold on the rack for this requisition. */
+  const [reserve, setReserve] = useState<Record<string, Record<string, string>>>({})
+  const [held, setHeld] = useState<HeldRow[]>([])
   /** Per line: how much to buy. */
   const [buy, setBuy] = useState<Record<string, string>>({})
 
@@ -173,6 +193,7 @@ export function FulfilDialog({
             handovers: Handover[]
             events: TrailEvent[]
             itemBuys?: ItemBuy[]
+            reservations?: HeldRow[]
           }
         }>(`/inventory/requisitions/${mrId}/fulfil`)
         if (cancelled) return
@@ -194,6 +215,7 @@ export function FulfilDialog({
         setStock(res.data.stock ?? [])
         setHandovers(res.data.handovers ?? [])
         setEvents(res.data.events ?? [])
+        setHeld(res.data.reservations ?? [])
       } catch (err) {
         if (!cancelled) setError(err instanceof ApiError ? err.message : 'Could not open the requisition.')
       } finally {
@@ -214,8 +236,21 @@ export function FulfilDialog({
         : 'You approved this requisition, so somebody else in the store issues it. You can still set what to buy.'
       : null
 
-  /** Every store holding this line's stock — ours, or that customer's — the asked store first. */
-  const storesFor = (l: Line) => {
+  /**
+   * Every store holding this line's stock — ours, or that customer's — the asked
+   * store first. For our own stock: what other requisitions hold there, what
+   * this line holds, and what is free to issue or reserve.
+   */
+  const storesFor = (l: Line) =>
+    rawStoresFor(l).map((st) => {
+      const theirs = l.ownership === 'CUSTOMER_OWNED'
+      const here = held.filter((h) => h.itemId === l.item.id && h.warehouseId === st.id)
+      const others = theirs ? [] : here.filter((h) => h.mrLineId !== l.id)
+      const othersQty = r3(others.reduce((t, h) => t + h.qty, 0))
+      const own = theirs ? 0 : r3(here.filter((h) => h.mrLineId === l.id).reduce((t, h) => t + h.qty, 0))
+      return { ...st, others, othersQty, own, free: r3(Math.max(0, st.qty - othersQty)) }
+    })
+  const rawStoresFor = (l: Line) => {
     const theirs = l.ownership === 'CUSTOMER_OWNED'
     const by = new Map<string, { id: string; name: string; qty: number }>()
     for (const r of stock) {
@@ -242,6 +277,7 @@ export function FulfilDialog({
     if (!mr || loading) return
     const nextIssue: Record<string, Record<string, string>> = {}
     const nextBuy: Record<string, string> = {}
+    const nextReserve: Record<string, Record<string, string>> = {}
     for (const l of mr.lines) {
       const was = boughtOf(l)
       // Left for the purchase to cover: what is really on order and not yet in,
@@ -249,45 +285,76 @@ export function FulfilDialog({
       // it is not a decision, so the racks are offered first.
       const onOrder = Math.max(0, (was?.orderedQty ?? 0) - (was?.receivedQty ?? 0))
       const alreadyBuying = Math.max(onOrder, typedBuyOf(l) - (was?.receivedQty ?? 0), 0)
-      let need = r3(Math.max(0, owedOf(l) - alreadyBuying))
+      // What is already held for this line stays held; the rest is offered from free stock.
+      const stores = storesFor(l)
+      const ownHeld = r3(stores.reduce((t, st) => t + st.own, 0))
+      let need = r3(Math.max(0, owedOf(l) - alreadyBuying - ownHeld))
       const per: Record<string, string> = {}
-      for (const s of storesFor(l)) {
-        const take = canIssue ? Math.min(s.qty, need) : 0
+      const keep: Record<string, string> = {}
+      for (const s of stores) {
+        const take = canIssue ? Math.min(Math.max(0, s.free - s.own), need) : 0
         per[s.id] = take > 0 ? String(r3(take)) : ''
+        keep[s.id] = s.own > 0 ? String(s.own) : ''
         need = r3(need - take)
       }
       nextIssue[l.id] = per
+      nextReserve[l.id] = keep
       // Buy what all the racks together cannot cover — never less than is
       // already ordered, and a typed-in figure stands.
-      const onRacks = storesFor(l).reduce((t, st) => t + st.qty, 0)
+      const onRacks = stores.reduce((t, st) => t + st.free, 0)
       const theirs = l.ownership === 'CUSTOMER_OWNED'
       const short = r3(Math.max(0, owedOf(l) - onRacks))
       nextBuy[l.id] = theirs ? '0' : String(r3(Math.max(typedBuyOf(l), was?.orderedQty ?? 0, short)))
     }
     setIssue(nextIssue)
     setBuy(nextBuy)
+    setReserve(nextReserve)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mr, stock, bought, loading])
+  }, [mr, stock, bought, held, loading])
 
   const issuingOf = (l: Line) => r3(Object.values(issue[l.id] ?? {}).reduce((t, v) => t + num(v), 0))
+  const reservingOf = (l: Line) => r3(Object.values(reserve[l.id] ?? {}).reduce((t, v) => t + num(v), 0))
+  /** The reservations to send: per store, what is to be held once this window's issue has used its part. */
+  const reserveCalls = (l: Line) =>
+    l.ownership === 'CUSTOMER_OWNED'
+      ? []
+      : storesFor(l)
+          .map((st) => {
+            const keep = r3(num(reserve[l.id]?.[st.id] ?? ''))
+            const giving = r3(num(issue[l.id]?.[st.id] ?? ''))
+            // Issuing uses up what is held in that store first, so hold keep + giving beforehand.
+            const target = keep > 0 ? r3(keep + giving) : giving > 0 && st.own > 0 ? Math.min(st.own, giving) : 0
+            return { st, keep, target }
+          })
+          .filter((c) => Math.abs(c.target - c.st.own) > 1e-9)
 
   /** Everything the window would do, and anything that would stop it. */
   const summary = useMemo(() => {
     if (!mr) return null
     const problems: string[] = []
     let issueLines = 0
+    let reserveChanges = 0
     let buyChanges = 0
     let buyLines = 0
     for (const l of mr.lines) {
       const unit = l.item.uom.symbol
       const owed = owedOf(l)
       const giving = issuingOf(l)
+      const keeping = reservingOf(l)
       if (giving > owed + 1e-9) problems.push(`${l.item.name}: issuing ${fmt(giving)} ${unit}, but only ${fmt(owed)} is owed.`)
+      else if (giving + keeping > owed + 1e-9)
+        problems.push(`${l.item.name}: issuing ${fmt(giving)} and reserving ${fmt(keeping)} ${unit} is more than the ${fmt(owed)} owed.`)
       for (const s of storesFor(l)) {
         const v = num(issue[l.id]?.[s.id] ?? '')
+        const k = num(reserve[l.id]?.[s.id] ?? '')
         if (Number.isNaN(v) || v < 0) problems.push(`${l.item.name}: the quantity from ${s.name} is not a number.`)
-        else if (v > s.qty + 1e-9) problems.push(`${l.item.name}: ${s.name} has only ${fmt(s.qty)} ${unit}.`)
+        else if (Number.isNaN(k) || k < 0) problems.push(`${l.item.name}: the quantity to reserve in ${s.name} is not a number.`)
+        else if (v + k > s.free + 1e-9)
+          problems.push(
+            `${l.item.name}: ${s.name} has ${fmt(s.free)} ${unit} free${s.othersQty ? ` (${fmt(s.othersQty)} is reserved for other requisitions)` : ''}.`,
+          )
       }
+      if (reserveCalls(l).length) reserveChanges += 1
       if (giving > 0) issueLines += 1
       const b = num(buy[l.id] ?? '0')
       const was = boughtOf(l)
@@ -297,15 +364,16 @@ export function FulfilDialog({
       if (b > 0) buyLines += 1
       if (Math.abs(b - (was?.buyQty ?? 0)) > 1e-9) buyChanges += 1
     }
-    return { problems, issueLines, buyChanges, buyLines }
+    return { problems, issueLines, reserveChanges, buyChanges, buyLines }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mr, issue, buy, stock, bought])
+  }, [mr, issue, reserve, buy, stock, bought, held])
 
   const save = async () => {
     if (!mr || !summary) return
     setError(null)
     if (summary.problems.length) return setError(summary.problems[0])
-    if (!summary.issueLines && !summary.buyChanges) return setError('Nothing to do: enter a quantity to issue or to buy.')
+    if (!summary.issueLines && !summary.buyChanges && !summary.reserveChanges)
+      return setError('Nothing to do: enter a quantity to issue, reserve or buy.')
 
     setSaving(true)
     const done: string[] = []
@@ -317,6 +385,18 @@ export function FulfilDialog({
           lines: mr.lines.map((l) => ({ lineId: l.id, buyQty: r3(num(buy[l.id] ?? '0')) })),
         })
         if (res.message) done.push(res.message)
+      }
+      // Then what to hold on the rack, so the issue below uses up the right part of it.
+      if (summary.reserveChanges) {
+        const lines = mr.lines.flatMap((l) => reserveCalls(l).map((c) => ({ lineId: l.id, warehouseId: c.st.id, qty: c.target })))
+        const res = await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/reserve`, { lines })
+        if (res.message && !summary.issueLines) done.push(res.message)
+        else
+          done.push(
+            mr.lines
+              .flatMap((l) => reserveCalls(l).map((c) => (c.keep > 0 ? `Reserved ${fmt(c.keep)} ${l.item.uom.symbol} ${l.item.name} in ${c.st.name}.` : `Released ${l.item.name} in ${c.st.name}.`)))
+              .join(' '),
+          )
       }
       if (summary.issueLines && canIssue) {
         const lines = mr.lines.flatMap((l) =>
@@ -358,6 +438,11 @@ export function FulfilDialog({
           .join(' + ')
         parts.push(`issue ${fmt(giving)} ${unit} ${l.item.name} from ${from}`)
       }
+      for (const st of storesFor(l)) {
+        const keep = r3(num(reserve[l.id]?.[st.id] ?? ''))
+        if (Math.abs(keep - st.own) > 1e-9)
+          parts.push(keep > 0 ? `reserve ${fmt(keep)} ${unit} ${l.item.name} in ${st.name}` : `release what is held in ${st.name}`)
+      }
       const b = num(buy[l.id] ?? '0')
       const was = boughtOf(l)?.buyQty ?? 0
       if (Math.abs(b - was) > 1e-9) parts.push(b > 0 ? `set ${fmt(b)} ${unit} ${l.item.name} to buy` : `stop buying ${l.item.name}`)
@@ -371,7 +456,7 @@ export function FulfilDialog({
       title={mr ? `Fulfil ${mr.mrNumber}` : 'Fulfil requisition'}
       subtitle={
         mr
-          ? `${mr.department.name}${mr.raisedBy ? ` · raised by ${mr.raisedBy.name}` : ''}${mr.approvedBy ? ` · approved by ${mr.approvedBy.name}` : ''}${mr.requiredDate ? ` · needed by ${formatDate(mr.requiredDate)}` : ''}`
+          ? `${mr.department.name}${mr.so ? ` · for ${mr.so.customer.name} (${mr.so.soNumber})` : ''}${mr.raisedBy ? ` · raised by ${mr.raisedBy.name}` : ''}${mr.approvedBy ? ` · approved by ${mr.approvedBy.name}` : ''}${mr.requiredDate ? ` · needed by ${formatDate(mr.requiredDate)}` : ''}`
           : 'Opening…'
       }
       width="max-w-6xl"
@@ -381,7 +466,7 @@ export function FulfilDialog({
           Cancel
         </button>
       }
-      footerNote={doing ? `Confirm will ${doing}.` : 'Nothing changed yet. Enter what to issue, or change what to buy.'}
+      footerNote={doing ? `Confirm will ${doing}.` : 'Nothing changed yet. Enter what to issue or reserve, or change what to buy.'}
       error={error}
       onClose={onClose}
       busy={saving}
@@ -410,8 +495,9 @@ export function FulfilDialog({
             const stores = storesFor(l)
             const available = r3(stores.reduce((t, st) => t + st.qty, 0))
             const giving = issuingOf(l)
-            const shortAfter = r3(Math.max(0, owed - giving))
             const theirs = l.ownership === 'CUSTOMER_OWNED'
+            // What neither this issue nor what is held on the rack covers.
+            const shortAfter = r3(Math.max(0, owed - giving - (theirs ? 0 : reservingOf(l))))
             const was = boughtOf(l)
             const buyNow = num(buy[l.id] ?? '0')
             const cat = l.item.category
@@ -439,10 +525,14 @@ export function FulfilDialog({
             const notOrdered = Math.min(Math.max(0, toBuy - ordered), Math.max(0, owed - arrivedHere - onOrder))
             // What this window is about to hand over from the racks.
             const givingNow = Math.min(giving, Math.max(0, owed - arrivedHere - onOrder - notOrdered))
-            const uncovered = r3(Math.max(0, owed - arrivedHere - onOrder - notOrdered - givingNow))
+            // Held on the rack for it, as the Reserve column now stands.
+            const keeping = theirs ? 0 : reservingOf(l)
+            const keptNow = Math.min(keeping, Math.max(0, owed - arrivedHere - onOrder - notOrdered - givingNow))
+            const uncovered = r3(Math.max(0, owed - arrivedHere - onOrder - notOrdered - givingNow - keptNow))
             const segments = [
               { key: 'given', label: 'Issued', value: issued, cls: 'bg-emerald-500', dot: 'bg-emerald-500' },
               { key: 'now', label: 'Issuing now', value: givingNow, cls: 'bg-emerald-300', dot: 'bg-emerald-300' },
+              { key: 'kept', label: 'Reserved', value: keptNow, cls: 'bg-violet-500', dot: 'bg-violet-500' },
               { key: 'arrived', label: 'Arrived on PO', value: arrivedHere, cls: 'bg-teal-400', dot: 'bg-teal-400' },
               { key: 'ordered', label: 'On order', value: onOrder, cls: 'bg-sky-500', dot: 'bg-sky-500' },
               { key: 'waiting', label: 'To buy, no PO yet', value: notOrdered, cls: 'bg-amber-400', dot: 'bg-amber-400' },
@@ -459,6 +549,7 @@ export function FulfilDialog({
             const figures = [
               { label: 'Asked', value: asked, tone: 'text-foreground' },
               { label: 'Issued', value: issued, tone: 'text-emerald-500' },
+              { label: 'Reserved', value: keeping, tone: 'text-violet-500' },
               { label: 'To buy', value: toBuy, tone: 'text-sky-500' },
               { label: 'Still owed', value: owed, tone: owed ? 'text-orange-500' : 'text-muted-foreground' },
             ]
@@ -484,7 +575,7 @@ export function FulfilDialog({
                 <div className="space-y-4 px-4 py-3">
                   {/* Where the line stands: four numbers and one bar. */}
                   <div>
-                    <div className="grid grid-cols-4 gap-3">
+                    <div className="grid grid-cols-5 gap-3">
                       {figures.map((f) => (
                         <div key={f.label}>
                           <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{f.label}</div>
@@ -529,7 +620,7 @@ export function FulfilDialog({
                         <div className="mb-1.5 flex items-baseline justify-between gap-2">
                           <h4 className="text-sm font-semibold text-foreground">
                             <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] text-primary">1</span>
-                            Issue raw material
+                            Issue or reserve raw material
                           </h4>
                           <span className="text-[11px] text-muted-foreground">
                             {available ? `${fmt(available)} ${unit} ${theirs ? 'of theirs ' : ''}in stock` : 'none in stock'}
@@ -540,8 +631,15 @@ export function FulfilDialog({
                             <thead className="bg-secondary text-[10px] uppercase tracking-wider text-muted-foreground">
                               <tr>
                                 <th className="px-3 py-1.5 text-left font-semibold">Store</th>
-                                <th className="px-3 py-1.5 text-right font-semibold">Has</th>
-                                <th className="px-3 py-1.5 text-right font-semibold" style={{ width: '9rem' }}>
+                                <th className="px-3 py-1.5 text-right font-semibold">On hand</th>
+                                {!theirs && <th className="px-3 py-1.5 text-right font-semibold">Reserved for others</th>}
+                                {!theirs && <th className="px-3 py-1.5 text-right font-semibold">Free</th>}
+                                {!theirs && (
+                                  <th className="px-3 py-1.5 text-right font-semibold" style={{ width: '8rem' }}>
+                                    Reserve
+                                  </th>
+                                )}
+                                <th className="px-3 py-1.5 text-right font-semibold" style={{ width: '8rem' }}>
                                   Issue
                                 </th>
                               </tr>
@@ -549,7 +647,8 @@ export function FulfilDialog({
                             <tbody>
                               {stores.map((st) => {
                                 const v = issue[l.id]?.[st.id] ?? ''
-                                const over = num(v) > st.qty + 1e-9
+                                const k = reserve[l.id]?.[st.id] ?? ''
+                                const over = num(v) + num(k) > st.free + 1e-9
                                 return (
                                   <tr key={st.id} className="border-t border-border">
                                     <td className="px-3 py-1.5 text-xs text-foreground">
@@ -559,15 +658,54 @@ export function FulfilDialog({
                                     <td className={`px-3 py-1.5 text-right text-xs tabular-nums ${st.qty ? 'text-foreground' : 'text-muted-foreground'}`}>
                                       {fmt(st.qty)}
                                     </td>
+                                    {!theirs && (
+                                      <td
+                                        className="px-3 py-1.5 text-right text-xs tabular-nums"
+                                        title={st.others.map((h) => `${fmt(h.qty)} for ${h.mrNumber}${h.customerName ? ` (${h.customerName}${h.soNumber ? `, ${h.soNumber}` : ''})` : ''}`).join('\n') || undefined}
+                                      >
+                                        {st.othersQty ? (
+                                          <span className="text-violet-500">
+                                            {fmt(st.othersQty)}
+                                            <span className="block text-[10px] text-muted-foreground">
+                                              {[...new Set(st.others.map((h) => h.customerName ?? h.mrNumber))].join(', ')}
+                                            </span>
+                                          </span>
+                                        ) : (
+                                          <span className="text-muted-foreground">—</span>
+                                        )}
+                                      </td>
+                                    )}
+                                    {!theirs && (
+                                      <td className={`px-3 py-1.5 text-right text-xs font-semibold tabular-nums ${st.free ? 'text-foreground' : 'text-muted-foreground'}`}>
+                                        {fmt(st.free)}
+                                      </td>
+                                    )}
+                                    {!theirs && (
+                                      <td className="px-3 py-1">
+                                        <div className="relative ml-auto w-28">
+                                          <input
+                                            className={`form-input h-8 pr-9 text-right text-xs tabular-nums ${over ? 'border-red-500' : ''}`}
+                                            inputMode="decimal"
+                                            value={k}
+                                            placeholder="0"
+                                            onChange={(e) => setReserve((p) => ({ ...p, [l.id]: { ...(p[l.id] ?? {}), [st.id]: e.target.value } }))}
+                                            disabled={st.free <= 0 && !st.own}
+                                            aria-label={`Reserve ${l.item.name} in ${st.name}`}
+                                            title="Hold it on the rack for this requisition; nobody else is given it"
+                                          />
+                                          <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">{unit}</span>
+                                        </div>
+                                      </td>
+                                    )}
                                     <td className="px-3 py-1">
-                                      <div className="relative ml-auto w-32">
+                                      <div className="relative ml-auto w-28">
                                         <input
                                           className={`form-input h-8 pr-9 text-right text-xs tabular-nums ${over ? 'border-red-500' : ''}`}
                                           inputMode="decimal"
                                           value={v}
                                           placeholder="0"
                                           onChange={(e) => setIssue((p) => ({ ...p, [l.id]: { ...(p[l.id] ?? {}), [st.id]: e.target.value } }))}
-                                          disabled={!canIssue || st.qty <= 0}
+                                          disabled={!canIssue || (theirs ? st.qty <= 0 : st.free <= 0)}
                                           aria-label={`Issue ${l.item.name} from ${st.name}`}
                                         />
                                         <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">{unit}</span>
@@ -580,7 +718,8 @@ export function FulfilDialog({
                           </table>
                         </div>
                         <p className={`mt-1 text-[11px] ${giving > owed + 1e-9 ? 'text-red-500' : 'text-muted-foreground'}`}>
-                          Issuing {fmt(giving)} of the {fmt(owed)} {unit} still owed.
+                          Issuing {fmt(giving)} of the {fmt(owed)} {unit} still owed
+                          {!theirs && reservingOf(l) > 0 ? ` · reserving ${fmt(reservingOf(l))} ${unit} for ${mr.so ? `${mr.so.customer.name} (${mr.so.soNumber})` : mr.mrNumber}` : ''}.
                         </p>
                       </div>
 
@@ -819,6 +958,8 @@ export function FulfilDialog({
                                       .filter(Boolean)
                                       .join(', ') || 'nothing'
                                   }`
+                                : e.reservedNow?.length
+                                  ? `reserved ${e.reservedNow.join(', ')}`
                                 : e.closeReason
                                   ? `closed it: ${e.closeReason}`
                                   : e.toBuy?.length

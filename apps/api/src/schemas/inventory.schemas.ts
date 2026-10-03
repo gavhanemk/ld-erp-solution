@@ -146,6 +146,8 @@ export const transferSchema = z.object({
 export const createRequisitionSchema = z.object({
   departmentId: id('the department asking'),
   moId: z.string().optional().nullable(),
+  /** The sales order the material is for: reservations are held for its customer. */
+  soId: z.string().optional().nullable(),
   /**
    * One store for every line, as older callers send it. A line may name its
    * own instead — the form now picks the store per item, from where it is.
@@ -199,6 +201,29 @@ export const rejectRequisitionSchema = z.object({
 /** Cancelling a requisition, or closing one part issued. The reason goes on it. */
 export const closeRequisitionSchema = z.object({
   reason: z.string().trim().min(5, 'Say why it is no longer needed').max(500),
+})
+
+/**
+ * Holding stock on the rack for a requisition: per line and store, the amount
+ * to hold. It sets the amount — 0 lets it go — rather than adding to it.
+ */
+export const reserveRequisitionSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        lineId: id('a line'),
+        warehouseId: id('a store'),
+        qty: z.coerce
+          .number({ invalid_type_error: 'The quantity to reserve has to be a number' })
+          .min(0, 'A reservation cannot be below zero')
+          .max(9999999),
+      }),
+    )
+    .min(1, 'Say what to reserve'),
+})
+
+export const releaseReservationSchema = z.object({
+  reason: z.string().trim().min(3, 'Say why it is being released').max(300),
 })
 
 /**
