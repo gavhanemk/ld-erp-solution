@@ -41,6 +41,19 @@ interface Uom {
  */
 const PREFERRED_UNITS = ['nos', 'job', 'lot', 'each', 'pcs']
 
+/** The unit "Not needed" saves as, from the units the master holds. */
+export function plainUnit<U extends { symbol: string }>(uoms: U[]): U | null {
+  return (
+    PREFERRED_UNITS.map((s) => uoms.find((u) => u.symbol.toLowerCase() === s)).find(Boolean) ??
+    uoms[0] ??
+    null
+  )
+}
+
+/** Whether a head's unit is one of the plain ones, i.e. shown as "Not needed". */
+export const isPlainUnit = (symbol?: string | null) =>
+  Boolean(symbol && PREFERRED_UNITS.includes(symbol.toLowerCase()))
+
 export function NewExpenseHeadDialog({
   expenseCategory,
   groups,
@@ -73,13 +86,7 @@ export function NewExpenseHeadDialog({
   }, [])
 
   /** What "Not needed" saves as. */
-  const fallbackUnit = useMemo(
-    () =>
-      PREFERRED_UNITS.map((s) => uoms.find((u) => u.symbol.toLowerCase() === s)).find(Boolean) ??
-      uoms[0] ??
-      null,
-    [uoms]
-  )
+  const fallbackUnit = useMemo(() => plainUnit(uoms), [uoms])
 
   const problems = useMemo(() => {
     const out: string[] = []

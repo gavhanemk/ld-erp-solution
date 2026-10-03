@@ -5,7 +5,11 @@ import { Plus, Receipt } from 'lucide-react'
 import { masterResource } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
-import { NewExpenseHeadDialog } from '@/components/purchase/NewExpenseHeadDialog'
+import {
+  NewExpenseHeadDialog,
+  isPlainUnit,
+  plainUnit,
+} from '@/components/purchase/NewExpenseHeadDialog'
 
 /**
  * Expense heads — Electricity, Rent, Repairs — on their own master screen.
@@ -21,6 +25,12 @@ interface Category {
   id: string
   name: string
   parentId: string | null
+}
+
+interface Uom {
+  id: string
+  symbol: string
+  name: string
 }
 
 interface Head {
@@ -71,6 +81,14 @@ const columns: Column<Head>[] = [
 
 export default function ExpenseHeadsPage() {
   const [categories, setCategories] = useState<Category[] | null>(null)
+  const [uoms, setUoms] = useState<Uom[]>([])
+  useEffect(() => {
+    masterResource<Uom>('uoms')
+      .list({ limit: 100 })
+      .then((r) => setUoms(r.data))
+      .catch(() => {})
+  }, [])
+  const plain = useMemo(() => plainUnit(uoms), [uoms])
   const [adding, setAdding] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
 
@@ -95,9 +113,16 @@ export default function ExpenseHeadsPage() {
   )
 
   /*
-   * The edit form. Kind and stock fields are left out: a head is always filed
-   * as a consumable, and a partial save keeps what it already holds. Group is
-   * the category itself or one of the groups under it.
+   * The edit form, in two rows:
+   *
+   *   Expense Head ......... | Group | Unit
+   *   SAC / HSN | Note ..........................
+   *
+   * Kind and stock fields are left out: a head is always filed as a consumable,
+   * and a partial save keeps what it already holds. Group is the category
+   * itself or one of the groups under it. Unit leads with "Not needed", which
+   * is the plain unit the item master insists on (pcs today) under a name that
+   * says what it means for a rent bill.
    */
   const formFields: FormField[] = useMemo(
     () => [
@@ -118,13 +143,22 @@ export default function ExpenseHeadsPage() {
         label: 'Unit',
         type: 'select',
         required: true,
-        optionsFrom: { resource: 'uoms' },
+        options: [
+          ...(plain ? [{ value: plain.id, label: 'Not needed' }] : []),
+          ...uoms
+            .filter((u) => u.id !== plain?.id)
+            .map((u) => ({ value: u.id, label: `${u.symbol} · ${u.name}` })),
+        ],
+        initial: (r) => {
+          const u = r.uom as Uom | null
+          return u && isPlainUnit(u.symbol) && plain ? plain.id : r.uomId
+        },
       },
       { name: 'hsnCode', label: 'SAC / HSN Code', placeholder: '998714' },
-      { name: 'description', label: 'Note', placeholder: 'e.g. MSEDCL, factory meter', span: 2 },
+      { name: 'description', label: 'Note', placeholder: 'e.g. MSEDCL, factory meter', span: 3 },
       { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available on new bills' },
     ],
-    [top]
+    [top, uoms, plain]
   )
 
   const dialog = adding && (
@@ -181,6 +215,7 @@ export default function ExpenseHeadsPage() {
         filters={{ categoryId: top.id }}
         columns={columns}
         formFields={formFields}
+        formColumns={4}
         refreshKey={refreshKey}
         onNew={() => setAdding(true)}
         defaultSort="name"
