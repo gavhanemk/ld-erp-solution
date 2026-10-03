@@ -238,7 +238,7 @@ export function ExpenseHeadDialog({
                 SAC / HSN | Note ........................ */}
           <Section icon={Receipt} title="Expense head">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className={groups.length ? 'sm:col-span-2' : 'sm:col-span-2 lg:col-span-3'}>
+              <div className="sm:col-span-2">
                 <label className="form-label" htmlFor="eh-name">
                   Name
                 </label>
@@ -254,26 +254,33 @@ export function ExpenseHeadDialog({
                   autoFocus
                 />
               </div>
-              {groups.length > 0 && (
-                <div>
-                  <label className="form-label" htmlFor="eh-group">
-                    Group
-                  </label>
-                  <select
-                    id="eh-group"
-                    value={groupId}
-                    onChange={(e) => setGroupId(e.target.value)}
-                    className="form-input"
-                  >
-                    <option value="">None</option>
-                    {groups.map((g) => (
-                      <option key={g.id} value={g.id}>
-                        {g.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              {/* Always shown, so the form is the same shape whether or not the
+                mill has grouped its heads yet. Groups are sub-categories under
+                Expenses, made in Item Categories. */}
+              <div>
+                <label className="form-label" htmlFor="eh-group">
+                  Group <span className="text-muted-foreground font-normal">(optional)</span>
+                </label>
+                <select
+                  id="eh-group"
+                  value={groupId}
+                  onChange={(e) => setGroupId(e.target.value)}
+                  disabled={groups.length === 0}
+                  className="form-input"
+                >
+                  <option value="">{groups.length ? 'None' : 'No groups yet'}</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="form-help">
+                  {groups.length
+                    ? 'e.g. Utilities, Repairs.'
+                    : 'Add groups under Expenses in Masters → Item Categories.'}
+                </p>
+              </div>
               <div>
                 <label className="form-label" htmlFor="eh-uom">
                   Unit <span className="text-muted-foreground font-normal">(optional)</span>
