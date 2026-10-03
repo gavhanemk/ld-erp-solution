@@ -1,13 +1,15 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
-  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock,
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock,
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { FulfilDialog } from '@/components/inventory/FulfilDialog'
+import { ReservationsView } from '@/components/inventory/ReservationsView'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
@@ -256,6 +258,27 @@ const PAGE = 50
 type FilterKey = 'stage' | 'department' | 'raisedBy' | 'store' | 'category' | 'need'
 
 export default function RequisitionsPage() {
+  return (
+    <Suspense>
+      <RequisitionsScreen />
+    </Suspense>
+  )
+}
+
+function RequisitionsScreen() {
+  // Two tabs: the requisitions themselves, and the stock held for them.
+  const params = useSearchParams()
+  const router = useRouter()
+  const pathname = usePathname()
+  const view: 'list' | 'reservations' = params.get('view') === 'reservations' ? 'reservations' : 'list'
+  const setView = (v: 'list' | 'reservations') => {
+    const next = new URLSearchParams(params.toString())
+    if (v === 'reservations') next.set('view', 'reservations')
+    else next.delete('view')
+    const qs = next.toString()
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+  }
+
   const me = currentUser()
   // The Admin may approve a requisition they raised themselves; the server says the same.
   const admin = me?.role === 'Admin'
@@ -731,11 +754,31 @@ export default function RequisitionsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="page-header">
-        <div>
+      {/* The title, the two tabs beside it, and the buttons on the right: one line, as on Job Work. */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-4">
           <h1 className="page-title">Material Requisitions</h1>
-          <p className="page-subtitle">What the floor has asked the store for</p>
+          <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
+            {([
+              { key: 'list', label: 'Requisitions', icon: List },
+              { key: 'reservations', label: 'Reservations', icon: Lock },
+            ] as const).map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={view === t.key}
+                onClick={() => setView(t.key)}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  view === t.key ? 'bg-card font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <t.icon size={15} /> {t.label}
+              </button>
+            ))}
+          </div>
         </div>
+        {view === 'list' && (
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
@@ -752,6 +795,7 @@ export default function RequisitionsPage() {
             <Plus size={15} /> New requisition
           </button>
         </div>
+        )}
       </div>
 
       {error && (
@@ -769,6 +813,10 @@ export default function RequisitionsPage() {
         </div>
       )}
 
+      {view === 'reservations' && <ReservationsView />}
+
+      {view === 'list' && (
+      <>
       {/* Each tile is a filter: click to show only those, click again to show all. */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <KpiTile
@@ -1120,6 +1168,8 @@ export default function RequisitionsPage() {
           </div>
         )}
       </div>
+      </>
+      )}
 
       {fulfilling && (
         <FulfilDialog
