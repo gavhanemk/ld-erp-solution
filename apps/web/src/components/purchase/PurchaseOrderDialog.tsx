@@ -653,6 +653,9 @@ export function PurchaseOrderDialog({
   // Files chosen on a new order, held here until it has a number to hang them
   // on. They go up the moment it is saved.
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
+  // The supplier's PI scan, on an order raised from his quote. Already in
+  // storage against the enquiry; the server copies it onto the order on save.
+  const [carriedFiles, setCarriedFiles] = useState<Attachment[]>([])
   const [uploading, setUploading] = useState(false)
   /* "or drag and drop" is printed on the drop zone, so it has to work, and a
      dragged file does not trigger :hover. Declared up here with the rest:
@@ -800,6 +803,7 @@ export function PurchaseOrderDialog({
     setPctOf({})
     setAttachments([])
     setPendingFiles([])
+    setCarriedFiles([])
     setRateHistory({})
     setHistoryFor(null)
     setSupplierAddresses([])
@@ -814,6 +818,25 @@ export function PurchaseOrderDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- categories is
     // read for the category dropdowns and would re-run this reset every time
     // the master list loads, wiping what the buyer had typed.
+  }, [open, record, enquiry, quote])
+
+  // His PI scan comes with the order raised from it, so nobody uploads it twice.
+  useEffect(() => {
+    if (!open || record || !enquiry || !quote) return
+    let alive = true
+    api
+      .get<{ success: boolean; data: Array<Attachment & { quoteId?: string | null }> }>(
+        `/purchase/enquiries/${enquiry.id}/attachments`
+      )
+      .then((res) => {
+        if (alive) setCarriedFiles(res.data.filter((a) => a.quoteId === quote.id).slice(0, MAX_FILES))
+      })
+      .catch(() => {
+        // Not worth blocking the order over. The buyer can still attach it by hand.
+      })
+    return () => {
+      alive = false
+    }
   }, [open, record, enquiry, quote])
 
   /*
@@ -1586,7 +1609,7 @@ export function PurchaseOrderDialog({
     if (!fileList?.length) return
     const chosen = Array.from(fileList)
 
-    const room = MAX_FILES - attachments.length - pendingFiles.length
+    const room = MAX_FILES - attachments.length - pendingFiles.length - carriedFiles.length
     if (chosen.length > room) {
       setError(
         room === 0
@@ -1703,6 +1726,7 @@ export function PurchaseOrderDialog({
     // `enquiryDate` from the enquiry's own PI row.
     enquiryId: enquiry?.id ?? null,
     enquiryQuoteId: quote?.id ?? null,
+    quoteAttachmentIds: isEdit ? undefined : carriedFiles.map((f) => f.id),
     deliveryWarehouseId: deliverTo === 'CUSTOMER' ? null : warehouseId || null,
     deliveryCustomerId: deliverTo === 'CUSTOMER' ? deliveryCustomerId || null : null,
     poDate: poDate || undefined,
@@ -1756,14 +1780,19 @@ export function PurchaseOrderDialog({
 
     try {
       let id = record?.id
+      // His PI scan is copied by the server; whatever did not make it comes back named.
+      let carryFailed: Array<{ name: string; why: string }> = []
       if (isEdit && record) {
         await api.patch(`/purchase/orders/${record.id}`, payload())
       } else {
-        const res = await api.post<{ success: boolean; data: { id: string } }>(
-          '/purchase/orders',
-          payload()
-        )
+        const res = await api.post<{
+          success: boolean
+          data: { id: string }
+          fileFailures?: Array<{ name: string; why: string }>
+        }>('/purchase/orders', payload())
         id = res.data.id
+        setCarriedFiles([])
+        carryFailed = res.fileFailures ?? []
       }
 
       // Files chosen before the order existed. It has a number now, so they
@@ -1773,11 +1802,11 @@ export function PurchaseOrderDialog({
       // and throwing it away over an attachment would be the worse outcome.
       // The names of whatever did not make it are reported instead, and they
       // can be added by reopening the order.
-      if (pendingFiles.length && id) {
+      if ((pendingFiles.length || carryFailed.length) && id) {
         // The reason is kept, not just the name. Naming a file that failed
         // without saying why leaves the person at the desk — and whoever they
         // ring about it — with nowhere at all to go.
-        const failed: Array<{ name: string; why: string }> = []
+        const failed: Array<{ name: string; why: string }> = [...carryFailed]
         for (const file of pendingFiles) {
           try {
             await uploadOne(file, id)
@@ -1854,7 +1883,7 @@ export function PurchaseOrderDialog({
 
   // Sent and still-to-send together: the limit is five files on the order,
   // not five of each.
-  const fileCount = attachments.length + pendingFiles.length
+  const fileCount = attachments.length + pendingFiles.length + carriedFiles.length
 
   const incomplete = !supplierId || activeLines.length === 0 || unfinished.length > 0
   const busy = saving !== null
@@ -3222,6 +3251,33 @@ export function PurchaseOrderDialog({
                                   className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                   onClick={() => void removeFile(f)}
                                   aria-label={`Remove ${f.fileName}`}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </li>
+                            ))}
+
+                            {/* His PI scan, copied onto the order when it is saved.
+                              Removable here, so it can be left off if wanted. */}
+                            {carriedFiles.map((f) => (
+                              <li
+                                key={`carried-${f.id}`}
+                                className="border-border bg-secondary flex items-center gap-2 rounded-lg border border-dashed px-3 py-1.5"
+                              >
+                                <Paperclip size={13} className="text-muted-foreground shrink-0" />
+                                <span className="text-foreground min-w-0 flex-1 truncate text-sm">
+                                  {f.fileName}
+                                </span>
+                                <span className="text-muted-foreground whitespace-nowrap text-[10px]">
+                                  {(f.sizeBytes / 1024).toFixed(0)} KB · from his PI · on save
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                                  onClick={() =>
+                                    setCarriedFiles((prev) => prev.filter((x) => x.id !== f.id))
+                                  }
+                                  aria-label={`Leave ${f.fileName} off this order`}
                                 >
                                   <Trash2 size={13} />
                                 </button>
