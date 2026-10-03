@@ -82,13 +82,15 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           onOpenMobileNav={() => setMobileNavOpen(true)}
         />
 
-        {/* 16px of padding on a phone rather than 24px. On a 390px screen
-            the old padding was 12% of the width.
+        {/* 16px either side at every size, 24px above and below on a wider
+            screen. No maximum width: the lists are wide, and a centred
+            1600px column with a margin each side left them scrolling
+            sideways on a screen that had room to show every column.
 
             `min-w-0` here and on the column above, so neither refuses to
             go narrower than its content's own minimum. */}
-        <main className="min-w-0 flex-1 overflow-auto p-4 sm:p-6">
-          <div className="mx-auto min-w-0 max-w-[1600px] animate-fade-in">
+        <main className="min-w-0 flex-1 overflow-auto p-4 sm:py-6">
+          <div className="min-w-0 animate-fade-in">
             {children}
           </div>
         </main>
