@@ -595,12 +595,17 @@ export function PurchaseBillDialog({
   )
 
   /**
-   * The choices in a line's item picker. On an expense bill the expense heads
-   * come first, with a way to add one; every other item is still listed below
-   * them, so a bill can be booked before the heads have been set up.
+   * The choices in a line's item picker. On an expense bill only the expense
+   * heads are offered, with a way to add one — fabric and trims come in on a
+   * goods receipt, not here. Every item is still offered while the mill has no
+   * expense heads at all, so a bill can be booked before they are set up, and
+   * a line already holding some other item (an older bill) keeps it listed.
    */
-  const itemChoices = () =>
-    expenseMode ? (
+  const itemChoices = (currentId?: string) => {
+    const others = items.filter(
+      (it) => !isExpenseHead(it) && (expenseHeads.length === 0 || it.id === currentId)
+    )
+    return expenseMode ? (
       <>
         <option value="">Select...</option>
         {expenseHeads.length > 0 && (
@@ -613,15 +618,15 @@ export function PurchaseBillDialog({
           </optgroup>
         )}
         <option value={ADD_EXPENSE_HEAD}>+ Add a new expense head…</option>
-        <optgroup label="Other items">
-          {items
-            .filter((it) => !isExpenseHead(it))
-            .map((it) => (
+        {others.length > 0 && (
+          <optgroup label="Other items">
+            {others.map((it) => (
               <option key={it.id} value={it.id}>
                 {it.code ? `${it.code} — ${it.name}` : it.name}
               </option>
             ))}
-        </optgroup>
+          </optgroup>
+        )}
       </>
     ) : (
       <>
@@ -633,6 +638,7 @@ export function PurchaseBillDialog({
         ))}
       </>
     )
+  }
 
   /** A fresh line: one of whatever it is, on an expense bill — a month's electricity is one. */
   const freshLine = (): BillLine => (expenseMode ? { ...emptyLine(), qty: '1' } : emptyLine())
@@ -2142,7 +2148,7 @@ export function PurchaseBillDialog({
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
                             >
-                              {itemChoices()}
+                              {itemChoices(line.itemId)}
                             </select>
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
@@ -2310,7 +2316,7 @@ export function PurchaseBillDialog({
                           onChange={(e) => pickItem(i, e.target.value)}
                           aria-label={`Line ${i + 1} item`}
                         >
-                          {itemChoices()}
+                          {itemChoices(line.itemId)}
                         </select>
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
