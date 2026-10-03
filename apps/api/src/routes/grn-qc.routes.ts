@@ -209,8 +209,16 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     })
 
     const rejecting = lines.filter((l) => l.rejectedQty > 0)
+    /*
+     * Where rejected goods are moved, if anywhere.
+     *
+     * Optional: with one store there is nowhere else to put them, so a check
+     * without a reject godown only records what was rejected and why. The
+     * goods stay where they were received until the return challan takes
+     * them out. When a reject godown is named, they are moved into it.
+     */
     let rejectWarehouseId: string | null = null
-    if (rejecting.length) {
+    if (rejecting.length && data.rejectWarehouseId) {
       const target = await tx.warehouse.findUnique({
         where: { id: data.rejectWarehouseId ?? '' },
         select: { id: true, name: true, isActive: true },
@@ -257,8 +265,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     })
 
     // Out of the godown it was received into, into the reject godown, at the
-    // value it was carried at — a move, not a loss.
-    for (const l of rejecting) {
+    // value it was carried at — a move, not a loss. Nothing moves without one.
+    for (const l of rejectWarehouseId ? rejecting : []) {
       const out = await recordMovement(tx, {
         itemId: l.itemId,
         warehouseId: l.warehouseId,
