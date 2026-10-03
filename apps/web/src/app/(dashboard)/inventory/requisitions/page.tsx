@@ -81,7 +81,12 @@ const partlyIssued = (mr: Requisition) =>
 
 /** How much of a line is to be bought; the whole line where it was marked before a quantity could be set. */
 const buyQtyOf = (l: Line) =>
-  l.purchaseQty !== null && l.purchaseQty !== undefined ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+  l.purchaseQty !== null && l.purchaseQty !== undefined
+    ? Number(l.purchaseQty)
+    : // Only marked "buy": what is still owed, not the whole line again.
+      l.fulfilment === 'PURCHASE'
+      ? Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+      : 0
 
 const qtyFmt = (v: number) =>
   v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })

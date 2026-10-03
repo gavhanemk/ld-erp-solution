@@ -124,7 +124,11 @@ export default function PrintMaterialIssue() {
   const rows = mr.lines.map((l, i) => {
     // Being bought: still owed to the department, handed over from the store once it arrives.
     const buying =
-      l.purchaseQty !== null && l.purchaseQty !== undefined ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+      l.purchaseQty !== null && l.purchaseQty !== undefined
+        ? Number(l.purchaseQty)
+        : l.fulfilment === 'PURCHASE'
+          ? Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+          : 0
     const toBuy = buying > 0
     const owed = Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
     return {

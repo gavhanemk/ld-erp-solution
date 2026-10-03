@@ -919,8 +919,14 @@ router.patch(
  * How much of a line is to be bought. Lines decided before the store could
  * set a quantity have none; there PURCHASE meant the whole line.
  */
-const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }) =>
-  l.purchaseQty !== null ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal; issuedQty: Prisma.Decimal }) =>
+  l.purchaseQty !== null
+    ? Number(l.purchaseQty)
+    : // Marked "buy" before a quantity could be set: what is still owed, so a
+      // part handed over from the rack is not bought a second time.
+      l.fulfilment === 'PURCHASE'
+      ? Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+      : 0
 
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
@@ -1020,10 +1026,10 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
  * fulfil window can say what is already on its way.
  */
 async function boughtFor(
-  lines: Array<{ id: string; purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }>,
+  lines: Array<{ id: string; purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal; issuedQty: Prisma.Decimal }>,
 ) {
   const orders = await prisma.purchaseOrderLine.findMany({
-    where: { mrLineId: { in: lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' } } },
+    where: { mrLineId: { in: lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' }, deletedAt: null } },
     select: {
       mrLineId: true,
       qty: true,
@@ -1160,7 +1166,13 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     const mine = orderRows.filter((o) => o.mrLineId === l.id)
     return {
       lineId: l.id,
-      buyQty: l.purchaseQty !== null ? l.purchaseQty : l.fulfilment === 'PURCHASE' ? l.requestedQty : 0,
+      // A quantity typed in stands; a line only marked "buy" means what is still owed.
+      buyQty:
+        l.purchaseQty !== null
+          ? l.purchaseQty
+          : l.fulfilment === 'PURCHASE'
+            ? Math.max(round3(l.requestedQty - l.issuedQty), round3(mine.reduce((t, o) => t + o.qty, 0)))
+            : 0,
       orderedQty: round3(mine.reduce((t, o) => t + o.qty, 0)),
       receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
       poNumbers: [...new Set(mine.map((o) => o.poNumber))],
