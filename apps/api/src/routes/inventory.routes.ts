@@ -957,6 +957,40 @@ const mrInclude = {
   },
 }
 
+
+/**
+ * What a requisition line could take from the stores now, for every screen
+ * that shows "in stock": our own stock in every store less what is reserved
+ * for other lines, or — for a customer's material — that customer's stock.
+ */
+async function availableFor(
+  lines: Array<{ id: string; itemId: string; ownership: string; ownerCustomerId: string | null }>,
+): Promise<Map<string, number>> {
+  const itemIds = [...new Set(lines.map((l) => l.itemId))]
+  if (!itemIds.length) return new Map()
+  const [stock, held] = await Promise.all([
+    prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; qty: number }>>`
+      SELECT "itemId", ownership::text AS "ownership", "ownerCustomerId", SUM("inQty" - "outQty")::float8 AS "qty"
+      FROM ld_erp.stock_ledger
+      WHERE "itemId" IN (${Prisma.join(itemIds)})
+      GROUP BY "itemId", ownership, "ownerCustomerId"`,
+    prisma.$queryRaw<Array<{ itemId: string; mrLineId: string; qty: number }>>`
+      SELECT "itemId", "mrLineId", qty::float8 AS "qty"
+      FROM ld_erp.stock_reservations
+      WHERE status::text = 'ACTIVE' AND "itemId" IN (${Prisma.join(itemIds)})`,
+  ])
+  const out = new Map<string, number>()
+  for (const l of lines) {
+    const theirs = l.ownership === 'CUSTOMER_OWNED'
+    const onHand = stock
+      .filter((s2) => s2.itemId === l.itemId && (theirs ? s2.ownership === 'CUSTOMER_OWNED' && s2.ownerCustomerId === l.ownerCustomerId : s2.ownership === 'OWNED'))
+      .reduce((t, s2) => t + s2.qty, 0)
+    const others = theirs ? 0 : held.filter((h) => h.itemId === l.itemId && h.mrLineId !== l.id).reduce((t, h) => t + h.qty, 0)
+    out.set(l.id, round3(Math.max(0, onHand - others)))
+  }
+  return out
+}
+
 router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -1003,9 +1037,12 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
     prisma.materialRequisition.count({ where }),
   ])
 
+  // In stock for every line, so the list can say whether the store can cover it.
+  const available = await availableFor(rows.flatMap((r) => r.lines))
+
   res.json({
     success: true,
-    data: rows,
+    data: rows.map((r) => ({ ...r, lines: r.lines.map((l) => ({ ...l, available: available.get(l.id) ?? 0 })) })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   })
 })
@@ -2156,21 +2193,25 @@ router.post(
  * ?status=all includes what was used up or released.
  */
 /**
- * Every item on the indent, across all approved requisitions still open: what
- * is to be bought, what is ordered and received, and on which POs — the old
- * system's indent list in one place. One query.
+ * Every item still pending, across all open requisitions — waiting for
+ * approval, to be issued, on the indent or on order: what is in stock, asked,
+ * issued, reserved, to be bought, ordered and received, and on which POs. The
+ * old system's indent screen in one place.
  */
 router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
   const rows = await prisma.$queryRaw<
     Array<{
-      lineId: string; mrId: string; mrNumber: string; requestDate: Date; requiredDate: Date | null
+      lineId: string; mrId: string; mrNumber: string; mrStatus: string; requestDate: Date; requiredDate: Date | null
+      ownership: string; ownerCustomerId: string | null; fulfilment: string; reserved: number
       departmentId: string; departmentName: string; soNumber: string | null; customerId: string | null; customerName: string | null
       itemId: string; itemCode: string; itemName: string; uom: string | null; purpose: string | null
       asked: number; issued: number; purchaseQty: number | null
       ordered: number; received: number; poNumbers: string | null
     }>
   >`
-    SELECT l.id AS "lineId", m.id AS "mrId", m."mrNumber", m."requestDate", m."requiredDate",
+    SELECT l.id AS "lineId", m.id AS "mrId", m."mrNumber", m.status::text AS "mrStatus", m."requestDate", m."requiredDate",
+           l.ownership::text AS "ownership", l."ownerCustomerId", l.fulfilment::text AS "fulfilment",
+           COALESCE((SELECT SUM(r.qty) FROM ld_erp.stock_reservations r WHERE r."mrLineId" = l.id AND r.status::text = 'ACTIVE'), 0)::float8 AS "reserved",
            d.id AS "departmentId", d.name AS "departmentName", so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
            i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom", l.purpose,
            l."requestedQty"::float8 AS "asked", l."issuedQty"::float8 AS "issued", l."purchaseQty"::float8 AS "purchaseQty",
@@ -2196,20 +2237,21 @@ router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
       WHERE pol."mrLineId" = l.id AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL AND gr.status::text <> 'CANCELLED'
     ) g ON TRUE
-    WHERE m.status::text = 'APPROVED' AND m."closedAt" IS NULL
-      AND (l."purchaseQty" > 0 OR (l."purchaseQty" IS NULL AND l.fulfilment::text = 'PURCHASE') OR COALESCE(o.ordered, 0) > 0)
+    WHERE m.status::text IN ('APPROVED', 'PENDING') AND m."closedAt" IS NULL
+      AND (l."issuedQty" < l."requestedQty" OR COALESCE(o.ordered, 0) > COALESCE(g.received, 0))
     ORDER BY m."requestDate" DESC, m."mrNumber" DESC`
+  const available = await availableFor(
+    rows.map((r) => ({ id: r.lineId, itemId: r.itemId, ownership: r.ownership, ownerCustomerId: r.ownerCustomerId })),
+  )
   res.json({
     success: true,
-    data: rows
-      .map((r) => {
-        // A typed quantity stands; a line only marked "buy" means what is still owed, never below what is ordered.
-        const toBuy = round3(
-          r.purchaseQty !== null ? r.purchaseQty : Math.max(r.asked - r.issued, r.ordered),
-        )
-        return { ...r, uom: r.uom ?? '', toBuy, purchaseQty: undefined }
-      })
-      .filter((r) => r.toBuy > 0 || r.ordered > 0),
+    data: rows.map((r) => {
+      // A typed quantity stands; a line only marked "buy" means what is still owed, never below what is ordered.
+      const toBuy = round3(
+        r.purchaseQty !== null ? r.purchaseQty : r.fulfilment === 'PURCHASE' ? Math.max(r.asked - r.issued, r.ordered) : r.ordered,
+      )
+      return { ...r, uom: r.uom ?? '', toBuy, available: available.get(r.lineId) ?? 0, purchaseQty: undefined }
+    }),
   })
 })
 
@@ -2226,6 +2268,7 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
       asked: number; issued: number; soNumber: string | null; customerId: string | null; customerName: string | null
       reservedBy: string | null; reservedAt: Date; updatedAt: Date
       releasedBy: string | null; releasedAt: Date | null; releaseReason: string | null
+      onHand: number
     }>
   >`
     SELECT r.id, r.status::text AS "status", r.qty::float8 AS "qty", r."reservedQty"::float8 AS "reservedQty",
@@ -2236,7 +2279,10 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
            ml."requestedQty"::float8 AS "asked", ml."issuedQty"::float8 AS "issued",
            so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
            rb.name AS "reservedBy", r."createdAt" AS "reservedAt", r."updatedAt",
-           xb.name AS "releasedBy", r."releasedAt", r."releaseReason"
+           xb.name AS "releasedBy", r."releasedAt", r."releaseReason",
+           -- Our stock of the item in that store now, reserved or not.
+           COALESCE((SELECT SUM(sl."inQty" - sl."outQty") FROM ld_erp.stock_ledger sl
+                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED'), 0)::float8 AS "onHand"
     FROM ld_erp.stock_reservations r
     JOIN ld_erp.items i ON i.id = r."itemId"
     LEFT JOIN ld_erp.uom u ON u.id = i."uomId"

@@ -54,6 +54,8 @@ interface Line {
   ownerCustomer?: { id: string; name: string } | null
   /** Stock held on the rack for this line. */
   reservations?: Array<{ id: string; warehouseId: string; qty: string | number }>
+  /** What this line could take from the stores now: our stock less what others reserved, or the customer's stock. */
+  available?: number
 }
 
 interface Requisition {
@@ -190,10 +192,11 @@ type UnitGroup = ReturnType<typeof qtyByUnit>[number]
 
 /** The item panel's columns, as shares of the row, so the table fits the panel it opens in. */
 const ITEM_COLS = [
-  { label: 'Item', width: '28%' },
-  { label: 'Code', width: '11%' },
-  { label: 'What for', width: '16%' },
-  { label: 'Asked', width: '9%', numeric: true },
+  { label: 'Item', width: '25%' },
+  { label: 'Code', width: '10%' },
+  { label: 'What for', width: '12%' },
+  { label: 'In stock', width: '9%', numeric: true },
+  { label: 'Asked', width: '8%', numeric: true },
   { label: 'Issued', width: '9%', numeric: true },
   { label: 'Reserved', width: '9%', numeric: true },
   { label: 'Buying', width: '9%', numeric: true },
@@ -667,6 +670,11 @@ function RequisitionsScreen() {
                     {l.purpose ?? <span className="text-muted-foreground">—</span>}
                   </td>
                   <td className="whitespace-nowrap text-right text-xs tabular-nums">
+                    <span className={(l.available ?? 0) + 1e-9 >= owed || owed === 0 ? 'font-semibold text-emerald-600' : 'font-semibold text-red-500'}>
+                      {qtyFmt(l.available ?? 0)}
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap text-right text-xs tabular-nums">
                     {qtyFmt(asked)} {l.item.uom.symbol}
                   </td>
                   <td className="whitespace-nowrap text-right text-xs tabular-nums">
@@ -742,7 +750,7 @@ function RequisitionsScreen() {
 
   const pages = Math.ceil(shown.length / PAGE) || 1
   const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
-  const COLS = 12
+  const COLS = 13
 
   return (
     <div className="space-y-4">
@@ -1039,6 +1047,7 @@ function RequisitionsScreen() {
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still needed</th>
+                      <th className="whitespace-nowrap">Stock</th>
                       <th className="whitespace-nowrap">Status</th>
                       <th />
                     </tr>
@@ -1049,6 +1058,9 @@ function RequisitionsScreen() {
                       const expanded = open === mr.id
                       const live = OPEN_STAGES.includes(r.stage)
                       const p = itemsPreview(mr.lines.map((l) => l.item.name))
+                      // Lines still needed that the stores cannot cover in full.
+                      const openLines = live ? mr.lines.filter((l) => Number(l.requestedQty) - Number(l.issuedQty) > 1e-9) : []
+                      const short = openLines.filter((l) => (l.available ?? 0) + 1e-9 < Number(l.requestedQty) - Number(l.issuedQty))
                       return (
                         <Fragment key={mr.id}>
                           <tr>
@@ -1092,6 +1104,17 @@ function RequisitionsScreen() {
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">{unitStack(r.groups, (g) => g.issued, 'text-emerald-500')}</td>
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
                               {live ? unitStack(r.groups, (g) => g.owed, 'font-medium text-amber-500') : dash}
+                            </td>
+                            <td className="whitespace-nowrap text-xs" title={short.map((l) => `${l.item.name}: ${qtyFmt(l.available ?? 0)} ${l.item.uom.symbol} in stock`).join('\n') || undefined}>
+                              {!openLines.length ? (
+                                dash
+                              ) : short.length ? (
+                                <span className="font-semibold text-red-500">
+                                  Short on {short.length} of {openLines.length}
+                                </span>
+                              ) : (
+                                <span className="font-semibold text-emerald-600">In stock</span>
+                              )}
                             </td>
                             <td className="whitespace-nowrap">
                               <span className={r.s.cls} title={r.s.next}>

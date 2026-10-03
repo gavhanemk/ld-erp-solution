@@ -52,6 +52,8 @@ interface Row {
   releasedBy: string | null
   releasedAt: string | null
   releaseReason: string | null
+  /** Our stock of the item in that store now. */
+  onHand: number
 }
 
 type FilterKey = 'status' | 'customer' | 'store' | 'department' | 'category'
@@ -366,6 +368,7 @@ export function ReservationsView() {
                     <th className="whitespace-nowrap">Item</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Reserved</th>
                     <th className="whitespace-nowrap">In store</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>On hand there</th>
                     <th className="whitespace-nowrap">For</th>
                     <th className="whitespace-nowrap">Requisition</th>
                     <th className="whitespace-nowrap">Since</th>
@@ -394,6 +397,9 @@ export function ReservationsView() {
                           )}
                         </td>
                         <td className="whitespace-nowrap text-sm">{r.warehouseName}</td>
+                        <td className="whitespace-nowrap text-right tabular-nums" title="Our stock of this item in that store now, reserved or not">
+                          {qtyFmt(r.onHand)} <span className="text-xs text-muted-foreground">{r.uom}</span>
+                        </td>
                         <td className="whitespace-nowrap">
                           <div className="text-sm">{r.customerName ?? <span className="text-muted-foreground">No customer</span>}</div>
                           {r.soNumber && <div className="font-mono text-[11px] text-muted-foreground">{r.soNumber}</div>}

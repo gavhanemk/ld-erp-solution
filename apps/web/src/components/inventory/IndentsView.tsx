@@ -9,15 +9,20 @@ import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { formatDate } from '@/lib/utils'
 
 /**
- * Every item on the indent, across all open requisitions — the old system's
- * indent list in one place. What is to be bought, what is ordered and received,
- * and on which POs. Process opens the requisition to change what to buy.
+ * Every item still pending, across all open requisitions — the old system's
+ * indent screen in one place: what is in stock, asked, issued, still needed,
+ * reserved, to buy, ordered and received, and what happens next. Process opens
+ * the requisition to issue, reserve or buy.
  */
 
 interface Row {
   lineId: string
   mrId: string
   mrNumber: string
+  mrStatus: 'APPROVED' | 'PENDING'
+  ownership: 'OWNED' | 'CUSTOMER_OWNED'
+  available: number
+  reserved: number
   requestDate: string
   requiredDate: string | null
   departmentId: string
@@ -38,15 +43,24 @@ interface Row {
   poNumbers: string | null
 }
 
-type StateKey = 'notOrdered' | 'part' | 'ordered' | 'received'
+/** What happens next to the item, in the order things happen. */
+type StateKey = 'approval' | 'short' | 'notOrdered' | 'part' | 'ordered' | 'arrived' | 'inStock'
 const STATE: Record<StateKey, { label: string; cls: string }> = {
-  notOrdered: { label: 'Not ordered yet', cls: 'badge-warning' },
+  approval: { label: 'Waiting for approval', cls: 'badge-neutral' },
+  short: { label: 'Short — not on indent', cls: 'badge-danger' },
+  notOrdered: { label: 'To buy — no PO yet', cls: 'badge-warning' },
   part: { label: 'Part ordered', cls: 'badge-warning' },
-  ordered: { label: 'Ordered', cls: 'badge-info' },
-  received: { label: 'Received', cls: 'badge-success' },
+  ordered: { label: 'On order', cls: 'badge-info' },
+  arrived: { label: 'Arrived — to issue', cls: 'badge-success' },
+  inStock: { label: 'In stock — to issue', cls: 'badge-success' },
 }
-const stateOf = (r: Row): StateKey =>
-  r.ordered <= 0 ? 'notOrdered' : r.ordered + 1e-9 < r.toBuy ? 'part' : r.received + 1e-9 >= r.ordered ? 'received' : 'ordered'
+const needed = (r: Row) => Math.max(0, Number((r.asked - r.issued).toFixed(3)))
+const stateOf = (r: Row): StateKey => {
+  if (r.mrStatus === 'PENDING') return 'approval'
+  if (r.ordered > 0) return r.received + 1e-9 >= r.ordered ? 'arrived' : r.ordered + 1e-9 < r.toBuy ? 'part' : 'ordered'
+  if (r.toBuy > 0) return 'notOrdered'
+  return r.available + 1e-9 >= needed(r) ? 'inStock' : 'short'
+}
 
 type FilterKey = 'state' | 'department' | 'customer'
 const dayKey = (d: Date | string) => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
@@ -125,8 +139,10 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
   )
 
   // One plain line of figures for what the filters leave.
-  const notOrdered = shown.filter((r) => stateOf(r) === 'notOrdered' || stateOf(r) === 'part').length
-  const onOrder = shown.filter((r) => stateOf(r) === 'ordered').length
+  const count = (k: StateKey[]) => shown.filter((r) => k.includes(stateOf(r))).length
+  const shortN = count(['short'])
+  const toBuyN = count(['notOrdered', 'part'])
+  const onOrder = count(['ordered'])
 
   const exportRows = async () => {
     setExporting(true)
@@ -143,8 +159,12 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
           'Item Code': r.itemCode,
           'Item Name': r.itemName,
           Unit: r.uom,
+          Whose: r.ownership === 'CUSTOMER_OWNED' ? "Customer's material" : 'Ours',
+          'Available Qty': r.available,
           'Requisition Qty': r.asked,
           'Issued Qty': r.issued,
+          'Still Needed': needed(r),
+          'Reserved Qty': r.reserved,
           'Indent Qty': r.toBuy,
           'Ordered Qty': r.ordered,
           'Received Qty': r.received,
@@ -153,7 +173,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
           Status: STATE[stateOf(r)].label,
         })),
       )
-      sheet['!cols'] = [16, 11, 11, 16, 24, 14, 14, 30, 6, 12, 10, 10, 11, 11, 12, 20, 16].map((wch) => ({ wch }))
+      sheet['!cols'] = [16, 11, 11, 16, 24, 14, 14, 30, 6, 18, 12, 12, 10, 12, 11, 10, 11, 11, 12, 20, 22].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Indents')
       XLSX.writeFile(book, `indents-${dayKey(new Date())}.xlsx`)
@@ -222,7 +242,8 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
             </button>
           )}
           <span className="ml-auto text-xs text-muted-foreground">
-            {shown.length} {shown.length === 1 ? 'item' : 'items'} on the indent · {notOrdered} still to order · {onOrder} on order
+            {shown.length} {shown.length === 1 ? 'item' : 'items'} pending ·{' '}
+            <span className={shortN ? 'font-semibold text-red-500' : ''}>{shortN} short</span> · {toBuyN} to buy · {onOrder} on order
           </span>
         </div>
       </div>
@@ -232,7 +253,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
           <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
         ) : !shown.length ? (
           <p className="px-4 py-10 text-center text-sm text-muted-foreground">
-            {rows.length ? 'Nothing matches that.' : 'Nothing is on the indent. Items go on it from a requisition’s Process window — the Buy box, step 3.'}
+            {rows.length ? 'Nothing matches that.' : 'Nothing is pending — every requisition has been issued in full.'}
           </p>
         ) : (
           <div className={`transition-opacity ${loading ? 'opacity-60' : ''}`}>
@@ -244,8 +265,11 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                     <th className="whitespace-nowrap">Department</th>
                     <th className="whitespace-nowrap">For</th>
                     <th className="whitespace-nowrap">Item</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Available</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still needed</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Reserved</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>To buy</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Ordered</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Received</th>
@@ -257,7 +281,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                 <tbody>
                   {pageRows.map((r) => {
                     const st = STATE[stateOf(r)]
-                    const late = r.requiredDate && dayKey(r.requiredDate) < dayKey(new Date()) && stateOf(r) !== 'received'
+                    const late = r.requiredDate && dayKey(r.requiredDate) < dayKey(new Date()) && stateOf(r) !== 'arrived' && stateOf(r) !== 'inStock'
                     return (
                       <tr key={r.lineId}>
                         <td className="whitespace-nowrap">
@@ -271,13 +295,20 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                         <td className="whitespace-nowrap text-sm">{r.customerName ?? dash}</td>
                         <td className="min-w-[200px]">
                           <div className="text-sm font-medium text-foreground">{r.itemName}</div>
-                          <div className="font-mono text-[11px] text-muted-foreground">{r.itemCode}</div>
+                          <div className="font-mono text-[11px] text-muted-foreground">
+                            {r.itemCode}
+                            {r.ownership === 'CUSTOMER_OWNED' && <span className="font-sans text-sky-600"> · customer&apos;s material</span>}
+                          </div>
                         </td>
                         <td className={num}>
-                          {qtyFmt(r.asked)} <span className="text-[11px] text-muted-foreground">{r.uom}</span>
+                          <span className={r.available + 1e-9 >= needed(r) ? 'font-semibold text-emerald-600' : 'font-semibold text-red-500'}>{qtyFmt(r.available)}</span>{' '}
+                          <span className="text-[11px] text-muted-foreground">{r.uom}</span>
                         </td>
+                        <td className={num}>{qtyFmt(r.asked)}</td>
                         <td className={num}>{r.issued > 0 ? <span className="text-emerald-600">{qtyFmt(r.issued)}</span> : dash}</td>
-                        <td className={`${num} font-semibold text-sky-600`}>{qtyFmt(r.toBuy)}</td>
+                        <td className={`${num} font-semibold`}>{qtyFmt(needed(r))}</td>
+                        <td className={num}>{r.reserved > 0 ? <span className="text-violet-600">{qtyFmt(r.reserved)}</span> : dash}</td>
+                        <td className={num}>{r.toBuy > 0 ? <span className="font-semibold text-sky-600">{qtyFmt(r.toBuy)}</span> : dash}</td>
                         <td className={num}>{r.ordered > 0 ? qtyFmt(r.ordered) : dash}</td>
                         <td className={num}>{r.received > 0 ? <span className="text-emerald-600">{qtyFmt(r.received)}</span> : dash}</td>
                         <td className="whitespace-nowrap font-mono text-xs">
@@ -293,9 +324,13 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                           <span className={st.cls}>{st.label}</span>
                         </td>
                         <td className="whitespace-nowrap text-right">
-                          <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => onProcess(r.mrId)} title="Open the requisition to change what to buy">
-                            <PackageCheck size={13} /> Process
-                          </button>
+                          {r.mrStatus === 'APPROVED' ? (
+                            <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => onProcess(r.mrId)} title="Open the requisition to issue, reserve or buy">
+                              <PackageCheck size={13} /> Process
+                            </button>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">approve first</span>
+                          )}
                         </td>
                       </tr>
                     )
