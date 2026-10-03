@@ -340,7 +340,7 @@ export function RecordQuoteDialog({
                           with the other 200 left unplaced on the enquiry. */}
                           <input
                             type="number"
-                            step="0.001"
+                            step="any"
                             min="0"
                             value={r?.offeredQty ?? ''}
                             onChange={(e) => setRow(l.id, { offeredQty: e.target.value })}
@@ -365,7 +365,7 @@ export function RecordQuoteDialog({
                         <td>
                           <input
                             type="number"
-                            step="0.01"
+                            step="any"
                             min="0"
                             value={r?.quotedRate ?? ''}
                             onChange={(e) => setRow(l.id, { quotedRate: e.target.value })}
@@ -382,7 +382,7 @@ export function RecordQuoteDialog({
                         <td>
                           <input
                             type="number"
-                            step="0.01"
+                            step="any"
                             min="0"
                             max="100"
                             value={r?.gstRate ?? ''}
