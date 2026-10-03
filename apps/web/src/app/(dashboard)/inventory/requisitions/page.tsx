@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
-import { ProcessDialog } from '@/components/inventory/ProcessDialog'
+import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
 import { ReservationsView } from '@/components/inventory/ReservationsView'
 import { IndentsView } from '@/components/inventory/IndentsView'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -302,6 +302,7 @@ function RequisitionsScreen() {
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
+  const [processTab, setProcessTab] = useState<ProcessTab>('issue')
   // Bumped after a save, so the Indents and Reservations tabs read again.
   const [saved, setSaved] = useState(0)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
@@ -626,7 +627,7 @@ function RequisitionsScreen() {
     ) : r.canFulfil ? (
       <button
         className={`${r.s.waiting ? 'btn-secondary' : 'btn-primary'} h-7 px-2.5 text-xs`}
-        onClick={() => setFulfilling(mr)}
+        onClick={() => (setProcessTab('issue'), setFulfilling(mr))}
         disabled={busy === mr.id}
         title={r.s.waiting ? 'Waiting on the buyer; open it to see what has happened, or change the plan' : 'Issue it, buy what is short, or both'}
       >
@@ -715,7 +716,7 @@ function RequisitionsScreen() {
             {mr.notes && <>Note: {mr.notes}</>}
           </span>
           {r.canFulfil && (
-            <button className="btn-primary ml-auto h-7 px-2.5 text-xs" onClick={() => setFulfilling(mr)}>
+            <button className="btn-primary ml-auto h-7 px-2.5 text-xs" onClick={() => (setProcessTab('issue'), setFulfilling(mr))}>
               <PackageCheck size={13} /> Process
             </button>
           )}
@@ -820,7 +821,10 @@ function RequisitionsScreen() {
           key={saved}
           onProcess={(id) => {
             const found = rows.find((r) => r.id === id)
-            if (found) setFulfilling(found)
+            if (found) {
+              setProcessTab('buy')
+              setFulfilling(found)
+            }
           }}
         />
       )}
@@ -1159,10 +1163,11 @@ function RequisitionsScreen() {
       {fulfilling && (
         <ProcessDialog
           mr={fulfilling}
+          startTab={processTab}
           onClose={() => setFulfilling(null)}
+          // The window stays open after a save; the list and tabs behind refresh.
           onDone={(msg) => {
             setSaved((n) => n + 1)
-            setFulfilling(null)
             setMessage(msg)
             void load()
           }}
