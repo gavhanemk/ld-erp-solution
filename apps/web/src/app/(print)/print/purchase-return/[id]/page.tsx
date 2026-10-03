@@ -115,7 +115,14 @@ interface Line {
   billLine: {
     hsnCode: string | null
     description: string | null
-    grnLine: { grn: { grnNumber: string } } | null
+    grnLine: {
+      grn: {
+        grnNumber: string
+        challanNo?: string | null
+        challanDate?: string | null
+        po?: { poNumber: string } | null
+      }
+    } | null
   }
   item: { code: string; name: string; uom: { symbol: string } | null }
   warehouse: { name: string }
@@ -345,6 +352,35 @@ export default function PurchaseReturnPrintPage() {
                     }
                     mono
                   />
+                  {/* The order and their delivery challan, off the receipts the
+                    lines came in on — the two numbers a supplier's store looks
+                    the goods up by. */}
+                  {(() => {
+                    const grns = c.lines
+                      .map((l) => l.billLine.grnLine?.grn)
+                      .filter((g): g is NonNullable<typeof g> => Boolean(g))
+                    const pos = [...new Set(grns.map((g) => g.po?.poNumber).filter(Boolean))]
+                    const challans = [
+                      ...new Set(
+                        grns
+                          .filter((g) => g.challanNo)
+                          .map(
+                            (g) =>
+                              g.challanNo + (g.challanDate ? ' · ' + shortDate(g.challanDate) : '')
+                          )
+                      ),
+                    ]
+                    return (
+                      <>
+                        {pos.length > 0 && (
+                          <MetaRow i={4} label="Our PO no." value={pos.join(', ')} mono />
+                        )}
+                        {challans.length > 0 && (
+                          <MetaRow i={5} label="Their challan" value={challans.join(', ')} mono />
+                        )}
+                      </>
+                    )
+                  })()}
                 </tbody>
               </table>
             </div>

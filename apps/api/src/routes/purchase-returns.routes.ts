@@ -7,7 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
-import { qcRejectedByGrnLine } from '../services/grnQc.service'
+import { qcRejectedByGrnLine, qcSummaryOf } from '../services/grnQc.service'
 import {
   adjustableOn,
   DOC_RULES,
@@ -88,7 +88,21 @@ const returnInclude = {
           qty: true,
           hsnCode: true,
           description: true,
-          grnLine: { select: { grn: { select: { id: true, grnNumber: true } } } },
+          // The receipt each line came in on, with the supplier's own delivery
+          // challan and the order, so the printed challan can quote them back.
+          grnLine: {
+            select: {
+              grn: {
+                select: {
+                  id: true,
+                  grnNumber: true,
+                  challanNo: true,
+                  challanDate: true,
+                  po: { select: { poNumber: true } },
+                },
+              },
+            },
+          },
         },
       },
       item: {
@@ -212,10 +226,57 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
       supplierInvoiceDate: true,
       billDate: true,
       status: true,
+      totalAmount: true,
       supplier: { select: { id: true, code: true, name: true, gstin: true } },
+      po: { select: { poNumber: true, poDate: true } },
     },
   })
   if (!bill) throw new AppError('That purchase bill no longer exists', 404, 'NOT_FOUND')
+
+  /*
+   * The paperwork behind the bill, for the challan to quote: which receipts
+   * the billed goods came in on (with the supplier's own delivery challan and
+   * the gate entry), the order they were bought on, and any quality check.
+   * The godown and the supplier both ask for these when goods come back.
+   */
+  const receipts = await prisma.gRN.findMany({
+    where: { lines: { some: { billLines: { some: { billId: bill.id } } } } },
+    orderBy: { grnDate: 'asc' },
+    select: {
+      id: true,
+      grnNumber: true,
+      grnDate: true,
+      challanNo: true,
+      challanDate: true,
+      gateEntryNo: true,
+      gateEntryDate: true,
+      vehicleNo: true,
+      po: { select: { poNumber: true, poDate: true } },
+      qcRecords: {
+        orderBy: { inspectionDate: 'desc' },
+        select: { id: true, result: true, inspectionDate: true, checklistData: true },
+      },
+    },
+  })
+  const references = {
+    orders: [
+      ...new Map(
+        [bill.po, ...receipts.map((g) => g.po)]
+          .filter((p): p is { poNumber: string; poDate: Date } => Boolean(p))
+          .map((p) => [p.poNumber, p])
+      ).values(),
+    ],
+    receipts: receipts.map((g) => ({
+      grnNumber: g.grnNumber,
+      grnDate: g.grnDate,
+      challanNo: g.challanNo,
+      challanDate: g.challanDate,
+      gateEntryNo: g.gateEntryNo,
+      gateEntryDate: g.gateEntryDate,
+      vehicleNo: g.vehicleNo,
+      qc: qcSummaryOf(g.qcRecords),
+    })),
+  }
 
   const lines = await prisma.$transaction((tx) => adjustableOn(tx, bill.id))
 
@@ -276,6 +337,7 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
     success: true,
     data: {
       bill,
+      references,
       lines: withStock,
       reasons: RETURN_REASONS.map((r) => ({
         value: r,
