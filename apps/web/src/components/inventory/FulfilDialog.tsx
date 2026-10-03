@@ -59,10 +59,31 @@ interface Bought {
     poDate: string
     status?: string
     deliveryDate?: string | null
+    supplierName?: string
+    unitRate?: number
     qty: number
     receivedQty: number
+    receipts?: Array<{ grnNumber: string; grnDate: string; qty: number }>
   }>
 }
+
+/** What else is known about buying an item: the last price paid, and orders for it not tied to this requisition. */
+interface ItemBuy {
+  itemId: string
+  lastBuy: { poNumber: string; poDate: string; supplierName: string; unitRate: number } | null
+  otherOpen: Array<{
+    poNumber: string
+    poDate: string
+    status: string
+    supplierName: string
+    qty: number
+    receivedQty: number
+    deliveryDate: string | null
+    forMr: string | null
+  }>
+}
+
+const inr = (v: number) => `₹${v.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
 
 /** A purchase order's status, as the buyer's list words it. */
 const PO_STATUS: Record<string, { text: string; cls: string }> = {
@@ -124,6 +145,7 @@ export function FulfilDialog({
 }) {
   const [mr, setMr] = useState<Requisition | null>(initial)
   const [bought, setBought] = useState<Bought[]>([])
+  const [itemBuys, setItemBuys] = useState<ItemBuy[]>([])
   const [stock, setStock] = useState<StockRow[]>([])
   const [handovers, setHandovers] = useState<Handover[]>([])
   const [events, setEvents] = useState<TrailEvent[]>([])
@@ -150,6 +172,7 @@ export function FulfilDialog({
             stock: StockRow[]
             handovers: Handover[]
             events: TrailEvent[]
+            itemBuys?: ItemBuy[]
           }
         }>(`/inventory/requisitions/${mrId}/fulfil`)
         if (cancelled) return
@@ -167,6 +190,7 @@ export function FulfilDialog({
             : prev,
         )
         setBought(res.data.bought ?? [])
+        setItemBuys(res.data.itemBuys ?? [])
         setStock(res.data.stock ?? [])
         setHandovers(res.data.handovers ?? [])
         setEvents(res.data.events ?? [])
@@ -359,7 +383,7 @@ export function FulfilDialog({
       ) : (
         <>
           {whyNot && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-600 dark:text-amber-400">
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-orange-500">
               <Info size={16} className="mt-0.5 shrink-0" /> {whyNot}
             </div>
           )}
@@ -418,9 +442,9 @@ export function FulfilDialog({
                   : { cls: 'badge-info', text: `On order · ${was?.poNumbers.join(', ')}` }
             const figures = [
               { label: 'Asked', value: asked, tone: 'text-foreground' },
-              { label: 'Handed over', value: issued, tone: 'text-emerald-600 dark:text-emerald-400' },
-              { label: 'To buy', value: was?.buyQty ?? 0, tone: 'text-sky-600 dark:text-sky-400' },
-              { label: 'Still owed', value: owed, tone: owed ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground' },
+              { label: 'Handed over', value: issued, tone: 'text-emerald-500' },
+              { label: 'To buy', value: was?.buyQty ?? 0, tone: 'text-sky-500' },
+              { label: 'Still owed', value: owed, tone: owed ? 'text-orange-500' : 'text-muted-foreground' },
             ]
             return (
               <section key={l.id} className="overflow-hidden rounded-xl border border-border bg-card">
@@ -479,7 +503,7 @@ export function FulfilDialog({
                   </div>
 
                   {owed <= 0 ? (
-                    <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400">
+                    <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-500">
                       Everything asked for has been handed over.
                     </p>
                   ) : (
@@ -552,7 +576,7 @@ export function FulfilDialog({
                             Buy
                           </h4>
                           {!theirs && (
-                            <span className={`text-[11px] ${shortAfter ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                            <span className={`text-[11px] ${shortAfter ? 'text-red-500' : 'text-emerald-500'}`}>
                               {shortAfter ? `${fmt(shortAfter)} ${unit} short` : 'nothing short'}
                             </span>
                           )}
@@ -604,62 +628,129 @@ export function FulfilDialog({
                                       : 'Nothing needs buying.'}
                             </p>
                             {/* Where the buying has got to: the orders raised against this line, or that there are none. */}
-                            {toBuy > 0 && (
-                              <div className="rounded-lg border border-border">
-                                <div className="flex items-center justify-between gap-2 border-b border-border bg-secondary/60 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                                  <span>Purchase order</span>
-                                  <span className="normal-case tracking-normal">
-                                    {fmt(ordered)} of {fmt(toBuy)} {unit} ordered · {fmt(arrived)} received
-                                  </span>
-                                </div>
-                                {(was?.orders ?? []).length === 0 ? (
-                                  <p className="px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-                                    <b className="font-semibold">Not ordered yet.</b> It is on the buyer&apos;s list under Purchase → Pending Indents. A PO raised
-                                    without picking this indent is not linked here.
-                                  </p>
-                                ) : (
-                                  <ul className="divide-y divide-border">
-                                    {(was?.orders ?? []).map((o) => {
-                                      const st = PO_STATUS[o.status ?? ''] ?? { text: o.status ?? '', cls: 'badge-neutral' }
-                                      const got = o.qty ? Math.min(100, (o.receivedQty / o.qty) * 100) : 0
-                                      return (
-                                        <li key={o.poId} className="px-3 py-2 text-xs">
-                                          <div className="flex items-center justify-between gap-2">
-                                            <a
-                                              href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`}
-                                              target="_blank"
-                                              rel="noreferrer"
-                                              className="font-mono font-semibold text-teal-600 hover:underline dark:text-teal-400"
-                                              title="Open this order in Purchase Orders"
-                                            >
-                                              {o.poNumber}
-                                            </a>
-                                            <span className={st.cls}>{st.text}</span>
-                                          </div>
-                                          <div className="mt-1 flex items-center gap-2">
-                                            <div className="h-1 flex-1 rounded-full bg-secondary">
-                                              <div className="h-1 rounded-full bg-teal-500" style={{ width: `${got}%` }} />
-                                            </div>
-                                            <span className="shrink-0 tabular-nums text-muted-foreground">
-                                              {fmt(o.receivedQty)} of {fmt(o.qty)} {unit} in
-                                            </span>
-                                          </div>
-                                          <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                            Ordered {formatDate(o.poDate)}
-                                            {o.deliveryDate ? ` · due ${formatDate(o.deliveryDate)}` : ''}
-                                          </p>
-                                        </li>
-                                      )
-                                    })}
-                                  </ul>
-                                )}
-                                {ordered > 0 && ordered + 1e-9 < toBuy && (
-                                  <p className="border-t border-border px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-                                    {fmt(r3(toBuy - ordered))} {unit} still to be put on an order.
-                                  </p>
-                                )}
-                              </div>
-                            )}
+                            {toBuy > 0 &&
+                              (() => {
+                                const info = itemBuys.find((b) => b.itemId === l.item.id)
+                                const orders = was?.orders ?? []
+                                const poLink = (n: string) => (
+                                  <a
+                                    href={`/purchase/orders?q=${encodeURIComponent(n)}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="font-mono font-semibold text-primary hover:underline"
+                                    title="Open this order in Purchase Orders"
+                                  >
+                                    {n}
+                                  </a>
+                                )
+                                return (
+                                  <div className="overflow-hidden rounded-lg border border-border">
+                                    <div className="flex items-center justify-between gap-2 border-b border-border bg-secondary/60 px-3 py-1.5">
+                                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Purchase order</span>
+                                      <span className="text-[11px] tabular-nums text-foreground">
+                                        <b className="font-semibold">{fmt(ordered)}</b> of {fmt(toBuy)} {unit} ordered · <b className="font-semibold">{fmt(arrived)}</b> received
+                                      </span>
+                                    </div>
+
+                                    {orders.length === 0 ? (
+                                      <div className="border-l-4 border-amber-500 bg-amber-500/15 px-3 py-2 text-xs text-foreground">
+                                        <p className="font-semibold">No PO raised for this yet</p>
+                                        <p className="mt-0.5 leading-snug">
+                                          {fmt(r3(toBuy))} {unit} is waiting on the buyer&apos;s indent list. To link the order here, raise it from{' '}
+                                          <b>Purchase → Purchase Orders → New order → Select from indent</b> and pick {mr.mrNumber}.
+                                        </p>
+                                      </div>
+                                    ) : (
+                                      <ul className="divide-y divide-border">
+                                        {orders.map((o) => {
+                                          const st = PO_STATUS[o.status ?? ''] ?? { text: o.status ?? '', cls: 'badge-neutral' }
+                                          const got = o.qty ? Math.min(100, (o.receivedQty / o.qty) * 100) : 0
+                                          const late =
+                                            o.deliveryDate &&
+                                            o.receivedQty + 1e-9 < o.qty &&
+                                            new Date(o.deliveryDate).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) <
+                                              new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+                                          return (
+                                            <li key={o.poId} className="space-y-1 px-3 py-2 text-xs">
+                                              <div className="flex items-center justify-between gap-2">
+                                                {poLink(o.poNumber)}
+                                                <span className={st.cls}>{st.text}</span>
+                                              </div>
+                                              <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[11px]">
+                                                <dt className="text-muted-foreground">Supplier</dt>
+                                                <dd className="truncate text-foreground">{o.supplierName ?? '—'}</dd>
+                                                <dt className="text-muted-foreground">Ordered</dt>
+                                                <dd className="text-foreground">
+                                                  {fmt(o.qty)} {unit}
+                                                  {o.unitRate ? ` at ${inr(o.unitRate)}/${unit}` : ''} · {formatDate(o.poDate)}
+                                                </dd>
+                                                <dt className="text-muted-foreground">Due</dt>
+                                                <dd className={late ? 'font-semibold text-red-500' : 'text-foreground'}>
+                                                  {o.deliveryDate ? formatDate(o.deliveryDate) : 'no date given'}
+                                                  {late ? ' — late' : ''}
+                                                </dd>
+                                                <dt className="text-muted-foreground">Received</dt>
+                                                <dd className="text-foreground">
+                                                  {o.receipts?.length
+                                                    ? o.receipts.map((g) => `${g.grnNumber} (${fmt(g.qty)} ${unit}, ${formatDate(g.grnDate)})`).join(', ')
+                                                    : 'nothing yet'}
+                                                </dd>
+                                              </dl>
+                                              <div className="flex items-center gap-2">
+                                                <div className="h-1 flex-1 rounded-full bg-secondary">
+                                                  <div className="h-1 rounded-full bg-teal-500" style={{ width: `${got}%` }} />
+                                                </div>
+                                                <span className="shrink-0 tabular-nums text-muted-foreground">
+                                                  {fmt(o.receivedQty)} of {fmt(o.qty)} in
+                                                </span>
+                                              </div>
+                                            </li>
+                                          )
+                                        })}
+                                      </ul>
+                                    )}
+
+                                    {ordered > 0 && ordered + 1e-9 < toBuy && (
+                                      <p className="border-t border-border bg-amber-500/15 px-3 py-1.5 text-[11px] font-medium text-foreground">
+                                        {fmt(r3(toBuy - ordered))} {unit} still to be put on an order.
+                                      </p>
+                                    )}
+
+                                    {/* Orders for this item not tied to this requisition: often why someone thinks it is ordered. */}
+                                    {info && info.otherOpen.length > 0 && (
+                                      <div className="border-t border-border px-3 py-2 text-[11px]">
+                                        <p className="font-semibold text-foreground">Other open orders for this item (not linked here)</p>
+                                        <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                                          {info.otherOpen.slice(0, 4).map((o) => (
+                                            <li key={o.poNumber}>
+                                              {poLink(o.poNumber)} · {o.supplierName} · {fmt(o.qty - o.receivedQty)} of {fmt(o.qty)} {unit} to come
+                                              {o.deliveryDate ? ` · due ${formatDate(o.deliveryDate)}` : ''}
+                                              {o.forMr ? ` · for ${o.forMr}` : ' · raised directly'}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+
+                                    {/* The last price paid, so whoever sets the quantity has a feel for the cost. */}
+                                    <p className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
+                                      {info?.lastBuy ? (
+                                        <>
+                                          Last bought from <span className="text-foreground">{info.lastBuy.supplierName}</span> at{' '}
+                                          <span className="text-foreground">
+                                            {inr(info.lastBuy.unitRate)}/{unit}
+                                          </span>{' '}
+                                          on {poLink(info.lastBuy.poNumber)}, {formatDate(info.lastBuy.poDate)}
+                                          {toBuy > ordered ? ` · ${fmt(r3(toBuy - ordered))} ${unit} would be about ${inr(r3((toBuy - ordered) * info.lastBuy.unitRate))}` : ''}
+                                        </>
+                                      ) : (
+                                        'This item has never been bought on a purchase order.'
+                                      )}
+                                    </p>
+                                  </div>
+                                )
+                              })()}
+
                           </div>
                         )}
                       </div>

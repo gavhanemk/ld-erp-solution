@@ -1060,7 +1060,7 @@ async function boughtFor(
  */
 router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
   const id = req.params.id
-  const [lines, stock, orderRows, received, handovers, activity] = await Promise.all([
+  const [lines, stock, orderRows, received, handovers, activity, receipts, itemOrders] = await Promise.all([
     prisma.$queryRaw<
       Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
     >`
@@ -1080,11 +1080,18 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
     // Deleted orders are gone; their numbers are not offered as the order.
-    prisma.$queryRaw<Array<{ mrLineId: string; poId: string; poNumber: string; poDate: Date; status: string; deliveryDate: Date | null; qty: number; receivedQty: number }>>`
-      SELECT pol."mrLineId", po.id AS "poId", po."poNumber", po."poDate", po.status::text AS "status",
-             po."deliveryDate", pol.qty::float8 AS "qty", pol."receivedQty"::float8 AS "receivedQty"
+    prisma.$queryRaw<
+      Array<{
+        mrLineId: string; poLineId: string; poId: string; poNumber: string; poDate: Date; status: string
+        deliveryDate: Date | null; supplierName: string; unitRate: number; qty: number; receivedQty: number
+      }>
+    >`
+      SELECT pol."mrLineId", pol.id AS "poLineId", po.id AS "poId", po."poNumber", po."poDate", po.status::text AS "status",
+             po."deliveryDate", sp.name AS "supplierName", pol."unitRate"::float8 AS "unitRate",
+             pol.qty::float8 AS "qty", pol."receivedQty"::float8 AS "receivedQty"
       FROM ld_erp.purchase_order_lines pol
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      JOIN ld_erp.suppliers sp ON sp.id = po."supplierId"
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
         AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
       ORDER BY po."poDate"`,
@@ -1118,6 +1125,34 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       JOIN ld_erp.users u ON u.id = a."userId"
       WHERE a."entityType" = 'MaterialRequisition' AND a."entityId" = ${id}
       ORDER BY a."createdAt"`,
+    // The goods receipts booked against those orders, one row per receipt line.
+    prisma.$queryRaw<Array<{ poLineId: string; grnNumber: string; grnDate: Date; qty: number }>>`
+      SELECT gl."poLineId", g."grnNumber", g."grnDate", gl."receivedQty"::float8 AS "qty"
+      FROM ld_erp.grn_lines gl
+      JOIN ld_erp.grn g ON g.id = gl."grnId"
+      JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
+      WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND g.status::text <> 'CANCELLED'
+      ORDER BY g."grnDate"`,
+    // Every live order line for these items, whoever it was raised for: the
+    // last price paid, and orders for the same item that are not linked here.
+    prisma.$queryRaw<
+      Array<{
+        itemId: string; mrLineId: string | null; mrNumber: string | null; poNumber: string; poDate: Date; status: string
+        supplierName: string; unitRate: number; qty: number; receivedQty: number; deliveryDate: Date | null
+      }>
+    >`
+      SELECT pol."itemId", pol."mrLineId", m."mrNumber", po."poNumber", po."poDate", po.status::text AS "status",
+             sp.name AS "supplierName", pol."unitRate"::float8 AS "unitRate", pol.qty::float8 AS "qty",
+             pol."receivedQty"::float8 AS "receivedQty", po."deliveryDate"
+      FROM ld_erp.purchase_order_lines pol
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      JOIN ld_erp.suppliers sp ON sp.id = po."supplierId"
+      LEFT JOIN ld_erp.material_requisition_lines ml ON ml.id = pol."mrLineId"
+      LEFT JOIN ld_erp.material_requisitions m ON m.id = ml."mrId"
+      WHERE pol."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
+      ORDER BY po."poDate" DESC, po."createdAt" DESC`,
   ])
   if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
 
@@ -1135,9 +1170,40 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
         poDate: o.poDate,
         status: o.status,
         deliveryDate: o.deliveryDate,
+        supplierName: o.supplierName,
+        unitRate: o.unitRate,
         qty: o.qty,
         receivedQty: o.receivedQty,
+        receipts: receipts
+          .filter((g) => g.poLineId === o.poLineId)
+          .map((g) => ({ grnNumber: g.grnNumber, grnDate: g.grnDate, qty: g.qty })),
       })),
+    }
+  })
+
+  // For each item: the last price paid, and open orders for it that are not
+  // tied to this requisition — often the reason a buyer thinks it is ordered.
+  const myLineIds = new Set(lines.map((l) => l.id))
+  const itemBuys = [...new Set(itemOrders.map((o) => o.itemId))].map((itemId) => {
+    const all = itemOrders.filter((o) => o.itemId === itemId)
+    const last = all[0]
+    return {
+      itemId,
+      lastBuy: last
+        ? { poNumber: last.poNumber, poDate: last.poDate, supplierName: last.supplierName, unitRate: last.unitRate }
+        : null,
+      otherOpen: all
+        .filter((o) => !(o.mrLineId && myLineIds.has(o.mrLineId)) && o.status !== 'COMPLETED' && o.qty - o.receivedQty > 1e-9)
+        .map((o) => ({
+          poNumber: o.poNumber,
+          poDate: o.poDate,
+          status: o.status,
+          supplierName: o.supplierName,
+          qty: o.qty,
+          receivedQty: o.receivedQty,
+          deliveryDate: o.deliveryDate,
+          forMr: o.mrNumber,
+        })),
     }
   })
 
@@ -1154,7 +1220,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     toBuy: a.toBuy,
   }))
 
-  res.json({ success: true, data: { lines, bought, stock, handovers, events } })
+  res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
