@@ -468,7 +468,7 @@ function PercentOfGross({
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs">
         <input
           type="number"
-          step="0.01"
+          step="any"
           min={0}
           max={100}
           autoFocus
@@ -2697,7 +2697,7 @@ export function PurchaseOrderDialog({
                           <td className={COL.rate}>
                             <input
                               type="number"
-                              step="0.01"
+                              step="any"
                               min={0}
                               className={`${cell} text-right ${needsRate ? 'border-amber-500/70' : ''}`}
                               placeholder="0.00"
@@ -2737,7 +2737,7 @@ export function PurchaseOrderDialog({
                             <div className="flex items-stretch gap-1">
                               <input
                                 type="number"
-                                step="0.01"
+                                step="any"
                                 min={0}
                                 max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
                                 className={`${cell} min-w-0 flex-1 text-right`}
@@ -2765,7 +2765,7 @@ export function PurchaseOrderDialog({
                           <td className={COL.tax}>
                             <input
                               type="number"
-                              step="0.01"
+                              step="any"
                               min={0}
                               max={100}
                               className={`${cell} text-right`}
@@ -3012,7 +3012,7 @@ export function PurchaseOrderDialog({
                           <label className={fieldLabel}>Rate</label>
                           <input
                             type="number"
-                            step="0.01"
+                            step="any"
                             min={0}
                             className={`${cell} ${needsRate ? 'border-amber-500/70' : ''}`}
                             placeholder="0.00"
@@ -3049,7 +3049,7 @@ export function PurchaseOrderDialog({
                           <div className="flex items-stretch gap-1">
                             <input
                               type="number"
-                              step="0.01"
+                              step="any"
                               min={0}
                               max={(line.discountUnit ?? '%') === '%' ? 100 : undefined}
                               className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
@@ -3077,7 +3077,7 @@ export function PurchaseOrderDialog({
                           <label className={fieldLabel}>Tax %</label>
                           <input
                             type="number"
-                            step="0.01"
+                            step="any"
                             min={0}
                             max={100}
                             className={cell}
@@ -3595,7 +3595,7 @@ export function PurchaseOrderDialog({
                       <input
                         id="po-discount"
                         type="number"
-                        step="0.01"
+                        step="any"
                         min={0}
                         className="form-input h-8 w-28 text-right"
                         placeholder="0.00"
@@ -3667,7 +3667,7 @@ export function PurchaseOrderDialog({
                                 </button>
                                 <input
                                   type="number"
-                                  step="0.01"
+                                  step="any"
                                   min={0}
                                   className="form-input h-8 w-28 text-right"
                                   placeholder="0.00"
@@ -3764,7 +3764,7 @@ export function PurchaseOrderDialog({
                         <input
                           id="po-other-charges"
                           type="number"
-                          step="0.01"
+                          step="any"
                           min={0}
                           className="form-input h-8 w-28 text-right"
                           placeholder="0.00"
