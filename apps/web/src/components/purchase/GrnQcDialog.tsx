@@ -247,7 +247,7 @@ export function GrnQcDialog({
        window's is. */
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
       <div
-        className="glass-card po-form flex max-h-full w-full max-w-4xl flex-col overflow-hidden"
+        className="glass-card po-form flex max-h-full w-full max-w-6xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="qc-dialog-title"
@@ -464,8 +464,10 @@ export function GrnQcDialog({
                     <thead>
                       <tr className="bg-secondary">
                         {[
-                          ['Item', 'w-56', 'left'],
-                          ['Godown', 'w-36', 'left'],
+                          // The reason takes whatever is left, which is most of a
+                          // wide window — it is the one box people type a sentence in.
+                          ['Item', 'w-52', 'left'],
+                          ['Godown', 'w-32', 'left'],
                           ['Received', 'w-24', 'right'],
                           ['Approved', 'w-24', 'right'],
                           ['Rejected', 'w-28', 'right'],
