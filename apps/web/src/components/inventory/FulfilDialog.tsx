@@ -53,7 +53,23 @@ interface Bought {
   orderedQty: number
   receivedQty: number
   poNumbers: string[]
-  orders?: Array<{ poId: string; poNumber: string; poDate: string; qty: number; receivedQty: number }>
+  orders?: Array<{
+    poId: string
+    poNumber: string
+    poDate: string
+    status?: string
+    deliveryDate?: string | null
+    qty: number
+    receivedQty: number
+  }>
+}
+
+/** A purchase order's status, as the buyer's list words it. */
+const PO_STATUS: Record<string, { text: string; cls: string }> = {
+  DRAFT: { text: 'Draft — not sent', cls: 'badge-neutral' },
+  SENT: { text: 'Sent to supplier', cls: 'badge-info' },
+  PARTIALLY_RECEIVED: { text: 'Part received', cls: 'badge-warning' },
+  COMPLETED: { text: 'Received', cls: 'badge-success' },
 }
 
 /** One hand-over against the requisition, from the stock ledger. */
@@ -375,9 +391,31 @@ export function FulfilDialog({
                   : available > 0
                     ? { cls: 'badge-warning', text: 'Part in stock' }
                     : { cls: 'badge-danger', text: 'Not in stock' }
-            // The bar: handed over (green), then planned to buy (blue), out of what was asked.
+            /*
+             * The bar, out of what was asked: handed over (green), arrived on an
+             * order and waiting to be handed over (teal), on order (blue), and to
+             * buy but not ordered yet (amber). What none of these cover is grey.
+             */
             const pct = (v: number) => `${Math.max(0, Math.min(100, asked ? (v / asked) * 100 : 0))}%`
-            const plannedBuy = Math.min(Math.max(0, (was?.buyQty ?? 0) - (was?.receivedQty ?? 0)), owed)
+            const toBuy = was?.buyQty ?? 0
+            const ordered = was?.orderedQty ?? 0
+            const arrived = was?.receivedQty ?? 0
+            const arrivedHere = Math.min(arrived, owed)
+            const onOrder = Math.min(Math.max(0, ordered - arrived), Math.max(0, owed - arrivedHere))
+            const notOrdered = Math.min(Math.max(0, toBuy - ordered), Math.max(0, owed - arrivedHere - onOrder))
+            const segments = [
+              { key: 'given', label: 'Handed over', value: issued, cls: 'bg-emerald-500', dot: 'bg-emerald-500' },
+              { key: 'arrived', label: 'Arrived on PO', value: arrivedHere, cls: 'bg-teal-400', dot: 'bg-teal-400' },
+              { key: 'ordered', label: 'On order', value: onOrder, cls: 'bg-sky-500', dot: 'bg-sky-500' },
+              { key: 'waiting', label: 'To buy, no PO yet', value: notOrdered, cls: 'bg-amber-400', dot: 'bg-amber-400' },
+            ]
+            const buyState = theirs || toBuy <= 0 || owed <= 0
+              ? null
+              : ordered <= 0
+                ? { cls: 'badge-warning', text: 'Waiting for PO' }
+                : arrived >= Math.min(ordered, owed) - 1e-9 && arrived > 0
+                  ? { cls: 'badge-success', text: 'Arrived — hand over' }
+                  : { cls: 'badge-info', text: `On order · ${was?.poNumbers.join(', ')}` }
             const figures = [
               { label: 'Asked', value: asked, tone: 'text-foreground' },
               { label: 'Handed over', value: issued, tone: 'text-emerald-600 dark:text-emerald-400' },
@@ -398,6 +436,7 @@ export function FulfilDialog({
                   </div>
                   <div className="flex items-center gap-2">
                     {theirs && <span className="badge-info">{l.ownerCustomer?.name ?? 'Customer'}&apos;s material</span>}
+                    {buyState && <span className={buyState.cls}>{buyState.text}</span>}
                     <span className={status.cls}>{status.text}</span>
                   </div>
                 </header>
@@ -416,8 +455,26 @@ export function FulfilDialog({
                       ))}
                     </div>
                     <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-secondary">
-                      <div className="bg-emerald-500" style={{ width: pct(issued) }} title={`Handed over ${fmt(issued)} ${unit}`} />
-                      <div className="bg-sky-400" style={{ width: pct(plannedBuy) }} title={`To buy ${fmt(plannedBuy)} ${unit}`} />
+                      {segments.map((sg) => (
+                        <div key={sg.key} className={sg.cls} style={{ width: pct(sg.value) }} title={`${sg.label}: ${fmt(sg.value)} ${unit}`} />
+                      ))}
+                    </div>
+                    {/* The bar's key, with the figure behind each colour. */}
+                    <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+                      {segments
+                        .filter((sg) => sg.value > 0)
+                        .map((sg) => (
+                          <span key={sg.key} className="inline-flex items-center gap-1.5">
+                            <span className={`h-2 w-2 rounded-full ${sg.dot}`} />
+                            {sg.label} <b className="font-semibold tabular-nums text-foreground">{fmt(sg.value)}</b>
+                          </span>
+                        ))}
+                      {owed > 0 && arrivedHere + onOrder + notOrdered + 1e-9 < owed && (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-secondary ring-1 ring-border" />
+                          Not covered yet <b className="font-semibold tabular-nums text-foreground">{fmt(r3(owed - arrivedHere - onOrder - notOrdered))}</b>
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -545,8 +602,64 @@ export function FulfilDialog({
                                     : shortAfter
                                       ? 'Nothing will be bought.'
                                       : 'Nothing needs buying.'}
-                              {was?.orderedQty ? ` Ordered ${fmt(was.orderedQty)} on ${was.poNumbers.join(', ')}${was.receivedQty ? `, ${fmt(was.receivedQty)} received` : ''}.` : ''}
                             </p>
+                            {/* Where the buying has got to: the orders raised against this line, or that there are none. */}
+                            {toBuy > 0 && (
+                              <div className="rounded-lg border border-border">
+                                <div className="flex items-center justify-between gap-2 border-b border-border bg-secondary/60 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                  <span>Purchase order</span>
+                                  <span className="normal-case tracking-normal">
+                                    {fmt(ordered)} of {fmt(toBuy)} {unit} ordered · {fmt(arrived)} received
+                                  </span>
+                                </div>
+                                {(was?.orders ?? []).length === 0 ? (
+                                  <p className="px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                                    <b className="font-semibold">Not ordered yet.</b> It is on the buyer&apos;s list under Purchase → Pending Indents. A PO raised
+                                    without picking this indent is not linked here.
+                                  </p>
+                                ) : (
+                                  <ul className="divide-y divide-border">
+                                    {(was?.orders ?? []).map((o) => {
+                                      const st = PO_STATUS[o.status ?? ''] ?? { text: o.status ?? '', cls: 'badge-neutral' }
+                                      const got = o.qty ? Math.min(100, (o.receivedQty / o.qty) * 100) : 0
+                                      return (
+                                        <li key={o.poId} className="px-3 py-2 text-xs">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <a
+                                              href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="font-mono font-semibold text-teal-600 hover:underline dark:text-teal-400"
+                                              title="Open this order in Purchase Orders"
+                                            >
+                                              {o.poNumber}
+                                            </a>
+                                            <span className={st.cls}>{st.text}</span>
+                                          </div>
+                                          <div className="mt-1 flex items-center gap-2">
+                                            <div className="h-1 flex-1 rounded-full bg-secondary">
+                                              <div className="h-1 rounded-full bg-teal-500" style={{ width: `${got}%` }} />
+                                            </div>
+                                            <span className="shrink-0 tabular-nums text-muted-foreground">
+                                              {fmt(o.receivedQty)} of {fmt(o.qty)} {unit} in
+                                            </span>
+                                          </div>
+                                          <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                            Ordered {formatDate(o.poDate)}
+                                            {o.deliveryDate ? ` · due ${formatDate(o.deliveryDate)}` : ''}
+                                          </p>
+                                        </li>
+                                      )
+                                    })}
+                                  </ul>
+                                )}
+                                {ordered > 0 && ordered + 1e-9 < toBuy && (
+                                  <p className="border-t border-border px-3 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+                                    {fmt(r3(toBuy - ordered))} {unit} still to be put on an order.
+                                  </p>
+                                )}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>

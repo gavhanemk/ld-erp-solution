@@ -1079,13 +1079,14 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
-    prisma.$queryRaw<Array<{ mrLineId: string; poId: string; poNumber: string; poDate: Date; qty: number; receivedQty: number }>>`
-      SELECT pol."mrLineId", po.id AS "poId", po."poNumber", po."poDate", pol.qty::float8 AS "qty",
-             pol."receivedQty"::float8 AS "receivedQty"
+    // Deleted orders are gone; their numbers are not offered as the order.
+    prisma.$queryRaw<Array<{ mrLineId: string; poId: string; poNumber: string; poDate: Date; status: string; deliveryDate: Date | null; qty: number; receivedQty: number }>>`
+      SELECT pol."mrLineId", po.id AS "poId", po."poNumber", po."poDate", po.status::text AS "status",
+             po."deliveryDate", pol.qty::float8 AS "qty", pol."receivedQty"::float8 AS "receivedQty"
       FROM ld_erp.purchase_order_lines pol
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
-        AND po.status::text <> 'CANCELLED'
+        AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
       ORDER BY po."poDate"`,
     // Cancelled receipts booked nothing in.
     prisma.$queryRaw<Array<{ mrLineId: string; qty: number }>>`
@@ -1095,7 +1096,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
-        AND po.status::text <> 'CANCELLED' AND g.status::text <> 'CANCELLED'
+        AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL AND g.status::text <> 'CANCELLED'
       GROUP BY pol."mrLineId"`,
     // Every hand-over against it, from whichever rack.
     prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; warehouseName: string; qty: number; at: Date }>>`
@@ -1128,7 +1129,15 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       orderedQty: round3(mine.reduce((t, o) => t + o.qty, 0)),
       receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
       poNumbers: [...new Set(mine.map((o) => o.poNumber))],
-      orders: mine.map((o) => ({ poId: o.poId, poNumber: o.poNumber, poDate: o.poDate, qty: o.qty, receivedQty: o.receivedQty })),
+      orders: mine.map((o) => ({
+        poId: o.poId,
+        poNumber: o.poNumber,
+        poDate: o.poDate,
+        status: o.status,
+        deliveryDate: o.deliveryDate,
+        qty: o.qty,
+        receivedQty: o.receivedQty,
+      })),
     }
   })
 
