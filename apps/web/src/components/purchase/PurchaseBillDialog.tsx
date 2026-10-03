@@ -203,6 +203,22 @@ interface Category {
   parentId: string | null
 }
 
+/**
+ * The supplier categories an expense bill is offered: whoever sends a bill for
+ * a service rather than for goods. Fabric, thread, labels and the rest are
+ * billed against a receipt, not here.
+ */
+const EXPENSE_SUPPLIER_CATEGORIES = new Set(['SERVICE', 'TRANSPORT', 'OTHER'])
+
+/**
+ * A supplier's category, as the supplier list sends it (a plain word). Read
+ * apart from `Option.category`, which on an item is the category record.
+ */
+const supplierCategory = (s: Option): string => {
+  const c = (s as unknown as { category?: unknown }).category
+  return typeof c === 'string' ? c : ''
+}
+
 /** The item-list choice that opens "new expense head" instead of picking one. */
 const ADD_EXPENSE_HEAD = '__new_expense__'
 
@@ -723,6 +739,16 @@ export function PurchaseBillDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
+  /*
+   * Who the supplier box offers. An expense bill lists only service, transport
+   * and other suppliers, kept apart from the material ones; a bill already
+   * made out to some other supplier keeps that one listed.
+   */
+  const supplierChoices = expenseMode
+    ? suppliers.filter(
+        (s) => EXPENSE_SUPPLIER_CATEGORIES.has(supplierCategory(s)) || s.id === supplierId
+      )
+    : suppliers
 
   /**
    * How long this supplier gives us, in days.
@@ -1846,12 +1872,18 @@ export function PurchaseBillDialog({
                     onChange={(e) => chooseSupplier(e.target.value)}
                   >
                     <option value="">Select...</option>
-                    {suppliers.map((s) => (
+                    {supplierChoices.map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.code ? `${s.code} — ${s.name}` : s.name}
                       </option>
                     ))}
                   </select>
+                  {expenseMode && suppliers.length > 0 && supplierChoices.length === 0 && (
+                    <p className="mt-1 text-xs text-amber-500">
+                      No service suppliers yet. Add one in Masters → Suppliers with category
+                      Service, Transport or Other.
+                    </p>
+                  )}
                   {supplier && (
                     <p className="text-muted-foreground mt-1 text-xs">
                       {supplier.gstin ? (
