@@ -19,6 +19,7 @@ import {
   PackageCheck,
   Paperclip,
   LayoutDashboard,
+  Loader2,
 } from 'lucide-react'
 import Link from 'next/link'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
@@ -28,6 +29,7 @@ import {
   type PoLine,
 } from '@/components/purchase/PurchaseOrderDialog'
 import type { EnquiryQuote, EnquiryRecord } from '@/components/purchase/enquiryTypes'
+import { takeHandedEnquiry } from '@/components/purchase/enquiryHandoff'
 import { OrderAttachmentsDialog } from '@/components/purchase/OrderAttachmentsDialog'
 import { GoodsReceiptHistoryDialog } from '@/components/purchase/GoodsReceiptHistoryDialog'
 import { Pagination } from '@/components/tables/Pagination'
@@ -135,14 +137,16 @@ export default function PurchaseOrdersPage() {
    * The enquiry an order is being raised from, arrived at by ?fromEnquiry=.
    *
    * A link rather than a dialog handing over an object, because the Order
-   * button lives on a different screen. The id is all that crosses; the enquiry
-   * itself is fetched here, so what the form prefills from is what the server
-   * currently holds and not a copy of a row that may be minutes stale.
+   * button lives on a different screen. The enquiry screen leaves its freshly
+   * loaded copy in session storage (see enquiryHandoff) so the form opens at
+   * once; without it — a refresh, an old link — it is fetched here.
    */
   const [fromEnquiry, setFromEnquiry] = useState<{
     enquiry: EnquiryRecord
     quote: EnquiryQuote
   } | null>(null)
+  /** True while an enquiry is being fetched to prefill the order form. */
+  const [openingEnquiry, setOpeningEnquiry] = useState(false)
   /** Which order's files are open in the read-only viewer, or null when closed. */
   const [filesFor, setFilesFor] = useState<PurchaseOrder | null>(null)
   const [historyFor, setHistoryFor] = useState<PurchaseOrder | null>(null)
@@ -171,18 +175,26 @@ export default function PurchaseOrdersPage() {
     const quoteId = params.get('fromQuote')
     if (!id || !quoteId) return
     let alive = true
+    const openWith = (enquiry: EnquiryRecord) => {
+      const quote = enquiry.quotes.find((q) => q.id === quoteId)
+      if (!quote) {
+        setError('That supplier is no longer on the enquiry.')
+        setDialog({ open: true, record: null })
+        return
+      }
+      setFromEnquiry({ enquiry, quote })
+      setDialog({ open: true, record: null })
+    }
+    const handed = takeHandedEnquiry(id)
+    if (handed) {
+      openWith(handed)
+      return
+    }
+    setOpeningEnquiry(true)
     void api
       .get<{ data: EnquiryRecord }>(`/purchase/enquiries/${id}`)
       .then((res) => {
-        if (!alive) return
-        const quote = res.data.quotes.find((q) => q.id === quoteId)
-        if (!quote) {
-          setError('That supplier is no longer on the enquiry.')
-          setDialog({ open: true, record: null })
-          return
-        }
-        setFromEnquiry({ enquiry: res.data, quote })
-        setDialog({ open: true, record: null })
+        if (alive) openWith(res.data)
       })
       .catch((err) => {
         if (!alive) return
@@ -192,6 +204,9 @@ export default function PurchaseOrdersPage() {
             : 'That enquiry could not be opened.'
         )
         setDialog({ open: true, record: null })
+      })
+      .finally(() => {
+        if (alive) setOpeningEnquiry(false)
       })
     return () => {
       alive = false
@@ -1389,6 +1404,26 @@ The supplier already has this order. If it was real and fell through, cancel it 
           </p>
         </div>
       </div>
+
+      {/* Fetching the enquiry behind an Order click. Without this the list sat
+      empty for seconds with nothing to say the form was on its way. */}
+      {openingEnquiry && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-[1px]"
+        >
+          <div className="bg-card border-border flex items-center gap-3 rounded-xl border px-5 py-4 shadow-lg">
+            <Loader2 size={18} className="text-primary animate-spin" />
+            <div>
+              <p className="text-foreground text-sm font-medium">Opening the purchase order…</p>
+              <p className="text-muted-foreground text-xs">
+                Bringing over the supplier, items and rates from his PI.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <PurchaseOrderDialog
         open={dialog.open}

@@ -22,6 +22,7 @@ import {
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { RecordQuoteDialog } from '@/components/purchase/RecordQuoteDialog'
+import { handEnquiryToOrder } from '@/components/purchase/enquiryHandoff'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { Section } from '@/components/purchase/Section'
 import {
@@ -391,6 +392,7 @@ export function EnquiryCompareDialog({
                       {q.answered && !q.declinedAt && can(MODULE, 'create') && (
                         <Link
                           href={'/purchase/orders?fromEnquiry=' + enquiry.id + '&fromQuote=' + q.id}
+                          onClick={() => handEnquiryToOrder(enquiry)}
                           className="btn-primary text-xs"
                           title={'Raise a purchase order against ' + q.piNumber}
                         >
