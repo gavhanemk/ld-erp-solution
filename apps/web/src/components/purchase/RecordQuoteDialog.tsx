@@ -28,11 +28,6 @@ import {
  * because it does not break down per item would push the step back onto email.
  * So is a short supply: a supplier who can manage 800 of the 1,240 asked has
  * answered the enquiry, and that is the fact the buyer splits an order on.
- *
- * His total and ours are both shown when they disagree, and neither is
- * corrected into the other. A mismatch is usually a charge he has added or an
- * arithmetic slip worth a phone call, and silently replacing one with the other
- * hides both.
  */
 
 const num = (v: string) => {
@@ -65,7 +60,6 @@ export function RecordQuoteDialog({
   const [piNumber, setPiNumber] = useState(quote.piNumber ?? '')
   const [piDate, setPiDate] = useState(iso(quote.piDate) || new Date().toISOString().slice(0, 10))
   const [validUntil, setValidUntil] = useState(iso(quote.piValidUntil))
-  const [amount, setAmount] = useState(quote.piAmount == null ? '' : String(Number(quote.piAmount)))
   const [remark, setRemark] = useState(quote.remark ?? '')
 
   const [rows, setRows] = useState<Record<string, RateRow>>(() =>
@@ -92,7 +86,7 @@ export function RecordQuoteDialog({
   const setRow = (lineId: string, patch: Partial<RateRow>) =>
     setRows((p) => ({ ...p, [lineId]: { ...p[lineId], ...patch } }))
 
-  /** What his rates add up to, for comparison against the total he stated. */
+  /** What his rates add up to, before tax. */
   const fromRates = useMemo(
     () =>
       enquiry.lines.reduce((t, l) => {
@@ -107,16 +101,6 @@ export function RecordQuoteDialog({
     [enquiry.lines, rows]
   )
 
-  const stated = amount === '' ? null : num(amount)
-  /*
-   * A rupee of slack. His PI is rounded to the rupee and ours is built from
-   * rates carrying paise, so the two disagreeing by fifty paise is arithmetic,
-   * not a discrepancy worth a phone call.
-   */
-  const mismatch =
-    stated != null && fromRates > 0 && Math.abs(stated - fromRates) > 1
-      ? { stated, ours: fromRates }
-      : null
 
   const priced = enquiry.lines.filter((l) => rows[l.id]?.quotedRate !== '').length
 
@@ -147,7 +131,6 @@ export function RecordQuoteDialog({
         {
           piNumber: piNumber.trim(),
           piDate,
-          amount: amount === '' ? null : num(amount),
           validUntil: validUntil || null,
           remark: remark.trim() || null,
           rates: enquiry.lines.map((l) => {
@@ -174,7 +157,7 @@ export function RecordQuoteDialog({
     } finally {
       setSaving(false)
     }
-  }, [problems, quote, enquiry, piNumber, piDate, amount, validUntil, remark, rows, onSaved])
+  }, [problems, quote, enquiry, piNumber, piDate, validUntil, remark, rows, onSaved])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -236,7 +219,7 @@ export function RecordQuoteDialog({
           )}
 
           <Section icon={Receipt} title="The document">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               <div>
                 <label className="form-label" htmlFor="pi-no">
                   PI number
@@ -278,21 +261,6 @@ export function RecordQuoteDialog({
                 <p className="text-muted-foreground mt-1 text-[11px]">
                   Left empty if he did not say.
                 </p>
-              </div>
-              <div>
-                <label className="form-label" htmlFor="pi-amount">
-                  Total on his PI
-                </label>
-                <input
-                  id="pi-amount"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  className="form-input text-right"
-                />
-                <p className="text-muted-foreground mt-1 text-[11px]">Stored as he stated it.</p>
               </div>
             </div>
           </Section>
@@ -436,26 +404,6 @@ export function RecordQuoteDialog({
                 </tbody>
               </table>
             </div>
-
-            {/* Both figures, side by side, with neither corrected into the other.
-            The buyer decides whether the gap is a charge he added or a slip
-            worth a call — this screen only makes sure they see it. */}
-            {mismatch && (
-              <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
-                <AlertCircle size={16} className="mt-0.5 shrink-0 text-amber-400" />
-                <div className="text-xs">
-                  <p className="font-medium text-amber-400">
-                    His total and his rates do not agree.
-                  </p>
-                  <p className="text-muted-foreground mt-0.5">
-                    The PI states ₹{money(mismatch.stated)}; the rates above come to ₹
-                    {money(mismatch.ours)} before tax — a difference of ₹
-                    {money(Math.abs(mismatch.stated - mismatch.ours))}. Often a charge he has added.
-                    Both are kept as they are.
-                  </p>
-                </div>
-              </div>
-            )}
           </Section>
 
           <Section icon={Paperclip} title="Notes and the scan">
@@ -494,7 +442,7 @@ export function RecordQuoteDialog({
 
           {priced === 0 && (
             <p className="text-muted-foreground text-xs">
-              No rates typed. The PI will be recorded with its number and total only, which is
+              No rates typed. The PI will be recorded with its number only, which is
               enough to raise an order against — the order asks for its own rates.
             </p>
           )}
@@ -506,9 +454,9 @@ export function RecordQuoteDialog({
               {priced} of {enquiry.lines.length} lines priced
             </p>
             <p className="text-foreground text-sm font-semibold tabular-nums">
-              ₹{money(stated ?? fromRates)}
+              ₹{money(fromRates)}
               <span className="text-muted-foreground ml-1.5 text-[11px] font-normal">
-                {stated != null ? 'his stated total' : 'from his rates, before tax'}
+                from his rates, before tax
               </span>
             </p>
           </div>
