@@ -71,7 +71,10 @@ export function RecordQuoteDialog({
           {
             quotedRate: ql?.quotedRate == null ? '' : String(Number(ql.quotedRate)),
             gstRate: ql?.gstRate == null ? '' : String(Number(ql.gstRate)),
-            offeredQty: ql?.offeredQty == null ? '' : String(Number(ql.offeredQty)),
+            // Starts at the full quantity asked, as a real value the buyer can
+            // edit or scroll down from. A placeholder looked filled in but could
+            // not be touched, and the wheel started it from 0.
+            offeredQty: String(Number(ql?.offeredQty ?? l.qty)),
             remark: ql?.remark ?? '',
           },
         ]
@@ -139,7 +142,11 @@ export function RecordQuoteDialog({
               lineId: l.id,
               quotedRate: r?.quotedRate === '' ? null : num(r?.quotedRate ?? ''),
               gstRate: r?.gstRate === '' ? null : num(r?.gstRate ?? ''),
-              offeredQty: r?.offeredQty === '' ? null : num(r?.offeredQty ?? ''),
+              // The full quantity is stored as "all of it", same as leaving it empty.
+              offeredQty:
+                r?.offeredQty === '' || num(r?.offeredQty ?? '') === Number(l.qty)
+                  ? null
+                  : num(r?.offeredQty ?? ''),
               remark: r?.remark?.trim() || null,
             }
           }),
@@ -329,19 +336,15 @@ export function RecordQuoteDialog({
                           {expected == null ? '—' : money(expected)}
                         </td>
                         <td>
-                          {/* The placeholder is the quantity asked for, not the
-                          word "all".
-                          "all" looked like a value somebody had entered, and a
-                          buyer reading the row could not tell whether the
-                          supplier had committed to the full quantity or the box
-                          was simply empty. Showing the figure it falls back to
-                          says the same thing and cannot be misread: leave it
-                          and he supplies 1,000; type 800 and he supplies 800,
-                          with the other 200 left unplaced on the enquiry. */}
+                          {/* Filled with the quantity asked for. Leave it and he
+                          supplies 1,000; change it to 800 and he supplies 800,
+                          with the other 200 left unplaced on the enquiry. Cleared,
+                          it falls back to the full quantity. */}
                           <input
                             type="number"
                             step="any"
                             min="0"
+                            max={Number(l.qty)}
                             value={r?.offeredQty ?? ''}
                             onChange={(e) => setRow(l.id, { offeredQty: e.target.value })}
                             placeholder={fmtQty(l.qty)}
