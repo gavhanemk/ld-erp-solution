@@ -2157,62 +2157,53 @@ router.post(
  */
 router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) => {
   const all = str(req.query.status) === 'all'
-  const rows = await prisma.stockReservation.findMany({
-    where: all ? {} : { status: 'ACTIVE' },
-    orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
-    take: 2000,
-    include: {
-      item: {
-        select: {
-          id: true, code: true, name: true, uom: { select: { symbol: true } },
-          category: { select: { id: true, name: true, parent: { select: { id: true, name: true } } } },
-        },
-      },
-      warehouse: { select: { id: true, name: true } },
-      mr: {
-        select: {
-          id: true, mrNumber: true, requiredDate: true, status: true, closedAt: true,
-          department: { select: { id: true, name: true } },
-        },
-      },
-      mrLine: { select: { requestedQty: true, issuedQty: true } },
-      so: { select: { id: true, soNumber: true } },
-      customer: { select: { id: true, name: true } },
-      reservedBy: { select: { name: true } },
-      releasedBy: { select: { name: true } },
-    },
-  })
+  // One query: the include form took six round trips, nearly two seconds on the shared database.
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string; status: string; qty: number; reservedQty: number
+      itemId: string; itemCode: string; itemName: string; uom: string | null
+      catName: string | null; parentName: string | null
+      warehouseId: string; warehouseName: string
+      mrId: string; mrNumber: string; neededBy: Date | null; departmentId: string; departmentName: string
+      asked: number; issued: number; soNumber: string | null; customerId: string | null; customerName: string | null
+      reservedBy: string | null; reservedAt: Date; updatedAt: Date
+      releasedBy: string | null; releasedAt: Date | null; releaseReason: string | null
+    }>
+  >`
+    SELECT r.id, r.status::text AS "status", r.qty::float8 AS "qty", r."reservedQty"::float8 AS "reservedQty",
+           i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom",
+           c.name AS "catName", cp.name AS "parentName",
+           w.id AS "warehouseId", w.name AS "warehouseName",
+           m.id AS "mrId", m."mrNumber", m."requiredDate" AS "neededBy", d.id AS "departmentId", d.name AS "departmentName",
+           ml."requestedQty"::float8 AS "asked", ml."issuedQty"::float8 AS "issued",
+           so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
+           rb.name AS "reservedBy", r."createdAt" AS "reservedAt", r."updatedAt",
+           xb.name AS "releasedBy", r."releasedAt", r."releaseReason"
+    FROM ld_erp.stock_reservations r
+    JOIN ld_erp.items i ON i.id = r."itemId"
+    LEFT JOIN ld_erp.uom u ON u.id = i."uomId"
+    LEFT JOIN ld_erp.item_categories c ON c.id = i."categoryId"
+    LEFT JOIN ld_erp.item_categories cp ON cp.id = c."parentId"
+    JOIN ld_erp.warehouses w ON w.id = r."warehouseId"
+    JOIN ld_erp.material_requisitions m ON m.id = r."mrId"
+    JOIN ld_erp.departments d ON d.id = m."departmentId"
+    JOIN ld_erp.material_requisition_lines ml ON ml.id = r."mrLineId"
+    LEFT JOIN ld_erp.sales_orders so ON so.id = r."soId"
+    LEFT JOIN ld_erp.customers cu ON cu.id = r."customerId"
+    LEFT JOIN ld_erp.users rb ON rb.id = r."reservedById"
+    LEFT JOIN ld_erp.users xb ON xb.id = r."releasedById"
+    WHERE ${all ? Prisma.sql`TRUE` : Prisma.sql`r.status::text = 'ACTIVE'`}
+    ORDER BY (r.status::text = 'ACTIVE') DESC, r."createdAt" DESC
+    LIMIT 2000`
   res.json({
     success: true,
     data: rows.map((r) => ({
-      id: r.id,
-      status: r.status,
-      qty: Number(r.qty),
-      reservedQty: Number(r.reservedQty),
-      itemId: r.item.id,
-      itemCode: r.item.code,
-      itemName: r.item.name,
-      uom: r.item.uom?.symbol ?? '',
-      mainCategoryName: r.item.category?.parent?.name ?? r.item.category?.name ?? '',
-      subCategoryName: r.item.category?.parent ? r.item.category.name : null,
-      warehouseId: r.warehouse.id,
-      warehouseName: r.warehouse.name,
-      mrId: r.mr.id,
-      mrNumber: r.mr.mrNumber,
-      neededBy: r.mr.requiredDate,
-      departmentId: r.mr.department.id,
-      departmentName: r.mr.department.name,
-      asked: Number(r.mrLine.requestedQty),
-      issued: Number(r.mrLine.issuedQty),
-      soNumber: r.so?.soNumber ?? null,
-      customerId: r.customer?.id ?? null,
-      customerName: r.customer?.name ?? null,
-      reservedBy: r.reservedBy?.name ?? null,
-      reservedAt: r.createdAt,
-      updatedAt: r.updatedAt,
-      releasedBy: r.releasedBy?.name ?? null,
-      releasedAt: r.releasedAt,
-      releaseReason: r.releaseReason,
+      ...r,
+      uom: r.uom ?? '',
+      mainCategoryName: r.parentName ?? r.catName ?? '',
+      subCategoryName: r.parentName ? r.catName : null,
+      catName: undefined,
+      parentName: undefined,
     })),
   })
 })

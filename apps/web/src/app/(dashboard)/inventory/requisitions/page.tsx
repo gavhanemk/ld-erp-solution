@@ -10,6 +10,7 @@ import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { FulfilDialog } from '@/components/inventory/FulfilDialog'
 import { ReservationsView } from '@/components/inventory/ReservationsView'
+import { RequisitionTableDialog } from '@/components/inventory/RequisitionTableDialog'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
@@ -301,6 +302,8 @@ function RequisitionsScreen() {
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
+  // The all-items table: an indent or a reservation for every line at once.
+  const [tableFor, setTableFor] = useState<{ mode: 'indent' | 'reserve'; mr: Requisition } | null>(null)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
 
   const today = dayKey(new Date())
@@ -600,6 +603,10 @@ function RequisitionsScreen() {
     const actions: RowAction[] = []
     if (canDecide)
       actions.push({ key: 'refuse', label: 'Refuse', icon: <X size={14} />, onClick: () => setAsking({ mr, kind: 'reject' }), danger: true })
+    if (mr.status === 'APPROVED' && !mr.closedAt && !mr.issuedAt) {
+      actions.push({ key: 'indent', label: 'Create indent (all items)', icon: <ShoppingCart size={14} />, onClick: () => setTableFor({ mode: 'indent', mr }) })
+      actions.push({ key: 'reserve', label: 'Reserve material (all items)', icon: <Lock size={14} />, onClick: () => setTableFor({ mode: 'reserve', mr }) })
+    }
     if (mr.status === 'APPROVED')
       actions.push({ key: 'slip', label: 'Print issue slip', icon: <Printer size={14} />, href: `/print/material-issue/${mr.id}`, newTab: true })
     if (mayClose(mr, isMine))
@@ -1169,6 +1176,19 @@ function RequisitionsScreen() {
         )}
       </div>
       </>
+      )}
+
+      {tableFor && (
+        <RequisitionTableDialog
+          mode={tableFor.mode}
+          mr={tableFor.mr}
+          onClose={() => setTableFor(null)}
+          onDone={(msg) => {
+            setTableFor(null)
+            setMessage(msg)
+            void load()
+          }}
+        />
       )}
 
       {fulfilling && (

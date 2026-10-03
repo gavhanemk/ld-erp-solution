@@ -10,6 +10,7 @@ import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { RequisitionTableDialog } from '@/components/inventory/RequisitionTableDialog'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -77,6 +78,7 @@ export function ReservationsView() {
   const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({ status: ['ACTIVE'] })
   const [page, setPage] = useState(1)
   const [releasing, setReleasing] = useState<Row | null>(null)
+  const [reserving, setReserving] = useState(false)
 
   const today = dayKey(new Date())
 
@@ -321,6 +323,11 @@ export function ReservationsView() {
           <button className="btn-secondary h-10" onClick={() => void exportRows()} disabled={exporting || shown.length === 0}>
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
+          {canRelease && (
+            <button className="btn-primary h-10" onClick={() => setReserving(true)}>
+              <Lock size={15} /> Reserve material
+            </button>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {chips.map((c) => (
@@ -442,6 +449,18 @@ export function ReservationsView() {
           </div>
         )}
       </div>
+
+      {reserving && (
+        <RequisitionTableDialog
+          mode="reserve"
+          onClose={() => setReserving(false)}
+          onDone={(msg) => {
+            setReserving(false)
+            setMessage(msg)
+            void load()
+          }}
+        />
+      )}
 
       {releasing && (
         <ReasonDialog
