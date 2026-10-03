@@ -10,12 +10,12 @@ import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { ProcessDialog } from '@/components/inventory/ProcessDialog'
 import { formatDate } from '@/lib/utils'
 
 /**
  * Stock held on the racks for requisitions, and who it is held for — the
- * Reservations tab of Material Requisitions.
+ * Reservations tab of Material Requisitions. Only for seeing and releasing:
+ * stock is reserved in a requisition's Process window.
  *
  * A reservation keeps material in the store — it is still in the stock figure —
  * but no other requisition is given it. It is made in a requisition's Fulfil
@@ -78,7 +78,6 @@ export function ReservationsView() {
   const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({ status: ['ACTIVE'] })
   const [page, setPage] = useState(1)
   const [releasing, setReleasing] = useState<Row | null>(null)
-  const [reserving, setReserving] = useState(false)
 
   const today = dayKey(new Date())
 
@@ -314,11 +313,6 @@ export function ReservationsView() {
           <button className="btn-secondary h-10" onClick={() => void exportRows()} disabled={exporting || shown.length === 0}>
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
-          {canRelease && (
-            <button className="btn-primary h-10" onClick={() => setReserving(true)}>
-              <Lock size={15} /> Reserve material
-            </button>
-          )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {chips.filter((c) => c.key !== 'status').map((c) => (
@@ -359,7 +353,7 @@ export function ReservationsView() {
           <div className="px-4 py-10 text-center">
             <p className="text-sm text-muted-foreground">
               {onlyHeld && !words.length && chips.length === 1
-                ? 'Nothing is reserved right now. Press Reserve material to keep stock aside for a requisition.'
+                ? 'Nothing is reserved right now. To reserve stock, go to the Requisitions tab and press Process on a requisition — the Reserve box is step 2.'
                 : 'Nothing matches that.'}
             </p>
           </div>
@@ -437,17 +431,6 @@ export function ReservationsView() {
           </div>
         )}
       </div>
-
-      {reserving && (
-        <ProcessDialog
-          onClose={() => setReserving(false)}
-          onDone={(msg) => {
-            setReserving(false)
-            setMessage(msg)
-            void load()
-          }}
-        />
-      )}
 
       {releasing && (
         <ReasonDialog
