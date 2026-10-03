@@ -232,16 +232,23 @@ export function FulfilDialog({
   const owedOf = (l: Line) => r3(Math.max(0, Number(l.requestedQty) - Number(l.issuedQty)))
   const boughtOf = (l: Line) => bought.find((b) => b.lineId === l.id)
 
-  // Start from the obvious answer: hand over what the racks have, asked store
-  // first, and buy whatever is still short (or keep what was already planned).
+  /** A buy quantity somebody typed in, as opposed to a line only marked "buy" on the old form. */
+  const typedBuyOf = (l: Line) =>
+    l.purchaseQty !== null && l.purchaseQty !== undefined && Number(l.purchaseQty) > 0 ? Number(l.purchaseQty) : 0
+
+  // Start from stock: hand over what the racks have, asked store first, and buy
+  // only what they cannot cover. Whoever fulfils decides whether to buy more.
   useEffect(() => {
     if (!mr || loading) return
     const nextIssue: Record<string, Record<string, string>> = {}
     const nextBuy: Record<string, string> = {}
     for (const l of mr.lines) {
-      // What is already planned to be bought is left for the purchase to cover;
-      // the racks are offered for the rest, so an earlier "buy it" is not doubled.
-      const alreadyBuying = Math.max(0, (boughtOf(l)?.buyQty ?? 0) - (boughtOf(l)?.receivedQty ?? 0))
+      const was = boughtOf(l)
+      // Left for the purchase to cover: what is really on order and not yet in,
+      // or a quantity somebody typed in. An old "buy" mark with no order behind
+      // it is not a decision, so the racks are offered first.
+      const onOrder = Math.max(0, (was?.orderedQty ?? 0) - (was?.receivedQty ?? 0))
+      const alreadyBuying = Math.max(onOrder, typedBuyOf(l) - (was?.receivedQty ?? 0), 0)
       let need = r3(Math.max(0, owedOf(l) - alreadyBuying))
       const per: Record<string, string> = {}
       for (const s of storesFor(l)) {
@@ -250,11 +257,12 @@ export function FulfilDialog({
         need = r3(need - take)
       }
       nextIssue[l.id] = per
-      // Buy what all the racks together cannot cover, unless a figure was already set.
-      const planned = boughtOf(l)?.buyQty ?? 0
+      // Buy what all the racks together cannot cover — never less than is
+      // already ordered, and a typed-in figure stands.
       const onRacks = storesFor(l).reduce((t, st) => t + st.qty, 0)
       const theirs = l.ownership === 'CUSTOMER_OWNED'
-      nextBuy[l.id] = theirs ? '0' : String(planned > 0 ? planned : r3(Math.max(0, owedOf(l) - onRacks)))
+      const short = r3(Math.max(0, owedOf(l) - onRacks))
+      nextBuy[l.id] = theirs ? '0' : String(r3(Math.max(typedBuyOf(l), was?.orderedQty ?? 0, short)))
     }
     setIssue(nextIssue)
     setBuy(nextBuy)
@@ -421,14 +429,20 @@ export function FulfilDialog({
              * buy but not ordered yet (amber). What none of these cover is grey.
              */
             const pct = (v: number) => `${Math.max(0, Math.min(100, asked ? (v / asked) * 100 : 0))}%`
-            const toBuy = was?.buyQty ?? 0
+            // What the window will buy once confirmed: the figure in the Buy box.
+            const savedBuy = was?.buyQty ?? 0
+            const toBuy = Number.isNaN(buyNow) ? savedBuy : buyNow
             const ordered = was?.orderedQty ?? 0
             const arrived = was?.receivedQty ?? 0
             const arrivedHere = Math.min(arrived, owed)
             const onOrder = Math.min(Math.max(0, ordered - arrived), Math.max(0, owed - arrivedHere))
             const notOrdered = Math.min(Math.max(0, toBuy - ordered), Math.max(0, owed - arrivedHere - onOrder))
+            // What this window is about to hand over from the racks.
+            const givingNow = Math.min(giving, Math.max(0, owed - arrivedHere - onOrder - notOrdered))
+            const uncovered = r3(Math.max(0, owed - arrivedHere - onOrder - notOrdered - givingNow))
             const segments = [
               { key: 'given', label: 'Handed over', value: issued, cls: 'bg-emerald-500', dot: 'bg-emerald-500' },
+              { key: 'now', label: 'Handing over now', value: givingNow, cls: 'bg-emerald-300', dot: 'bg-emerald-300' },
               { key: 'arrived', label: 'Arrived on PO', value: arrivedHere, cls: 'bg-teal-400', dot: 'bg-teal-400' },
               { key: 'ordered', label: 'On order', value: onOrder, cls: 'bg-sky-500', dot: 'bg-sky-500' },
               { key: 'waiting', label: 'To buy, no PO yet', value: notOrdered, cls: 'bg-amber-400', dot: 'bg-amber-400' },
@@ -436,14 +450,16 @@ export function FulfilDialog({
             const buyState = theirs || toBuy <= 0 || owed <= 0
               ? null
               : ordered <= 0
-                ? { cls: 'badge-warning', text: 'Waiting for PO' }
+                ? available >= owed - 1e-9
+                  ? null
+                  : { cls: 'badge-warning', text: 'Waiting for PO' }
                 : arrived >= Math.min(ordered, owed) - 1e-9 && arrived > 0
                   ? { cls: 'badge-success', text: 'Arrived — hand over' }
                   : { cls: 'badge-info', text: `On order · ${was?.poNumbers.join(', ')}` }
             const figures = [
               { label: 'Asked', value: asked, tone: 'text-foreground' },
               { label: 'Handed over', value: issued, tone: 'text-emerald-500' },
-              { label: 'To buy', value: was?.buyQty ?? 0, tone: 'text-sky-500' },
+              { label: 'To buy', value: toBuy, tone: 'text-sky-500' },
               { label: 'Still owed', value: owed, tone: owed ? 'text-orange-500' : 'text-muted-foreground' },
             ]
             return (
@@ -493,10 +509,10 @@ export function FulfilDialog({
                             {sg.label} <b className="font-semibold tabular-nums text-foreground">{fmt(sg.value)}</b>
                           </span>
                         ))}
-                      {owed > 0 && arrivedHere + onOrder + notOrdered + 1e-9 < owed && (
+                      {owed > 0 && uncovered > 0 && (
                         <span className="inline-flex items-center gap-1.5">
                           <span className="h-2 w-2 rounded-full bg-secondary ring-1 ring-border" />
-                          Not covered yet <b className="font-semibold tabular-nums text-foreground">{fmt(r3(owed - arrivedHere - onOrder - notOrdered))}</b>
+                          Not covered yet <b className="font-semibold tabular-nums text-foreground">{fmt(uncovered)}</b>
                         </span>
                       )}
                     </div>
@@ -627,6 +643,13 @@ export function FulfilDialog({
                                       ? 'Nothing will be bought.'
                                       : 'Nothing needs buying.'}
                             </p>
+                            {/* An old "buy" mark with no order behind it, now that the racks can cover it. */}
+                            {savedBuy > 0 && toBuy <= 0 && ordered <= 0 && typedBuyOf(l) === 0 && available >= owed - 1e-9 && (
+                              <p className="rounded-lg border border-border bg-secondary/50 px-3 py-2 text-[11px] leading-snug text-foreground">
+                                It was marked to be bought earlier, but no PO was raised and the stores now have {fmt(available)} {unit}. So the window
+                                hands it over from stock instead. To buy anyway, enter a quantity or pick Shortfall / Whole line.
+                              </p>
+                            )}
                             {/* Where the buying has got to: the orders raised against this line, or that there are none. */}
                             {toBuy > 0 &&
                               (() => {
