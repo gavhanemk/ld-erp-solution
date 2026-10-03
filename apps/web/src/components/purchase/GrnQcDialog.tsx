@@ -12,16 +12,17 @@ import {
   Package,
   X,
 } from 'lucide-react'
-import { api, apiErrorMessage, can, masterResource } from '@/lib/api'
+import { api, apiErrorMessage, can } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 
 /**
  * Quality check on a goods receipt — optional, after the goods are in.
  *
  * Per line the checker enters only what was rejected and why; what passed is
- * the rest of what arrived. Rejected goods move to a reject godown the
- * checker picks, where they stay on the books but cannot be issued as good
- * stock, until a return challan sends them back against the bill.
+ * the rest of what arrived. The mill keeps one store, so nothing is moved:
+ * rejected goods stay where they were received, recorded as rejected, until a
+ * return challan sends them back against the bill. (Older checks may name a
+ * reject godown the goods were moved to; those still show it.)
  *
  * A receipt with a check standing on it opens read-only, with the one thing
  * that can be done to it: cancel the check (its goods move back) so it can be
@@ -79,11 +80,6 @@ interface QcData {
   history: QcRecord[]
 }
 
-interface Warehouse {
-  id: string
-  name: string
-}
-
 export const QC_RESULT: Record<QcRecord['result'], { label: string; cls: string }> = {
   PASS: { label: 'QC passed', cls: 'badge-success' },
   CONDITIONAL_PASS: { label: 'QC part rejected', cls: 'badge-warning' },
@@ -116,11 +112,9 @@ export function GrnQcDialog({
   onSaved: (message: string) => void
 }) {
   const [data, setData] = useState<QcData | null>(null)
-  const [warehouses, setWarehouses] = useState<Warehouse[]>([])
   const [rejected, setRejected] = useState<Record<string, string>>({})
   const [reasons, setReasons] = useState<Record<string, string>>({})
   const [inspectionDate, setInspectionDate] = useState(today)
-  const [rejectWarehouseId, setRejectWarehouseId] = useState('')
   const [remarks, setRemarks] = useState('')
   const [cancelReason, setCancelReason] = useState('')
   const [cancelling, setCancelling] = useState(false)
@@ -131,17 +125,10 @@ export function GrnQcDialog({
 
   useEffect(() => {
     let alive = true
-    Promise.all([
-      api.get<{ data: QcData }>('/purchase/qc/grn/' + grnId),
-      masterResource<Warehouse>('warehouses').list({ limit: 200, active: true }),
-    ])
-      .then(([r, w]) => {
-        if (!alive) return
-        setData(r.data)
-        setWarehouses(w.data)
-        // A godown named for rejects is the obvious place, when there is one.
-        const reject = w.data.find((x) => /reject/i.test(x.name))
-        if (reject) setRejectWarehouseId(reject.id)
+    api
+      .get<{ data: QcData }>('/purchase/qc/grn/' + grnId)
+      .then((r) => {
+        if (alive) setData(r.data)
       })
       .catch((err) => {
         if (alive) setError(apiErrorMessage(err, 'Could not read that receipt.'))
@@ -185,15 +172,9 @@ export function GrnQcDialog({
       if (r > 0 && (reasons[l.grnLineId]?.trim().length ?? 0) < 3) {
         out.push(`${l.itemName}: say why it was rejected`)
       }
-      if (r > 0 && rejectWarehouseId && rejectWarehouseId === l.warehouseId) {
-        out.push(`${l.itemName} is already in that godown — pick a different one for rejects`)
-      }
-    }
-    if (rejecting.length && !rejectWarehouseId) {
-      out.push('Pick the godown the rejected goods move to')
     }
     return out
-  }, [lines, rejected, reasons, rejecting.length, rejectWarehouseId])
+  }, [lines, rejected, reasons])
 
   const save = async () => {
     if (problems.length || saving || !data) return
@@ -203,7 +184,6 @@ export function GrnQcDialog({
       const res = await api.post<{ message: string }>('/purchase/qc', {
         grnId: data.grn.id,
         inspectionDate,
-        rejectWarehouseId: rejecting.length ? rejectWarehouseId : null,
         remarks: remarks.trim() || null,
         lines: lines.map((l) => ({
           grnLineId: l.grnLineId,
@@ -247,7 +227,7 @@ export function GrnQcDialog({
        window's is. */
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-4">
       <div
-        className="glass-card po-form flex max-h-full w-full max-w-4xl flex-col overflow-hidden"
+        className="glass-card po-form flex max-h-full w-full max-w-6xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="qc-dialog-title"
@@ -302,8 +282,8 @@ export function GrnQcDialog({
         <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto px-5 py-3">
           {!readOnly && !loading && (
             <p className="text-muted-foreground text-[11px]">
-              Enter only what was rejected and why — the rest counts as passed. Rejected goods move
-              to the reject godown and go back to the supplier on a return challan from the bill.
+              Enter only what was rejected and why — the rest counts as passed. Rejected goods go back
+              to the supplier on a return challan from the bill.
             </p>
           )}
 
@@ -337,7 +317,7 @@ export function GrnQcDialog({
           ) : (
             <>
               <Section icon={MessageSquare} title="Check Details">
-                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                   <label className="block">
                     <span className="form-label">QC date</span>
                     <input
@@ -346,32 +326,6 @@ export function GrnQcDialog({
                       value={inspectionDate}
                       onChange={(e) => setInspectionDate(e.target.value)}
                     />
-                  </label>
-                  <label className="block">
-                    <span className="form-label">
-                      Rejected goods go to
-                      {rejecting.length > 0 && <span className="ml-0.5 text-red-400">*</span>}
-                    </span>
-                    <select
-                      className={`form-input ${
-                        rejecting.length && !rejectWarehouseId ? 'border-amber-500/70' : ''
-                      }`}
-                      value={rejectWarehouseId}
-                      onChange={(e) => setRejectWarehouseId(e.target.value)}
-                    >
-                      <option value="">Pick a godown…</option>
-                      {warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {w.name}
-                        </option>
-                      ))}
-                    </select>
-                    {!warehouses.some((w) => /reject/i.test(w.name)) && (
-                      <span className="text-muted-foreground mt-1 block text-[10px]">
-                        Tip: add a &ldquo;Rejected Goods&rdquo; godown in Masters and it is picked
-                        here by itself.
-                      </span>
-                    )}
                   </label>
                   <label className="block sm:col-span-2">
                     <span className="form-label">Remarks</span>
@@ -398,7 +352,7 @@ export function GrnQcDialog({
                       >
                         <p className="text-foreground text-sm font-medium">{l.itemName}</p>
                         <p className="text-muted-foreground font-mono text-[10px]">
-                          {l.itemCode} · in {l.warehouseName}
+                          {l.itemCode}
                         </p>
                         <div className="border-border/70 mt-2 grid grid-cols-2 gap-2 border-t pt-2 text-xs">
                           <div>
@@ -449,11 +403,6 @@ export function GrnQcDialog({
                             />
                           </div>
                         </div>
-                        {r > l.onHand + 0.0005 && !over && (
-                          <p className="mt-1 text-[10px] text-red-400">
-                            Only {l.onHand} {l.uom ?? ''} left in {l.warehouseName}
-                          </p>
-                        )}
                       </div>
                     )
                   })}
@@ -464,8 +413,9 @@ export function GrnQcDialog({
                     <thead>
                       <tr className="bg-secondary">
                         {[
-                          ['Item', 'w-56', 'left'],
-                          ['Godown', 'w-36', 'left'],
+                          // The reason takes whatever is left, which is most of a
+                          // wide window — it is the one box people type a sentence in.
+                          ['Item', 'w-52', 'left'],
                           ['Received', 'w-24', 'right'],
                           ['Approved', 'w-24', 'right'],
                           ['Rejected', 'w-28', 'right'],
@@ -486,7 +436,6 @@ export function GrnQcDialog({
                       {lines.map((l, i) => {
                         const r = num(rejected[l.grnLineId] ?? '')
                         const over = r > l.receivedQty + 0.0005
-                        const short = !over && r > l.onHand + 0.0005
                         return (
                           <tr
                             key={l.grnLineId}
@@ -500,14 +449,6 @@ export function GrnQcDialog({
                                 {l.itemCode}
                               </p>
                             </td>
-                            <td className="pt-2.5 text-xs">
-                              {l.warehouseName}
-                              {short && (
-                                <p className="text-[10px] text-red-400">
-                                  only {l.onHand} {l.uom ?? ''} left here
-                                </p>
-                              )}
-                            </td>
                             <td className="whitespace-nowrap pt-2.5 text-right text-xs tabular-nums">
                               {l.receivedQty} {l.uom ?? ''}
                             </td>
@@ -520,7 +461,7 @@ export function GrnQcDialog({
                                 step="any"
                                 min={0}
                                 className={`form-input h-8 text-right text-xs ${
-                                  over || short ? 'border-red-500/60' : ''
+                                  over ? 'border-red-500/60' : ''
                                 }`}
                                 placeholder="0"
                                 value={rejected[l.grnLineId] ?? ''}
@@ -658,7 +599,7 @@ function StandingCheck({
               <div className="min-w-0">
                 <p className="text-xs font-medium">{l.itemName}</p>
                 <p className="text-muted-foreground font-mono text-[10px]">
-                  {l.itemCode} · received in {l.warehouseName}
+                  {l.itemCode}
                 </p>
                 {l.reason && <p className="mt-0.5 text-[10px] text-amber-500">{l.reason}</p>}
               </div>
@@ -682,8 +623,7 @@ function StandingCheck({
           {!cancelling ? (
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="text-muted-foreground text-xs">
-                Cancelling moves any rejected goods back to the godown they were received into. The
-                receipt can then be corrected, or checked again.
+                Cancelling undoes this check. The receipt can then be corrected, or checked again.
               </p>
               <button type="button" className="btn-danger" onClick={() => setCancelling(true)}>
                 <Ban size={14} /> Cancel QC

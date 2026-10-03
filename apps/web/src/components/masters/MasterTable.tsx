@@ -122,6 +122,13 @@ interface MasterTableProps<T> {
   exportable?: boolean
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
+  /**
+   * Opens the page's own form for a new record instead of the generic one —
+   * for a master whose new rows need values the edit form does not show.
+   */
+  onNew?: () => void
+  /** Likewise for editing a row: the page's own form instead of the generic one. */
+  onEdit?: (row: T) => void
 }
 
 export function MasterTable<T extends { id: string; isActive?: boolean }>({
@@ -143,6 +150,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   noActiveFlag = false,
   refreshKey = 0,
   exportable = false,
+  onNew,
+  onEdit,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -167,7 +176,8 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   const { rowsPerPage } = useAppSettings()
 
   const client = useMemo(() => masterResource<T>(resource), [resource])
-  const editable = Boolean(formFields?.length)
+  // Editable through the generic form, or through the page's own forms for both.
+  const editable = Boolean(formFields?.length || (onNew && onEdit))
   const singular = entityName ?? title.replace(/s$/, '')
 
   // Typing shouldn't fire a request per keystroke.
@@ -454,6 +464,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           {editable && (
             <button
               onClick={() => {
+                if (onNew) return onNew()
                 setEditing(null)
                 setDialogOpen(true)
               }}
@@ -653,6 +664,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
                         className="btn-ghost p-1.5"
                         title={`Edit ${singular.toLowerCase()}`}
                         onClick={() => {
+                          if (onEdit) return onEdit(row)
                           setEditing(row)
                           setDialogOpen(true)
                         }}

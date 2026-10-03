@@ -12,6 +12,7 @@ import { amountInWords, getPrintHeader } from '../lib/printData'
 import {
   MAX_FILES_PER_DOCUMENT,
   MAX_FILE_BYTES,
+  copyObject,
   removeObject,
   signedDownloadUrl,
   signedUploadUrl,
@@ -122,6 +123,11 @@ const createSchema = z.object({
    * built on — and that is the document the rate has to be traceable to.
    */
   enquiryQuoteId: z.string().optional().nullable(),
+  /*
+   * The PI scans to carry onto the new order. Each must be filed against
+   * `enquiryQuoteId`; the files are copied, not shared, once the order exists.
+   */
+  quoteAttachmentIds: z.array(z.string()).max(MAX_FILES_PER_DOCUMENT).optional(),
   // Which quotation this order answers, and whatever the mill quotes back.
   // Free text on purpose: every mill numbers these its own way.
   enquiryNo: z.string().max(50).optional().nullable(),
@@ -1097,7 +1103,45 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     after: po,
   })
 
-  res.status(201).json({ success: true, data: po })
+  /*
+   * The supplier's PI scan, carried onto the order raised from it.
+   *
+   * After the order rather than inside its transaction, for the same reason as
+   * files chosen on the form: the order is the document that matters, and a
+   * storage hiccup must not throw it away. Whatever did not copy is named in
+   * the reply so the form can say so.
+   */
+  const fileFailures: Array<{ name: string; why: string }> = []
+  if (quote && data.quoteAttachmentIds?.length) {
+    const files = await prisma.purchaseEnquiryAttachment.findMany({
+      where: { id: { in: data.quoteAttachmentIds }, quoteId: quote.id },
+      orderBy: { createdAt: 'asc' },
+      take: MAX_FILES_PER_DOCUMENT,
+    })
+    for (const f of files) {
+      try {
+        const path = storagePathFor('purchase-orders', po.id, f.fileName)
+        await copyObject(f.storagePath, path)
+        await prisma.purchaseOrderAttachment.create({
+          data: {
+            poId: po.id,
+            fileName: f.fileName,
+            storagePath: path,
+            mimeType: f.mimeType,
+            sizeBytes: f.sizeBytes,
+            uploadedById: req.user!.id,
+          },
+        })
+      } catch (err) {
+        fileFailures.push({
+          name: f.fileName,
+          why: err instanceof Error ? err.message : 'no reason given',
+        })
+      }
+    }
+  }
+
+  res.status(201).json({ success: true, data: po, fileFailures })
 })
 
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
