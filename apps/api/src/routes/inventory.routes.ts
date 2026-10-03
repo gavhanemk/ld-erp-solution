@@ -2155,6 +2155,64 @@ router.post(
  * Everything held on the racks, with who it is for. Active by default;
  * ?status=all includes what was used up or released.
  */
+/**
+ * Every item on the indent, across all approved requisitions still open: what
+ * is to be bought, what is ordered and received, and on which POs — the old
+ * system's indent list in one place. One query.
+ */
+router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      lineId: string; mrId: string; mrNumber: string; requestDate: Date; requiredDate: Date | null
+      departmentId: string; departmentName: string; soNumber: string | null; customerId: string | null; customerName: string | null
+      itemId: string; itemCode: string; itemName: string; uom: string | null; purpose: string | null
+      asked: number; issued: number; purchaseQty: number | null
+      ordered: number; received: number; poNumbers: string | null
+    }>
+  >`
+    SELECT l.id AS "lineId", m.id AS "mrId", m."mrNumber", m."requestDate", m."requiredDate",
+           d.id AS "departmentId", d.name AS "departmentName", so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
+           i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom", l.purpose,
+           l."requestedQty"::float8 AS "asked", l."issuedQty"::float8 AS "issued", l."purchaseQty"::float8 AS "purchaseQty",
+           COALESCE(o.ordered, 0)::float8 AS "ordered", COALESCE(g.received, 0)::float8 AS "received", o."poNumbers"
+    FROM ld_erp.material_requisition_lines l
+    JOIN ld_erp.material_requisitions m ON m.id = l."mrId"
+    JOIN ld_erp.departments d ON d.id = m."departmentId"
+    JOIN ld_erp.items i ON i.id = l."itemId"
+    LEFT JOIN ld_erp.uom u ON u.id = i."uomId"
+    LEFT JOIN ld_erp.sales_orders so ON so.id = m."soId"
+    LEFT JOIN ld_erp.customers cu ON cu.id = so."customerId"
+    LEFT JOIN LATERAL (
+      SELECT SUM(pol.qty) AS ordered, STRING_AGG(DISTINCT po."poNumber", ', ') AS "poNumbers"
+      FROM ld_erp.purchase_order_lines pol
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" = l.id AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
+    ) o ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT SUM(gl."receivedQty") AS received
+      FROM ld_erp.grn_lines gl
+      JOIN ld_erp.grn gr ON gr.id = gl."grnId"
+      JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" = l.id AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL AND gr.status::text <> 'CANCELLED'
+    ) g ON TRUE
+    WHERE m.status::text = 'APPROVED' AND m."closedAt" IS NULL
+      AND (l."purchaseQty" > 0 OR (l."purchaseQty" IS NULL AND l.fulfilment::text = 'PURCHASE') OR COALESCE(o.ordered, 0) > 0)
+    ORDER BY m."requestDate" DESC, m."mrNumber" DESC`
+  res.json({
+    success: true,
+    data: rows
+      .map((r) => {
+        // A typed quantity stands; a line only marked "buy" means what is still owed, never below what is ordered.
+        const toBuy = round3(
+          r.purchaseQty !== null ? r.purchaseQty : Math.max(r.asked - r.issued, r.ordered),
+        )
+        return { ...r, uom: r.uom ?? '', toBuy, purchaseQty: undefined }
+      })
+      .filter((r) => r.toBuy > 0 || r.ordered > 0),
+  })
+})
+
 router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) => {
   const all = str(req.query.status) === 'all'
   // One query: the include form took six round trips, nearly two seconds on the shared database.

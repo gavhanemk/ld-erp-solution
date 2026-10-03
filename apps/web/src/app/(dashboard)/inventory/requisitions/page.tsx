@@ -10,6 +10,7 @@ import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog } from '@/components/inventory/ProcessDialog'
 import { ReservationsView } from '@/components/inventory/ReservationsView'
+import { IndentsView } from '@/components/inventory/IndentsView'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
@@ -265,10 +266,12 @@ function RequisitionsScreen() {
   const params = useSearchParams()
   const router = useRouter()
   const pathname = usePathname()
-  const view: 'list' | 'reservations' = params.get('view') === 'reservations' ? 'reservations' : 'list'
-  const setView = (v: 'list' | 'reservations') => {
+  type View = 'list' | 'indents' | 'reservations'
+  const asked = params.get('view')
+  const view: View = asked === 'reservations' || asked === 'indents' ? asked : 'list'
+  const setView = (v: View) => {
     const next = new URLSearchParams(params.toString())
-    if (v === 'reservations') next.set('view', 'reservations')
+    if (v !== 'list') next.set('view', v)
     else next.delete('view')
     const qs = next.toString()
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
@@ -296,6 +299,8 @@ function RequisitionsScreen() {
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
+  // Bumped after a save, so the Indents and Reservations tabs read again.
+  const [saved, setSaved] = useState(0)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
 
   const today = dayKey(new Date())
@@ -748,6 +753,7 @@ function RequisitionsScreen() {
           <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
             {([
               { key: 'list', label: 'Requisitions', icon: List },
+              { key: 'indents', label: 'Indents', icon: ShoppingCart },
               { key: 'reservations', label: 'Reservations', icon: Lock },
             ] as const).map((t) => (
               <button
@@ -800,7 +806,16 @@ function RequisitionsScreen() {
         </div>
       )}
 
-      {view === 'reservations' && <ReservationsView />}
+      {view === 'reservations' && <ReservationsView key={saved} />}
+      {view === 'indents' && (
+        <IndentsView
+          key={saved}
+          onProcess={(id) => {
+            const found = rows.find((r) => r.id === id)
+            if (found) setFulfilling(found)
+          }}
+        />
+      )}
 
       {view === 'list' && (
       <>
@@ -1123,6 +1138,7 @@ function RequisitionsScreen() {
           mr={fulfilling}
           onClose={() => setFulfilling(null)}
           onDone={(msg) => {
+            setSaved((n) => n + 1)
             setFulfilling(null)
             setMessage(msg)
             void load()
