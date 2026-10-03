@@ -142,17 +142,17 @@ function nextStep(mr: Requisition, key: StageKey, isMine: boolean, iApproved: bo
           : 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
         : 'Yours to approve or refuse.'
     case 'purchase':
-      return `${mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Part handed over; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Fulfil to hand it over.`
+      return `${mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Part issued; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Fulfil to hand it over.`
     case 'partly': {
       const full = mr.lines.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
-      return `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} handed over in full. Press Fulfil to hand over the rest, or close it if it is no longer wanted.`
+      return `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} issued in full. Press Fulfil to issue the rest, or close it if it is no longer wanted.`
     }
     case 'handover':
       // Raised, approved and issued by three different people (the Admin may
       // do all three), so the two who have had their say are told whose turn it is.
       return (isMine || iApproved) && !admin
-        ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store hands it over. You can still press Fulfil to set what to buy.`
-        : 'Press Fulfil to hand it over from the stores that have it, and to buy what is short.'
+        ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store issues it. You can still press Fulfil to set what to buy.`
+        : 'Press Fulfil to issue it from the stores that have it, and to buy what is short.'
     default:
       return undefined
   }
@@ -595,7 +595,7 @@ export default function RequisitionsPage() {
         className={`${r.s.waiting ? 'btn-secondary' : 'btn-primary'} h-7 px-2.5 text-xs`}
         onClick={() => setFulfilling(mr)}
         disabled={busy === mr.id}
-        title={r.s.waiting ? 'Waiting on the buyer; open it to see what has happened, or change the plan' : 'Hand it over, buy what is short, or both'}
+        title={r.s.waiting ? 'Waiting on the buyer; open it to see what has happened, or change the plan' : 'Issue it, buy what is short, or both'}
       >
         <PackageCheck size={13} /> Fulfil
       </button>
@@ -668,7 +668,7 @@ export default function RequisitionsPage() {
           <span>
             {r.s.next && <>{r.s.next} </>}
             {mr.approvedBy && <>Approved by {mr.approvedBy.name}. </>}
-            {mr.issuedBy && mr.issuedAt && <>Handed over by {mr.issuedBy.name} on {formatDate(mr.issuedAt)}. </>}
+            {mr.issuedBy && mr.issuedAt && <>Issued by {mr.issuedBy.name} on {formatDate(mr.issuedAt)}. </>}
             {mr.closedAt && (
               <>
                 {mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Closed' : 'Cancelled'}
@@ -778,7 +778,7 @@ export default function RequisitionsPage() {
         <KpiTile
           icon={PackageCheck}
           tone={TONE.teal}
-          label="To be handed over"
+          label="To be issued"
           value={String(figures.handover)}
           sub={
             isSet('stage', ['handover', 'partly'])
@@ -1133,8 +1133,8 @@ export default function RequisitionsPage() {
             asking.kind === 'reject'
               ? 'Whoever raised it sees the reason, so say what they should do instead.'
               : partlyIssued(asking.mr)
-                ? 'What was handed over stays issued. The rest is no longer owed, and nothing more can be issued against it.'
-                : 'Nothing has been handed over. It comes off the list, and nothing can be issued against it.'
+                ? 'What was issued stays issued. The rest is no longer owed, and nothing more can be issued against it.'
+                : 'Nothing has been issued. It comes off the list, and nothing can be issued against it.'
           }
           confirmLabel={
             asking.kind === 'reject' ? 'Refuse' : partlyIssued(asking.mr) ? 'Close it' : 'Cancel it'

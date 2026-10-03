@@ -210,8 +210,8 @@ export function FulfilDialog({
   const whyNot =
     mr && !canIssue
       ? me?.id === mr.raisedBy?.id
-        ? 'You raised this requisition, so somebody else in the store hands it over. You can still set what to buy.'
-        : 'You approved this requisition, so somebody else in the store hands it over. You can still set what to buy.'
+        ? 'You raised this requisition, so somebody else in the store issues it. You can still set what to buy.'
+        : 'You approved this requisition, so somebody else in the store issues it. You can still set what to buy.'
       : null
 
   /** Every store holding this line's stock — ours, or that customer's — the asked store first. */
@@ -282,7 +282,7 @@ export function FulfilDialog({
       const unit = l.item.uom.symbol
       const owed = owedOf(l)
       const giving = issuingOf(l)
-      if (giving > owed + 1e-9) problems.push(`${l.item.name}: handing over ${fmt(giving)} ${unit}, but only ${fmt(owed)} is owed.`)
+      if (giving > owed + 1e-9) problems.push(`${l.item.name}: issuing ${fmt(giving)} ${unit}, but only ${fmt(owed)} is owed.`)
       for (const s of storesFor(l)) {
         const v = num(issue[l.id]?.[s.id] ?? '')
         if (Number.isNaN(v) || v < 0) problems.push(`${l.item.name}: the quantity from ${s.name} is not a number.`)
@@ -305,7 +305,7 @@ export function FulfilDialog({
     if (!mr || !summary) return
     setError(null)
     if (summary.problems.length) return setError(summary.problems[0])
-    if (!summary.issueLines && !summary.buyChanges) return setError('Nothing to do: enter a quantity to hand over or to buy.')
+    if (!summary.issueLines && !summary.buyChanges) return setError('Nothing to do: enter a quantity to issue or to buy.')
 
     setSaving(true)
     const done: string[] = []
@@ -356,7 +356,7 @@ export function FulfilDialog({
           .filter((st) => num(issue[l.id]?.[st.id] ?? '') > 0)
           .map((st) => st.name)
           .join(' + ')
-        parts.push(`hand over ${fmt(giving)} ${unit} ${l.item.name} from ${from}`)
+        parts.push(`issue ${fmt(giving)} ${unit} ${l.item.name} from ${from}`)
       }
       const b = num(buy[l.id] ?? '0')
       const was = boughtOf(l)?.buyQty ?? 0
@@ -381,7 +381,7 @@ export function FulfilDialog({
           Cancel
         </button>
       }
-      footerNote={doing ? `Confirm will ${doing}.` : 'Nothing changed yet. Enter what to hand over, or change what to buy.'}
+      footerNote={doing ? `Confirm will ${doing}.` : 'Nothing changed yet. Enter what to issue, or change what to buy.'}
       error={error}
       onClose={onClose}
       busy={saving}
@@ -417,7 +417,7 @@ export function FulfilDialog({
             const cat = l.item.category
             const status =
               owed === 0
-                ? { cls: 'badge-success', text: 'Handed over in full' }
+                ? { cls: 'badge-success', text: 'Issued in full' }
                 : available >= owed
                   ? { cls: 'badge-success', text: 'In stock' }
                   : available > 0
@@ -441,8 +441,8 @@ export function FulfilDialog({
             const givingNow = Math.min(giving, Math.max(0, owed - arrivedHere - onOrder - notOrdered))
             const uncovered = r3(Math.max(0, owed - arrivedHere - onOrder - notOrdered - givingNow))
             const segments = [
-              { key: 'given', label: 'Handed over', value: issued, cls: 'bg-emerald-500', dot: 'bg-emerald-500' },
-              { key: 'now', label: 'Handing over now', value: givingNow, cls: 'bg-emerald-300', dot: 'bg-emerald-300' },
+              { key: 'given', label: 'Issued', value: issued, cls: 'bg-emerald-500', dot: 'bg-emerald-500' },
+              { key: 'now', label: 'Issuing now', value: givingNow, cls: 'bg-emerald-300', dot: 'bg-emerald-300' },
               { key: 'arrived', label: 'Arrived on PO', value: arrivedHere, cls: 'bg-teal-400', dot: 'bg-teal-400' },
               { key: 'ordered', label: 'On order', value: onOrder, cls: 'bg-sky-500', dot: 'bg-sky-500' },
               { key: 'waiting', label: 'To buy, no PO yet', value: notOrdered, cls: 'bg-amber-400', dot: 'bg-amber-400' },
@@ -454,11 +454,11 @@ export function FulfilDialog({
                   ? null
                   : { cls: 'badge-warning', text: 'Waiting for PO' }
                 : arrived >= Math.min(ordered, owed) - 1e-9 && arrived > 0
-                  ? { cls: 'badge-success', text: 'Arrived — hand over' }
+                  ? { cls: 'badge-success', text: 'Arrived — issue it' }
                   : { cls: 'badge-info', text: `On order · ${was?.poNumbers.join(', ')}` }
             const figures = [
               { label: 'Asked', value: asked, tone: 'text-foreground' },
-              { label: 'Handed over', value: issued, tone: 'text-emerald-500' },
+              { label: 'Issued', value: issued, tone: 'text-emerald-500' },
               { label: 'To buy', value: toBuy, tone: 'text-sky-500' },
               { label: 'Still owed', value: owed, tone: owed ? 'text-orange-500' : 'text-muted-foreground' },
             ]
@@ -520,7 +520,7 @@ export function FulfilDialog({
 
                   {owed <= 0 ? (
                     <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-500">
-                      Everything asked for has been handed over.
+                      Everything asked for has been issued.
                     </p>
                   ) : (
                     <div className="grid gap-4 lg:grid-cols-5">
@@ -529,7 +529,7 @@ export function FulfilDialog({
                         <div className="mb-1.5 flex items-baseline justify-between gap-2">
                           <h4 className="text-sm font-semibold text-foreground">
                             <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[11px] text-primary">1</span>
-                            Hand over now
+                            Issue raw material
                           </h4>
                           <span className="text-[11px] text-muted-foreground">
                             {available ? `${fmt(available)} ${unit} ${theirs ? 'of theirs ' : ''}in stock` : 'none in stock'}
@@ -542,7 +542,7 @@ export function FulfilDialog({
                                 <th className="px-3 py-1.5 text-left font-semibold">Store</th>
                                 <th className="px-3 py-1.5 text-right font-semibold">Has</th>
                                 <th className="px-3 py-1.5 text-right font-semibold" style={{ width: '9rem' }}>
-                                  Give
+                                  Issue
                                 </th>
                               </tr>
                             </thead>
@@ -580,7 +580,7 @@ export function FulfilDialog({
                           </table>
                         </div>
                         <p className={`mt-1 text-[11px] ${giving > owed + 1e-9 ? 'text-red-500' : 'text-muted-foreground'}`}>
-                          Giving {fmt(giving)} of the {fmt(owed)} {unit} still owed.
+                          Issuing {fmt(giving)} of the {fmt(owed)} {unit} still owed.
                         </p>
                       </div>
 
@@ -647,7 +647,7 @@ export function FulfilDialog({
                             {savedBuy > 0 && toBuy <= 0 && ordered <= 0 && typedBuyOf(l) === 0 && available >= owed - 1e-9 && (
                               <p className="rounded-lg border border-border bg-secondary/50 px-3 py-2 text-[11px] leading-snug text-foreground">
                                 It was marked to be bought earlier, but no PO was raised and the stores now have {fmt(available)} {unit}. So the window
-                                hands it over from stock instead. To buy anyway, enter a quantity or pick Shortfall / Whole line.
+                                issues it from stock instead. To buy anyway, enter a quantity or pick Shortfall / Whole line.
                               </p>
                             )}
                             {/* Where the buying has got to: the orders raised against this line, or that there are none. */}
@@ -808,7 +808,7 @@ export function FulfilDialog({
                           : e.action === 'REJECT'
                             ? 'refused it'
                             : e.handedOver?.length
-                              ? `handed over ${e.handedOver.join(', ')}`
+                              ? `issued ${e.handedOver.join(', ')}`
                               : e.plan
                                 ? `set to buy ${
                                     e.plan
