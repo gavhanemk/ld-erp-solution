@@ -10,7 +10,7 @@ import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { RequisitionTableDialog } from '@/components/inventory/RequisitionTableDialog'
+import { ProcessDialog } from '@/components/inventory/ProcessDialog'
 import { formatDate } from '@/lib/utils'
 
 /**
@@ -268,35 +268,6 @@ export function ReservationsView() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <KpiTile
-          icon={Lock}
-          tone={TONE.violet}
-          label="Held now"
-          value={String(figures.lines)}
-          sub={figures.qty ? `${figures.lines === 1 ? 'item' : 'items'} · ${figures.qty}` : 'nothing is held'}
-          onClick={() => setFilter('status', onlyHeld ? [] : ['ACTIVE'])}
-          active={onlyHeld}
-          title="Show only what is held now"
-        />
-        <KpiTile
-          icon={Users}
-          tone={TONE.sky}
-          label="Customers"
-          value={String(figures.customers)}
-          sub={figures.noCustomer ? `${figures.noCustomer} held with no sales order` : 'every reservation names its customer'}
-        />
-        <KpiTile icon={ClipboardList} tone={TONE.teal} label="Requisitions" value={String(figures.mrs)} sub="with stock held for them" />
-        <KpiTile
-          icon={Hourglass}
-          tone={TONE.amber}
-          label="Held over 15 days"
-          value={String(figures.old)}
-          valueClass={figures.old ? 'text-orange-500' : 'text-foreground'}
-          sub={figures.old ? 'not touched for a fortnight — still wanted?' : 'nothing held for long'}
-        />
-      </div>
-
       <div className="glass-card relative z-30 space-y-2 px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex h-10 min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
@@ -314,7 +285,27 @@ export function ReservationsView() {
               </button>
             )}
           </div>
-          {FILTERS.map((f) => (
+          <div className="flex h-10 rounded-lg border border-border bg-secondary p-1" role="tablist" aria-label="Show">
+            {[
+              { key: 'now', label: 'Held now' },
+              { key: 'history', label: 'History' },
+            ].map((t) => {
+              const on = t.key === 'now' ? onlyHeld : !onlyHeld
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={on}
+                  onClick={() => setFilter('status', t.key === 'now' ? ['ACTIVE'] : [])}
+                  className={`rounded-md px-3 text-sm transition-colors ${on ? 'bg-card font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  {t.label}
+                </button>
+              )
+            })}
+          </div>
+          {FILTERS.filter((f) => f.key === 'customer' || f.key === 'store').map((f) => (
             <FilterMenu key={f.key} label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
           ))}
           <button className="btn-ghost h-10" onClick={() => void load()} disabled={loading} title="Refresh">
@@ -330,7 +321,7 @@ export function ReservationsView() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
-          {chips.map((c) => (
+          {chips.filter((c) => c.key !== 'status').map((c) => (
             <button
               key={`${c.key}-${c.value}`}
               type="button"
@@ -340,11 +331,11 @@ export function ReservationsView() {
               {c.text} <X size={11} />
             </button>
           ))}
-          {(chips.length > 0 || words.length > 0) && (
+          {(chips.some((c) => c.key !== 'status') || words.length > 0) && (
             <button
               type="button"
               onClick={() => {
-                setPicked({})
+                setPicked((p) => ({ status: p.status }))
                 setSearch('')
               }}
               className="text-xs text-primary hover:underline"
@@ -352,8 +343,11 @@ export function ReservationsView() {
               Clear all
             </button>
           )}
+          {/* The figures in one plain line. */}
           <span className="ml-auto text-xs text-muted-foreground">
-            {shown.length} of {rows.length} {rows.length === 1 ? 'reservation' : 'reservations'}
+            {figures.lines
+              ? `Held now: ${figures.qty} for ${figures.mrs} ${figures.mrs === 1 ? 'requisition' : 'requisitions'}${figures.customers ? ` · ${figures.customers} ${figures.customers === 1 ? 'customer' : 'customers'}` : ''}`
+              : 'Nothing is held now'}
           </span>
         </div>
       </div>
@@ -365,10 +359,8 @@ export function ReservationsView() {
           <div className="px-4 py-10 text-center">
             <p className="text-sm text-muted-foreground">
               {onlyHeld && !words.length && chips.length === 1
-                ? "Nothing is held on the racks right now. Reserve stock in a requisition's Fulfil window, or change Status to see what was issued or released."
-                : rows.length
-                  ? 'Nothing matches that.'
-                : 'Nothing is reserved yet. On the Requisitions tab, press Fulfil on an approved requisition and enter a quantity in the Reserve column.'}
+                ? 'Nothing is reserved right now. Press Reserve material to keep stock aside for a requisition.'
+                : 'Nothing matches that.'}
             </p>
           </div>
         ) : (
@@ -377,18 +369,13 @@ export function ReservationsView() {
               <table className="data-table table-compact min-w-full">
                 <thead>
                   <tr className="bg-secondary">
-                    <th className="whitespace-nowrap">Code</th>
                     <th className="whitespace-nowrap">Item</th>
-                    <th className="whitespace-nowrap">Category</th>
-                    <th className="whitespace-nowrap">Store</th>
-                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Held</th>
-                    <th className="whitespace-nowrap">For customer</th>
-                    <th className="whitespace-nowrap">Sales order</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Reserved</th>
+                    <th className="whitespace-nowrap">In store</th>
+                    <th className="whitespace-nowrap">For</th>
                     <th className="whitespace-nowrap">Requisition</th>
-                    <th className="whitespace-nowrap">Department</th>
-                    <th className="whitespace-nowrap">Needed by</th>
-                    <th className="whitespace-nowrap">Reserved</th>
-                    <th className="whitespace-nowrap">Status</th>
+                    <th className="whitespace-nowrap">Since</th>
+                    {!onlyHeld && <th className="whitespace-nowrap">Status</th>}
                     <th />
                   </tr>
                 </thead>
@@ -397,13 +384,10 @@ export function ReservationsView() {
                     const late = r.status === 'ACTIVE' && r.neededBy && dayKey(r.neededBy) < today
                     return (
                       <tr key={r.id} className={r.status === 'ACTIVE' ? undefined : 'opacity-70'}>
-                        <td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{r.itemCode}</td>
-                        <td className="min-w-[180px] text-sm font-medium text-foreground">{r.itemName}</td>
-                        <td className="whitespace-nowrap text-xs">
-                          {r.mainCategoryName || dash}
-                          {r.subCategoryName && <span className="text-muted-foreground"> › {r.subCategoryName}</span>}
+                        <td className="min-w-[200px]">
+                          <div className="text-sm font-medium text-foreground">{r.itemName}</div>
+                          <div className="font-mono text-[11px] text-muted-foreground">{r.itemCode}</div>
                         </td>
-                        <td className="whitespace-nowrap text-xs">{r.warehouseName}</td>
                         <td className="whitespace-nowrap text-right tabular-nums">
                           {r.status === 'ACTIVE' ? (
                             <span className="font-semibold text-violet-500">
@@ -415,23 +399,27 @@ export function ReservationsView() {
                             </span>
                           )}
                         </td>
-                        <td className="whitespace-nowrap text-sm">{r.customerName ?? <span className="text-xs text-muted-foreground">no sales order</span>}</td>
-                        <td className="whitespace-nowrap font-mono text-xs">{r.soNumber ?? dash}</td>
-                        <td className="whitespace-nowrap font-mono text-xs font-semibold text-primary">{r.mrNumber}</td>
-                        <td className="whitespace-nowrap text-xs">{r.departmentName}</td>
-                        <td className={`whitespace-nowrap text-xs ${late ? 'font-semibold text-red-500' : ''}`}>
-                          {r.neededBy ? formatDate(r.neededBy) : dash}
-                          {late && ' · late'}
-                        </td>
-                        <td className="whitespace-nowrap text-xs">
-                          {formatDate(r.reservedAt)}
-                          {r.reservedBy && <span className="text-muted-foreground"> · {r.reservedBy}</span>}
+                        <td className="whitespace-nowrap text-sm">{r.warehouseName}</td>
+                        <td className="whitespace-nowrap">
+                          <div className="text-sm">{r.customerName ?? <span className="text-muted-foreground">No customer</span>}</div>
+                          {r.soNumber && <div className="font-mono text-[11px] text-muted-foreground">{r.soNumber}</div>}
                         </td>
                         <td className="whitespace-nowrap">
-                          <span className={STATUS[r.status].cls} title={r.releaseReason ?? undefined}>
-                            {STATUS[r.status].label}
-                          </span>
+                          <div className="font-mono text-xs font-semibold text-primary">{r.mrNumber}</div>
+                          <div className={`text-[11px] ${late ? 'font-semibold text-red-500' : 'text-muted-foreground'}`}>
+                            {r.departmentName}
+                            {r.neededBy ? ` · needed ${formatDate(r.neededBy)}` : ''}
+                            {late ? ' — late' : ''}
+                          </div>
                         </td>
+                        <td className="whitespace-nowrap text-xs text-muted-foreground">{formatDate(r.reservedAt)}</td>
+                        {!onlyHeld && (
+                          <td className="whitespace-nowrap">
+                            <span className={STATUS[r.status].cls} title={r.releaseReason ?? undefined}>
+                              {STATUS[r.status].label}
+                            </span>
+                          </td>
+                        )}
                         <td className="whitespace-nowrap text-right">
                           {r.status === 'ACTIVE' && canRelease && (
                             <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setReleasing(r)} disabled={busy}>
@@ -451,8 +439,7 @@ export function ReservationsView() {
       </div>
 
       {reserving && (
-        <RequisitionTableDialog
-          mode="reserve"
+        <ProcessDialog
           onClose={() => setReserving(false)}
           onDone={(msg) => {
             setReserving(false)

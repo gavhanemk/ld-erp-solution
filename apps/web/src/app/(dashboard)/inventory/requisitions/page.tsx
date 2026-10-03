@@ -8,9 +8,8 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
-import { FulfilDialog } from '@/components/inventory/FulfilDialog'
+import { ProcessDialog } from '@/components/inventory/ProcessDialog'
 import { ReservationsView } from '@/components/inventory/ReservationsView'
-import { RequisitionTableDialog } from '@/components/inventory/RequisitionTableDialog'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
@@ -149,17 +148,17 @@ function nextStep(mr: Requisition, key: StageKey, isMine: boolean, iApproved: bo
           : 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
         : 'Yours to approve or refuse.'
     case 'purchase':
-      return `${mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Part issued; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Fulfil to hand it over.`
+      return `${mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Part issued; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Process to issue it.`
     case 'partly': {
       const full = mr.lines.filter((l) => Number(l.issuedQty) >= Number(l.requestedQty)).length
-      return `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} issued in full. Press Fulfil to issue the rest, or close it if it is no longer wanted.`
+      return `${full} of ${mr.lines.length} ${mr.lines.length === 1 ? 'line' : 'lines'} issued in full. Press Process to issue the rest, or close it if it is no longer wanted.`
     }
     case 'handover':
       // Raised, approved and issued by three different people (the Admin may
       // do all three), so the two who have had their say are told whose turn it is.
       return (isMine || iApproved) && !admin
-        ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store issues it. You can still press Fulfil to set what to buy.`
-        : 'Press Fulfil to issue it from the stores that have it, and to buy what is short.'
+        ? `You ${isMine ? 'raised' : 'approved'} it, so somebody else in the store issues it. You can still press Process to reserve or buy.`
+        : 'Press Process to issue it, reserve it, or buy what is short.'
     default:
       return undefined
   }
@@ -190,18 +189,14 @@ type UnitGroup = ReturnType<typeof qtyByUnit>[number]
 
 /** The item panel's columns, as shares of the row, so the table fits the panel it opens in. */
 const ITEM_COLS = [
-  { label: 'Code', width: '9%' },
-  { label: 'Item', width: '19%' },
-  { label: 'Category', width: '9%' },
-  { label: 'Sub-cat.', width: '9%' },
-  { label: 'Whose', width: '8%' },
-  { label: 'Asked of', width: '10%' },
-  { label: 'What for', width: '9%' },
-  { label: 'Asked', width: '7%', numeric: true },
-  { label: 'Issued', width: '6%', numeric: true },
-  { label: 'Reserved', width: '7%', numeric: true },
-  { label: 'To buy', width: '6%', numeric: true },
-  { label: 'Owed', width: '5%', numeric: true },
+  { label: 'Item', width: '28%' },
+  { label: 'Code', width: '11%' },
+  { label: 'What for', width: '16%' },
+  { label: 'Asked', width: '9%', numeric: true },
+  { label: 'Issued', width: '9%', numeric: true },
+  { label: 'Reserved', width: '9%', numeric: true },
+  { label: 'Buying', width: '9%', numeric: true },
+  { label: 'Still needed', width: '9%', numeric: true },
 ]
 /** One figure per unit on one line: "1,000 mtr · 250 pcs", or null when all are nil. */
 const unitLine = (groups: UnitGroup[], pick: (g: UnitGroup) => number) => {
@@ -251,7 +246,6 @@ const PRESETS = [
   { key: '30d', label: '30 days' },
   { key: 'month', label: 'This month' },
   { key: 'fy', label: 'This FY' },
-  { key: 'custom', label: 'Custom dates' },
 ]
 
 const PAGE = 50
@@ -302,8 +296,6 @@ function RequisitionsScreen() {
   const [dialog, setDialog] = useState(false)
   // The requisition being handed over, and the one a reason is being asked for.
   const [fulfilling, setFulfilling] = useState<Requisition | null>(null)
-  // The all-items table: an indent or a reservation for every line at once.
-  const [tableFor, setTableFor] = useState<{ mode: 'indent' | 'reserve'; mr: Requisition } | null>(null)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
 
   const today = dayKey(new Date())
@@ -603,10 +595,6 @@ function RequisitionsScreen() {
     const actions: RowAction[] = []
     if (canDecide)
       actions.push({ key: 'refuse', label: 'Refuse', icon: <X size={14} />, onClick: () => setAsking({ mr, kind: 'reject' }), danger: true })
-    if (mr.status === 'APPROVED' && !mr.closedAt && !mr.issuedAt) {
-      actions.push({ key: 'indent', label: 'Create indent (all items)', icon: <ShoppingCart size={14} />, onClick: () => setTableFor({ mode: 'indent', mr }) })
-      actions.push({ key: 'reserve', label: 'Reserve material (all items)', icon: <Lock size={14} />, onClick: () => setTableFor({ mode: 'reserve', mr }) })
-    }
     if (mr.status === 'APPROVED')
       actions.push({ key: 'slip', label: 'Print issue slip', icon: <Printer size={14} />, href: `/print/material-issue/${mr.id}`, newTab: true })
     if (mayClose(mr, isMine))
@@ -634,7 +622,7 @@ function RequisitionsScreen() {
         disabled={busy === mr.id}
         title={r.s.waiting ? 'Waiting on the buyer; open it to see what has happened, or change the plan' : 'Issue it, buy what is short, or both'}
       >
-        <PackageCheck size={13} /> Fulfil
+        <PackageCheck size={13} /> Process
       </button>
     ) : null
 
@@ -654,7 +642,6 @@ function RequisitionsScreen() {
           </thead>
           <tbody>
             {mr.lines.map((l) => {
-              const cat = l.item.category
               const asked = Number(l.requestedQty)
               const issued = Number(l.issuedQty)
               const owed = Math.max(0, asked - issued)
@@ -662,22 +649,15 @@ function RequisitionsScreen() {
               const held = (l.reservations ?? []).reduce((t, r) => t + Number(r.qty), 0)
               return (
                 <tr key={l.id}>
-                  <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
                   <td>
-                    <div className="text-foreground truncate text-xs" title={l.item.name}>
+                    <div className="text-foreground truncate text-xs font-medium" title={l.item.name}>
                       {l.item.name}
                     </div>
-                  </td>
-                  <td className="truncate text-xs">{cat?.parent?.name ?? cat?.name ?? <span className="text-muted-foreground">—</span>}</td>
-                  <td className="truncate text-xs">{cat?.parent ? cat.name : <span className="text-muted-foreground">—</span>}</td>
-                  <td className="truncate text-xs">
-                    {l.ownership === 'CUSTOMER_OWNED' ? (
-                      <span className="text-sky-400">{l.ownerCustomer?.name ?? 'Customer'}&apos;s</span>
-                    ) : (
-                      <span className="text-muted-foreground">Our own</span>
+                    {l.ownership === 'CUSTOMER_OWNED' && (
+                      <div className="truncate text-[10px] text-sky-500">{l.ownerCustomer?.name ?? 'Customer'}&apos;s material</div>
                     )}
                   </td>
-                  <td className="truncate text-xs">{l.warehouse.name}</td>
+                  <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
                   <td className="truncate text-xs" title={l.purpose ?? undefined}>
                     {l.purpose ?? <span className="text-muted-foreground">—</span>}
                   </td>
@@ -723,7 +703,7 @@ function RequisitionsScreen() {
           </span>
           {r.canFulfil && (
             <button className="btn-primary ml-auto h-7 px-2.5 text-xs" onClick={() => setFulfilling(mr)}>
-              <PackageCheck size={13} /> Fulfil
+              <PackageCheck size={13} /> Process
             </button>
           )}
         </div>
@@ -757,7 +737,7 @@ function RequisitionsScreen() {
 
   const pages = Math.ceil(shown.length / PAGE) || 1
   const pageRows = shown.slice((page - 1) * PAGE, page * PAGE)
-  const COLS = 14
+  const COLS = 12
 
   return (
     <div className="space-y-4">
@@ -897,7 +877,7 @@ function RequisitionsScreen() {
             <Search size={14} className="text-muted-foreground" />
             <input
               className="flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
-              placeholder="Search number, department, person, item..."
+              placeholder="Search requisition, department, customer, item..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search requisitions"
@@ -907,34 +887,6 @@ function RequisitionsScreen() {
                 <X size={14} />
               </button>
             )}
-          </div>
-          <div className="flex h-10 items-center gap-1 rounded-lg border border-border bg-secondary px-2">
-            <CalendarDays size={14} className="shrink-0 text-muted-foreground" />
-            <input
-              type="date"
-              className="w-[118px] bg-transparent text-sm text-foreground outline-none"
-              value={from}
-              max={to || undefined}
-              onChange={(e) => {
-                setFrom(e.target.value)
-                setPreset('custom')
-              }}
-              aria-label="From"
-              title="Raised from"
-            />
-            <span className="text-xs text-muted-foreground">to</span>
-            <input
-              type="date"
-              className="w-[118px] bg-transparent text-sm text-foreground outline-none"
-              value={to}
-              min={from || undefined}
-              onChange={(e) => {
-                setTo(e.target.value)
-                setPreset('custom')
-              }}
-              aria-label="To"
-              title="Raised up to"
-            />
           </div>
           <select
             className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
@@ -948,7 +900,7 @@ function RequisitionsScreen() {
               </option>
             ))}
           </select>
-          {FILTERS.map((f) => (
+          {FILTERS.filter((f) => ['stage', 'department', 'need'].includes(f.key)).map((f) => (
             <FilterMenu key={f.key} label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
           ))}
         </div>
@@ -1019,7 +971,7 @@ function RequisitionsScreen() {
                       <dd className="text-foreground min-w-0 tabular-nums">{unitLine(r.groups, (g) => g.asked) ?? '—'}</dd>
                       <dt className="text-muted-foreground">Issued</dt>
                       <dd className="min-w-0 tabular-nums text-emerald-500">{unitLine(r.groups, (g) => g.issued) ?? dash}</dd>
-                      <dt className="text-muted-foreground">Still owed</dt>
+                      <dt className="text-muted-foreground">Still needed</dt>
                       <dd className="min-w-0 tabular-nums text-amber-500">
                         {OPEN_STAGES.includes(r.stage) ? (unitLine(r.groups, (g) => g.owed) ?? dash) : dash}
                       </dd>
@@ -1066,14 +1018,12 @@ function RequisitionsScreen() {
                       <th className="whitespace-nowrap">Req. No.</th>
                       <th className="whitespace-nowrap">Date</th>
                       <th className="whitespace-nowrap">Department</th>
-                      <th className="whitespace-nowrap">Raised by</th>
+                      <th className="whitespace-nowrap">For</th>
                       <th className="whitespace-nowrap">Items</th>
-                      <th className="whitespace-nowrap">Store</th>
                       <th className="whitespace-nowrap">Needed by</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued</th>
-                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still owed</th>
-                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>To buy</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Still needed</th>
                       <th className="whitespace-nowrap">Status</th>
                       <th />
                     </tr>
@@ -1084,7 +1034,6 @@ function RequisitionsScreen() {
                       const expanded = open === mr.id
                       const live = OPEN_STAGES.includes(r.stage)
                       const p = itemsPreview(mr.lines.map((l) => l.item.name))
-                      const stores = [...new Set(mr.lines.map((l) => l.warehouse.name))]
                       return (
                         <Fragment key={mr.id}>
                           <tr>
@@ -1116,17 +1065,11 @@ function RequisitionsScreen() {
                             </td>
                             <td className="whitespace-nowrap text-xs">{formatDate(mr.requestDate)}</td>
                             <td className="whitespace-nowrap text-xs">{mr.department.name}</td>
-                            <td className="whitespace-nowrap text-xs">{mr.raisedBy?.name ?? dash}</td>
+                            <td className="whitespace-nowrap text-xs">{mr.so ? mr.so.customer.name : dash}</td>
                             <td className="text-xs">
-                              <div className="text-foreground max-w-[9rem] truncate" title={p.full}>
+                              <div className="text-foreground max-w-[14rem] truncate" title={p.full}>
                                 {p.shown}
                                 {p.extra && <span className="text-muted-foreground">{p.extra}</span>}
-                              </div>
-                            </td>
-                            <td className="text-xs">
-                              <div className="max-w-[8rem] truncate" title={stores.join(', ')}>
-                                {stores[0]}
-                                {stores.length > 1 && <span className="text-muted-foreground"> +{stores.length - 1}</span>}
                               </div>
                             </td>
                             <td className="whitespace-nowrap text-xs">{neededBy(mr, r)}</td>
@@ -1134,9 +1077,6 @@ function RequisitionsScreen() {
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">{unitStack(r.groups, (g) => g.issued, 'text-emerald-500')}</td>
                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
                               {live ? unitStack(r.groups, (g) => g.owed, 'font-medium text-amber-500') : dash}
-                            </td>
-                            <td className="whitespace-nowrap text-right text-xs tabular-nums">
-                              {live ? unitStack(r.groups, (g) => g.toBuy, 'text-sky-500') : dash}
                             </td>
                             <td className="whitespace-nowrap">
                               <span className={r.s.cls} title={r.s.next}>
@@ -1178,23 +1118,9 @@ function RequisitionsScreen() {
       </>
       )}
 
-      {tableFor && (
-        <RequisitionTableDialog
-          mode={tableFor.mode}
-          mr={tableFor.mr}
-          onClose={() => setTableFor(null)}
-          onDone={(msg) => {
-            setTableFor(null)
-            setMessage(msg)
-            void load()
-          }}
-        />
-      )}
-
       {fulfilling && (
-        <FulfilDialog
-          mrId={fulfilling.id}
-          initial={fulfilling}
+        <ProcessDialog
+          mr={fulfilling}
           onClose={() => setFulfilling(null)}
           onDone={(msg) => {
             setFulfilling(null)
