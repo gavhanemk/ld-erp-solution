@@ -122,6 +122,11 @@ interface MasterTableProps<T> {
   exportable?: boolean
   /** Dropdown filters shown beside the search. */
   filterDefs?: FilterDef[]
+  /**
+   * Opens the page's own form for a new record instead of the generic one —
+   * for a master whose new rows need values the edit form does not show.
+   */
+  onNew?: () => void
 }
 
 export function MasterTable<T extends { id: string; isActive?: boolean }>({
@@ -143,6 +148,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
   noActiveFlag = false,
   refreshKey = 0,
   exportable = false,
+  onNew,
 }: MasterTableProps<T>) {
   const [rows, setRows] = useState<T[]>([])
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 })
@@ -454,6 +460,7 @@ export function MasterTable<T extends { id: string; isActive?: boolean }>({
           {editable && (
             <button
               onClick={() => {
+                if (onNew) return onNew()
                 setEditing(null)
                 setDialogOpen(true)
               }}
