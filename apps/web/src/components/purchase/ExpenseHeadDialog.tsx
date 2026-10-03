@@ -2,19 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Loader2, Receipt, X } from 'lucide-react'
+import { AlertCircle, Loader2, Receipt, Save, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import type { NewItem } from '@/components/purchase/NewItemDialog'
 
 /**
- * Adding an expense head — Electricity, Rent, Repairs — from an expense bill.
+ * Adding or editing an expense head — Electricity, Rent, Repairs.
  *
  * An expense head is stored as an item filed under the "Expenses" category,
  * because that is what a bill line points at. But it is not stock: it has no
  * item type worth choosing, no standard rate and no reorder level, and the
- * full New Item form asking for all of that made a two-second job look like
- * adding fabric to the master. So this asks only for what a head needs.
+ * full item form asking for all of that made a two-second job look like
+ * adding fabric to the master. So this asks only for what a head needs, and
+ * the same form is used to add one (from a bill or from Masters) and to edit
+ * one, so the two never drift apart.
  *
  * The "Expenses" category is created on the first save if the mill has none
  * yet, rather than sending the buyer off to Masters in the middle of a bill.
@@ -30,6 +32,18 @@ interface Uom {
   id: string
   symbol: string
   name: string
+}
+
+/** A head being edited, as the item list sends it. */
+export interface ExpenseHead {
+  id: string
+  code: string
+  name: string
+  hsnCode: string | null
+  description: string | null
+  isActive: boolean
+  category: { id: string; name: string; parentId: string | null } | null
+  uom: { id: string; name: string; symbol: string } | null
 }
 
 /**
@@ -54,25 +68,39 @@ export function plainUnit<U extends { symbol: string }>(uoms: U[]): U | null {
 export const isPlainUnit = (symbol?: string | null) =>
   Boolean(symbol && PREFERRED_UNITS.includes(symbol.toLowerCase()))
 
-export function NewExpenseHeadDialog({
+export function ExpenseHeadDialog({
+  head,
   expenseCategory,
   groups,
   onClose,
   onCreated,
+  onSaved,
 }: {
+  /** The head to edit. Left out to add a new one. */
+  head?: ExpenseHead | null
   /** The top-level "Expenses" category, or null when the mill has not made one yet. */
   expenseCategory: Category | null
   /** Sub-groups under it (e.g. Utilities, Repairs), if any. */
   groups: Category[]
   onClose: () => void
-  /** The new head, plus the "Expenses" category when this created it. */
-  onCreated: (item: NewItem, createdCategory: Category | null) => void
+  /** A new head, plus the "Expenses" category when this created it. */
+  onCreated?: (item: NewItem, createdCategory: Category | null) => void
+  /** An edited head was saved. */
+  onSaved?: () => void
 }) {
-  const [name, setName] = useState('')
-  const [groupId, setGroupId] = useState('')
-  const [uomId, setUomId] = useState('')
-  const [sacCode, setSacCode] = useState('')
-  const [description, setDescription] = useState('')
+  const editing = Boolean(head)
+  const [name, setName] = useState(head?.name ?? '')
+  // A head filed straight under Expenses has no group; one under a group does.
+  const [groupId, setGroupId] = useState(
+    head?.category?.parentId ? head.category.id : ''
+  )
+  // A plain unit is shown as "Not needed" (empty), whatever it was saved as.
+  const [uomId, setUomId] = useState(
+    head?.uom && !isPlainUnit(head.uom.symbol) ? head.uom.id : ''
+  )
+  const [sacCode, setSacCode] = useState(head?.hsnCode ?? '')
+  const [description, setDescription] = useState(head?.description ?? '')
+  const [isActive, setIsActive] = useState(head?.isActive ?? true)
 
   const [uoms, setUoms] = useState<Uom[]>([])
   const [saving, setSaving] = useState(false)
@@ -111,22 +139,51 @@ export function NewExpenseHeadDialog({
         })
         category = created = res.data
       }
-      const res = await api.post<{ data: NewItem }>('/masters/items', {
+      const fields = {
         name: name.trim(),
-        // Used up, never part of a garment — the closest of the item types.
-        type: 'CONSUMABLE',
         categoryId: groupId || category.id,
         uomId: uomId || fallbackUnit?.id,
-        ...(sacCode.trim() ? { hsnCode: sacCode.trim() } : {}),
-        ...(description.trim() ? { description: description.trim() } : {}),
-      })
-      onCreated(res.data, created)
+      }
+      if (head) {
+        // Blank boxes are sent as null so clearing a code or note sticks.
+        await api.patch(`/masters/items/${head.id}`, {
+          ...fields,
+          hsnCode: sacCode.trim() || null,
+          description: description.trim() || null,
+          isActive,
+        })
+        onSaved?.()
+      } else {
+        const res = await api.post<{ data: NewItem }>('/masters/items', {
+          ...fields,
+          // Used up, never part of a garment — the closest of the item types.
+          type: 'CONSUMABLE',
+          ...(sacCode.trim() ? { hsnCode: sacCode.trim() } : {}),
+          ...(description.trim() ? { description: description.trim() } : {}),
+        })
+        onCreated?.(res.data, created)
+      }
     } catch (err) {
-      setError(apiErrorMessage(err, 'Could not add that expense head.'))
+      setError(
+        apiErrorMessage(err, head ? 'Could not save that expense head.' : 'Could not add that expense head.')
+      )
     } finally {
       setSaving(false)
     }
-  }, [problems, expenseCategory, name, groupId, uomId, fallbackUnit, sacCode, description, onCreated])
+  }, [
+    problems,
+    expenseCategory,
+    head,
+    name,
+    groupId,
+    uomId,
+    fallbackUnit,
+    sacCode,
+    description,
+    isActive,
+    onCreated,
+    onSaved,
+  ])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -139,10 +196,10 @@ export function NewExpenseHeadDialog({
   return createPortal(
     <div className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-black/60 p-4 backdrop-blur-sm">
       <div
-        className="glass-card po-form my-4 flex w-full max-w-xl flex-col overflow-hidden"
+        className="glass-card po-form my-4 flex w-full max-w-3xl flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
-        aria-labelledby="new-head-title"
+        aria-labelledby="head-title"
       >
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
           <div className="flex min-w-0 items-center gap-3">
@@ -151,13 +208,15 @@ export function NewExpenseHeadDialog({
             </div>
             <div className="min-w-0">
               <h2
-                id="new-head-title"
+                id="head-title"
                 className="text-foreground truncate text-xl font-semibold tracking-tight"
               >
-                New Expense Head
+                {editing ? 'Edit Expense Head' : 'New Expense Head'}
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
-                What this bill is for — Electricity, Rent, Repairs
+                {head
+                  ? `${head.code} · changes apply to new bills from now on`
+                  : 'What this bill is for — Electricity, Rent, Repairs'}
               </p>
             </div>
           </div>
@@ -174,25 +233,27 @@ export function NewExpenseHeadDialog({
             </div>
           )}
 
+          {/* Two rows:
+                Name ............. | Group | Unit
+                SAC / HSN | Note ........................ */}
           <Section icon={Receipt} title="Expense head">
-            <div>
-              <label className="form-label" htmlFor="eh-name">
-                Name
-              </label>
-              <input
-                id="eh-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void save()
-                }}
-                placeholder="Electricity"
-                className="form-input"
-                autoFocus
-              />
-            </div>
-
-            <div className={`mt-3 grid gap-3 ${groups.length ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className={groups.length ? 'sm:col-span-2' : 'sm:col-span-2 lg:col-span-3'}>
+                <label className="form-label" htmlFor="eh-name">
+                  Name
+                </label>
+                <input
+                  id="eh-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void save()
+                  }}
+                  placeholder="Electricity"
+                  className="form-input"
+                  autoFocus
+                />
+              </div>
               {groups.length > 0 && (
                 <div>
                   <label className="form-label" htmlFor="eh-group">
@@ -224,14 +285,17 @@ export function NewExpenseHeadDialog({
                   className="form-input"
                 >
                   <option value="">Not needed</option>
-                  {uoms.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.symbol} · {u.name}
-                    </option>
-                  ))}
+                  {uoms
+                    .filter((u) => u.id !== fallbackUnit?.id)
+                    .map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.symbol} · {u.name}
+                      </option>
+                    ))}
                 </select>
                 <p className="form-help">Only to count usage, e.g. units of power.</p>
               </div>
+
               <div>
                 <label className="form-label" htmlFor="eh-sac">
                   SAC / HSN code
@@ -246,31 +310,44 @@ export function NewExpenseHeadDialog({
                 />
                 <p className="form-help">Optional. From the bill, if printed.</p>
               </div>
-            </div>
-
-            <div className="mt-3">
-              <label className="form-label" htmlFor="eh-desc">
-                Note
-              </label>
-              <input
-                id="eh-desc"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Optional — e.g. MSEDCL, factory meter"
-                className="form-input"
-              />
+              <div className="sm:col-span-2 lg:col-span-3">
+                <label className="form-label" htmlFor="eh-desc">
+                  Note
+                </label>
+                <input
+                  id="eh-desc"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Optional — e.g. MSEDCL, factory meter"
+                  className="form-input"
+                />
+              </div>
             </div>
           </Section>
         </div>
 
         <div className="border-border flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-5 py-3.5">
-          <p className="text-muted-foreground max-w-[20rem] text-[11px]">
-            {problems.length > 0
-              ? problems[0]
-              : expenseCategory
-                ? `Filed under ${expenseCategory.name} in the item master.`
-                : 'Filed under a new "Expenses" category in the item master.'}
-          </p>
+          {editing ? (
+            <label className="text-foreground flex cursor-pointer items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={isActive}
+                onChange={(e) => setIsActive(e.target.checked)}
+              />
+              Active
+              <span className="text-muted-foreground text-[11px]">
+                {problems[0] ?? 'Available on new bills'}
+              </span>
+            </label>
+          ) : (
+            <p className="text-muted-foreground max-w-[22rem] text-[11px]">
+              {problems.length > 0
+                ? problems[0]
+                : expenseCategory
+                  ? `Filed under ${expenseCategory.name} in the item master.`
+                  : 'Filed under a new "Expenses" category in the item master.'}
+            </p>
+          )}
           <div className="flex items-center gap-3">
             <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
               Cancel
@@ -281,8 +358,14 @@ export function NewExpenseHeadDialog({
               onClick={save}
               disabled={saving || problems.length > 0}
             >
-              {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
-              Add expense head
+              {saving ? (
+                <Loader2 size={15} className="animate-spin" />
+              ) : editing ? (
+                <Save size={15} />
+              ) : (
+                <Receipt size={15} />
+              )}
+              {editing ? 'Save changes' : 'Add expense head'}
             </button>
           </div>
         </div>

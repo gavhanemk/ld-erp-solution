@@ -4,12 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Plus, Receipt } from 'lucide-react'
 import { masterResource } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column } from '@/components/masters/MasterTable'
-import type { FormField } from '@/components/masters/MasterFormDialog'
-import {
-  NewExpenseHeadDialog,
-  isPlainUnit,
-  plainUnit,
-} from '@/components/purchase/NewExpenseHeadDialog'
+import { ExpenseHeadDialog, type ExpenseHead } from '@/components/purchase/ExpenseHeadDialog'
 
 /**
  * Expense heads — Electricity, Rent, Repairs — on their own master screen.
@@ -17,8 +12,8 @@ import {
  * They are items filed under the "Expenses" category, because that is what a
  * bill line points at, so they were only reachable by digging through Items
  * and filtering. This lists just them, with the columns that mean something
- * for an expense, and adds new ones with the same short form the expense bill
- * uses.
+ * for an expense. Adding and editing both use the one short form the expense
+ * bill uses, so the two can never look different.
  */
 
 interface Category {
@@ -27,27 +22,10 @@ interface Category {
   parentId: string | null
 }
 
-interface Uom {
-  id: string
-  symbol: string
-  name: string
-}
-
-interface Head {
-  id: string
-  code: string
-  name: string
-  hsnCode: string | null
-  description: string | null
-  isActive: boolean
-  category: { id: string; name: string; parentId: string | null } | null
-  uom: { id: string; name: string; symbol: string } | null
-}
-
 /** Same rule the expense bill uses to recognise the category. */
 const EXPENSE_NAME = /expense/i
 
-const columns: Column<Head>[] = [
+const columns: Column<ExpenseHead>[] = [
   {
     key: 'code',
     header: 'Code',
@@ -81,15 +59,8 @@ const columns: Column<Head>[] = [
 
 export default function ExpenseHeadsPage() {
   const [categories, setCategories] = useState<Category[] | null>(null)
-  const [uoms, setUoms] = useState<Uom[]>([])
-  useEffect(() => {
-    masterResource<Uom>('uoms')
-      .list({ limit: 100 })
-      .then((r) => setUoms(r.data))
-      .catch(() => {})
-  }, [])
-  const plain = useMemo(() => plainUnit(uoms), [uoms])
-  const [adding, setAdding] = useState(false)
+  /** The open form: a new head, a head being edited, or nothing. */
+  const [form, setForm] = useState<{ head: ExpenseHead | null } | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
 
   const loadCategories = useCallback(() => {
@@ -112,63 +83,19 @@ export default function ExpenseHeadsPage() {
     [categories, top]
   )
 
-  /*
-   * The edit form, in two rows:
-   *
-   *   Expense Head ......... | Group | Unit
-   *   SAC / HSN | Note ..........................
-   *
-   * Kind and stock fields are left out: a head is always filed as a consumable,
-   * and a partial save keeps what it already holds. Group is the category
-   * itself or one of the groups under it. Unit leads with "Not needed", which
-   * is the plain unit the item master insists on (pcs today) under a name that
-   * says what it means for a rent bill.
-   */
-  const formFields: FormField[] = useMemo(
-    () => [
-      { name: 'code', label: 'Code', generated: true },
-      { name: 'name', label: 'Expense Head', required: true, placeholder: 'Electricity', span: 2 },
-      {
-        name: 'categoryId',
-        label: 'Group',
-        type: 'select',
-        required: true,
-        optionsFrom: {
-          resource: 'item-categories',
-          filter: (row) => Boolean(top) && (row.id === top!.id || row.parentId === top!.id),
-        },
-      },
-      {
-        name: 'uomId',
-        label: 'Unit',
-        type: 'select',
-        required: true,
-        options: [
-          ...(plain ? [{ value: plain.id, label: 'Not needed' }] : []),
-          ...uoms
-            .filter((u) => u.id !== plain?.id)
-            .map((u) => ({ value: u.id, label: `${u.symbol} · ${u.name}` })),
-        ],
-        initial: (r) => {
-          const u = r.uom as Uom | null
-          return u && isPlainUnit(u.symbol) && plain ? plain.id : r.uomId
-        },
-      },
-      { name: 'hsnCode', label: 'SAC / HSN Code', placeholder: '998714' },
-      { name: 'description', label: 'Note', placeholder: 'e.g. MSEDCL, factory meter', span: 3 },
-      { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available on new bills' },
-    ],
-    [top, uoms, plain]
-  )
-
-  const dialog = adding && (
-    <NewExpenseHeadDialog
+  const dialog = form && (
+    <ExpenseHeadDialog
+      head={form.head}
       expenseCategory={top}
       groups={groups}
-      onClose={() => setAdding(false)}
+      onClose={() => setForm(null)}
       onCreated={(_head, createdCategory) => {
-        setAdding(false)
+        setForm(null)
         if (createdCategory) loadCategories()
+        setRefreshKey((k) => k + 1)
+      }}
+      onSaved={() => {
+        setForm(null)
         setRefreshKey((k) => k + 1)
       }}
     />
@@ -197,7 +124,7 @@ export default function ExpenseHeadsPage() {
             Add the first one and an &ldquo;Expenses&rdquo; category is created for them in the
             item master. Every head added here or from an expense bill shows up in this list.
           </p>
-          <button type="button" className="btn-primary" onClick={() => setAdding(true)}>
+          <button type="button" className="btn-primary" onClick={() => setForm({ head: null })}>
             <Plus size={16} /> New Expense Head
           </button>
         </div>
@@ -208,16 +135,15 @@ export default function ExpenseHeadsPage() {
 
   return (
     <>
-      <MasterTable<Head>
+      <MasterTable<ExpenseHead>
         title="Expense Heads"
         entityName="Expense Head"
         resource="items"
         filters={{ categoryId: top.id }}
         columns={columns}
-        formFields={formFields}
-        formColumns={4}
         refreshKey={refreshKey}
-        onNew={() => setAdding(true)}
+        onNew={() => setForm({ head: null })}
+        onEdit={(head) => setForm({ head })}
         defaultSort="name"
         searchPlaceholder="Search expense heads..."
         emptyMessage="No expense heads yet. Add Electricity, Rent, Repairs and the like."

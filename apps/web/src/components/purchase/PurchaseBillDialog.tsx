@@ -22,7 +22,7 @@ import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
 import type { NewItem } from '@/components/purchase/NewItemDialog'
-import { NewExpenseHeadDialog } from '@/components/purchase/NewExpenseHeadDialog'
+import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
 
 export interface BillLine {
   itemId: string
@@ -1379,7 +1379,7 @@ export function PurchaseBillDialog({
         aria-labelledby="bill-dialog-title"
       >
         {newHeadFor !== null && (
-          <NewExpenseHeadDialog
+          <ExpenseHeadDialog
             expenseCategory={expenseTop}
             groups={expenseGroups}
             onClose={() => setNewHeadFor(null)}
