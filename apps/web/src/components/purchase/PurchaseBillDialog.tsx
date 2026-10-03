@@ -21,7 +21,8 @@ import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
-import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
+import type { NewItem } from '@/components/purchase/NewItemDialog'
+import { NewExpenseHeadDialog } from '@/components/purchase/NewExpenseHeadDialog'
 
 export interface BillLine {
   itemId: string
@@ -576,6 +577,11 @@ export function PurchaseBillDialog({
   const expenseCategory =
     categories.find((c) => !c.parentId && EXPENSE_NAME.test(c.name)) ??
     categories.find((c) => EXPENSE_NAME.test(c.name))
+  /** The top of the expense tree, and the groups filed under it. */
+  const expenseTop = expenseCategory?.parentId
+    ? (categories.find((c) => c.id === expenseCategory.parentId) ?? expenseCategory)
+    : (expenseCategory ?? null)
+  const expenseGroups = expenseTop ? categories.filter((c) => c.parentId === expenseTop.id) : []
   const isExpenseHead = (it?: Option | null) =>
     Boolean(
       it?.category &&
@@ -1373,14 +1379,16 @@ export function PurchaseBillDialog({
         aria-labelledby="bill-dialog-title"
       >
         {newHeadFor !== null && (
-          <NewItemDialog
-            categories={categories}
-            categoryId={expenseCategory?.parentId ?? expenseCategory?.id}
-            subcategoryId={expenseCategory?.parentId ? expenseCategory.id : undefined}
+          <NewExpenseHeadDialog
+            expenseCategory={expenseTop}
+            groups={expenseGroups}
             onClose={() => setNewHeadFor(null)}
-            onCreated={(created: NewItem) => {
+            onCreated={(created: NewItem, createdCategory) => {
               const index = newHeadFor
               setNewHeadFor(null)
+              // The first head also made the "Expenses" category. Known here too,
+              // so the new head is listed with the expense heads at once.
+              if (createdCategory) setCategories((p) => [...p, createdCategory])
               // Into the list this form holds as well as the master, so the
               // line that asked for it can pick it straight away.
               const option: Option = {
