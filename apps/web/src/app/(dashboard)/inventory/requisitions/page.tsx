@@ -56,6 +56,8 @@ interface Line {
   reservations?: Array<{ id: string; warehouseId: string; qty: string | number }>
   /** What this line could take from the stores now: our stock less what others reserved, or the customer's stock. */
   available?: number
+  /** The garment style it is for, when given. */
+  styleNo?: string | null
 }
 
 interface Requisition {
@@ -192,9 +194,10 @@ type UnitGroup = ReturnType<typeof qtyByUnit>[number]
 
 /** The item panel's columns, as shares of the row, so the table fits the panel it opens in. */
 const ITEM_COLS = [
-  { label: 'Item', width: '25%' },
-  { label: 'Code', width: '10%' },
-  { label: 'What for', width: '12%' },
+  { label: 'Item', width: '21%' },
+  { label: 'Code', width: '9%' },
+  { label: 'Style no.', width: '8%' },
+  { label: 'What for', width: '9%' },
   { label: 'In stock', width: '9%', numeric: true },
   { label: 'Asked', width: '8%', numeric: true },
   { label: 'Issued', width: '9%', numeric: true },
@@ -667,6 +670,9 @@ function RequisitionsScreen() {
                     )}
                   </td>
                   <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
+                  <td className="truncate font-mono text-xs" title={l.styleNo ?? undefined}>
+                    {l.styleNo ?? <span className="text-muted-foreground">—</span>}
+                  </td>
                   <td className="truncate text-xs" title={l.purpose ?? undefined}>
                     {l.purpose ?? <span className="text-muted-foreground">—</span>}
                   </td>

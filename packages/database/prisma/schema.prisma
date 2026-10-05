@@ -653,6 +653,7 @@ model Style {
   poLines  PurchaseOrderLine[]
 
   @@index([code])
+  mrLines MaterialRequisitionLine[] @relation("MRLineStyle")
   @@map("styles")
 }
 
@@ -2173,6 +2174,11 @@ model MaterialRequisitionLine {
   warehouseId  String
   warehouse    Warehouse           @relation(fields: [warehouseId], references: [id])
   purpose      String?
+  /// The garment style this material is for, as typed. styleId links it to
+  /// the style master when the text is exactly a style's code.
+  styleNo      String?
+  styleId      String?
+  style        Style?     @relation("MRLineStyle", fields: [styleId], references: [id])
 
   /// Whose material this line draws.
   ///

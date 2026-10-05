@@ -28,6 +28,8 @@ interface Line {
   requestedQty: string | number
   issuedQty: string | number
   purpose: string | null
+  /** The garment style it is for, as given on the requisition. */
+  styleNo?: string | null
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomer?: { id: string; name: string } | null
   item: {
@@ -340,7 +342,7 @@ export function ProcessDialog({
   const th = 'px-3 py-2.5 text-right font-semibold'
   const td = 'px-3 py-2.5 text-right tabular-nums align-top'
   const dash = <span className="text-muted-foreground">—</span>
-  const cols = tab === 'issue' ? 8 : tab === 'reserve' ? 6 : 8
+  const cols = tab === 'issue' ? 9 : tab === 'reserve' ? 7 : 9
 
   return (
     <FormFrame
@@ -432,6 +434,7 @@ export function ProcessDialog({
             <thead className="bg-secondary text-[11px] uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th className="px-3 py-2.5 text-left font-semibold">Item</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Style no.</th>
                 <th className={th}>In stock</th>
                 {tab === 'issue' && (
                   <>
@@ -498,6 +501,9 @@ export function ProcessDialog({
                           >
                             {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {isOpen ? 'Hide details' : 'Details'}
                           </button>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2.5 align-top">
+                          {r.l.styleNo ? <span className="font-mono text-sm font-semibold text-foreground">{r.l.styleNo}</span> : dash}
                         </td>
                         <td className={td}>
                           <span className={r.free + 1e-9 >= r.owed ? 'font-semibold text-emerald-600' : 'font-semibold text-red-500'}>{fmt(r.free)}</span>{' '}

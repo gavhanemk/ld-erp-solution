@@ -163,6 +163,8 @@ export const createRequisitionSchema = z.object({
         /** The store this line is asked of. Falls back to the requisition's. */
         warehouseId: z.string().optional().nullable(),
         purpose: z.string().max(300).optional().nullable(),
+        /** The garment style it is for, as typed. Optional. */
+        styleNo: z.string().trim().max(50, 'That style number is too long').optional().nullable(),
         /**
          * Whose material to draw. Defaults to ours, which is what every
          * requisition raised before customer material existed meant.
@@ -186,7 +188,8 @@ export const createRequisitionSchema = z.object({
       if (theirs && !l.ownerCustomerId) {
         ctx.addIssue({ code: 'custom', path: ['lines', i, 'ownerCustomerId'], message: `Line ${i + 1}: say whose material it is` })
       }
-      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}|${l.warehouseId ?? data.warehouseId}`
+      // The same item for two styles is two lines; for one style, one line.
+      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}|${l.warehouseId ?? data.warehouseId}|${(l.styleNo ?? '').trim().toLowerCase()}`
       if (seen.has(k)) {
         ctx.addIssue({ code: 'custom', path: ['lines', i, 'itemId'], message: `Line ${i + 1}: that item is already asked for from the same stock. Put it on one line.` })
       }

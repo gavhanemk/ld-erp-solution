@@ -1319,6 +1319,15 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
       if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
     }
 
+    // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
+    const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
+    const styleIdOf = new Map(
+      (typedStyles.length
+        ? await tx.style.findMany({ where: { code: { in: typedStyles, mode: 'insensitive' } }, select: { id: true, code: true } })
+        : []
+      ).map((st) => [st.code.toLowerCase(), st.id]),
+    )
+
     const mrNumber = await nextDocumentNumber(tx, 'MR')
 
     return tx.materialRequisition.create({
@@ -1343,6 +1352,8 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
             // from the stores that hold it; issuing and the slip read it here.
             warehouseId: storeOf(l),
             purpose: l.purpose ?? null,
+            styleNo: l.styleNo?.trim() || null,
+            styleId: (l.styleNo && styleIdOf.get(l.styleNo.trim().toLowerCase())) || null,
           })),
         },
       },
@@ -2204,7 +2215,7 @@ router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
       lineId: string; mrId: string; mrNumber: string; mrStatus: string; requestDate: Date; requiredDate: Date | null
       ownership: string; ownerCustomerId: string | null; fulfilment: string; reserved: number
       departmentId: string; departmentName: string; soNumber: string | null; customerId: string | null; customerName: string | null
-      itemId: string; itemCode: string; itemName: string; uom: string | null; purpose: string | null
+      itemId: string; itemCode: string; itemName: string; uom: string | null; purpose: string | null; styleNo: string | null
       asked: number; issued: number; purchaseQty: number | null
       ordered: number; received: number; poNumbers: string | null
     }>
@@ -2213,7 +2224,7 @@ router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
            l.ownership::text AS "ownership", l."ownerCustomerId", l.fulfilment::text AS "fulfilment",
            COALESCE((SELECT SUM(r.qty) FROM ld_erp.stock_reservations r WHERE r."mrLineId" = l.id AND r.status::text = 'ACTIVE'), 0)::float8 AS "reserved",
            d.id AS "departmentId", d.name AS "departmentName", so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
-           i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom", l.purpose,
+           i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom", l.purpose, l."styleNo",
            l."requestedQty"::float8 AS "asked", l."issuedQty"::float8 AS "issued", l."purchaseQty"::float8 AS "purchaseQty",
            COALESCE(o.ordered, 0)::float8 AS "ordered", COALESCE(g.received, 0)::float8 AS "received", o."poNumbers"
     FROM ld_erp.material_requisition_lines l

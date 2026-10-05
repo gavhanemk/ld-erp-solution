@@ -35,6 +35,7 @@ interface Row {
   itemName: string
   uom: string
   purpose: string | null
+  styleNo: string | null
   asked: number
   issued: number
   toBuy: number
@@ -110,7 +111,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
     (r: Row, skip?: FilterKey) =>
       (!words.length ||
         words.every((w) =>
-          `${r.mrNumber} ${r.itemCode} ${r.itemName} ${r.departmentName} ${r.customerName ?? ''} ${r.soNumber ?? ''} ${r.poNumbers ?? ''}`.toLowerCase().includes(w),
+          `${r.mrNumber} ${r.itemCode} ${r.itemName} ${r.styleNo ?? ''} ${r.departmentName} ${r.customerName ?? ''} ${r.soNumber ?? ''} ${r.poNumbers ?? ''}`.toLowerCase().includes(w),
         )) &&
       (Object.entries(picked) as Array<[FilterKey, string[]]>).every(([k, v]) => k === skip || !v?.length || v.includes(valueOf[k](r))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -158,6 +159,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
           'Sales Order': r.soNumber ?? '',
           'Item Code': r.itemCode,
           'Item Name': r.itemName,
+          'Style No': r.styleNo ?? '',
           Unit: r.uom,
           Whose: r.ownership === 'CUSTOMER_OWNED' ? "Customer's material" : 'Ours',
           'Available Qty': r.available,
@@ -265,6 +267,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                     <th className="whitespace-nowrap">Department</th>
                     <th className="whitespace-nowrap">For</th>
                     <th className="whitespace-nowrap">Item</th>
+                    <th className="whitespace-nowrap">Style no.</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Available</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Asked</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Issued</th>
@@ -300,6 +303,7 @@ export function IndentsView({ onProcess }: { onProcess: (mrId: string) => void }
                             {r.ownership === 'CUSTOMER_OWNED' && <span className="font-sans text-sky-600"> · customer&apos;s material</span>}
                           </div>
                         </td>
+                        <td className="whitespace-nowrap font-mono text-xs font-semibold">{r.styleNo ?? dash}</td>
                         <td className={num}>
                           <span className={r.available + 1e-9 >= needed(r) ? 'font-semibold text-emerald-600' : 'font-semibold text-red-500'}>{qtyFmt(r.available)}</span>{' '}
                           <span className="text-[11px] text-muted-foreground">{r.uom}</span>
