@@ -179,6 +179,21 @@ export async function statObject(path: string): Promise<{ sizeBytes: number; mim
   return { sizeBytes: Number(size), mimeType: type }
 }
 
+/**
+ * Copies a file to a new path inside the bucket.
+ *
+ * Used when one document's paperwork is carried onto another — a supplier's PI
+ * onto the order raised from it. A copy rather than a shared path, so removing
+ * the file from one document can never pull it out from under the other.
+ */
+export async function copyObject(from: string, to: string): Promise<void> {
+  await storageFetch('/object/copy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bucketId: BUCKET, sourceKey: from, destinationKey: to }),
+  })
+}
+
 /** Removes the file itself. The row is the caller's problem. */
 export async function removeObject(path: string): Promise<void> {
   await storageFetch(`/object/${BUCKET}/${path}`, { method: 'DELETE' })

@@ -58,6 +58,7 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Items & Products', href: '/masters/items' },
       { label: 'Item Categories', href: '/masters/item-categories' },
+      { label: 'Expense Heads', href: '/masters/expense-heads' },
       { label: 'Styles & SKU', href: '/masters/styles' },
       { label: 'Bill of Materials', href: '/masters/bom' },
       { label: 'Size Runs', href: '/masters/size-runs' },

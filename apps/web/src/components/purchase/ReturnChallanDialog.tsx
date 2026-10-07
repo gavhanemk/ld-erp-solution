@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
+  FileText,
   Loader2,
   MessageSquare,
   Package,
@@ -58,12 +59,54 @@ interface Returnable {
     id: string
     billNumber: string
     supplierInvoiceNo: string | null
+    supplierInvoiceDate: string | null
     billDate: string
     status: string
+    totalAmount: string | number
     supplier: { id: string; code: string; name: string; gstin: string | null }
+  }
+  /** The paperwork behind the bill, for the challan to quote. */
+  references?: {
+    orders: Array<{ poNumber: string; poDate: string }>
+    receipts: Array<{
+      grnNumber: string
+      grnDate: string
+      challanNo: string | null
+      challanDate: string | null
+      gateEntryNo: string | null
+      gateEntryDate: string | null
+      vehicleNo: string | null
+      qc: { result: string; inspectionDate: string; rejectedQty: number } | null
+    }>
   }
   lines: ReturnableLine[]
   reasons: Array<{ value: string; label: string; hint: string }>
+}
+
+/** A date as the mill writes it: 03 Oct 2026. */
+const refDay = (iso: string | null | undefined) =>
+  iso
+    ? new Date(iso).toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        timeZone: 'Asia/Kolkata',
+      })
+    : null
+
+/** One reference: a label, the number, and its date under it. */
+function RefCell({ label, value, sub }: { label: string; value: string; sub?: string | null }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-muted-foreground text-[10px] font-semibold uppercase tracking-wider">
+        {label}
+      </p>
+      <p className="text-foreground truncate font-mono text-sm" title={value}>
+        {value}
+      </p>
+      {sub && <p className="text-muted-foreground truncate text-[11px]">{sub}</p>}
+    </div>
+  )
 }
 
 interface Row {
@@ -356,6 +399,95 @@ export function ReturnChallanDialog({
             </div>
           ) : (
             <>
+              {/* ── What this return is against ──────────────────────────────
+                  Every number the supplier and the gate will ask for, read off
+                  the bill and the receipts behind it. Nothing to type. */}
+              {bill && (
+                <Section icon={FileText} title="References">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
+                    <RefCell
+                      label="Their invoice"
+                      value={bill.supplierInvoiceNo || '—'}
+                      sub={refDay(bill.supplierInvoiceDate)}
+                    />
+                    <RefCell
+                      label="Our bill"
+                      value={bill.billNumber}
+                      sub={[
+                        refDay(bill.billDate),
+                        '₹' +
+                          Number(bill.totalAmount).toLocaleString('en-IN', {
+                            maximumFractionDigits: 2,
+                          }),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    />
+                    <RefCell
+                      label={(data?.references?.orders.length ?? 0) > 1 ? 'Purchase orders' : 'Purchase order'}
+                      value={data?.references?.orders.map((o) => o.poNumber).join(', ') || '—'}
+                      sub={
+                        data?.references?.orders.length === 1
+                          ? refDay(data.references.orders[0].poDate)
+                          : null
+                      }
+                    />
+                    <RefCell
+                      label={(data?.references?.receipts.length ?? 0) > 1 ? 'Goods receipts' : 'Goods receipt'}
+                      value={data?.references?.receipts.map((g) => g.grnNumber).join(', ') || '—'}
+                      sub={
+                        data?.references?.receipts.length === 1
+                          ? refDay(data.references.receipts[0].grnDate)
+                          : null
+                      }
+                    />
+                    <RefCell
+                      label="Their delivery challan"
+                      value={
+                        data?.references?.receipts
+                          .map((g) => g.challanNo)
+                          .filter(Boolean)
+                          .join(', ') || '—'
+                      }
+                      sub={
+                        data?.references?.receipts.length === 1
+                          ? refDay(data.references.receipts[0].challanDate)
+                          : null
+                      }
+                    />
+                    <RefCell
+                      label="Quality check"
+                      value={(() => {
+                        const checked = (data?.references?.receipts ?? []).filter((g) => g.qc)
+                        if (!checked.length) return 'Not checked'
+                        const rejected = checked.reduce((n, g) => n + (g.qc?.rejectedQty ?? 0), 0)
+                        return rejected > 0 ? `${rejected} rejected` : 'Passed'
+                      })()}
+                      sub={(() => {
+                        const g = (data?.references?.receipts ?? []).find((x) => x.qc)
+                        return g?.qc ? 'on ' + refDay(g.qc.inspectionDate) : null
+                      })()}
+                    />
+                  </div>
+                  {(data?.references?.receipts ?? []).some((g) => g.gateEntryNo || g.vehicleNo) && (
+                    <p className="text-muted-foreground mt-2 text-[11px]">
+                      Came in on{' '}
+                      {(data?.references?.receipts ?? [])
+                        .map((g) =>
+                          [
+                            g.gateEntryNo && `gate entry ${g.gateEntryNo}`,
+                            g.vehicleNo && `vehicle ${g.vehicleNo}`,
+                          ]
+                            .filter(Boolean)
+                            .join(', ')
+                        )
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </p>
+                  )}
+                </Section>
+              )}
+
               {/* ── Why, and when ────────────────────────────────────────── */}
               <Section icon={MessageSquare} title="Return Details">
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">

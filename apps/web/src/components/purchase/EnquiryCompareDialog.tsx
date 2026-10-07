@@ -22,6 +22,7 @@ import {
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { RecordQuoteDialog } from '@/components/purchase/RecordQuoteDialog'
+import { handEnquiryToOrder } from '@/components/purchase/enquiryHandoff'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { Section } from '@/components/purchase/Section'
 import {
@@ -334,7 +335,7 @@ export function EnquiryCompareDialog({
                           )}
                         </p>
                         <p className="text-muted-foreground text-[11px]">
-                          {q.piAmount != null ? 'his stated total' : 'from his rates, before tax'}
+                          from his rates, before tax
                           {' · '}
                           {q.pricedLines} of {lines.length} priced
                         </p>
@@ -391,6 +392,7 @@ export function EnquiryCompareDialog({
                       {q.answered && !q.declinedAt && can(MODULE, 'create') && (
                         <Link
                           href={'/purchase/orders?fromEnquiry=' + enquiry.id + '&fromQuote=' + q.id}
+                          onClick={() => handEnquiryToOrder(enquiry)}
                           className="btn-primary text-xs"
                           title={'Raise a purchase order against ' + q.piNumber}
                         >
@@ -600,22 +602,6 @@ export function EnquiryCompareDialog({
                         }`}
                       >
                         ₹{money(q.value)}
-                      </td>
-                    ))}
-                </tr>
-                <tr>
-                  <td colSpan={3} className="text-muted-foreground text-xs">
-                    Total his PI states
-                  </td>
-                  {enquiry.quotes
-                    .filter((q) => q.answered)
-                    .map((q) => (
-                      <td
-                        key={q.id}
-                        style={{ textAlign: 'right' }}
-                        className="text-muted-foreground text-xs tabular-nums"
-                      >
-                        {q.piAmount == null ? '—' : '₹' + money(q.piAmount)}
                       </td>
                     ))}
                 </tr>

@@ -43,13 +43,8 @@ export const createQcSchema = z
         })
       }
     })
-    if (data.lines.some((l) => l.rejectedQty > 0) && !data.rejectWarehouseId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['rejectWarehouseId'],
-        message: 'Pick the godown the rejected goods are moved to',
-      })
-    }
+    // A reject godown is optional. The mill keeps one store, so a check is
+    // normally recorded without moving anything; see the QC route.
   })
 
 export const cancelQcSchema = z.object({

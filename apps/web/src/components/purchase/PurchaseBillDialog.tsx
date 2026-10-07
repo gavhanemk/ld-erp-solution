@@ -21,7 +21,8 @@ import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '
 // read as one module rather than three people's ideas of a form.
 import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
-import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
+import type { NewItem } from '@/components/purchase/NewItemDialog'
+import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
 
 export interface BillLine {
   itemId: string
@@ -200,6 +201,22 @@ interface Category {
   id: string
   name: string
   parentId: string | null
+}
+
+/**
+ * The supplier categories an expense bill is offered: whoever sends a bill for
+ * a service rather than for goods. Fabric, thread, labels and the rest are
+ * billed against a receipt, not here.
+ */
+const EXPENSE_SUPPLIER_CATEGORIES = new Set(['SERVICE', 'TRANSPORT', 'OTHER'])
+
+/**
+ * A supplier's category, as the supplier list sends it (a plain word). Read
+ * apart from `Option.category`, which on an item is the category record.
+ */
+const supplierCategory = (s: Option): string => {
+  const c = (s as unknown as { category?: unknown }).category
+  return typeof c === 'string' ? c : ''
 }
 
 /** The item-list choice that opens "new expense head" instead of picking one. */
@@ -576,6 +593,11 @@ export function PurchaseBillDialog({
   const expenseCategory =
     categories.find((c) => !c.parentId && EXPENSE_NAME.test(c.name)) ??
     categories.find((c) => EXPENSE_NAME.test(c.name))
+  /** The top of the expense tree, and the groups filed under it. */
+  const expenseTop = expenseCategory?.parentId
+    ? (categories.find((c) => c.id === expenseCategory.parentId) ?? expenseCategory)
+    : (expenseCategory ?? null)
+  const expenseGroups = expenseTop ? categories.filter((c) => c.parentId === expenseTop.id) : []
   const isExpenseHead = (it?: Option | null) =>
     Boolean(
       it?.category &&
@@ -589,12 +611,17 @@ export function PurchaseBillDialog({
   )
 
   /**
-   * The choices in a line's item picker. On an expense bill the expense heads
-   * come first, with a way to add one; every other item is still listed below
-   * them, so a bill can be booked before the heads have been set up.
+   * The choices in a line's item picker. On an expense bill only the expense
+   * heads are offered, with a way to add one — fabric and trims come in on a
+   * goods receipt, not here. Every item is still offered while the mill has no
+   * expense heads at all, so a bill can be booked before they are set up, and
+   * a line already holding some other item (an older bill) keeps it listed.
    */
-  const itemChoices = () =>
-    expenseMode ? (
+  const itemChoices = (currentId?: string) => {
+    const others = items.filter(
+      (it) => !isExpenseHead(it) && (expenseHeads.length === 0 || it.id === currentId)
+    )
+    return expenseMode ? (
       <>
         <option value="">Select...</option>
         {expenseHeads.length > 0 && (
@@ -607,15 +634,15 @@ export function PurchaseBillDialog({
           </optgroup>
         )}
         <option value={ADD_EXPENSE_HEAD}>+ Add a new expense head…</option>
-        <optgroup label="Other items">
-          {items
-            .filter((it) => !isExpenseHead(it))
-            .map((it) => (
+        {others.length > 0 && (
+          <optgroup label="Other items">
+            {others.map((it) => (
               <option key={it.id} value={it.id}>
                 {it.code ? `${it.code} — ${it.name}` : it.name}
               </option>
             ))}
-        </optgroup>
+          </optgroup>
+        )}
       </>
     ) : (
       <>
@@ -627,6 +654,7 @@ export function PurchaseBillDialog({
         ))}
       </>
     )
+  }
 
   /** A fresh line: one of whatever it is, on an expense bill — a month's electricity is one. */
   const freshLine = (): BillLine => (expenseMode ? { ...emptyLine(), qty: '1' } : emptyLine())
@@ -711,6 +739,16 @@ export function PurchaseBillDialog({
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
   const chargeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
   const supplier = suppliers.find((s) => s.id === supplierId)
+  /*
+   * Who the supplier box offers. An expense bill lists only service, transport
+   * and other suppliers, kept apart from the material ones; a bill already
+   * made out to some other supplier keeps that one listed.
+   */
+  const supplierChoices = expenseMode
+    ? suppliers.filter(
+        (s) => EXPENSE_SUPPLIER_CATEGORIES.has(supplierCategory(s)) || s.id === supplierId
+      )
+    : suppliers
 
   /**
    * How long this supplier gives us, in days.
@@ -1373,14 +1411,16 @@ export function PurchaseBillDialog({
         aria-labelledby="bill-dialog-title"
       >
         {newHeadFor !== null && (
-          <NewItemDialog
-            categories={categories}
-            categoryId={expenseCategory?.parentId ?? expenseCategory?.id}
-            subcategoryId={expenseCategory?.parentId ? expenseCategory.id : undefined}
+          <ExpenseHeadDialog
+            expenseCategory={expenseTop}
+            groups={expenseGroups}
             onClose={() => setNewHeadFor(null)}
-            onCreated={(created: NewItem) => {
+            onCreated={(created: NewItem, createdCategory) => {
               const index = newHeadFor
               setNewHeadFor(null)
+              // The first head also made the "Expenses" category. Known here too,
+              // so the new head is listed with the expense heads at once.
+              if (createdCategory) setCategories((p) => [...p, createdCategory])
               // Into the list this form holds as well as the master, so the
               // line that asked for it can pick it straight away.
               const option: Option = {
@@ -1832,12 +1872,18 @@ export function PurchaseBillDialog({
                     onChange={(e) => chooseSupplier(e.target.value)}
                   >
                     <option value="">Select...</option>
-                    {suppliers.map((s) => (
+                    {supplierChoices.map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.code ? `${s.code} — ${s.name}` : s.name}
                       </option>
                     ))}
                   </select>
+                  {expenseMode && suppliers.length > 0 && supplierChoices.length === 0 && (
+                    <p className="mt-1 text-xs text-amber-500">
+                      No service suppliers yet. Add one in Masters → Suppliers with category
+                      Service, Transport or Other.
+                    </p>
+                  )}
                   {supplier && (
                     <p className="text-muted-foreground mt-1 text-xs">
                       {supplier.gstin ? (
@@ -2134,7 +2180,7 @@ export function PurchaseBillDialog({
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
                             >
-                              {itemChoices()}
+                              {itemChoices(line.itemId)}
                             </select>
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
@@ -2302,7 +2348,7 @@ export function PurchaseBillDialog({
                           onChange={(e) => pickItem(i, e.target.value)}
                           aria-label={`Line ${i + 1} item`}
                         >
-                          {itemChoices()}
+                          {itemChoices(line.itemId)}
                         </select>
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
