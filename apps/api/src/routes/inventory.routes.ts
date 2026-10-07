@@ -33,6 +33,8 @@ import {
   openingStockSchema,
   rejectRequisitionSchema,
   closeRequisitionSchema,
+  reserveRequisitionSchema,
+  releaseReservationSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
 
@@ -919,12 +921,20 @@ router.patch(
  * How much of a line is to be bought. Lines decided before the store could
  * set a quantity have none; there PURCHASE meant the whole line.
  */
-const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }) =>
-  l.purchaseQty !== null ? Number(l.purchaseQty) : l.fulfilment === 'PURCHASE' ? Number(l.requestedQty) : 0
+const buyQtyOf = (l: { purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal; issuedQty: Prisma.Decimal }) =>
+  l.purchaseQty !== null
+    ? Number(l.purchaseQty)
+    : // Marked "buy" before a quantity could be set: what is still owed, so a
+      // part handed over from the rack is not bought a second time.
+      l.fulfilment === 'PURCHASE'
+      ? Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
+      : 0
 
 const mrInclude = {
   department: { select: { id: true, name: true, code: true } },
   mo: { select: { id: true, moNumber: true } },
+  // The sales order the material is for, and its customer.
+  so: { select: { id: true, soNumber: true, customer: { select: { id: true, name: true } } } },
   raisedBy: { select: { id: true, name: true } },
   approvedBy: { select: { id: true, name: true } },
   issuedBy: { select: { id: true, name: true } },
@@ -941,8 +951,44 @@ const mrInclude = {
       warehouse: { select: { id: true, name: true } },
       // Whose material the line draws, when it is a customer's.
       ownerCustomer: { select: { id: true, name: true } },
+      // Stock held on the rack for this line.
+      reservations: { where: { status: 'ACTIVE' as const }, select: { id: true, warehouseId: true, qty: true } },
     },
   },
+}
+
+
+/**
+ * What a requisition line could take from the stores now, for every screen
+ * that shows "in stock": our own stock in every store less what is reserved
+ * for other lines, or — for a customer's material — that customer's stock.
+ */
+async function availableFor(
+  lines: Array<{ id: string; itemId: string; ownership: string; ownerCustomerId: string | null }>,
+): Promise<Map<string, number>> {
+  const itemIds = [...new Set(lines.map((l) => l.itemId))]
+  if (!itemIds.length) return new Map()
+  const [stock, held] = await Promise.all([
+    prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; qty: number }>>`
+      SELECT "itemId", ownership::text AS "ownership", "ownerCustomerId", SUM("inQty" - "outQty")::float8 AS "qty"
+      FROM ld_erp.stock_ledger
+      WHERE "itemId" IN (${Prisma.join(itemIds)})
+      GROUP BY "itemId", ownership, "ownerCustomerId"`,
+    prisma.$queryRaw<Array<{ itemId: string; mrLineId: string; qty: number }>>`
+      SELECT "itemId", "mrLineId", qty::float8 AS "qty"
+      FROM ld_erp.stock_reservations
+      WHERE status::text = 'ACTIVE' AND "itemId" IN (${Prisma.join(itemIds)})`,
+  ])
+  const out = new Map<string, number>()
+  for (const l of lines) {
+    const theirs = l.ownership === 'CUSTOMER_OWNED'
+    const onHand = stock
+      .filter((s2) => s2.itemId === l.itemId && (theirs ? s2.ownership === 'CUSTOMER_OWNED' && s2.ownerCustomerId === l.ownerCustomerId : s2.ownership === 'OWNED'))
+      .reduce((t, s2) => t + s2.qty, 0)
+    const others = theirs ? 0 : held.filter((h) => h.itemId === l.itemId && h.mrLineId !== l.id).reduce((t, h) => t + h.qty, 0)
+    out.set(l.id, round3(Math.max(0, onHand - others)))
+  }
+  return out
 }
 
 router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -975,6 +1021,8 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
     where.OR = [
       { mrNumber: { contains: q, mode: 'insensitive' } },
       { department: { name: { contains: q, mode: 'insensitive' } } },
+      { so: { soNumber: { contains: q, mode: 'insensitive' } } },
+      { so: { customer: { name: { contains: q, mode: 'insensitive' } } } },
     ]
   }
 
@@ -989,9 +1037,12 @@ router.get('/requisitions', requirePermission(MODULE, 'view'), async (req, res) 
     prisma.materialRequisition.count({ where }),
   ])
 
+  // In stock for every line, so the list can say whether the store can cover it.
+  const available = await availableFor(rows.flatMap((r) => r.lines))
+
   res.json({
     success: true,
-    data: rows,
+    data: rows.map((r) => ({ ...r, lines: r.lines.map((l) => ({ ...l, available: available.get(l.id) ?? 0 })) })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   })
 })
@@ -1020,10 +1071,10 @@ router.get('/requisitions/:id', requirePermission(MODULE, 'view'), async (req, r
  * fulfil window can say what is already on its way.
  */
 async function boughtFor(
-  lines: Array<{ id: string; purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal }>,
+  lines: Array<{ id: string; purchaseQty: Prisma.Decimal | null; fulfilment: string; requestedQty: Prisma.Decimal; issuedQty: Prisma.Decimal }>,
 ) {
   const orders = await prisma.purchaseOrderLine.findMany({
-    where: { mrLineId: { in: lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' } } },
+    where: { mrLineId: { in: lines.map((l) => l.id) }, po: { status: { not: 'CANCELLED' }, deletedAt: null } },
     select: {
       mrLineId: true,
       qty: true,
@@ -1060,7 +1111,7 @@ async function boughtFor(
  */
 router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
   const id = req.params.id
-  const [lines, stock, orderRows, received, handovers, activity] = await Promise.all([
+  const [lines, stock, orderRows, received, handovers, activity, receipts, itemOrders, reservations] = await Promise.all([
     prisma.$queryRaw<
       Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
     >`
@@ -1079,13 +1130,21 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
-    prisma.$queryRaw<Array<{ mrLineId: string; poId: string; poNumber: string; poDate: Date; qty: number; receivedQty: number }>>`
-      SELECT pol."mrLineId", po.id AS "poId", po."poNumber", po."poDate", pol.qty::float8 AS "qty",
-             pol."receivedQty"::float8 AS "receivedQty"
+    // Deleted orders are gone; their numbers are not offered as the order.
+    prisma.$queryRaw<
+      Array<{
+        mrLineId: string; poLineId: string; poId: string; poNumber: string; poDate: Date; status: string
+        deliveryDate: Date | null; supplierName: string; unitRate: number; qty: number; receivedQty: number
+      }>
+    >`
+      SELECT pol."mrLineId", pol.id AS "poLineId", po.id AS "poId", po."poNumber", po."poDate", po.status::text AS "status",
+             po."deliveryDate", sp.name AS "supplierName", pol."unitRate"::float8 AS "unitRate",
+             pol.qty::float8 AS "qty", pol."receivedQty"::float8 AS "receivedQty"
       FROM ld_erp.purchase_order_lines pol
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      JOIN ld_erp.suppliers sp ON sp.id = po."supplierId"
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
-        AND po.status::text <> 'CANCELLED'
+        AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
       ORDER BY po."poDate"`,
     // Cancelled receipts booked nothing in.
     prisma.$queryRaw<Array<{ mrLineId: string; qty: number }>>`
@@ -1095,7 +1154,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
       JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
       WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
-        AND po.status::text <> 'CANCELLED' AND g.status::text <> 'CANCELLED'
+        AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL AND g.status::text <> 'CANCELLED'
       GROUP BY pol."mrLineId"`,
     // Every hand-over against it, from whichever rack.
     prisma.$queryRaw<Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; warehouseName: string; qty: number; at: Date }>>`
@@ -1106,9 +1165,10 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE s."referenceType" = 'MATERIAL_REQUISITION' AND s."referenceId" = ${id}
       ORDER BY s."transactionDate", s."createdAt"`,
     // Who did what to it, and when, from the audit trail.
-    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; closeReason: string | null; toBuy: string[] | null }>>`
+    prisma.$queryRaw<Array<{ at: Date; action: string; who: string; handedOver: unknown; plan: unknown; reservedNow: unknown; closeReason: string | null; toBuy: string[] | null }>>`
       SELECT a."createdAt" AS "at", a.action, u.name AS "who",
              a.after -> 'handedOverNow' AS "handedOver", a.after -> 'plan' AS "plan",
+             a.after -> 'reservedNow' AS "reservedNow",
              a.after ->> 'closeReason' AS "closeReason",
              -- The old issue-or-buy answer: which items it marked to be bought.
              (SELECT ARRAY_AGG(l -> 'item' ->> 'name') FROM jsonb_array_elements(a.after::jsonb -> 'lines') l
@@ -1117,6 +1177,46 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       JOIN ld_erp.users u ON u.id = a."userId"
       WHERE a."entityType" = 'MaterialRequisition' AND a."entityId" = ${id}
       ORDER BY a."createdAt"`,
+    // The goods receipts booked against those orders, one row per receipt line.
+    prisma.$queryRaw<Array<{ poLineId: string; grnNumber: string; grnDate: Date; qty: number }>>`
+      SELECT gl."poLineId", g."grnNumber", g."grnDate", gl."receivedQty"::float8 AS "qty"
+      FROM ld_erp.grn_lines gl
+      JOIN ld_erp.grn g ON g.id = gl."grnId"
+      JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
+      WHERE pol."mrLineId" IN (SELECT id FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND g.status::text <> 'CANCELLED'
+      ORDER BY g."grnDate"`,
+    // Every live order line for these items, whoever it was raised for: the
+    // last price paid, and orders for the same item that are not linked here.
+    prisma.$queryRaw<
+      Array<{
+        itemId: string; mrLineId: string | null; mrNumber: string | null; poNumber: string; poDate: Date; status: string
+        supplierName: string; unitRate: number; qty: number; receivedQty: number; deliveryDate: Date | null
+      }>
+    >`
+      SELECT pol."itemId", pol."mrLineId", m."mrNumber", po."poNumber", po."poDate", po.status::text AS "status",
+             sp.name AS "supplierName", pol."unitRate"::float8 AS "unitRate", pol.qty::float8 AS "qty",
+             pol."receivedQty"::float8 AS "receivedQty", po."deliveryDate"
+      FROM ld_erp.purchase_order_lines pol
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      JOIN ld_erp.suppliers sp ON sp.id = po."supplierId"
+      LEFT JOIN ld_erp.material_requisition_lines ml ON ml.id = pol."mrLineId"
+      LEFT JOIN ld_erp.material_requisitions m ON m.id = ml."mrId"
+      WHERE pol."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
+      ORDER BY po."poDate" DESC, po."createdAt" DESC`,
+    // Everything held on the racks for these items, by any requisition, with who it is for.
+    prisma.$queryRaw<
+      Array<{ id: string; itemId: string; warehouseId: string; mrLineId: string; mrId: string; mrNumber: string; qty: number; customerName: string | null; soNumber: string | null }>
+    >`
+      SELECT r.id, r."itemId", r."warehouseId", r."mrLineId", r."mrId", m."mrNumber", r.qty::float8 AS "qty",
+             c.name AS "customerName", so."soNumber"
+      FROM ld_erp.stock_reservations r
+      JOIN ld_erp.material_requisitions m ON m.id = r."mrId"
+      LEFT JOIN ld_erp.customers c ON c.id = r."customerId"
+      LEFT JOIN ld_erp.sales_orders so ON so.id = r."soId"
+      WHERE r.status::text = 'ACTIVE'
+        AND r."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})`,
   ])
   if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
 
@@ -1124,11 +1224,56 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     const mine = orderRows.filter((o) => o.mrLineId === l.id)
     return {
       lineId: l.id,
-      buyQty: l.purchaseQty !== null ? l.purchaseQty : l.fulfilment === 'PURCHASE' ? l.requestedQty : 0,
+      // A quantity typed in stands; a line only marked "buy" means what is still owed.
+      buyQty:
+        l.purchaseQty !== null
+          ? l.purchaseQty
+          : l.fulfilment === 'PURCHASE'
+            ? Math.max(round3(l.requestedQty - l.issuedQty), round3(mine.reduce((t, o) => t + o.qty, 0)))
+            : 0,
       orderedQty: round3(mine.reduce((t, o) => t + o.qty, 0)),
       receivedQty: round3(received.find((r) => r.mrLineId === l.id)?.qty ?? 0),
       poNumbers: [...new Set(mine.map((o) => o.poNumber))],
-      orders: mine.map((o) => ({ poId: o.poId, poNumber: o.poNumber, poDate: o.poDate, qty: o.qty, receivedQty: o.receivedQty })),
+      orders: mine.map((o) => ({
+        poId: o.poId,
+        poNumber: o.poNumber,
+        poDate: o.poDate,
+        status: o.status,
+        deliveryDate: o.deliveryDate,
+        supplierName: o.supplierName,
+        unitRate: o.unitRate,
+        qty: o.qty,
+        receivedQty: o.receivedQty,
+        receipts: receipts
+          .filter((g) => g.poLineId === o.poLineId)
+          .map((g) => ({ grnNumber: g.grnNumber, grnDate: g.grnDate, qty: g.qty })),
+      })),
+    }
+  })
+
+  // For each item: the last price paid, and open orders for it that are not
+  // tied to this requisition — often the reason a buyer thinks it is ordered.
+  const myLineIds = new Set(lines.map((l) => l.id))
+  const itemBuys = [...new Set(itemOrders.map((o) => o.itemId))].map((itemId) => {
+    const all = itemOrders.filter((o) => o.itemId === itemId)
+    const last = all[0]
+    return {
+      itemId,
+      lastBuy: last
+        ? { poNumber: last.poNumber, poDate: last.poDate, supplierName: last.supplierName, unitRate: last.unitRate }
+        : null,
+      otherOpen: all
+        .filter((o) => !(o.mrLineId && myLineIds.has(o.mrLineId)) && o.status !== 'COMPLETED' && o.qty - o.receivedQty > 1e-9)
+        .map((o) => ({
+          poNumber: o.poNumber,
+          poDate: o.poDate,
+          status: o.status,
+          supplierName: o.supplierName,
+          qty: o.qty,
+          receivedQty: o.receivedQty,
+          deliveryDate: o.deliveryDate,
+          forMr: o.mrNumber,
+        })),
     }
   })
 
@@ -1141,11 +1286,12 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     action: a.action,
     handedOver: Array.isArray(a.handedOver) ? (a.handedOver as string[]) : null,
     plan: Array.isArray(a.plan) ? (a.plan as Array<{ lineId: string; buyQty: number }>) : null,
+    reservedNow: Array.isArray(a.reservedNow) ? (a.reservedNow as string[]) : null,
     closeReason: a.closeReason,
     toBuy: a.toBuy,
   }))
 
-  res.json({ success: true, data: { lines, bought, stock, handovers, events } })
+  res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys, reservations } })
 })
 
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -1168,6 +1314,20 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
       if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
     }
 
+    if (data.soId) {
+      const so = await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true } })
+      if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
+    }
+
+    // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
+    const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
+    const styleIdOf = new Map(
+      (typedStyles.length
+        ? await tx.style.findMany({ where: { code: { in: typedStyles, mode: 'insensitive' } }, select: { id: true, code: true } })
+        : []
+      ).map((st) => [st.code.toLowerCase(), st.id]),
+    )
+
     const mrNumber = await nextDocumentNumber(tx, 'MR')
 
     return tx.materialRequisition.create({
@@ -1175,6 +1335,7 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
         mrNumber,
         departmentId: data.departmentId,
         moId: data.moId || null,
+        soId: data.soId || null,
         requiredDate: data.requiredDate ?? null,
         notes: data.notes ?? null,
         raisedById: req.user!.id,
@@ -1191,6 +1352,8 @@ router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: Au
             // from the stores that hold it; issuing and the slip read it here.
             warehouseId: storeOf(l),
             purpose: l.purpose ?? null,
+            styleNo: l.styleNo?.trim() || null,
+            styleId: (l.styleNo && styleIdOf.get(l.styleNo.trim().toLowerCase())) || null,
           })),
         },
       },
@@ -1525,6 +1688,58 @@ router.patch(
 const qtyText = (n: number) => String(Number(n.toFixed(3)))
 
 /**
+ * What other requisitions hold of an item in a store. Reserved stock stays on
+ * the rack and in the stock figure; it is only kept from being given to anyone else.
+ */
+async function heldForOthers(tx: Prisma.TransactionClient, itemId: string, warehouseId: string, mrLineId: string) {
+  const rows = await tx.stockReservation.findMany({
+    where: { itemId, warehouseId, status: 'ACTIVE', mrLineId: { not: mrLineId } },
+    select: { qty: true, mr: { select: { mrNumber: true } }, customer: { select: { name: true } } },
+  })
+  return { qty: round3(rows.reduce((t, r) => t + Number(r.qty), 0)), rows }
+}
+
+/** Refuses to take stock that is held for another requisition, and says whose it is. */
+async function refuseIfHeldForOthers(
+  tx: Prisma.TransactionClient,
+  a: { itemId: string; warehouseId: string; mrLineId: string; qty: number; what: string; unit: string },
+) {
+  const held = await heldForOthers(tx, a.itemId, a.warehouseId, a.mrLineId)
+  if (held.qty <= 0) return
+  const onRack = (await balanceOf(tx, { itemId: a.itemId, warehouseId: a.warehouseId })).qty
+  const free = round3(Math.max(0, onRack - held.qty))
+  if (a.qty > free + 1e-9) {
+    const whose = held.rows
+      .map((r) => `${qtyText(Number(r.qty))} ${a.unit} for ${r.mr.mrNumber}${r.customer ? ` (${r.customer.name})` : ''}`)
+      .join(', ')
+    throw new AppError(
+      `${a.what}: only ${qtyText(free)} ${a.unit} is free. ${whose} is reserved. Release it on Inventory → Reservations, or take it from another store.`,
+      400,
+      'RESERVED_FOR_OTHERS',
+    )
+  }
+}
+
+/** Issuing against a line uses up what was held for it in that store; a line issued in full lets the rest go. */
+async function useUpReservations(
+  tx: Prisma.TransactionClient,
+  mrLineId: string,
+  parts: Array<{ qty: number; warehouseId: string }>,
+  lineDone: boolean,
+) {
+  const active = await tx.stockReservation.findMany({ where: { mrLineId, status: 'ACTIVE' } })
+  for (const r of active) {
+    const used = round3(parts.filter((p) => p.warehouseId === r.warehouseId).reduce((t, p) => t + p.qty, 0))
+    const left = lineDone ? 0 : round3(Math.max(0, Number(r.qty) - used))
+    if (left === Number(r.qty)) continue
+    await tx.stockReservation.update({
+      where: { id: r.id },
+      data: left > 0 ? { qty: left } : { qty: 0, status: 'CONSUMED' },
+    })
+  }
+}
+
+/**
  * Holds a requisition for the rest of the transaction.
  *
  * Everything that changes what can still be issued (an issue, a close) takes
@@ -1670,6 +1885,17 @@ router.post(
         }
 
         for (const a of parts) {
+          // Stock held for other requisitions is not ours to give here.
+          if (line.ownership !== 'CUSTOMER_OWNED') {
+            await refuseIfHeldForOthers(tx, {
+              itemId: line.itemId,
+              warehouseId: a.warehouseId,
+              mrLineId: line.id,
+              qty: a.qty,
+              what: `${line.item.name} in ${storeNames.get(a.warehouseId) ?? 'that store'}`,
+              unit,
+            })
+          }
           // recordMovement refuses if that rack is short, and names the shortfall.
           await recordMovement(tx, {
             itemId: line.itemId,
@@ -1694,6 +1920,8 @@ router.post(
           where: { id: line.id },
           data: { issuedQty: { increment: total } },
         })
+        // What was held for this line is used up by issuing it.
+        await useUpReservations(tx, line.id, parts, round3(owed - total) <= 1e-9)
       }
 
       if (handedOver.length === 0) {
@@ -1797,6 +2025,11 @@ router.post(
         where: { id: before.id },
         data: { closedAt: new Date(), closedById: req.user!.id, closeReason: reason },
       })
+      // Nothing more will be issued against it, so what was held for it goes back.
+      await tx.stockReservation.updateMany({
+        where: { mrId: before.id, status: 'ACTIVE' },
+        data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: `${before.mrNumber} closed: ${reason}` },
+      })
       const after = await tx.materialRequisition.findUniqueOrThrow({
         where: { id: before.id },
         include: mrInclude,
@@ -1823,6 +2056,301 @@ router.post(
     })
   },
 )
+
+/**
+ * Holding stock on the rack for an approved requisition, so nobody else is
+ * given it before this department collects it.
+ *
+ * Per line and store it sets the amount held (0 lets it go). It cannot hold
+ * more than the line still owes, nor more than the store has free — what other
+ * requisitions already hold is not free. The reservation carries the
+ * requisition's sales order and its customer, so the Reservations list can say
+ * who the material is held for.
+ */
+router.post(
+  '/requisitions/:id/reserve',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const body = reserveRequisitionSchema.parse(req.body ?? {})
+
+    const result = await prisma.$transaction(async (tx) => {
+      await lockRequisition(tx, req.params.id)
+      const mr = await tx.materialRequisition.findUnique({
+        where: { id: req.params.id },
+        include: {
+          so: { select: { id: true, customerId: true } },
+          lines: {
+            include: {
+              item: { select: { name: true, uom: { select: { symbol: true } } } },
+              reservations: { where: { status: 'ACTIVE' } },
+            },
+          },
+        },
+      })
+      if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+      if (mr.closedAt) throw new AppError(`${mr.mrNumber} is closed, so nothing can be held for it.`, 400, 'CLOSED')
+      if (mr.status !== 'APPROVED')
+        throw new AppError('Stock can be reserved once the requisition is approved.', 400, 'NOT_APPROVED')
+      if (mr.issuedAt) throw new AppError(`${mr.mrNumber} is issued in full; there is nothing left to hold.`, 400, 'ALREADY_ISSUED')
+
+      const stores = new Map(
+        (await tx.warehouse.findMany({
+          where: { id: { in: [...new Set(body.lines.map((l) => l.warehouseId))] } },
+          select: { id: true, name: true },
+        })).map((w) => [w.id, w.name]),
+      )
+      const changed: string[] = []
+
+      for (const a of body.lines) {
+        const line = mr.lines.find((l) => l.id === a.lineId)
+        if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+        const storeName = stores.get(a.warehouseId)
+        if (!storeName) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+        const unit = line.item.uom?.symbol ?? ''
+        if (line.ownership === 'CUSTOMER_OWNED' && a.qty > 0) {
+          throw new AppError(
+            `${line.item.name} is the customer's own material — it is already theirs, so it is not reserved.`,
+            400,
+            'CUSTOMER_MATERIAL',
+          )
+        }
+
+        const current = line.reservations.find((r) => r.warehouseId === a.warehouseId)
+        const qty = round3(a.qty)
+        if (Number(current?.qty ?? 0) === qty) continue
+
+        if (qty > 0) {
+          // Not more than the line still owes, counting what is held in other stores.
+          const owed = round3(Number(line.requestedQty) - Number(line.issuedQty))
+          const elsewhere = round3(
+            line.reservations.filter((r) => r.warehouseId !== a.warehouseId).reduce((t, r) => t + Number(r.qty), 0),
+          )
+          if (qty + elsewhere > owed + 1e-9) {
+            throw new AppError(
+              `${line.item.name}: ${qtyText(owed)} ${unit} is still owed${elsewhere ? `, and ${qtyText(elsewhere)} is already held in another store` : ''}, so ${qtyText(qty)} cannot be held.`,
+              400,
+              'OVER_RESERVE',
+            )
+          }
+          // Not more than the store has free.
+          const onRack = (await balanceOf(tx, { itemId: line.itemId, warehouseId: a.warehouseId })).qty
+          const held = await heldForOthers(tx, line.itemId, a.warehouseId, line.id)
+          const free = round3(Math.max(0, onRack - held.qty))
+          if (qty > free + 1e-9) {
+            throw new AppError(
+              `${line.item.name}: ${storeName} has ${qtyText(free)} ${unit} free${held.qty ? ` (${qtyText(held.qty)} is held for other requisitions)` : ''}, so ${qtyText(qty)} cannot be held.`,
+              400,
+              'NOT_ENOUGH_FREE',
+            )
+          }
+        }
+
+        if (current) {
+          await tx.stockReservation.update({
+            where: { id: current.id },
+            data:
+              qty > 0
+                ? { qty, reservedQty: qty, reservedById: req.user!.id }
+                : { qty: 0, status: 'RELEASED', releasedAt: new Date(), releasedById: req.user!.id, releaseReason: 'Set to nothing in the fulfil window' },
+          })
+        } else if (qty > 0) {
+          await tx.stockReservation.create({
+            data: {
+              mrId: mr.id,
+              mrLineId: line.id,
+              itemId: line.itemId,
+              warehouseId: a.warehouseId,
+              soId: mr.so?.id ?? null,
+              customerId: mr.so?.customerId ?? null,
+              reservedQty: qty,
+              qty,
+              reservedById: req.user!.id,
+            },
+          })
+        }
+        changed.push(
+          qty > 0
+            ? `${qtyText(qty)} ${unit} ${line.item.name} in ${storeName}`.replace(/\s+/g, ' ')
+            : `released ${line.item.name} in ${storeName}`,
+        )
+      }
+
+      const after = await tx.materialRequisition.findUniqueOrThrow({ where: { id: mr.id }, include: mrInclude })
+      return { after, changed }
+    })
+
+    if (result.changed.length) {
+      await writeAuditLog(req, {
+        module: MODULE,
+        action: 'UPDATE',
+        entityType: 'MaterialRequisition',
+        entityId: result.after.id,
+        after: { ...result.after, reservedNow: result.changed },
+      })
+    }
+
+    res.json({
+      success: true,
+      message: result.changed.length
+        ? `Held for ${result.after.mrNumber}${result.after.so ? ` (${result.after.so.customer.name}, ${result.after.so.soNumber})` : ''}: ${result.changed.join(', ')}.`
+        : 'Nothing changed in what is held.',
+      data: result.after,
+    })
+  },
+)
+
+/**
+ * Everything held on the racks, with who it is for. Active by default;
+ * ?status=all includes what was used up or released.
+ */
+/**
+ * Every item still pending, across all open requisitions — waiting for
+ * approval, to be issued, on the indent or on order: what is in stock, asked,
+ * issued, reserved, to be bought, ordered and received, and on which POs. The
+ * old system's indent screen in one place.
+ */
+router.get('/indents', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const rows = await prisma.$queryRaw<
+    Array<{
+      lineId: string; mrId: string; mrNumber: string; mrStatus: string; requestDate: Date; requiredDate: Date | null
+      ownership: string; ownerCustomerId: string | null; fulfilment: string; reserved: number
+      departmentId: string; departmentName: string; soNumber: string | null; customerId: string | null; customerName: string | null
+      itemId: string; itemCode: string; itemName: string; uom: string | null; purpose: string | null; styleNo: string | null
+      asked: number; issued: number; purchaseQty: number | null
+      ordered: number; received: number; poNumbers: string | null
+    }>
+  >`
+    SELECT l.id AS "lineId", m.id AS "mrId", m."mrNumber", m.status::text AS "mrStatus", m."requestDate", m."requiredDate",
+           l.ownership::text AS "ownership", l."ownerCustomerId", l.fulfilment::text AS "fulfilment",
+           COALESCE((SELECT SUM(r.qty) FROM ld_erp.stock_reservations r WHERE r."mrLineId" = l.id AND r.status::text = 'ACTIVE'), 0)::float8 AS "reserved",
+           d.id AS "departmentId", d.name AS "departmentName", so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
+           i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom", l.purpose, l."styleNo",
+           l."requestedQty"::float8 AS "asked", l."issuedQty"::float8 AS "issued", l."purchaseQty"::float8 AS "purchaseQty",
+           COALESCE(o.ordered, 0)::float8 AS "ordered", COALESCE(g.received, 0)::float8 AS "received", o."poNumbers"
+    FROM ld_erp.material_requisition_lines l
+    JOIN ld_erp.material_requisitions m ON m.id = l."mrId"
+    JOIN ld_erp.departments d ON d.id = m."departmentId"
+    JOIN ld_erp.items i ON i.id = l."itemId"
+    LEFT JOIN ld_erp.uom u ON u.id = i."uomId"
+    LEFT JOIN ld_erp.sales_orders so ON so.id = m."soId"
+    LEFT JOIN ld_erp.customers cu ON cu.id = so."customerId"
+    LEFT JOIN LATERAL (
+      SELECT SUM(pol.qty) AS ordered, STRING_AGG(DISTINCT po."poNumber", ', ') AS "poNumbers"
+      FROM ld_erp.purchase_order_lines pol
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" = l.id AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL
+    ) o ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT SUM(gl."receivedQty") AS received
+      FROM ld_erp.grn_lines gl
+      JOIN ld_erp.grn gr ON gr.id = gl."grnId"
+      JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
+      JOIN ld_erp.purchase_orders po ON po.id = pol."poId"
+      WHERE pol."mrLineId" = l.id AND po.status::text <> 'CANCELLED' AND po."deletedAt" IS NULL AND gr.status::text <> 'CANCELLED'
+    ) g ON TRUE
+    WHERE m.status::text IN ('APPROVED', 'PENDING') AND m."closedAt" IS NULL
+      AND (l."issuedQty" < l."requestedQty" OR COALESCE(o.ordered, 0) > COALESCE(g.received, 0))
+    ORDER BY m."requestDate" DESC, m."mrNumber" DESC`
+  const available = await availableFor(
+    rows.map((r) => ({ id: r.lineId, itemId: r.itemId, ownership: r.ownership, ownerCustomerId: r.ownerCustomerId })),
+  )
+  res.json({
+    success: true,
+    data: rows.map((r) => {
+      // A typed quantity stands; a line only marked "buy" means what is still owed, never below what is ordered.
+      const toBuy = round3(
+        r.purchaseQty !== null ? r.purchaseQty : r.fulfilment === 'PURCHASE' ? Math.max(r.asked - r.issued, r.ordered) : r.ordered,
+      )
+      return { ...r, uom: r.uom ?? '', toBuy, available: available.get(r.lineId) ?? 0, purchaseQty: undefined }
+    }),
+  })
+})
+
+router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) => {
+  const all = str(req.query.status) === 'all'
+  // One query: the include form took six round trips, nearly two seconds on the shared database.
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string; status: string; qty: number; reservedQty: number
+      itemId: string; itemCode: string; itemName: string; uom: string | null
+      catName: string | null; parentName: string | null
+      warehouseId: string; warehouseName: string
+      mrId: string; mrNumber: string; neededBy: Date | null; departmentId: string; departmentName: string
+      asked: number; issued: number; soNumber: string | null; customerId: string | null; customerName: string | null
+      reservedBy: string | null; reservedAt: Date; updatedAt: Date
+      releasedBy: string | null; releasedAt: Date | null; releaseReason: string | null
+      onHand: number
+    }>
+  >`
+    SELECT r.id, r.status::text AS "status", r.qty::float8 AS "qty", r."reservedQty"::float8 AS "reservedQty",
+           i.id AS "itemId", i.code AS "itemCode", i.name AS "itemName", u.symbol AS "uom",
+           c.name AS "catName", cp.name AS "parentName",
+           w.id AS "warehouseId", w.name AS "warehouseName",
+           m.id AS "mrId", m."mrNumber", m."requiredDate" AS "neededBy", d.id AS "departmentId", d.name AS "departmentName",
+           ml."requestedQty"::float8 AS "asked", ml."issuedQty"::float8 AS "issued",
+           so."soNumber", cu.id AS "customerId", cu.name AS "customerName",
+           rb.name AS "reservedBy", r."createdAt" AS "reservedAt", r."updatedAt",
+           xb.name AS "releasedBy", r."releasedAt", r."releaseReason",
+           -- Our stock of the item in that store now, reserved or not.
+           COALESCE((SELECT SUM(sl."inQty" - sl."outQty") FROM ld_erp.stock_ledger sl
+                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED'), 0)::float8 AS "onHand"
+    FROM ld_erp.stock_reservations r
+    JOIN ld_erp.items i ON i.id = r."itemId"
+    LEFT JOIN ld_erp.uom u ON u.id = i."uomId"
+    LEFT JOIN ld_erp.item_categories c ON c.id = i."categoryId"
+    LEFT JOIN ld_erp.item_categories cp ON cp.id = c."parentId"
+    JOIN ld_erp.warehouses w ON w.id = r."warehouseId"
+    JOIN ld_erp.material_requisitions m ON m.id = r."mrId"
+    JOIN ld_erp.departments d ON d.id = m."departmentId"
+    JOIN ld_erp.material_requisition_lines ml ON ml.id = r."mrLineId"
+    LEFT JOIN ld_erp.sales_orders so ON so.id = r."soId"
+    LEFT JOIN ld_erp.customers cu ON cu.id = r."customerId"
+    LEFT JOIN ld_erp.users rb ON rb.id = r."reservedById"
+    LEFT JOIN ld_erp.users xb ON xb.id = r."releasedById"
+    WHERE ${all ? Prisma.sql`TRUE` : Prisma.sql`r.status::text = 'ACTIVE'`}
+    ORDER BY (r.status::text = 'ACTIVE') DESC, r."createdAt" DESC
+    LIMIT 2000`
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      ...r,
+      uom: r.uom ?? '',
+      mainCategoryName: r.parentName ?? r.catName ?? '',
+      subCategoryName: r.parentName ? r.catName : null,
+      catName: undefined,
+      parentName: undefined,
+    })),
+  })
+})
+
+/** Letting a reservation go: the stock is free for anyone again. */
+router.patch(
+  '/reservations/:id/release',
+  requirePermission(MODULE, 'edit'),
+  async (req: AuthRequest, res) => {
+    const { reason } = releaseReservationSchema.parse(req.body ?? {})
+    const before = await prisma.stockReservation.findUnique({
+      where: { id: req.params.id },
+      include: { mr: { select: { id: true, mrNumber: true } }, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+    })
+    if (!before) throw new AppError('Reservation not found', 404, 'NOT_FOUND')
+    if (before.status !== 'ACTIVE') throw new AppError('That reservation is no longer held.', 409, 'NOT_ACTIVE')
+    const after = await prisma.stockReservation.update({
+      where: { id: before.id },
+      data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: reason },
+    })
+    const what = `released ${qtyText(Number(before.qty))} ${before.item.uom?.symbol ?? ''} ${before.item.name}`.replace(/\s+/g, ' ')
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: before.mr.id,
+      after: { reservedNow: [`${what}: ${reason}`] },
+    })
+    res.json({ success: true, message: `${before.mr.mrNumber}: ${what}. It is free for anyone again.`, data: after })
+  },
+)
+
 
 // ── Printed store papers ────────────────────────────────────────────────────
 //
@@ -2043,6 +2571,8 @@ async function createCustomerGrn(
       challanDate: data.challanDate ?? null,
       gateEntryNumber: data.gateEntryNumber ?? null,
       gateEntryDate: data.gateEntryDate ?? null,
+      billNumber: data.billNumber ?? null,
+      billDate: data.billDate ?? null,
       vehicleNo: data.vehicleNo ?? null,
       transporter: data.transporter ?? null,
       notes: data.notes ?? null,
@@ -2052,6 +2582,7 @@ async function createCustomerGrn(
           itemId: l.itemId,
           challanQty: l.challanQty,
           receivedQty: l.receivedQty,
+          rejectedQty: l.rejectedQty ?? 0,
           batchNumber: l.batchNumber ?? null,
           markings: l.markings ?? null,
         })),
@@ -2102,12 +2633,20 @@ router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: Au
     (n, l) => n + (Number(l.receivedQty) !== Number(l.challanQty) ? 1 : 0),
     0,
   )
+  const rejected = grn.lines.filter((l) => Number(l.rejectedQty) > 0).length
 
   res.status(201).json({
     success: true,
-    message: short
-      ? `${grn.grnNumber} saved. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
-      : `${grn.grnNumber} saved. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
+    message: [
+      short
+        ? `${grn.grnNumber} saved. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
+        : `${grn.grnNumber} saved. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
+      rejected
+        ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material; it is in their stock until it goes back on a return challan.`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
     data: grn,
   })
 })
@@ -2201,6 +2740,9 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       challanNumber: r.challanNumber,
       challanDate: r.challanDate,
       gateEntryNumber: r.gateEntryNumber,
+      gateEntryDate: r.gateEntryDate,
+      billNumber: r.billNumber,
+      billDate: r.billDate,
       vehicleNo: r.vehicleNo,
       transporter: r.transporter,
       notes: r.notes,
@@ -2220,6 +2762,7 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       ...about(l.item),
       challanQty: Number(l.challanQty),
       receivedQty: Number(l.receivedQty),
+      rejectedQty: Number(l.rejectedQty),
       batchNumber: l.batchNumber,
       markings: l.markings,
     })),

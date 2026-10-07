@@ -146,6 +146,8 @@ export const transferSchema = z.object({
 export const createRequisitionSchema = z.object({
   departmentId: id('the department asking'),
   moId: z.string().optional().nullable(),
+  /** The sales order the material is for: reservations are held for its customer. */
+  soId: z.string().optional().nullable(),
   /**
    * One store for every line, as older callers send it. A line may name its
    * own instead — the form now picks the store per item, from where it is.
@@ -161,6 +163,8 @@ export const createRequisitionSchema = z.object({
         /** The store this line is asked of. Falls back to the requisition's. */
         warehouseId: z.string().optional().nullable(),
         purpose: z.string().max(300).optional().nullable(),
+        /** The garment style it is for, as typed. Optional. */
+        styleNo: z.string().trim().max(50, 'That style number is too long').optional().nullable(),
         /**
          * Whose material to draw. Defaults to ours, which is what every
          * requisition raised before customer material existed meant.
@@ -184,7 +188,8 @@ export const createRequisitionSchema = z.object({
       if (theirs && !l.ownerCustomerId) {
         ctx.addIssue({ code: 'custom', path: ['lines', i, 'ownerCustomerId'], message: `Line ${i + 1}: say whose material it is` })
       }
-      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}|${l.warehouseId ?? data.warehouseId}`
+      // The same item for two styles is two lines; for one style, one line.
+      const k = `${l.itemId}|${theirs ? l.ownerCustomerId : 'OWNED'}|${l.warehouseId ?? data.warehouseId}|${(l.styleNo ?? '').trim().toLowerCase()}`
       if (seen.has(k)) {
         ctx.addIssue({ code: 'custom', path: ['lines', i, 'itemId'], message: `Line ${i + 1}: that item is already asked for from the same stock. Put it on one line.` })
       }
@@ -199,6 +204,29 @@ export const rejectRequisitionSchema = z.object({
 /** Cancelling a requisition, or closing one part issued. The reason goes on it. */
 export const closeRequisitionSchema = z.object({
   reason: z.string().trim().min(5, 'Say why it is no longer needed').max(500),
+})
+
+/**
+ * Holding stock on the rack for a requisition: per line and store, the amount
+ * to hold. It sets the amount — 0 lets it go — rather than adding to it.
+ */
+export const reserveRequisitionSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        lineId: id('a line'),
+        warehouseId: id('a store'),
+        qty: z.coerce
+          .number({ invalid_type_error: 'The quantity to reserve has to be a number' })
+          .min(0, 'A reservation cannot be below zero')
+          .max(9999999),
+      }),
+    )
+    .min(1, 'Say what to reserve'),
+})
+
+export const releaseReservationSchema = z.object({
+  reason: z.string().trim().min(3, 'Say why it is being released').max(300),
 })
 
 /**
@@ -257,6 +285,9 @@ export const createCustomerGrnSchema = z
     challanDate: z.coerce.date().optional().nullable(),
     gateEntryNumber: z.string().max(50).optional().nullable(),
     gateEntryDate: z.coerce.date().optional().nullable(),
+    /** The customer's bill, where one came with the goods. */
+    billNumber: z.string().max(50).optional().nullable(),
+    billDate: z.coerce.date().optional().nullable(),
     vehicleNo: z.string().max(20, 'That vehicle number is too long').optional().nullable(),
     transporter: z.string().max(120).optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
@@ -268,6 +299,8 @@ export const createCustomerGrnSchema = z
           challanQty: qty,
           /** What actually came off the lorry. */
           receivedQty: qty,
+          /** Of what arrived, how much failed the check. Still booked in, and flagged to go back. */
+          rejectedQty: z.coerce.number().min(0, 'Rejected cannot be below zero').max(9999999).optional().default(0),
           batchNumber: z.string().max(50).optional().nullable(),
           markings: z.string().max(200).optional().nullable(),
         })
@@ -285,6 +318,13 @@ export const createCustomerGrnSchema = z
         })
       }
       seen.add(line.itemId)
+      if ((line.rejectedQty ?? 0) > line.receivedQty) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'rejectedQty'],
+          message: 'More is rejected than arrived. Rejected is part of what arrived.',
+        })
+      }
     })
 
     if (!data.lines.some((l) => l.receivedQty > 0)) {

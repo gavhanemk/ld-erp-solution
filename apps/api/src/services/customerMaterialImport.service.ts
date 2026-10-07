@@ -31,6 +31,9 @@ export type CmKey =
   | 'challanNo'
   | 'challanDate'
   | 'gateEntry'
+  | 'gateEntryDate'
+  | 'billNo'
+  | 'billDate'
   | 'vehicleNo'
   | 'transport'
   | 'note'
@@ -38,6 +41,7 @@ export type CmKey =
   | 'itemName'
   | 'challanQty'
   | 'arrivedQty'
+  | 'rejectedQty'
   | 'markings'
 type Raw = Partial<Record<CmKey, string>>
 
@@ -48,6 +52,9 @@ export const CM_COLUMNS: SheetColumn<CmKey>[] = [
   { key: 'challanNo', head: 'Their Challan No', width: 16, note: 'Rows with the same customer, store, day and challan are one receipt.' },
   { key: 'challanDate', head: 'Their Challan Date', width: 14 },
   { key: 'gateEntry', head: 'Gate Entry No', width: 14 },
+  { key: 'gateEntryDate', head: 'Gate Entry Date', width: 14 },
+  { key: 'billNo', head: 'Their Bill No', width: 14 },
+  { key: 'billDate', head: 'Their Bill Date', width: 14 },
   { key: 'vehicleNo', head: 'Vehicle No', width: 14 },
   { key: 'transport', head: 'Transport', width: 18 },
   { key: 'note', head: 'Note', width: 26 },
@@ -55,6 +62,7 @@ export const CM_COLUMNS: SheetColumn<CmKey>[] = [
   { key: 'itemName', head: 'Item Name', width: 30 },
   { key: 'challanQty', head: 'Their Challan Qty', width: 12, note: 'What their challan says. Empty means the same as arrived.' },
   { key: 'arrivedQty', head: 'Arrived Qty *', width: 12, note: 'What actually came off the lorry. This is what goes into stock.' },
+  { key: 'rejectedQty', head: 'Rejected Qty', width: 12, note: 'Of what arrived, how much failed the check. It stays in their stock, flagged to go back. Empty means none.' },
   { key: 'markings', head: 'Their Markings', width: 20 },
 ]
 
@@ -94,6 +102,9 @@ export function cmRow(r: Record<string, unknown>, l: Record<string, unknown>): R
     challanNo: text(r.challanNumber),
     challanDate: day(r.challanDate as Date | null),
     gateEntry: text(r.gateEntryNumber),
+    gateEntryDate: day(r.gateEntryDate as Date | null),
+    billNo: text(r.billNumber),
+    billDate: day(r.billDate as Date | null),
     vehicleNo: text(r.vehicleNo),
     transport: text(r.transporter),
     note: text(r.notes),
@@ -101,6 +112,7 @@ export function cmRow(r: Record<string, unknown>, l: Record<string, unknown>): R
     itemName: item.name,
     challanQty: Number(l.challanQty),
     arrivedQty: Number(l.receivedQty),
+    rejectedQty: Number(l.rejectedQty ?? 0),
     markings: text(l.markings),
   }
 }
@@ -213,6 +225,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
     const item = raw.itemCode ? itemByCode.get(key(raw.itemCode)) : raw.itemName ? itemByName.get(key(raw.itemName)) : undefined
     const receivedOn = parseDay(raw.receivedOn)
     const challanDate = parseDay(raw.challanDate)
+    const gateEntryDate = parseDay(raw.gateEntryDate)
+    const billDate = parseDay(raw.billDate)
+    const rejected = parseQty(raw.rejectedQty)
     const arrived = parseQty(raw.arrivedQty)
     const onChallan = parseQty(raw.challanQty)
 
@@ -225,6 +240,11 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
     else if (!item) problems.push(`No item with code "${raw.itemCode ?? raw.itemName}".`)
     if (receivedOn === 'bad') problems.push(`Received On "${raw.receivedOn}" is not a date. Write it as 2026-09-29.`)
     if (challanDate === 'bad') problems.push(`Their Challan Date "${raw.challanDate}" is not a date.`)
+    if (gateEntryDate === 'bad') problems.push(`Gate Entry Date "${raw.gateEntryDate}" is not a date.`)
+    if (billDate === 'bad') problems.push(`Their Bill Date "${raw.billDate}" is not a date.`)
+    if (rejected !== null && (Number.isNaN(rejected) || rejected < 0)) problems.push(`Rejected Qty "${raw.rejectedQty}" is not a number.`)
+    else if (rejected !== null && arrived !== null && !Number.isNaN(arrived) && rejected > arrived)
+      problems.push(`Rejected Qty ${rejected} is more than arrived. Rejected is part of what arrived.`)
     if (arrived === null) problems.push('Arrived Qty is empty.')
     else if (Number.isNaN(arrived) || arrived <= 0) problems.push(`Arrived Qty "${raw.arrivedQty}" has to be a number above 0.`)
     if (onChallan !== null && (Number.isNaN(onChallan) || onChallan < 0)) problems.push(`Their Challan Qty "${raw.challanQty}" is not a number.`)
@@ -261,6 +281,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
           challanNumber: raw.challanNo || null,
           challanDate: challanDate instanceof Date ? challanDate : null,
           gateEntryNumber: raw.gateEntry || null,
+          gateEntryDate: gateEntryDate instanceof Date ? gateEntryDate : null,
+          billNumber: raw.billNo || null,
+          billDate: billDate instanceof Date ? billDate : null,
           vehicleNo: raw.vehicleNo || null,
           transporter: raw.transport || null,
           notes: raw.note || null,
@@ -274,6 +297,9 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
       const b = g.body
       b.challanDate ??= challanDate instanceof Date ? challanDate : null
       b.gateEntryNumber ??= raw.gateEntry || null
+      b.gateEntryDate ??= gateEntryDate instanceof Date ? gateEntryDate : null
+      b.billNumber ??= raw.billNo || null
+      b.billDate ??= billDate instanceof Date ? billDate : null
       b.vehicleNo ??= raw.vehicleNo || null
       b.transporter ??= raw.transport || null
       b.notes ??= raw.note || null
@@ -290,6 +316,7 @@ export async function planImport(rows: Array<{ row: number; raw: Raw }>) {
         itemId: item.id,
         challanQty: plan.challanQty ?? plan.arrivedQty,
         receivedQty: plan.arrivedQty,
+        rejectedQty: rejected !== null && !Number.isNaN(rejected) ? rejected : 0,
         markings: raw.markings || null,
       })
     }

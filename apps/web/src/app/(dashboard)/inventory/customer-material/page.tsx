@@ -6,19 +6,21 @@ import Link from 'next/link'
 import {
   Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, FileSpreadsheet, CalendarDays,
   List, LayoutDashboard, FileText, Boxes, AlertTriangle, Users, Warehouse as WarehouseIcon, PackageCheck,
-  LineChart, Target, PieChart as PieIcon, Undo2, Printer,
+  LineChart, Target, PieChart as PieIcon, Undo2, Printer, Ruler, Table2, Hourglass, XCircle, CheckCircle2,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { CustomerMaterialDialog } from '@/components/inventory/CustomerMaterialDialog'
 import { ImportCustomerMaterialDialog } from '@/components/inventory/ImportCustomerMaterialDialog'
 import { CustomerReturnDialog } from '@/components/inventory/CustomerReturnDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
-import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
+import { DashCard, Highlights, KpiTile, PALETTE, SplitBar, TONE } from '@/components/dashboard/DashKit'
+import { Sparkline } from '@/components/inventory/InventoryDashboardCharts'
 import { Pagination } from '@/components/tables/Pagination'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu } from '@/components/tables/ActionMenu'
 import {
-  ArrivalGauge, CategoryDonut, CustomerBars, ReceiptTrend, StoreColumns,
+  AgeBars, CheckSteps, HeldDonut, HeldUnitTiles, MaterialBreakdown, MaterialFlow, RankBars, StoreBars, unitLine,
+  type MaterialBreakRow, type UnitQty,
 } from '@/components/inventory/MaterialCharts'
 import { formatDate } from '@/lib/utils'
 
@@ -44,6 +46,9 @@ interface LineRow {
   challanNumber: string | null
   challanDate: string | null
   gateEntryNumber: string | null
+  gateEntryDate?: string | null
+  billNumber?: string | null
+  billDate?: string | null
   vehicleNo: string | null
   transporter: string | null
   notes: string | null
@@ -69,6 +74,8 @@ interface LineRow {
   departmentName: string | null
   challanQty: number
   receivedQty: number
+  /** Of what arrived, how much failed the check. In their stock, flagged to go back. */
+  rejectedQty?: number
   batchNumber: string | null
   markings: string | null
 }
@@ -160,6 +167,7 @@ const qtyFmt = (v: number) => v.toLocaleString('en-IN', { minimumFractionDigits:
 
 // Days are India's days.
 const dayKey = (d: Date | string) => new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86400000)
 const localIso = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
@@ -449,6 +457,9 @@ function CustomerMaterialScreen() {
           'Against Order': r.soNumber ?? '',
           Store: r.warehouseName,
           'Gate Entry No': r.gateEntryNumber ?? '',
+          'Gate Entry Date': r.gateEntryDate ? dayKey(r.gateEntryDate) : '',
+          'Their Bill No': r.billNumber ?? '',
+          'Their Bill Date': r.billDate ? dayKey(r.billDate) : '',
           'Vehicle No': r.vehicleNo ?? '',
           Transport: r.transporter ?? '',
           'Item Code': r.itemCode,
@@ -459,6 +470,8 @@ function CustomerMaterialScreen() {
           'Their Challan Qty': r.challanQty,
           'Arrived Qty': r.receivedQty,
           'Short / Excess': Number((r.receivedQty - r.challanQty).toFixed(3)),
+          'Rejected Qty': r.rejectedQty ?? 0,
+          'Accepted Qty': Number((r.receivedQty - (r.rejectedQty ?? 0)).toFixed(3)),
           Unit: r.uom,
           'Their Markings': r.markings ?? '',
           Status: r.cancelledAt ? 'Cancelled' : 'Active',
@@ -467,7 +480,7 @@ function CustomerMaterialScreen() {
           Note: r.notes ?? '',
         })),
       )
-      sheet['!cols'] = [15, 12, 26, 16, 14, 14, 20, 13, 13, 16, 14, 30, 18, 18, 14, 12, 12, 12, 7, 18, 10, 26, 18, 30].map((wch) => ({ wch }))
+      sheet['!cols'] = [15, 12, 26, 16, 14, 14, 20, 13, 13, 13, 13, 13, 16, 14, 30, 18, 18, 14, 12, 12, 12, 11, 11, 7, 18, 10, 26, 18, 30].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
       XLSX.utils.book_append_sheet(book, sheet, 'Customer Material')
       if (heldShown.length) {
@@ -499,8 +512,9 @@ function CustomerMaterialScreen() {
   // ── dashboard figures ──
   const trend = useMemo(() => {
     const live = shown.filter((r) => !r.cancelledAt)
-    if (!live.length) return []
-    const days = live.map((r) => dayKey(r.receiptDate)).sort()
+    const back = shownReturns.filter((r) => !r.cancelledAt)
+    if (!live.length && !back.length) return []
+    const days = [...live.map((r) => dayKey(r.receiptDate)), ...back.map((r) => dayKey(r.returnDate))].sort()
     const start = new Date(`${from || days[0]}T00:00:00`)
     const end = new Date(`${to || days[days.length - 1]}T00:00:00`)
     const span = Math.round((end.getTime() - start.getTime()) / 86400000) + 1
@@ -512,7 +526,7 @@ function CustomerMaterialScreen() {
       m.setDate(m.getDate() - ((m.getDay() + 6) % 7))
       return localIso(m)
     }
-    const map = new Map<string, { key: string; label: string; from: string; to: string; items: number; receipts: number; ids: Set<string> }>()
+    const map = new Map<string, { key: string; label: string; from: string; to: string; received: number; returned: number; receipts: number; ids: Set<string> }>()
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
       const k = keyOf(d)
       const cur = map.get(k)
@@ -522,18 +536,22 @@ function CustomerMaterialScreen() {
           unit === 'month'
             ? d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' })
             : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
-        map.set(k, { key: k, label, from: localIso(d), to: localIso(d), items: 0, receipts: 0, ids: new Set() })
+        map.set(k, { key: k, label, from: localIso(d), to: localIso(d), received: 0, returned: 0, receipts: 0, ids: new Set() })
       }
     }
     for (const r of live) {
       const b = map.get(keyOf(new Date(`${dayKey(r.receiptDate)}T00:00:00`)))
       if (!b) continue
-      b.items += 1
+      b.received += 1
       b.ids.add(r.receiptId)
       b.receipts = b.ids.size
     }
+    for (const r of back) {
+      const b = map.get(keyOf(new Date(`${dayKey(r.returnDate)}T00:00:00`)))
+      if (b) b.returned += 1
+    }
     return [...map.values()]
-  }, [shown, from, to])
+  }, [shown, shownReturns, from, to])
 
   const slices = (key: FilterKey, labelOf: (r: LineRow) => string) => {
     const m = new Map<string, { value: string; label: string; count: number }>()
@@ -573,6 +591,152 @@ function CustomerMaterialScreen() {
   const returnPages = Math.ceil(shownReturns.length / PAGE) || 1
   const returnPageRows = shownReturns.slice((page - 1) * PAGE, page * PAGE)
   const liveReturns = shownReturns.filter((r) => !r.cancelledAt)
+
+  /* ── the dashboard's figures, from what the filters leave ── */
+  const today = dayKey(new Date())
+  /** Quantities per unit, biggest first: metres are never added to pieces. */
+  const sumBy = (xs: Array<{ uom: string; qty: number }>): UnitQty => {
+    const m = new Map<string, number>()
+    for (const x of xs) if (x.qty) m.set(x.uom, (m.get(x.uom) ?? 0) + x.qty)
+    return [...m.entries()].map(([uom, qty]) => ({ uom, qty: Math.round(qty * 1000) / 1000 })).sort((a, b) => b.qty - a.qty)
+  }
+  const heldQty = sumBy(heldShown.map((h) => ({ uom: h.uom, qty: h.qty })))
+  const receivedQty = sumBy(live.map((r) => ({ uom: r.uom, qty: r.receivedQty })))
+  const returnedQty = sumBy(liveReturns.map((r) => ({ uom: r.uom, qty: r.qty })))
+  const rejectedLines = live.filter((r) => (r.rejectedQty ?? 0) > 0)
+  const rejectedQty = sumBy(rejectedLines.map((r) => ({ uom: r.uom, qty: r.rejectedQty ?? 0 })))
+  const receiptCount = new Set(live.map((r) => r.receiptId)).size
+  const returnCount = new Set(liveReturns.map((r) => r.returnId)).size
+
+  const heldByCustomer = (() => {
+    const m = new Map<string, { id: string; name: string; lines: number; rows: Array<{ uom: string; qty: number }> }>()
+    for (const h of heldShown) {
+      const cur = m.get(h.customerId) ?? { id: h.customerId, name: h.customerName, lines: 0, rows: [] }
+      cur.lines += 1
+      cur.rows.push({ uom: h.uom, qty: h.qty })
+      m.set(h.customerId, cur)
+    }
+    return [...m.values()].map((c) => ({ id: c.id, name: c.name, lines: c.lines, qty: sumBy(c.rows) })).sort((a, b) => b.lines - a.lines)
+  })()
+
+  const unitTiles = (() => {
+    const uoms = new Set([...heldQty, ...receivedQty, ...returnedQty].map((q) => q.uom))
+    const of = (q: UnitQty, u: string) => q.find((x) => x.uom === u)?.qty ?? 0
+    return [...uoms]
+      .map((u) => ({
+        uom: u,
+        held: of(heldQty, u),
+        items: new Set(heldShown.filter((h) => h.uom === u).map((h) => h.itemId)).size,
+        received: of(receivedQty, u),
+        returned: of(returnedQty, u),
+      }))
+      .sort((a, b) => b.held - a.held || b.received - a.received)
+  })()
+
+  const ageOf = (h: HeldRow) => (h.lastMovedAt ? Math.max(0, daysBetween(dayKey(h.lastMovedAt), today)) : 0)
+  const ageBuckets = [
+    { key: '30', label: '0–30 days', max: 30 },
+    { key: '60', label: '31–60', max: 60 },
+    { key: '90', label: '61–90', max: 90 },
+    { key: '180', label: '91–180', max: 180 },
+    { key: 'old', label: 'Over 180', max: Infinity },
+  ].map((b, i, all) => ({
+    key: b.key,
+    label: b.label,
+    lines: heldShown.filter((h) => ageOf(h) <= b.max && (i === 0 || ageOf(h) > all[i - 1].max)).length,
+  }))
+  const oldest = heldShown.reduce<HeldRow | null>((o, h) => (!o || ageOf(h) > ageOf(o) ? h : o), null)
+  const avgAge = heldShown.length ? Math.round(heldShown.reduce((t, h) => t + ageOf(h), 0) / heldShown.length) : 0
+
+  const customerRank = (() => {
+    const m = new Map<string, { id: string; name: string; value: number; rows: Array<{ uom: string; qty: number }> }>()
+    for (const r of live) {
+      const cur = m.get(r.customerId) ?? { id: r.customerId, name: r.customerName, value: 0, rows: [] }
+      cur.value += 1
+      cur.rows.push({ uom: r.uom, qty: r.receivedQty })
+      m.set(r.customerId, cur)
+    }
+    return [...m.values()]
+      .map((c) => ({ id: c.id, name: c.name, value: c.value, tag: `${c.value} · ${unitLine(sumBy(c.rows), 1)}` }))
+      .sort((a, b) => b.value - a.value)
+  })()
+
+  /** Category › sub-category and department › category, from receipts in the period and what is here now. */
+  const breakdown = (() => {
+    type Place = { itemId: string; mainCategoryName: string; subCategoryName: string | null; departmentName: string | null }
+    type Acc = { name: string; items: Set<string>; lines: number; received: Array<{ uom: string; qty: number }>; held: Array<{ uom: string; qty: number }>; kids: Map<string, Acc> }
+    const mk = (name: string): Acc => ({ name, items: new Set(), lines: 0, received: [], held: [], kids: new Map() })
+    const build = (top: (r: Place) => string, sub: (r: Place) => string): MaterialBreakRow[] => {
+      const m = new Map<string, Acc>()
+      const at = (r: Place) => {
+        const t = m.get(top(r)) ?? mk(top(r))
+        m.set(t.name, t)
+        const k = t.kids.get(sub(r)) ?? mk(sub(r))
+        t.kids.set(k.name, k)
+        return [t, k]
+      }
+      for (const r of live)
+        for (const a of at(r)) {
+          a.items.add(r.itemId)
+          a.lines += 1
+          a.received.push({ uom: r.uom, qty: r.receivedQty })
+        }
+      for (const h of heldShown)
+        for (const a of at(h)) {
+          a.items.add(h.itemId)
+          a.held.push({ uom: h.uom, qty: h.qty })
+        }
+      const total = live.length || 1
+      const out = (a: Acc): MaterialBreakRow => ({
+        name: a.name,
+        items: a.items.size,
+        lines: a.lines,
+        received: sumBy(a.received),
+        held: sumBy(a.held),
+        share: Math.round((a.lines / total) * 100),
+      })
+      const order = (x: Acc, y: Acc) => y.lines - x.lines || y.held.length - x.held.length || x.name.localeCompare(y.name)
+      return [...m.values()].sort(order).map((a) => ({ ...out(a), children: [...a.kids.values()].sort(order).map(out) }))
+    }
+    return {
+      categories: build((r) => r.mainCategoryName, (r) => r.subCategoryName ?? 'No sub-category'),
+      departments: build((r) => r.departmentName ?? 'No department', (r) => r.mainCategoryName),
+    }
+  })()
+
+  const pct = (n: number) => (live.length ? Math.round((n / live.length) * 100) : 0)
+  const highlights = [
+    heldByCustomer[0] && {
+      icon: Users,
+      tone: TONE.sky,
+      text: (
+        <>
+          <span className="font-semibold">{heldByCustomer[0].name}</span> has the most with us — {unitLine(heldByCustomer[0].qty)}
+        </>
+      ),
+    },
+    live.length > 0 &&
+      (arrival.short
+        ? { icon: AlertTriangle, tone: TONE.rose, text: `${arrival.short} of ${live.length} items arrived short of their challan` }
+        : { icon: CheckCircle2, tone: TONE.emerald, text: 'Nothing arrived short of its challan' }),
+    rejectedLines.length > 0 && {
+      icon: XCircle,
+      tone: TONE.rose,
+      text: `${unitLine(rejectedQty)} rejected at the gate, waiting to go back`,
+    },
+    oldest &&
+      ageOf(oldest) > 0 && {
+        icon: Hourglass,
+        tone: ageOf(oldest) > 90 ? TONE.rose : TONE.amber,
+        text: (
+          <>
+            {oldest.customerName}&apos;s <span className="font-semibold">{oldest.itemName}</span> has not moved for {ageOf(oldest)}{' '}
+            {ageOf(oldest) === 1 ? 'day' : 'days'}
+          </>
+        ),
+      },
+    returnCount > 0 && { icon: Undo2, tone: TONE.violet, text: `${unitLine(returnedQty)} sent back on ${returnCount} ${returnCount === 1 ? 'return' : 'returns'}` },
+  ].filter(Boolean) as Array<{ icon: React.ElementType; tone: string; text: React.ReactNode }>
 
   const cancelReturn = async (r: ReturnRow) => {
     const reason = prompt(
@@ -820,6 +984,7 @@ function CustomerMaterialScreen() {
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Challan</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Arrived</th>
                       <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Short / extra</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Rejected</th>
                       <th className="whitespace-nowrap">Status</th>
                       <th className="whitespace-nowrap">Markings</th>
                       <th />
@@ -868,6 +1033,19 @@ function CustomerMaterialScreen() {
                                 {diff > 0 ? '+' : '−'}
                                 {qtyFmt(Math.abs(diff))} {r.uom}
                               </span>
+                            )}
+                          </td>
+                          {/* Rejected at the gate: still in their stock, to go back on a return challan. */}
+                          <td
+                            className="whitespace-nowrap text-right text-sm tabular-nums"
+                            title={r.rejectedQty ? `Accepted ${qtyFmt(r.receivedQty - r.rejectedQty)} ${r.uom}. The rejected part is in their stock until it goes back on a return challan.` : undefined}
+                          >
+                            {r.rejectedQty ? (
+                              <span className="text-red-500">
+                                {qtyFmt(r.rejectedQty)} {r.uom}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
                             )}
                           </td>
                           <td className="whitespace-nowrap">
@@ -1069,37 +1247,97 @@ function CustomerMaterialScreen() {
 
       {view === 'dashboard' && (
         <>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <Highlights items={highlights.slice(0, 5)} />
+
+          {/* ── The figures that matter most, as on the purchase and inventory dashboards ── */}
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
             <KpiTile
               icon={Users}
               tone={TONE.sky}
               label="Customers' material here"
-              value={String(new Set(heldShown.map((h) => h.customerId)).size)}
-              sub="customers with something in our stores now"
-            />
-            <KpiTile icon={PackageCheck} tone={TONE.teal} label="Items still with us" value={String(heldShown.length)} sub="item and store together, listed below" />
+              value={String(heldByCustomer.length)}
+              sub={`${heldShown.length} ${heldShown.length === 1 ? 'item' : 'items'} in ${new Set(heldShown.map((h) => h.warehouseId)).size} ${new Set(heldShown.map((h) => h.warehouseId)).size === 1 ? 'store' : 'stores'}`}
+            >
+              <SplitBar parts={heldByCustomer.map((c, i) => ({ value: c.lines, colour: PALETTE[i % PALETTE.length], label: `${c.name}: ${c.lines}` }))} />
+            </KpiTile>
+            <KpiTile
+              icon={Ruler}
+              tone={TONE.blue}
+              label="Quantity with us"
+              value={heldQty[0] ? qtyFmt(heldQty[0].qty) : '—'}
+              sub={heldQty[0] ? `${heldQty[0].uom}${heldQty.length > 1 ? ` · plus ${unitLine(heldQty.slice(1), 2)}` : ''}` : 'nothing of theirs here'}
+            >
+              <SplitBar parts={unitTiles.filter((u) => u.items).map((u, i) => ({ value: u.items, colour: PALETTE[i % PALETTE.length], label: `${u.uom}: ${u.items} items` }))} />
+            </KpiTile>
             <KpiTile
               icon={FileText}
-              tone={TONE.blue}
+              tone={TONE.teal}
               label="Received"
               value={String(live.length)}
-              sub={`items on ${new Set(live.map((r) => r.receiptId)).size} receipts · ${liveReturns.length} returned`}
-            />
+              sub={live.length ? `items on ${receiptCount} ${receiptCount === 1 ? 'receipt' : 'receipts'} · ${unitLine(receivedQty, 1)}` : 'nothing received'}
+              onClick={() => setView('receipts')}
+              title="See the receipts"
+            >
+              <Sparkline data={trend.map((t) => t.received)} />
+            </KpiTile>
+            <KpiTile
+              icon={Undo2}
+              tone={TONE.violet}
+              label="Returned"
+              value={String(liveReturns.length)}
+              sub={liveReturns.length ? `items on ${returnCount} ${returnCount === 1 ? 'return' : 'returns'} · ${unitLine(returnedQty, 1)}` : 'nothing sent back'}
+              onClick={() => setView('returns')}
+              title="See the returns"
+            >
+              <Sparkline data={trend.map((t) => t.returned)} colour={TONE.violet} />
+            </KpiTile>
             <KpiTile
               icon={AlertTriangle}
               tone={TONE.rose}
               label="Arrived short"
               value={String(arrival.short)}
               valueClass={arrival.short ? 'text-rose-500' : 'text-foreground'}
-              sub={live.length ? `${Math.round((arrival.short / live.length) * 100)}% of items · click to filter` : 'nothing received'}
+              sub={
+                isSet('arrival', ['short'])
+                  ? 'showing only these · click to show all'
+                  : live.length
+                    ? `${pct(arrival.short)}% of items · click to filter`
+                    : 'nothing received'
+              }
               onClick={() => toggleTo('arrival', ['short'])}
               active={isSet('arrival', ['short'])}
+            >
+              <SplitBar
+                parts={[
+                  { value: arrival.match, colour: TONE.emerald, label: `matched: ${arrival.match}` },
+                  { value: arrival.short, colour: TONE.rose, label: `short: ${arrival.short}` },
+                  { value: arrival.excess, colour: TONE.amber, label: `more than challan: ${arrival.excess}` },
+                ]}
+              />
+            </KpiTile>
+            <KpiTile
+              icon={XCircle}
+              tone={TONE.orange}
+              label="Rejected, to go back"
+              value={rejectedLines.length ? unitLine(rejectedQty, 1) : '0'}
+              valueClass={rejectedLines.length ? 'text-rose-500' : 'text-foreground'}
+              sub={
+                rejectedLines.length
+                  ? `${rejectedLines.length} ${rejectedLines.length === 1 ? 'item' : 'items'} — send back on a return challan`
+                  : 'nothing rejected at the gate'
+              }
             />
           </div>
 
-          <div className="grid gap-5 lg:grid-cols-3">
-            <DashCard className="lg:col-span-2" icon={LineChart} title="Receipts over time" hint="Items and receipts booked in. Click a point to see that period.">
-              <ReceiptTrend
+          {/* ── What came in and went back, and whose is here ── */}
+          <div className="grid gap-5 xl:grid-cols-3">
+            <DashCard
+              className="xl:col-span-2"
+              icon={LineChart}
+              title="Received and returned over time"
+              hint="Items booked in and sent back each period — click a bar to see only that period"
+            >
+              <MaterialFlow
                 data={trend}
                 onPick={(f, t) => {
                   setFrom(f)
@@ -1108,20 +1346,92 @@ function CustomerMaterialScreen() {
                 }}
               />
             </DashCard>
-            <DashCard icon={Target} title="Against their challan" hint="How often what arrived matched their paperwork">
-              <ArrivalGauge matched={arrival.match} short={arrival.short} excess={arrival.excess} onPick={(v) => toggleTo('arrival', [v])} />
+            <DashCard icon={PieIcon} title="Still with us, by customer" hint="Pick a customer to see only theirs">
+              <HeldDonut data={heldByCustomer} picked={picked.customer ?? []} onPick={(id) => toggleOne('customer', id)} />
             </DashCard>
           </div>
 
+          {/* ── Quantity, unit by unit, and how it checked against their paperwork ── */}
+          <div className="grid gap-5 xl:grid-cols-3">
+            <DashCard className="xl:col-span-2" icon={Ruler} title="Still with us, by unit" hint="Metres with metres, pieces with pieces — and how much went back in the period">
+              <HeldUnitTiles data={unitTiles} />
+            </DashCard>
+            <DashCard icon={Target} title="Against their challan" hint="What arrived, checked against their paperwork — pick a step to see those items">
+              <CheckSteps
+                steps={[
+                  {
+                    label: 'Matched their challan',
+                    value: String(arrival.match),
+                    sub: `${pct(arrival.match)}% of items`,
+                    share: pct(arrival.match),
+                    colour: TONE.emerald,
+                    onClick: () => toggleTo('arrival', ['match']),
+                    active: isSet('arrival', ['match']),
+                  },
+                  {
+                    label: 'Arrived short',
+                    value: String(arrival.short),
+                    sub: `${pct(arrival.short)}% of items`,
+                    share: pct(arrival.short),
+                    colour: TONE.rose,
+                    onClick: () => toggleTo('arrival', ['short']),
+                    active: isSet('arrival', ['short']),
+                  },
+                  {
+                    label: 'More than their challan',
+                    value: String(arrival.excess),
+                    sub: `${pct(arrival.excess)}% of items`,
+                    share: pct(arrival.excess),
+                    colour: TONE.amber,
+                    onClick: () => toggleTo('arrival', ['excess']),
+                    active: isSet('arrival', ['excess']),
+                  },
+                  {
+                    label: 'Rejected at the gate',
+                    value: String(rejectedLines.length),
+                    sub: rejectedLines.length ? `${unitLine(rejectedQty)} — still in their stock until it goes back` : 'nothing rejected',
+                    share: pct(rejectedLines.length),
+                    colour: TONE.orange,
+                  },
+                ]}
+              />
+            </DashCard>
+          </div>
+
+          {/* ── Category, sub-category and department ── */}
+          <DashCard
+            icon={Table2}
+            title="Category, sub-category and department"
+            hint="Items, lines and quantity — received in the period, and still with us now. Open a row to see what is inside it"
+          >
+            <MaterialBreakdown categories={breakdown.categories} departments={breakdown.departments} />
+          </DashCard>
+
+          {/* ── Customers, stores and how long it has been here ── */}
           <div className="grid gap-5 lg:grid-cols-3">
-            <DashCard icon={Users} title="By customer" hint="Items received. Click one to filter.">
-              <CustomerBars data={slices('customer', (r) => r.customerName)} picked={picked.customer ?? []} onPick={(v) => toggleOne('customer', v)} />
+            <DashCard icon={Users} title="Biggest customers" hint="Items received in the period — pick one to see only theirs">
+              <RankBars
+                data={customerRank}
+                picked={picked.customer ?? []}
+                onPick={(id) => toggleOne('customer', id)}
+                name="Items received"
+                empty="Nothing received in this period."
+              />
             </DashCard>
-            <DashCard icon={PieIcon} title="By category" hint="Share of items received. Click a slice to filter.">
-              <CategoryDonut data={slices('category', (r) => r.mainCategoryName)} picked={picked.category ?? []} onPick={(v) => toggleOne('category', v)} />
+            <DashCard icon={WarehouseIcon} title="By store" hint="Items received in the period, and items there now — pick a store to filter">
+              <StoreBars
+                data={storeCols.map((c) => ({ id: c.value, name: c.label, received: c.received, held: c.held }))}
+                picked={picked.store ?? []}
+                onPick={(id) => toggleOne('store', id)}
+              />
             </DashCard>
-            <DashCard icon={WarehouseIcon} title="By store" hint="Items received, and items still there now">
-              <StoreColumns data={storeCols} onPick={(v) => toggleOne('store', v)} />
+            <DashCard icon={Hourglass} title="How long it has been here" hint="Items still with us, by days since they last moved">
+              <AgeBars data={ageBuckets} />
+              {heldShown.length > 0 && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Average <span className="font-semibold text-foreground">{avgAge} {avgAge === 1 ? 'day' : 'days'}</span> since it last moved
+                </p>
+              )}
             </DashCard>
           </div>
 

@@ -144,6 +144,7 @@ export const indentAgainstPo: ReportDefinition = {
       orderBy: [{ mr: { requestDate: 'asc' } }, { id: 'asc' }],
       select: {
         requestedQty: true,
+        issuedQty: true,
         purchaseQty: true,
         item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
         warehouse: { select: { name: true } },
@@ -171,8 +172,9 @@ export const indentAgainstPo: ReportDefinition = {
     const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate())
 
     const all = lines.map((l) => {
-      // What the store decided to buy; the whole line where it was decided before a quantity could be set.
-      const indentQty = l.purchaseQty !== null ? Number(l.purchaseQty) : Number(l.requestedQty)
+      // What the store decided to buy; where it was only marked "buy", what is still owed.
+      const indentQty =
+        l.purchaseQty !== null ? Number(l.purchaseQty) : Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
       const orderedQty = round2(l.poLines.reduce((s, p) => s + Number(p.qty), 0))
       // Cancelled receipts booked nothing in.
       const receivedQty = round2(

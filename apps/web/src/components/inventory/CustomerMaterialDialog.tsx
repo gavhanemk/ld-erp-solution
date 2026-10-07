@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
@@ -12,6 +12,12 @@ import { Section } from '@/components/purchase/Section'
  * Their challan quantity and what actually arrived are both asked for, because
  * the gap between the two is the thing worth telling them about. The store
  * keeper types what they counted; the difference is worked out here.
+ *
+ * The fields follow the old system's "GRN JW Customer" form: their challan
+ * (D.C.) and bill, the gate entry, and per line the category, sub-category and
+ * item, then challan, received, short/excess, rejected and accepted. Rejected
+ * material is still booked into the customer's stock — it is on our floor — and
+ * flagged so it can go back on a return challan.
  */
 
 interface Option {
@@ -20,18 +26,45 @@ interface Option {
   code?: string
 }
 
+interface Category {
+  id: string
+  name: string
+  parentId?: string | null
+  parent?: { id: string; name: string } | null
+}
+
 interface ItemOption extends Option {
   uom?: { symbol: string } | null
+  category?: Category | null
 }
 
 interface Line {
+  categoryId: string
+  subCategoryId: string
   itemId: string
   challanQty: string
   receivedQty: string
+  rejectedQty: string
   markings: string
 }
 
-const emptyLine = (): Line => ({ itemId: '', challanQty: '', receivedQty: '', markings: '' })
+const emptyLine = (): Line => ({
+  categoryId: '',
+  subCategoryId: '',
+  itemId: '',
+  challanQty: '',
+  receivedQty: '',
+  rejectedQty: '',
+  markings: '',
+})
+
+/** The main category and sub-category of an item: a category with a parent is a sub-category. */
+const placeOf = (it: ItemOption) => {
+  const c = it.category
+  if (!c) return { main: '', sub: '' }
+  return c.parentId || c.parent ? { main: c.parent?.id ?? c.parentId ?? '', sub: c.id } : { main: c.id, sub: '' }
+}
+const fmt = (v: number) => v.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
 const num = (v: string) => Number(v) || 0
 
 export function CustomerMaterialDialog({
@@ -56,6 +89,9 @@ export function CustomerMaterialDialog({
   const [challanNumber, setChallanNumber] = useState('')
   const [challanDate, setChallanDate] = useState('')
   const [gateEntryNumber, setGateEntryNumber] = useState('')
+  const [gateEntryDate, setGateEntryDate] = useState('')
+  const [billNumber, setBillNumber] = useState('')
+  const [billDate, setBillDate] = useState('')
   const [vehicleNo, setVehicleNo] = useState('')
   const [transporter, setTransporter] = useState('')
   const [notes, setNotes] = useState('')
@@ -70,8 +106,9 @@ export function CustomerMaterialDialog({
       try {
         const [c, i, w, so] = await Promise.all([
           masterResource<Option>('customers').list({ limit: 300 }),
-          masterResource<ItemOption>('items').list({ limit: 500 }),
-          masterResource<Option>('warehouses').list({ limit: 100 }),
+          // Active only: a switched-off item or store is not offered for anything new.
+          masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
+          masterResource<Option>('warehouses').list({ limit: 100, active: true }),
           api.get<Paginated<{ id: string; soNumber: string; customerId: string }>>(
             '/sales/orders?limit=100'
           ),
@@ -80,6 +117,8 @@ export function CustomerMaterialDialog({
         setCustomers(c.data)
         setItems(i.data)
         setWarehouses(w.data)
+        // One store to choose from: chosen already.
+        if (w.data.length === 1) setWarehouseId(w.data[0].id)
         setOrders(so.data)
       } catch {
         if (!cancelled) setError('Could not load customers, items and stores.')
@@ -98,11 +137,42 @@ export function CustomerMaterialDialog({
   const theirOrders = orders.filter((o) => o.customerId === customerId)
   const filled = lines.filter((l) => l.itemId && num(l.receivedQty) > 0)
 
+  /** Main categories that have at least one item. */
+  const mainCategories = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const it of items) {
+      const c = it.category
+      if (!c) continue
+      const main = c.parent ?? (c.parentId ? null : c)
+      if (main) m.set(main.id, main.name)
+    }
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }, [items])
+
+  /** Sub-categories under a main category that have items. */
+  const subCategoriesOf = (mainId: string) => {
+    const m = new Map<string, string>()
+    for (const it of items) {
+      const c = it.category
+      if (c && (c.parent?.id ?? c.parentId) === mainId) m.set(c.id, c.name)
+    }
+    return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+  }
+
+  /** Items matching the line's category and sub-category, where chosen. */
+  const itemsFor = (l: Line) =>
+    items.filter((it) => {
+      const p = placeOf(it)
+      return (!l.categoryId || p.main === l.categoryId) && (!l.subCategoryId || p.sub === l.subCategoryId)
+    })
+
   const save = async () => {
     setError(null)
     if (!customerId) return setError('Whose material is this?')
     if (!warehouseId) return setError('Which store did it go into?')
     if (filled.length === 0) return setError('Enter what arrived on at least one line.')
+    const over = filled.find((l) => num(l.rejectedQty) > num(l.receivedQty))
+    if (over) return setError(`Line ${lines.indexOf(over) + 1}: more is rejected than arrived. Rejected is part of what arrived.`)
 
     setSaving(true)
     try {
@@ -116,6 +186,9 @@ export function CustomerMaterialDialog({
           challanNumber: challanNumber || null,
           challanDate: challanDate || null,
           gateEntryNumber: gateEntryNumber || null,
+          gateEntryDate: gateEntryDate || null,
+          billNumber: billNumber || null,
+          billDate: billDate || null,
           vehicleNo: vehicleNo || null,
           transporter: transporter || null,
           notes: notes || null,
@@ -123,6 +196,7 @@ export function CustomerMaterialDialog({
             itemId: l.itemId,
             challanQty: num(l.challanQty) || num(l.receivedQty),
             receivedQty: num(l.receivedQty),
+            rejectedQty: num(l.rejectedQty),
             markings: l.markings || null,
           })),
         }
@@ -159,7 +233,7 @@ export function CustomerMaterialDialog({
           void save()
         }}
         noValidate
-        className="glass-card po-form flex max-h-full w-full max-w-6xl flex-col self-center overflow-hidden"
+        className="glass-card po-form flex max-h-full w-full max-w-7xl flex-col self-center overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-labelledby="customer-material-title"
@@ -234,7 +308,7 @@ export function CustomerMaterialDialog({
                 </select>
               </label>
               <label className="block min-w-0">
-                <span className="form-label">Their challan no.</span>
+                <span className="form-label">Their challan (D.C.) no.</span>
                 <input
                   className="form-input placeholder:text-muted-foreground/60"
                   value={challanNumber}
@@ -243,13 +317,26 @@ export function CustomerMaterialDialog({
                 />
               </label>
               <label className="block min-w-0">
-                <span className="form-label">Their challan date</span>
+                <span className="form-label">Their challan (D.C.) date</span>
                 <input
                   type="date"
                   className="form-input"
                   value={challanDate}
                   onChange={(e) => setChallanDate(e.target.value)}
                 />
+              </label>
+              <label className="block min-w-0">
+                <span className="form-label">Their bill no.</span>
+                <input
+                  className="form-input placeholder:text-muted-foreground/60"
+                  value={billNumber}
+                  onChange={(e) => setBillNumber(e.target.value)}
+                  placeholder="If a bill came with it"
+                />
+              </label>
+              <label className="block min-w-0">
+                <span className="form-label">Their bill date</span>
+                <input type="date" className="form-input" value={billDate} onChange={(e) => setBillDate(e.target.value)} />
               </label>
             </div>
           </Section>
@@ -284,11 +371,20 @@ export function CustomerMaterialDialog({
                 />
               </label>
               <label className="block min-w-0">
-                <span className="form-label">Gate entry no.</span>
+                <span className="form-label">Gate entry (G.E.) no.</span>
                 <input
                   className="form-input"
                   value={gateEntryNumber}
                   onChange={(e) => setGateEntryNumber(e.target.value)}
+                />
+              </label>
+              <label className="block min-w-0">
+                <span className="form-label">Gate entry (G.E.) date</span>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={gateEntryDate}
+                  onChange={(e) => setGateEntryDate(e.target.value)}
                 />
               </label>
               <label className="block min-w-0">
@@ -308,7 +404,7 @@ export function CustomerMaterialDialog({
                   onChange={(e) => setTransporter(e.target.value)}
                 />
               </label>
-              <label className="block min-w-0 sm:col-span-1 lg:col-span-3">
+              <label className="block min-w-0 sm:col-span-2 lg:col-span-2">
                 <span className="form-label">Note</span>
                 <input
                   className="form-input placeholder:text-muted-foreground/60"
@@ -337,32 +433,104 @@ export function CustomerMaterialDialog({
               <table className="data-table w-full [&>tbody>tr>td]:px-3 [&>thead>tr>th]:px-3">
                 <thead>
                   <tr>
-                    <th style={{ width: 40 }}>#</th>
-                    <th style={{ width: '34%' }}>Item</th>
-                    <th style={{ textAlign: 'right' }}>Their challan says</th>
-                    <th style={{ textAlign: 'right' }}>Actually arrived</th>
+                    <th style={{ width: 36 }}>#</th>
+                    <th>Category · Sub-category · Item</th>
+                    <th style={{ textAlign: 'right' }}>Challan qty</th>
+                    <th style={{ textAlign: 'right' }}>Received qty</th>
                     <th style={{ textAlign: 'right' }}>Short / excess</th>
-                    <th>Their markings</th>
-                    <th style={{ width: 44 }} />
+                    <th style={{ textAlign: 'right' }}>Rejected qty</th>
+                    <th style={{ textAlign: 'right' }}>Accepted qty</th>
+                    <th>Markings / remarks</th>
+                    <th style={{ width: 40 }} />
                   </tr>
                 </thead>
                 <tbody>
                   {lines.map((line, i) => {
                     const diff = num(line.receivedQty) - num(line.challanQty)
                     const item = items.find((x) => x.id === line.itemId)
+                    const uom = item?.uom?.symbol ?? ''
+                    const rejected = num(line.rejectedQty)
+                    const accepted = num(line.receivedQty) - rejected
+                    const subs = line.categoryId ? subCategoriesOf(line.categoryId) : []
+                    const choices = itemsFor(line)
+                    const qtyInput = (field: 'challanQty' | 'receivedQty' | 'rejectedQty', label: string, bad = false) => (
+                      <div className="relative">
+                        <input
+                          className={`form-input h-9 pr-10 text-right ${bad ? 'border-red-500/60' : ''}`}
+                          inputMode="decimal"
+                          value={line[field]}
+                          onChange={(e) => setLine(i, { [field]: e.target.value })}
+                          aria-label={`${label} on line ${i + 1}`}
+                        />
+                        {uom && (
+                          <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">
+                            {uom}
+                          </span>
+                        )}
+                      </div>
+                    )
                     return (
-                      <tr key={i}>
-                        <td className="text-muted-foreground text-xs tabular-nums">{i + 1}</td>
-                        <td className="min-w-[220px]">
+                      <tr key={i} className="align-top">
+                        <td className="text-muted-foreground pt-4 text-xs tabular-nums">{i + 1}</td>
+                        {/* Category and sub-category narrow the item list, as on the old form. */}
+                        <td className="min-w-[300px]">
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <select
+                              className="form-input h-9"
+                              value={line.categoryId}
+                              onChange={(e) => {
+                                const categoryId = e.target.value
+                                const keep = item && (!categoryId || placeOf(item).main === categoryId)
+                                setLine(i, { categoryId, subCategoryId: '', itemId: keep ? line.itemId : '' })
+                              }}
+                              disabled={loadingLists}
+                              aria-label={`Category on line ${i + 1}`}
+                            >
+                              <option value="">All categories</option>
+                              {mainCategories.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              className="form-input h-9"
+                              value={line.subCategoryId}
+                              onChange={(e) => {
+                                const subCategoryId = e.target.value
+                                const keep = item && (!subCategoryId || placeOf(item).sub === subCategoryId)
+                                setLine(i, { subCategoryId, itemId: keep ? line.itemId : '' })
+                              }}
+                              disabled={!line.categoryId || subs.length === 0}
+                              aria-label={`Sub-category on line ${i + 1}`}
+                            >
+                              <option value="">
+                                {!line.categoryId ? 'Sub-category' : subs.length ? 'All sub-categories' : 'No sub-categories'}
+                              </option>
+                              {subs.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
                           <select
-                            className="form-input h-9"
+                            className="form-input mt-1.5 h-9"
                             value={line.itemId}
-                            onChange={(e) => setLine(i, { itemId: e.target.value })}
+                            onChange={(e) => {
+                              const picked = items.find((x) => x.id === e.target.value)
+                              // Picking an item fills in its category and sub-category.
+                              const place = picked ? placeOf(picked) : null
+                              setLine(i, {
+                                itemId: e.target.value,
+                                ...(place ? { categoryId: place.main, subCategoryId: place.sub } : {}),
+                              })
+                            }}
                             disabled={loadingLists}
                             aria-label={`Item on line ${i + 1}`}
                           >
-                            <option value="">Choose an item…</option>
-                            {items.map((it) => (
+                            <option value="">Choose an item… ({choices.length})</option>
+                            {choices.map((it) => (
                               <option key={it.id} value={it.id}>
                                 {it.code ? `${it.code} · ` : ''}
                                 {it.name}
@@ -370,57 +538,39 @@ export function CustomerMaterialDialog({
                             ))}
                           </select>
                         </td>
-                        <td className="min-w-[110px]">
-                          <div className="relative">
-                            <input
-                              className="form-input h-9 pr-10 text-right"
-                              inputMode="decimal"
-                              value={line.challanQty}
-                              onChange={(e) => setLine(i, { challanQty: e.target.value })}
-                              aria-label={`Challan quantity on line ${i + 1}`}
-                            />
-                            {item?.uom?.symbol && (
-                              <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">
-                                {item.uom.symbol}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="min-w-[110px]">
-                          <div className="relative">
-                            <input
-                              className="form-input h-9 pr-10 text-right"
-                              inputMode="decimal"
-                              value={line.receivedQty}
-                              onChange={(e) => setLine(i, { receivedQty: e.target.value })}
-                              aria-label={`Quantity that arrived on line ${i + 1}`}
-                            />
-                            {item?.uom?.symbol && (
-                              <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">
-                                {item.uom.symbol}
-                              </span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="whitespace-nowrap text-right text-sm tabular-nums">
+                        <td className="min-w-[110px]">{qtyInput('challanQty', 'Challan quantity')}</td>
+                        <td className="min-w-[110px]">{qtyInput('receivedQty', 'Received quantity')}</td>
+                        <td className="whitespace-nowrap pt-4 text-right text-sm tabular-nums">
                           {!line.challanQty || !line.receivedQty ? (
                             <span className="text-muted-foreground">—</span>
                           ) : diff === 0 ? (
                             <span className="badge-success">matches</span>
                           ) : (
-                            <span className={diff > 0 ? 'text-amber-400' : 'text-red-400'}>
+                            <span className={diff > 0 ? 'text-amber-500' : 'text-red-500'}>
                               {diff > 0 ? '+' : ''}
-                              {diff} {item?.uom?.symbol ?? ''}
+                              {fmt(diff)} {uom}
                             </span>
                           )}
                         </td>
-                        <td className="min-w-[140px]">
+                        <td className="min-w-[110px]">{qtyInput('rejectedQty', 'Rejected quantity', rejected > num(line.receivedQty))}</td>
+                        <td className="whitespace-nowrap pt-4 text-right text-sm tabular-nums">
+                          {!line.receivedQty ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : accepted < 0 ? (
+                            <span className="text-red-500">more rejected than received</span>
+                          ) : (
+                            <span className="text-emerald-600">
+                              {fmt(accepted)} {uom}
+                            </span>
+                          )}
+                        </td>
+                        <td className="min-w-[150px]">
                           <input
                             className="form-input h-9 placeholder:text-muted-foreground/60"
                             value={line.markings}
                             onChange={(e) => setLine(i, { markings: e.target.value })}
                             placeholder="e.g. Lot 7, navy"
-                            aria-label={`Markings on line ${i + 1}`}
+                            aria-label={`Markings or remarks on line ${i + 1}`}
                           />
                         </td>
                         <td className="text-right">

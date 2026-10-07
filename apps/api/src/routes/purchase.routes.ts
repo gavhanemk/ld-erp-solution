@@ -747,9 +747,10 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
 
   const rows = lines
     .map((l) => {
-      // What the store decided to buy for this line; the whole line where it
-      // was decided before a quantity could be set.
-      const requested = l.purchaseQty !== null ? Number(l.purchaseQty) : Number(l.requestedQty)
+      // What the store decided to buy for this line; where it was only marked
+      // "buy", what is still owed after anything handed over from the rack.
+      const requested =
+        l.purchaseQty !== null ? Number(l.purchaseQty) : Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
       const ordered = round3(l.poLines.reduce((t, p) => t + Number(p.qty), 0))
       const enquired = round3(l.enquiryLines.reduce((t, e) => t + Number(e.qty), 0))
       return {
