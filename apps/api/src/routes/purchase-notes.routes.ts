@@ -907,7 +907,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
      */
     if (before.gstTreatment === 'NOT_REVIEWED') {
       throw new AppError(
-        `Pick the GST treatment on ${before.noteNumber} before posting it — open it with Edit and choose "GST treatment" beside the tax.`,
+        `Pick "GST on this note" on ${before.noteNumber} before posting it — open it with Edit; it is beside the tax.`,
         409,
         'GST_NOT_PICKED'
       )
