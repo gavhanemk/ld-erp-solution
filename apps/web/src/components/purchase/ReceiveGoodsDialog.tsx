@@ -1293,10 +1293,18 @@ export function ReceiveGoodsDialog({
               <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 sm:contents">
                 <label className="block">
                   <span className="form-label">Purchase order</span>
-                  {editing ? (
+                  {/* Fixed when the form was opened against an order — Receive
+                    on that order's row has already answered this, and a list of
+                    every other order is only a chance to receive against the
+                    wrong one. Only the page's own "Receive goods" button, which
+                    starts from no order, offers the choice. */}
+                  {editing || startOn ? (
                     <input
                       className="form-input text-muted-foreground h-9"
-                      value={order?.poNumber ?? ''}
+                      value={
+                        order?.poNumber ?? orders.find((o) => o.id === startOn)?.poNumber ?? ''
+                      }
+                      placeholder="Loading…"
                       disabled
                     />
                   ) : (
