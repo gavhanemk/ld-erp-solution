@@ -24,6 +24,7 @@ import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTyp
 import type { NewItem } from '@/components/purchase/NewItemDialog'
 import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 
 export interface BillLine {
   itemId: string
@@ -270,6 +271,8 @@ interface GrnOption {
    * is the mill's own record of having seen it arrive.
    */
   supplierInvoiceNo?: string | null
+  /** The date on that invoice, when the gate wrote that down too. */
+  supplierInvoiceDate?: string | null
   /** What is still unbilled on this receipt. Sent by `/purchase/grn`. */
   billing?: {
     acceptedQty: number | string
@@ -898,6 +901,66 @@ export function PurchaseBillDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [receiptChoices, filterPo, filterChallan, filterBill, filterGrn]
   )
+
+  /*
+   * The supplier's bill numbers the gate wrote down, offered in Bill no.
+   *
+   * One invoice often covers several deliveries, and the number is usually
+   * caught on only one of them — the clerk at the gate had the invoice for one
+   * lorry and not the next. So every number on the receipts ticked onto this
+   * bill is offered first, then the rest of the order's (or the supplier's,
+   * with no order chosen). Still a free box: a bill the gate never saw is typed.
+   */
+  const billNoSuggestions = useMemo(() => {
+    const byNo = new Map<string, { onBill: boolean; refs: string[] }>()
+    for (const g of receiptChoices) {
+      const no = g.supplierInvoiceNo?.trim()
+      const onBill = billedSet.has(g.grnNumber)
+      if (!no || !(onBill || matchesPo(g))) continue
+      const entry = byNo.get(no) ?? { onBill: false, refs: [] }
+      entry.onBill ||= onBill
+      entry.refs.push(g.challanNo ? `${g.grnNumber} · challan ${g.challanNo}` : g.grnNumber)
+      byNo.set(no, entry)
+    }
+    return [...byNo]
+      .sort(([a, x], [b, y]) => Number(y.onBill) - Number(x.onBill) || a.localeCompare(b))
+      .map(([value, e]) => ({ value, label: `${e.onBill ? 'On this bill — ' : ''}${e.refs.join(', ')}` }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, billedSet, filterPo])
+
+  /** The date the gate wrote beside that bill number, if it wrote one. */
+  const dateForBillNo = (no: string) =>
+    receiptChoices
+      .find((g) => g.supplierInvoiceNo?.trim() === no.trim() && g.supplierInvoiceDate)
+      ?.supplierInvoiceDate?.slice(0, 10) ?? ''
+
+  const typeBillNo = (no: string) => {
+    setSupplierInvoiceNo(no)
+    // Picking a number the gate caught brings its date, into an empty box only.
+    const date = dateForBillNo(no)
+    if (date && !supplierInvoiceDate) setSupplierInvoiceDate(date)
+  }
+
+  /*
+   * Filled in for the clerk when the receipts on the bill agree on one
+   * number — the common case, one invoice for the deliveries ticked. Never
+   * over anything typed, and not when they carry two different numbers:
+   * which one is right is the clerk's call, and both are offered.
+   */
+  const onBillNos = [
+    ...new Set(
+      receiptChoices
+        .filter((g) => billedSet.has(g.grnNumber))
+        .map((g) => g.supplierInvoiceNo?.trim())
+        .filter(Boolean) as string[]
+    ),
+  ]
+  const onBillNosKey = onBillNos.join('|')
+  useEffect(() => {
+    if (onBillNos.length !== 1 || supplierInvoiceNo.trim()) return
+    typeBillNo(onBillNos[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onBillNosKey])
 
   /*
    * Whether there is anything to show the table for.
@@ -1911,12 +1974,13 @@ export function PurchaseBillDialog({
                     Bill no.<span className="ml-0.5 text-red-400">*</span>{' '}
                     <span className="text-muted-foreground">(theirs)</span>
                   </label>
-                  <input
+                  <SuggestInput
                     id="bill-supplier-no"
                     className="form-input"
                     placeholder="As printed on their bill"
                     value={supplierInvoiceNo}
-                    onChange={(e) => setSupplierInvoiceNo(e.target.value)}
+                    onValueChange={typeBillNo}
+                    suggestions={billNoSuggestions}
                   />
                   {/* A prompt, not an alarm. An empty box on a form nobody has
                 filled in yet has not gone wrong — it is simply not done, and
