@@ -95,7 +95,7 @@ const SEARCH_FROM = 7
 type SmartSelectProps = Omit<SelectHTMLAttributes<HTMLSelectElement>, 'onChange' | 'multiple' | 'size'> & {
   onChange?: (e: ChangeEvent<HTMLSelectElement>) => void
   /**
-   * Offers "+ Add new …" at the foot of the list, for adding the missing
+   * Offers "+ Add new …" at the top of the list, for adding the missing
    * choice without leaving the form. Given whatever was typed in the search,
    * so a name searched for and not found can be added as it is.
    */
@@ -320,6 +320,21 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
               />
             </div>
           )}
+          {/* First in the list, under the search, so it is found straight away
+            when the search turns up nothing. */}
+          {onCreate && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={create}
+              className="border-border text-primary hover:bg-primary/10 flex shrink-0 items-center gap-2 border-b px-3 py-2 text-left text-sm font-medium"
+            >
+              <Plus size={14} className="shrink-0" aria-hidden />
+              <span className="min-w-0 truncate">
+                {query.trim() ? `Add “${query.trim()}” as a new ${createNoun}` : `Add new ${createNoun}`}
+              </span>
+            </button>
+          )}
           <div
             ref={listRef}
             role="listbox"
@@ -364,19 +379,6 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
               )
             })}
           </div>
-          {onCreate && (
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={create}
-              className="border-border text-primary hover:bg-primary/10 flex shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm font-medium"
-            >
-              <Plus size={14} className="shrink-0" aria-hidden />
-              <span className="min-w-0 truncate">
-                {query.trim() ? `Add “${query.trim()}” as a new ${createNoun}` : `Add new ${createNoun}`}
-              </span>
-            </button>
-          )}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
