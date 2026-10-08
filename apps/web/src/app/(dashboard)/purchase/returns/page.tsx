@@ -83,8 +83,15 @@ const STATUS: Record<ReturnRow['status'], { label: string; cls: string }> = {
   CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
 }
 
+/*
+ * A challan writes its debit note itself, as a draft, the moment it is saved.
+ * "Draft" alone read as though somebody had started one; it says what it is.
+ */
+const NOTE_DRAFT_HINT =
+  'Written automatically when this challan was saved. Accounts checks it and posts it; only then is it adjusted against the bill.'
+
 const NOTE_STATUS: Record<string, { label: string; cls: string }> = {
-  DRAFT: { label: 'Draft', cls: 'badge-warning' },
+  DRAFT: { label: 'Draft · not posted', cls: 'badge-warning' },
   POSTED: { label: 'Posted', cls: 'badge-success' },
   CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
 }
@@ -201,9 +208,13 @@ export default function PurchaseReturnsPage() {
       },
     ]
     for (const n of r.debitNotes) {
+      const draft = n.status === 'DRAFT'
       items.push({
         key: 'note-' + n.id,
-        label: `Open debit note ${n.noteNumber}`,
+        label: draft
+          ? `Review & post debit note ${n.noteNumber}`
+          : `View debit note ${n.noteNumber}`,
+        hint: draft ? 'Written automatically from this challan — not posted yet' : undefined,
         icon: <FileText size={14} />,
         href: '/purchase/debit-notes?q=' + encodeURIComponent(n.noteNumber),
       })
@@ -233,7 +244,8 @@ export default function PurchaseReturnsPage() {
         <div className="min-w-0">
           <h1 className="page-title text-xl sm:text-2xl">Purchase Returns</h1>
           <p className="page-subtitle hidden sm:block">
-            Goods sent back to suppliers. Raised from a bill; each writes its own debit note.
+            Goods sent back to suppliers, raised from a bill. Saving one writes a draft debit
+            note for accounts to check and post.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -430,7 +442,10 @@ export default function PurchaseReturnsPage() {
                               >
                                 {n.noteNumber}
                               </Link>
-                              <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
+                              <span
+                                    className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}
+                                    title={n.status === 'DRAFT' ? NOTE_DRAFT_HINT : undefined}
+                                  >
                                 {NOTE_STATUS[n.status]?.label ?? n.status}
                               </span>
                             </span>
@@ -595,7 +610,10 @@ export default function PurchaseReturnsPage() {
                                   >
                                     {n.noteNumber}
                                   </Link>
-                                  <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
+                                  <span
+                                    className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}
+                                    title={n.status === 'DRAFT' ? NOTE_DRAFT_HINT : undefined}
+                                  >
                                     {NOTE_STATUS[n.status]?.label ?? n.status}
                                   </span>
                                 </div>
