@@ -34,9 +34,12 @@ import {
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
-import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, apiErrorMessage, ApiError, can, masterResource, type Paginated } from '@/lib/api'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Raising a purchase order.
@@ -304,6 +307,7 @@ interface CompanyLite {
   state?: string | null
   pincode?: string | null
   stateCode?: string | null
+  gstin?: string | null
   email?: string | null
 }
 
@@ -547,6 +551,9 @@ export function PurchaseOrderDialog({
   const quote = source?.quote ?? null
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
+  // "Add new supplier" from the supplier list: the name typed in its search,
+  // while the supplier form is open over this one.
+  const [newSupplier, setNewSupplier] = useState<{ name: string } | null>(null)
   const [items, setItems] = useState<Option[]>([])
   const [warehouses, setWarehouses] = useState<Option[]>([])
   const [customers, setCustomers] = useState<Option[]>([])
@@ -667,7 +674,7 @@ export function PurchaseOrderDialog({
   const [saving, setSaving] = useState<'draft' | 'send' | 'print' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [mounted, setMounted] = useState(false)
-  const firstFieldRef = useRef<HTMLSelectElement | null>(null)
+  const firstFieldRef = useRef<HTMLButtonElement | null>(null)
 
   // document does not exist while this page is rendered on the server, so the
   // portal can only be opened once the browser has it.
@@ -942,9 +949,9 @@ export function PurchaseOrderDialog({
       masterResource<ChargeTypeOption>('charge-types')
         .list({ limit: 100, active: true })
         .catch(() => null),
-      // The company block under "deliver to" is our own address. Settings is
-      // the only place that serves it and a purchase clerk may not be allowed
-      // in there, so the address is treated as a nicety, not a requirement.
+      // The company block under "deliver to" is our own address. A purchase
+      // clerk may not be allowed into Settings, so a refusal here falls back
+      // to the copy order-defaults carries, below.
       api.get<{ success: boolean; data: CompanyLite }>('/settings/company').catch(() => null),
       /*
        * What the next purchase order number will be, for the read-only box.
@@ -967,7 +974,9 @@ export function PurchaseOrderDialog({
        * the terms reach the supplier either way.
        */
       api
-        .get<{ success: boolean; data: { terms: string | null } }>('/purchase/order-defaults')
+        .get<{ success: boolean; data: { terms: string | null; company?: CompanyLite } }>(
+          '/purchase/order-defaults'
+        )
         .catch(() => null),
     ]).then(([s, i, w, cust, c, st, ct, co, ns, dflt]) => {
       if (cancelled) return
@@ -986,7 +995,10 @@ export function PurchaseOrderDialog({
             )
           : []
       )
-      setCompany(co?.data ?? null)
+      // Settings first; the purchase module's copy for a buyer who may not open
+      // Settings. Our state code decides CGST + SGST against IGST, so it must
+      // not depend on who is signed in.
+      setCompany(co?.data ?? dflt?.data.company ?? null)
       setNextPoNumber(ns?.data.find((x) => x.docType === 'PO')?.nextNumber ?? '')
       /*
        * Only on a new order, and only into a box still empty.
@@ -1142,13 +1154,18 @@ export function PurchaseOrderDialog({
   // Where the goods land. Our own address unless the order says a customer,
   // and it is this — not our state — that the supplier's state is compared
   // against, because goods are taxed where they are delivered.
-  const placeOfSupply = customerStateCode || company?.stateCode
+  //
+  // Read exactly as the server reads it, so the split shown here is the one
+  // that is saved: a state code left blank falls back to the GSTIN's first two
+  // digits, for the supplier and for us alike.
+  const placeOfSupply =
+    customerStateCode || company?.stateCode || company?.gstin?.slice(0, 2) || null
 
   const taxMode = !supplier
     ? null
     : !supplier.gstin
       ? 'NONE'
-      : (supplier.stateCode ?? supplier.gstin?.slice(0, 2)) === placeOfSupply
+      : (supplier.stateCode || supplier.gstin.slice(0, 2)) === placeOfSupply
         ? 'CGST_SGST'
         : 'IGST'
 
@@ -1385,30 +1402,17 @@ export function PurchaseOrderDialog({
        * The GST rate is still filled in, and that is not the same thing: the
        * tax on an item is a fact about the item and its HSN code, not
        * something negotiated with this supplier on this order.
+       *
+       * A different item brings its own rate. Filling only an empty box left
+       * the last item's rate behind when the row was changed — fabric at 5%
+       * swapped for buttons at 18% still charged 5%.
        */
-      ...(item?.taxRate && String(line.gstRate).trim() === ''
-        ? { gstRate: String(item.taxRate.rate) }
-        : {}),
+      ...(line.itemId !== itemId
+        ? { gstRate: item?.taxRate ? String(Number(item.taxRate.rate)) : '' }
+        : item?.taxRate && String(line.gstRate).trim() === ''
+          ? { gstRate: String(Number(item.taxRate.rate)) }
+          : {}),
     })
-  }
-
-  /**
-   * The code cell resolves an item rather than merely narrowing the list.
-   *
-   * Every item has one unique code and that code is its identity — it is what
-   * is quoted on the phone and written on the rack. Typing one in full picks
-   * that item outright. Anything shorter is left alone, because it is a code
-   * half remembered, not a mistake.
-   */
-  const typeCodeFor = (index: number, raw: string) => {
-    setLine(index, { codeText: raw })
-    setError(null)
-
-    const typed = raw.trim().toLowerCase()
-    if (!typed) return
-
-    const exact = items.find((i) => (i.code ?? '').toLowerCase() === typed)
-    if (exact) pickItemFor(index, exact.id)
   }
 
   /**
@@ -2121,7 +2125,7 @@ export function PurchaseOrderDialog({
                       size={14}
                       className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                     />
-                    <select
+                    <SmartSelect
                       id="po-location"
                       ref={firstFieldRef}
                       className="form-input pl-9"
@@ -2134,7 +2138,7 @@ export function PurchaseOrderDialog({
                           {w.name}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </div>
                 </div>
 
@@ -2189,12 +2193,16 @@ export function PurchaseOrderDialog({
                       size={14}
                       className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                     />
-                    <select
+                    <SmartSelect
                       id="po-supplier"
                       className="form-input pl-9"
                       value={supplierId}
                       onChange={(e) => setSupplierId(e.target.value)}
                       aria-describedby={supplierMissing ? 'po-supplier-error' : undefined}
+                      onCreate={
+                        can('masters', 'create') ? (typed) => setNewSupplier({ name: typed }) : undefined
+                      }
+                      createNoun="supplier"
                     >
                       <option value="">Choose supplier</option>
                       {suppliers.map((s) => (
@@ -2202,8 +2210,31 @@ export function PurchaseOrderDialog({
                           {s.code ? `${s.code} — ${s.name}` : s.name}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </div>
+                  {/* The full supplier form, the same as Masters → Suppliers,
+                    over this order. Saved, the supplier joins the list and is
+                    picked; nothing on the order is lost or reloaded. */}
+                  <MasterFormDialog<Option>
+                    open={newSupplier !== null}
+                    onClose={() => setNewSupplier(null)}
+                    onSaved={() => {}}
+                    onCreated={(row) => {
+                      setSuppliers((prev) =>
+                        [...prev.filter((p) => p.id !== row.id), row].sort((a, b) =>
+                          a.name.localeCompare(b.name)
+                        )
+                      )
+                      setSupplierId(row.id)
+                    }}
+                    resource="suppliers"
+                    fields={supplierFormFields}
+                    initialValues={newSupplier?.name ? { name: newSupplier.name } : undefined}
+                    title="Supplier"
+                    columns={4}
+                    wide
+                    stacked
+                  />
                   {/* A prompt, not an alarm. Every Save on this form is
                     disabled while the supplier is empty, so this still says
                     which field is holding them back — but in the same grey a
@@ -2385,7 +2416,7 @@ export function PurchaseOrderDialog({
                   <label htmlFor="po-type" className="text-muted-foreground text-xs">
                     Order type
                   </label>
-                  <select
+                  <SmartSelect
                     id="po-type"
                     className="form-input h-7 w-auto px-2 py-0 text-xs"
                     value={poType}
@@ -2394,7 +2425,7 @@ export function PurchaseOrderDialog({
                     <option value="ITEM_LEVEL">With discount at item level</option>
                     <option value="ORDER_LEVEL">With discount at order level</option>
                     <option value="NONE">Without discount</option>
-                  </select>
+                  </SmartSelect>
                 </>
               }
             >
@@ -2514,7 +2545,7 @@ export function PurchaseOrderDialog({
                             the thing they were hunting through. */}
                           <td className={COL.category}>
                             <div className="space-y-1">
-                              <select
+                              <SmartSelect
                                 className={cell}
                                 value={view.categoryId}
                                 onChange={(e) =>
@@ -2531,14 +2562,14 @@ export function PurchaseOrderDialog({
                                     {c.name}
                                   </option>
                                 ))}
-                              </select>
+                              </SmartSelect>
                               {/* Always here, greyed where the category has no
                                 subcategories rather than vanishing. Hiding it
                                 made the row change shape as the category was
                                 picked, and left the buyer wondering where the
                                 box had gone — which is worse than a box that
                                 is plainly not needed yet. */}
-                              <select
+                              <SmartSelect
                                 className={cell}
                                 value={view.subcategoryId}
                                 disabled={subs.length === 0}
@@ -2554,7 +2585,7 @@ export function PurchaseOrderDialog({
                                     {c.name}
                                   </option>
                                 ))}
-                              </select>
+                              </SmartSelect>
                             </div>
                           </td>
 
@@ -2568,31 +2599,26 @@ export function PurchaseOrderDialog({
                               name the same thing, so one wide cell shows both
                               whole and gives the table back a column. */}
                             <div className="space-y-1">
-                              {/* A real combobox, using the browser's own: type
-                                a code and the list narrows, or open it and pick
-                                one. `datalist` rather than a hand-built dropdown
-                                because it needs no package, it keeps the cell a
-                                plain text box for anyone who already knows the
-                                code by heart, and it cannot be scrolled out of
-                                the table the way an absolutely positioned menu
-                                inside a sideways-scrolling grid can.
-
+                              {/* The code, as the same searchable dropdown as
+                                every other on the form: type a code or part of
+                                the name and the list narrows, each code with its
+                                item's name under it. Picking one picks the item.
                                 One list per row, because each row narrows its
                                 items by its own category. */}
-                              <input
+                              <SmartSelect
                                 className={`${cell} font-mono`}
-                                list={`po-codes-${i}`}
-                                placeholder="Item code"
-                                value={line.codeText ?? ''}
-                                onChange={(e) => typeCodeFor(i, e.target.value)}
+                                value={line.itemId}
+                                onChange={(e) => pickItemFor(i, e.target.value)}
                                 aria-label={`Row ${i + 1} item code`}
-                              />
-                              <datalist id={`po-codes-${i}`}>
+                              >
+                                <option value="">Item code</option>
                                 {choices.map((it) => (
-                                  <option key={it.id} value={it.code ?? ''} label={it.name} />
+                                  <option key={it.id} value={it.id} data-sub={it.name}>
+                                    {it.code ?? it.name}
+                                  </option>
                                 ))}
-                              </datalist>
-                              <select
+                              </SmartSelect>
+                              <SmartSelect
                                 className={cell}
                                 value={line.itemId}
                                 onChange={(e) => pickItemFor(i, e.target.value)}
@@ -2601,13 +2627,18 @@ export function PurchaseOrderDialog({
                                 <option value="">
                                   {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                                 </option>
-                                <option value={ADD_NEW}>+ Add a new item…</option>
-                                {choices.map((it) => (
-                                  <option key={it.id} value={it.id}>
+                                {/* A chosen item stands alone here — its code already decided it.
+                                    The code list still offers the rest, and "Choose an item..." clears
+                                    the row to show every name again. Adding a new item is offered
+                                    only on an empty row: on a chosen one it would quietly replace
+                                    the item, code and all. */}
+                                {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                                {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
+                                  <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                     {it.name}
                                   </option>
                                 ))}
-                              </select>
+                              </SmartSelect>
                             </div>
                             {/* What the row is, under what it is called: the
                               HSN the tax hangs off, and the indent it answers
@@ -2747,7 +2778,7 @@ export function PurchaseOrderDialog({
                                 onChange={(e) => setLine(i, { discount: e.target.value })}
                                 aria-label={`Row ${i + 1} discount`}
                               />
-                              <select
+                              <SmartSelect
                                 className={`${cell} w-14 shrink-0 px-1`}
                                 disabled={poType !== 'ITEM_LEVEL'}
                                 value={line.discountUnit ?? '%'}
@@ -2758,7 +2789,7 @@ export function PurchaseOrderDialog({
                               >
                                 <option value="%">%</option>
                                 <option value="INR">₹</option>
-                              </select>
+                              </SmartSelect>
                             </div>
                           </td>
 
@@ -2872,7 +2903,7 @@ export function PurchaseOrderDialog({
                       <div className="grid grid-cols-2 gap-2">
                         <div className="space-y-1">
                           <label className={fieldLabel}>Category</label>
-                          <select
+                          <SmartSelect
                             className={cell}
                             value={view.categoryId}
                             onChange={(e) =>
@@ -2886,11 +2917,11 @@ export function PurchaseOrderDialog({
                                 {c.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                         </div>
                         <div className="space-y-1">
                           <label className={fieldLabel}>Sub-category</label>
-                          <select
+                          <SmartSelect
                             className={cell}
                             value={view.subcategoryId}
                             disabled={subs.length === 0}
@@ -2903,7 +2934,7 @@ export function PurchaseOrderDialog({
                                 {c.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                         </div>
                       </div>
 
@@ -2918,20 +2949,20 @@ export function PurchaseOrderDialog({
                             flex-basis override here — spelled out without it
                             so the fixed code column and the flexible name
                             column actually hold the widths they are given. */}
-                          <input
-                            className="form-input h-9 w-24 shrink-0 px-2 font-mono text-xs"
-                            list={`po-codes-m-${i}`}
-                            placeholder="Code"
-                            value={line.codeText ?? ''}
-                            onChange={(e) => typeCodeFor(i, e.target.value)}
+                          <SmartSelect
+                            className="form-input h-9 w-28 shrink-0 px-2 font-mono text-xs"
+                            value={line.itemId}
+                            onChange={(e) => pickItemFor(i, e.target.value)}
                             aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={`po-codes-m-${i}`}>
+                          >
+                            <option value="">Code</option>
                             {choices.map((it) => (
-                              <option key={it.id} value={it.code ?? ''} label={it.name} />
+                              <option key={it.id} value={it.id} data-sub={it.name}>
+                                {it.code ?? it.name}
+                              </option>
                             ))}
-                          </datalist>
-                          <select
+                          </SmartSelect>
+                          <SmartSelect
                             className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
                             value={line.itemId}
                             onChange={(e) => pickItemFor(i, e.target.value)}
@@ -2940,13 +2971,15 @@ export function PurchaseOrderDialog({
                             <option value="">
                               {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                             </option>
-                            <option value={ADD_NEW}>+ Add a new item…</option>
-                            {choices.map((it) => (
-                              <option key={it.id} value={it.id}>
+                            {/* As on the desktop row: a chosen item stands alone, and a new
+                                item is offered only on an empty row. */}
+                            {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                            {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
+                              <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                 {it.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                         </div>
                         {(item?.hsnCode || line.mrNumber) && (
                           <p className="flex flex-wrap items-center gap-x-2 font-mono text-[10px] leading-tight">
@@ -3059,7 +3092,7 @@ export function PurchaseOrderDialog({
                               onChange={(e) => setLine(i, { discount: e.target.value })}
                               aria-label={`Row ${i + 1} discount`}
                             />
-                            <select
+                            <SmartSelect
                               className="form-input h-9 w-14 shrink-0 px-1 text-xs"
                               disabled={poType !== 'ITEM_LEVEL'}
                               value={line.discountUnit ?? '%'}
@@ -3070,7 +3103,7 @@ export function PurchaseOrderDialog({
                             >
                               <option value="%">%</option>
                               <option value="INR">₹</option>
-                            </select>
+                            </SmartSelect>
                           </div>
                         </div>
                         <div className="space-y-1">
@@ -3340,7 +3373,7 @@ export function PurchaseOrderDialog({
 
                       {deliverTo === 'CUSTOMER' ? (
                         <>
-                          <select
+                          <SmartSelect
                             className="form-input"
                             value={deliveryCustomerId}
                             onChange={(e) => setDeliveryCustomerId(e.target.value)}
@@ -3352,7 +3385,7 @@ export function PurchaseOrderDialog({
                                 {c.code ? `${c.code} — ${c.name}` : c.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
 
                           {deliveryCustomer && (
                             <div className="border-border bg-secondary rounded-lg border px-3 py-2">

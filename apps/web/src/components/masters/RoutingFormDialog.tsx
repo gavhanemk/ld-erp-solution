@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { X, Loader2, AlertCircle, Plus, Trash2, ArrowUp, ArrowDown, Lock } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * A routing is the ordered path a style takes through the factory. No two
@@ -279,7 +280,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: Props) {
               <label className="form-label" htmlFor="rt-style">
                 Style<span className="text-red-400 ml-0.5">*</span>
               </label>
-              <select
+              <SmartSelect
                 id="rt-style"
                 className="form-input"
                 value={styleId}
@@ -291,7 +292,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: Props) {
                     {s.code ? `${s.code} — ${s.name}` : s.name}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
             </div>
           </div>
 
@@ -338,7 +339,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: Props) {
                     <tr key={i} className="border-b border-border/50 last:border-0">
                       <td className="py-2 px-3 font-mono text-xs text-teal-400">{i + 1}</td>
                       <td className="py-2 px-3">
-                        <select
+                        <SmartSelect
                           className="form-input h-9"
                           value={step.operationId}
                           onChange={(e) => pickOperation(i, e.target.value)}
@@ -350,10 +351,10 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: Props) {
                               {o.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </td>
                       <td className="py-2 px-3">
-                        <select
+                        <SmartSelect
                           className="form-input h-9"
                           value={step.departmentId}
                           onChange={(e) => setStep(i, { departmentId: e.target.value })}
@@ -365,10 +366,10 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: Props) {
                               {d.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </td>
                       <td className="py-2 px-3">
-                        <select
+                        <SmartSelect
                           className="form-input h-9"
                           value={step.workstationId ?? ''}
                           onChange={(e) => setStep(i, { workstationId: e.target.value })}
@@ -381,7 +382,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: Props) {
                               {w.type === 'JOB_WORK' ? ' (outside)' : ''}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </td>
                       <td className="py-2 px-3">
                         <input

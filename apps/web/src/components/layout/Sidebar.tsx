@@ -58,6 +58,7 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Items & Products', href: '/masters/items' },
       { label: 'Item Categories', href: '/masters/item-categories' },
+      { label: 'HSN / SAC Codes', href: '/masters/hsn-codes' },
       { label: 'Expense Heads', href: '/masters/expense-heads' },
       { label: 'Styles & SKU', href: '/masters/styles' },
       { label: 'Bill of Materials', href: '/masters/bom' },
@@ -68,6 +69,7 @@ const navItems: NavItem[] = [
       { label: 'Departments', href: '/masters/departments' },
       { label: 'Workstations', href: '/masters/workstations' },
       { label: 'Extra Charges', href: '/masters/charges' },
+      { label: 'Dropdown Lists', href: '/masters/dropdown-lists' },
       { label: 'Warehouses', href: '/masters/warehouses' },
       { label: 'Bank Accounts', href: '/masters/bank-accounts' },
     ],

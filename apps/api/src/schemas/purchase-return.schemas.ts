@@ -37,15 +37,32 @@ const lineSchema = z.object({
     .positive('The quantity going back has to be more than zero')
     .max(9_999_999, 'That quantity looks like a typo'),
   remarks: text(300, 'line remark'),
+  /**
+   * Why this row is going back. Every row says its own; a caller that still
+   * sends one reason for the whole challan has it stand for rows without one.
+   */
+  reason: z.enum(RETURN_REASONS).optional(),
+  /**
+   * The mill's own name for the reason, when it is one from Masters →
+   * Dropdown Lists. `reason` is then the built-in one it works like.
+   */
+  reasonLabel: z.string().trim().max(60).optional().nullable(),
 })
 
 export const createReturnSchema = z
   .object({
     billId: z.string().min(1, 'Pick the bill these goods are going back against'),
     returnDate: z.coerce.date().optional(),
-    reason: z.enum(RETURN_REASONS, {
-      errorMap: () => ({ message: 'Say why the goods are going back' }),
-    }),
+    /*
+     * The challan's own reason. Optional now that each row carries one — the
+     * server works out the main reason from the rows. Still accepted, and
+     * used for any row that does not say, so an older screen keeps working.
+     */
+    reason: z
+      .enum(RETURN_REASONS, {
+        errorMap: () => ({ message: 'Say why the goods are going back' }),
+      })
+      .optional(),
     reasonNote: text(500, 'reason'),
     vehicleNo: text(20, 'vehicle number'),
     transporterName: text(120, 'transporter name'),
@@ -57,19 +74,28 @@ export const createReturnSchema = z
   })
   .superRefine((data, ctx) => {
     /*
-     * One bill line may appear more than once — a line received into two
-     * godowns goes back from both — but not twice from the same godown, which
-     * passes every per-line check and then takes the goods out twice.
+     * One bill line may appear more than once — from two godowns, or for two
+     * reasons (30 damaged, 20 off-shade) — but not twice with the same godown
+     * and the same reason. That pair says nothing two rows can say that one
+     * cannot, and is nearly always the same quantity typed in twice.
      */
     const seen = new Set<string>()
     data.lines.forEach((l, i) => {
-      const key = l.billLineId + '::' + l.warehouseId
+      if (!l.reason && !data.reason) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'reason'],
+          message: 'Say why each row is going back',
+        })
+      }
+      const key =
+        l.billLineId + '::' + l.warehouseId + '::' + (l.reasonLabel || (l.reason ?? data.reason))
       if (seen.has(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['lines', i, 'warehouseId'],
+          path: ['lines', i, 'reason'],
           message:
-            'This item is already going back from that godown on this challan. Put the whole quantity on one row.',
+            'This item is already going back from that godown for the same reason on this challan. Pick a different reason for this row, or put the quantity on one row.',
         })
       }
       seen.add(key)

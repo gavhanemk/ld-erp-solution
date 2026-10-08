@@ -14,8 +14,15 @@ import {
   Truck,
   X,
 } from 'lucide-react'
-import { api, apiErrorMessage, masterResource } from '@/lib/api'
+import { api, apiErrorMessage, can, masterResource } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import {
+  optionFromCreated,
+  returnReasonFields,
+  type ReasonOption,
+} from '@/components/purchase/returnReasons'
 
 /**
  * A return challan — goods going back to the supplier against a bill.
@@ -49,6 +56,12 @@ interface ReturnableLine {
   onHand: number | null
   /** Rejected on a quality check, and the reject godown it was moved to. */
   qcRejectedQty: number
+  /** Why QC rejected it, as one of the challan's reasons; null if it did not say. */
+  qcReasonCode: string | null
+  /** The mill's own name for that reason, when QC picked one of theirs. */
+  qcReasonName: string | null
+  /** The checker's note on that rejection. */
+  qcReasonNote: string | null
   qcWarehouseId: string | null
   qcWarehouseName: string | null
   qcOnHand: number | null
@@ -80,7 +93,8 @@ interface Returnable {
     }>
   }
   lines: ReturnableLine[]
-  reasons: Array<{ value: string; label: string; hint: string }>
+  /** Built-in reasons, then the mill's own from Masters → Dropdown Lists. */
+  reasons: ReasonOption[]
 }
 
 /** A date as the mill writes it: 03 Oct 2026. */
@@ -115,6 +129,8 @@ interface Row {
   warehouseId: string
   qty: string
   remarks: string
+  /** Why this row is going back. Required — each row says its own. */
+  reason: string
 }
 
 interface Warehouse {
@@ -154,18 +170,21 @@ export function ReturnChallanDialog({
   const [rows, setRows] = useState<Row[]>([])
 
   const [returnDate, setReturnDate] = useState(today)
-  const [reason, setReason] = useState('')
   const [reasonNote, setReasonNote] = useState('')
   const [vehicleNo, setVehicleNo] = useState('')
   const [transporterName, setTransporterName] = useState('')
   const [lrNumber, setLrNumber] = useState('')
   const [ewayBillNo, setEwayBillNo] = useState('')
   const [driverName, setDriverName] = useState('')
-  const [remarks, setRemarks] = useState('')
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  /** The row a new reason is being added for, and what had been typed. */
+  const [newReasonFor, setNewReasonFor] = useState<{ rowKey: string; typed: string } | null>(
+    null
+  )
 
   useEffect(() => {
     let alive = true
@@ -190,15 +209,27 @@ export function ReturnChallanDialog({
                 l.warehouseId ??
                 w.data[0]?.id ??
                 '',
-              qty: '',
-              remarks: '',
+              /*
+               * What QC rejected and has not yet gone back, why, and the
+               * checker's note — straight off the check. A line QC did not
+               * reject, or rejected without saying why, starts empty: nothing
+               * here is guessed.
+               */
+              qty: (() => {
+                const left = Math.min(l.qcRejectedQty - l.adjustedQty, l.remainingQty)
+                return l.qcRejectedQty > 0 && left > 0 ? String(Number(left.toFixed(3))) : ''
+              })(),
+              remarks: l.qcRejectedQty > 0 ? (l.qcReasonNote ?? '') : '',
+              reason:
+                l.qcRejectedQty > 0
+                  ? (r.data.reasons.find(
+                      (o) => o.custom && o.label === l.qcReasonName && o.code === l.qcReasonCode
+                    )?.value ??
+                    l.qcReasonCode ??
+                    '')
+                  : '',
             }))
         )
-        // Rejected at the gate is the commonest reason a return is written,
-        // and when the bill carries a rejection it is almost always the
-        // reason for this one. Suggested, never forced.
-        if (r.data.lines.some((l) => l.rejectedQty > l.adjustedQty || l.qcRejectedQty > 0))
-          setReason('QUALITY_REJECTION')
       })
       .catch((err) => {
         if (alive) setError(apiErrorMessage(err, 'Could not read that bill.'))
@@ -225,31 +256,42 @@ export function ReturnChallanDialog({
   }, [onClose, saving])
 
   const lineById = useMemo(() => new Map((data?.lines ?? []).map((l) => [l.billLineId, l])), [data])
+  const reasonByKey = useMemo(
+    () => new Map((data?.reasons ?? []).map((o) => [o.value, o])),
+    [data]
+  )
 
   const setRow = (key: string, patch: Partial<Row>) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
 
+
   /*
-   * A second row for the same bill line, from another godown.
+   * A second row for the same bill line.
    *
-   * One delivery is routinely split across two stores, and the goods go back
-   * from wherever they are. The server refuses the same line from the same
-   * godown twice, so the copy starts on a different one where there is one.
+   * Usually to give part of it another reason — of fifty rejected, thirty
+   * damaged and twenty off-shade — so the copy stays on the same godown and
+   * starts on the next reason not yet used there. Change the godown instead
+   * when the goods are in two places. The server refuses only the same line,
+   * godown and reason twice, which two rows could never mean.
    */
   const splitRow = (key: string) =>
     setRows((prev) => {
       const at = prev.findIndex((r) => r.key === key)
       if (at < 0) return prev
-      const used = new Set(
-        prev.filter((r) => r.billLineId === prev[at].billLineId).map((r) => r.warehouseId)
+      const from = prev[at]
+      const taken = new Set(
+        prev
+          .filter((r) => r.billLineId === from.billLineId && r.warehouseId === from.warehouseId)
+          .map((r) => r.reason)
       )
-      const other = warehouses.find((w) => !used.has(w.id))?.id ?? prev[at].warehouseId
+      const next = data?.reasons.find((x) => !taken.has(x.value))?.value ?? ''
       const copy: Row = {
         key: nextKey(),
-        billLineId: prev[at].billLineId,
-        warehouseId: other,
+        billLineId: from.billLineId,
+        warehouseId: from.warehouseId,
         qty: '',
         remarks: '',
+        reason: next,
       }
       return [...prev.slice(0, at + 1), copy, ...prev.slice(at + 1)]
     })
@@ -277,7 +319,6 @@ export function ReturnChallanDialog({
    */
   const problems = useMemo(() => {
     const out: string[] = []
-    if (!reason) out.push('Say why the goods are going back')
     if (going.length === 0) out.push('Enter what is going back on at least one line')
     for (const [billLineId, qty] of goingByLine) {
       const l = lineById.get(billLineId)
@@ -286,8 +327,20 @@ export function ReturnChallanDialog({
       }
     }
     if (going.some((r) => !r.warehouseId)) out.push('Every line needs the godown it leaves from')
+    if (going.some((r) => !r.reason)) out.push('Say why each row is going back')
+    const seen = new Set<string>()
+    for (const r of going) {
+      const k = r.billLineId + '::' + r.warehouseId + '::' + r.reason
+      if (seen.has(k)) {
+        out.push(
+          `${lineById.get(r.billLineId)?.itemName ?? 'An item'} is on two rows with the same godown and reason — give one of them another reason`
+        )
+        break
+      }
+      seen.add(k)
+    }
     return out
-  }, [reason, going, goingByLine, lineById])
+  }, [going, goingByLine, lineById])
 
   const save = async () => {
     if (problems.length || saving) return
@@ -297,19 +350,23 @@ export function ReturnChallanDialog({
       const res = await api.post<{ data: { id: string }; message: string }>('/purchase/returns', {
         billId,
         returnDate,
-        reason,
         reasonNote: reasonNote.trim() || null,
         vehicleNo: vehicleNo.trim() || null,
         transporterName: transporterName.trim() || null,
         lrNumber: lrNumber.trim() || null,
         ewayBillNo: ewayBillNo.trim() || null,
         driverName: driverName.trim() || null,
-        remarks: remarks.trim() || null,
         lines: going.map((r) => ({
           billLineId: r.billLineId,
           warehouseId: r.warehouseId,
           qty: num(r.qty),
           remarks: r.remarks.trim() || null,
+          // The built-in reason stock and the note go by, and the mill's
+          // own name for it when it is one of theirs.
+          reason: reasonByKey.get(r.reason)?.code,
+          reasonLabel: reasonByKey.get(r.reason)?.custom
+            ? reasonByKey.get(r.reason)?.label
+            : null,
         })),
       })
       onSaved(res.message, res.data.id)
@@ -490,26 +547,11 @@ export function ReturnChallanDialog({
 
               {/* ── Why, and when ────────────────────────────────────────── */}
               <Section icon={MessageSquare} title="Return Details">
+                {/* No reason here: each row below says why it is going back, and
+                  one box for the whole challan only ever disagreed with them. */}
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-                  <label className="block">
-                    <span className="form-label">
-                      Reason<span className="ml-0.5 text-red-400">*</span>
-                    </span>
-                    <select
-                      className="form-input"
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                    >
-                      <option value="">Pick one…</option>
-                      {data?.reasons.map((r) => (
-                        <option key={r.value} value={r.value}>
-                          {r.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="block lg:col-span-2">
-                    <span className="form-label">What was wrong</span>
+                  <label className="block sm:col-span-1 lg:col-span-3">
+                    <span className="form-label">What was wrong/Remarks</span>
                     <input
                       className="form-input"
                       value={reasonNote}
@@ -558,7 +600,7 @@ export function ReturnChallanDialog({
                               {!first && (
                                 <span className="text-muted-foreground font-normal">
                                   {' '}
-                                  — another godown
+                                  — split
                                 </span>
                               )}
                             </p>
@@ -567,12 +609,12 @@ export function ReturnChallanDialog({
                               {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
                             </p>
                             {first && l.rejectedQty > 0 && (
-                              <p className="text-[10px] text-amber-500">
+                              <p className="warn-text text-[11px] font-semibold">
                                 {l.rejectedQty} rejected at the gate
                               </p>
                             )}
                             {first && l.qcRejectedQty > 0 && (
-                              <p className="text-[10px] text-amber-500">
+                              <p className="warn-text text-[11px] font-semibold">
                                 {l.qcRejectedQty} {l.uom ?? ''} rejected on QC
                                 {l.qcWarehouseName ? ` — in ${l.qcWarehouseName}` : ''}
                               </p>
@@ -583,7 +625,7 @@ export function ReturnChallanDialog({
                               type="button"
                               className="btn-ghost text-muted-foreground p-1"
                               onClick={() => splitRow(r.key)}
-                              aria-label={`${l.itemName}: add another godown`}
+                              aria-label={`${l.itemName}: split into another row, for another reason or godown`}
                             >
                               <Plus size={14} />
                             </button>
@@ -592,7 +634,7 @@ export function ReturnChallanDialog({
                                 type="button"
                                 className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                 onClick={() => dropRow(r.key)}
-                                aria-label="Remove this godown row"
+                                aria-label="Remove this row"
                               >
                                 <Trash2 size={14} />
                               </button>
@@ -619,7 +661,7 @@ export function ReturnChallanDialog({
 
                         <div className="mt-2 space-y-1">
                           <label className={fieldLabel}>From godown</label>
-                          <select
+                          <SmartSelect
                             className="form-input h-9 w-full"
                             value={r.warehouseId}
                             onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}
@@ -631,7 +673,7 @@ export function ReturnChallanDialog({
                                 {w.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                           <p
                             className={`text-[10px] ${short ? 'text-red-400' : 'text-muted-foreground'}`}
                           >
@@ -639,6 +681,29 @@ export function ReturnChallanDialog({
                               ? `${onHand} ${l.uom ?? ''} in this godown`
                               : 'Stock is checked when you save'}
                           </p>
+                        </div>
+
+                        <div className="mt-2 space-y-1">
+                          <label className={fieldLabel}>Reason</label>
+                          <SmartSelect
+                            className="form-input h-9 w-full"
+                            value={r.reason}
+                            onChange={(e) => setRow(r.key, { reason: e.target.value })}
+                            onCreate={
+                              can('masters', 'create')
+                                ? (typed) => setNewReasonFor({ rowKey: r.key, typed })
+                                : undefined
+                            }
+                            createNoun="reason"
+                            aria-label={`Why ${l.itemName} is going back`}
+                          >
+                            <option value="">Pick…</option>
+                            {data?.reasons.map((x) => (
+                              <option key={x.value} value={x.value}>
+                                {x.label}
+                              </option>
+                            ))}
+                          </SmartSelect>
                         </div>
 
                         <div className="mt-2 grid grid-cols-2 gap-2">
@@ -675,18 +740,19 @@ export function ReturnChallanDialog({
                 </div>
 
                 <div className="border-border bg-card hidden overflow-x-auto rounded-lg border sm:block">
-                  <table className="w-full min-w-[980px] table-fixed border-collapse text-sm">
+                  <table className="w-full min-w-[1120px] table-fixed border-collapse text-sm">
                     <thead>
                       <tr className="bg-secondary">
                         {[
-                          ['Item', 'w-64', 'left'],
+                          ['Item', 'w-60', 'left'],
                           ['Billed', 'w-24', 'right'],
                           ['Can go back', 'w-28', 'right'],
                           ['From godown', 'w-44', 'left'],
                           ['In godown', 'w-24', 'right'],
-                          ['Qty going back', 'w-32', 'right'],
-                          ['Remark', 'w-44', 'left'],
-                          ['', 'w-20', 'left'],
+                          ['Qty going back', 'w-28', 'right'],
+                          ['Reason', 'w-44', 'left'],
+                          ['Remark', 'w-40', 'left'],
+                          ['', 'w-16', 'left'],
                         ].map(([label, width, align], i) => (
                           <th
                             key={label + i}
@@ -732,13 +798,13 @@ export function ReturnChallanDialog({
                                     {l.itemCode}
                                     {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
                                     {l.rejectedQty > 0 && (
-                                      <span className="text-amber-500">
+                                      <span className="warn-text font-semibold">
                                         {' '}
                                         · {l.rejectedQty} rejected at the gate
                                       </span>
                                     )}
                                     {l.qcRejectedQty > 0 && (
-                                      <span className="text-amber-500">
+                                      <span className="warn-text font-semibold">
                                         {' '}
                                         · {l.qcRejectedQty} rejected on QC
                                         {l.qcWarehouseName ? ` (in ${l.qcWarehouseName})` : ''}
@@ -748,7 +814,7 @@ export function ReturnChallanDialog({
                                 </>
                               ) : (
                                 <p className="text-muted-foreground pt-2 text-xs">
-                                  {l.itemName} — from another godown
+                                  {l.itemName} — split
                                 </p>
                               )}
                             </td>
@@ -763,7 +829,7 @@ export function ReturnChallanDialog({
                               {first ? `${l.remainingQty} ${l.uom ?? ''}` : ''}
                             </td>
                             <td>
-                              <select
+                              <SmartSelect
                                 className="form-input h-8 text-xs"
                                 value={r.warehouseId}
                                 onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}
@@ -775,7 +841,7 @@ export function ReturnChallanDialog({
                                     {w.name}
                                   </option>
                                 ))}
-                              </select>
+                              </SmartSelect>
                             </td>
                             <td
                               className={`whitespace-nowrap pt-2.5 text-right text-xs tabular-nums ${
@@ -799,6 +865,29 @@ export function ReturnChallanDialog({
                               />
                             </td>
                             <td>
+                              <SmartSelect
+                                className={`form-input h-8 text-xs ${
+                                  num(r.qty) > 0 && !r.reason ? 'border-red-500/60' : ''
+                                }`}
+                                value={r.reason}
+                                onChange={(e) => setRow(r.key, { reason: e.target.value })}
+                                onCreate={
+                                  can('masters', 'create')
+                                    ? (typed) => setNewReasonFor({ rowKey: r.key, typed })
+                                    : undefined
+                                }
+                                createNoun="reason"
+                                aria-label={`Why ${l.itemName} is going back`}
+                              >
+                                <option value="">Pick…</option>
+                                {data?.reasons.map((x) => (
+                                  <option key={x.value} value={x.value}>
+                                    {x.label}
+                                  </option>
+                                ))}
+                              </SmartSelect>
+                            </td>
+                            <td>
                               <input
                                 className="form-input h-8 text-xs"
                                 value={r.remarks}
@@ -813,8 +902,8 @@ export function ReturnChallanDialog({
                                   type="button"
                                   className="btn-ghost text-muted-foreground p-1"
                                   onClick={() => splitRow(r.key)}
-                                  title="Also send some back from another godown"
-                                  aria-label={`${l.itemName}: add another godown`}
+                                  title="Split into another row — for another reason, or from another godown"
+                                  aria-label={`${l.itemName}: split into another row`}
                                 >
                                   <Plus size={13} />
                                 </button>
@@ -823,7 +912,7 @@ export function ReturnChallanDialog({
                                     type="button"
                                     className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
                                     onClick={() => dropRow(r.key)}
-                                    aria-label="Remove this godown row"
+                                    aria-label="Remove this row"
                                   >
                                     <Trash2 size={13} />
                                   </button>
@@ -860,15 +949,6 @@ export function ReturnChallanDialog({
                       />
                     </label>
                   ))}
-                  <label className="block sm:col-span-2 lg:col-span-5">
-                    <span className="form-label">Remarks</span>
-                    <input
-                      className="form-input"
-                      value={remarks}
-                      onChange={(e) => setRemarks(e.target.value)}
-                      placeholder="Printed on the challan"
-                    />
-                  </label>
                 </div>
               </Section>
             </>
@@ -904,6 +984,24 @@ export function ReturnChallanDialog({
           </div>
         </div>
       </div>
+
+      {/* One of the mill's own reasons, added without leaving the form. It goes
+        into Masters → Dropdown Lists, where it can be renamed or switched off. */}
+      <MasterFormDialog<{ id: string; label: string; behavesAs: string | null }>
+        open={newReasonFor !== null}
+        onClose={() => setNewReasonFor(null)}
+        onSaved={() => {}}
+        onCreated={(row) => {
+          const option = optionFromCreated(row)
+          setData((prev) => (prev ? { ...prev, reasons: [...prev.reasons, option] } : prev))
+          if (newReasonFor) setRow(newReasonFor.rowKey, { reason: option.value })
+        }}
+        resource="dropdown-values"
+        fields={returnReasonFields}
+        initialValues={newReasonFor?.typed ? { label: newReasonFor.typed } : undefined}
+        title="Return reason"
+        stacked
+      />
     </div>,
     document.body
   )

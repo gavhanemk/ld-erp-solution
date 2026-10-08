@@ -17,6 +17,7 @@ import { api, apiErrorMessage, can, masterResource, type Paginated } from '@/lib
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { Pagination } from '@/components/tables/Pagination'
 import { RowPanel } from '@/components/tables/RowPanel'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Purchase returns — the challans goods went back to suppliers on.
@@ -41,6 +42,8 @@ interface ReturnLine {
   unitPrice: string | number
   gstRate: string | number
   remarks: string | null
+  /** This row's reason in words — the challan's own where the row had none. */
+  reasonLabel?: string
   billLine: {
     hsnCode: string | null
     grnLine: { grn: { id: string; grnNumber: string } } | null
@@ -80,8 +83,15 @@ const STATUS: Record<ReturnRow['status'], { label: string; cls: string }> = {
   CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
 }
 
+/*
+ * A challan writes its debit note itself, as a draft, the moment it is saved.
+ * "Draft" alone read as though somebody had started one; it says what it is.
+ */
+const NOTE_DRAFT_HINT =
+  'Written automatically when this challan was saved. Accounts checks it and posts it; only then is it adjusted against the bill.'
+
 const NOTE_STATUS: Record<string, { label: string; cls: string }> = {
-  DRAFT: { label: 'Draft', cls: 'badge-warning' },
+  DRAFT: { label: 'Draft · not posted', cls: 'badge-warning' },
   POSTED: { label: 'Posted', cls: 'badge-success' },
   CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
 }
@@ -198,9 +208,13 @@ export default function PurchaseReturnsPage() {
       },
     ]
     for (const n of r.debitNotes) {
+      const draft = n.status === 'DRAFT'
       items.push({
         key: 'note-' + n.id,
-        label: `Open debit note ${n.noteNumber}`,
+        label: draft
+          ? `Review & post debit note ${n.noteNumber}`
+          : `View debit note ${n.noteNumber}`,
+        hint: draft ? 'Written automatically from this challan — not posted yet' : undefined,
         icon: <FileText size={14} />,
         href: '/purchase/debit-notes?q=' + encodeURIComponent(n.noteNumber),
       })
@@ -230,7 +244,8 @@ export default function PurchaseReturnsPage() {
         <div className="min-w-0">
           <h1 className="page-title text-xl sm:text-2xl">Purchase Returns</h1>
           <p className="page-subtitle hidden sm:block">
-            Goods sent back to suppliers. Raised from a bill; each writes its own debit note.
+            Goods sent back to suppliers, raised from a bill. Saving one writes a draft debit
+            note for accounts to check and post.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -284,7 +299,7 @@ export default function PurchaseReturnsPage() {
               className="form-input pl-8"
             />
           </div>
-          <select
+          <SmartSelect
             value={status}
             onChange={(e) => setStatus(e.target.value)}
             className="form-input w-auto"
@@ -292,7 +307,7 @@ export default function PurchaseReturnsPage() {
             <option value="">Any status</option>
             <option value="DISPATCHED">Dispatched</option>
             <option value="CANCELLED">Cancelled</option>
-          </select>
+          </SmartSelect>
           <div className="flex shrink-0 items-center gap-1">
             <input
               type="date"
@@ -312,7 +327,7 @@ export default function PurchaseReturnsPage() {
               aria-label="Returns up to this date"
             />
           </div>
-          <select
+          <SmartSelect
             value={supplierId}
             onChange={(e) => setSupplierId(e.target.value)}
             className="form-input w-auto"
@@ -323,7 +338,7 @@ export default function PurchaseReturnsPage() {
                 {s.name}
               </option>
             ))}
-          </select>
+          </SmartSelect>
           {filtered && (
             <button type="button" onClick={clearAll} className="btn-ghost text-xs">
               <X size={14} />
@@ -427,7 +442,10 @@ export default function PurchaseReturnsPage() {
                               >
                                 {n.noteNumber}
                               </Link>
-                              <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
+                              <span
+                                    className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}
+                                    title={n.status === 'DRAFT' ? NOTE_DRAFT_HINT : undefined}
+                                  >
                                 {NOTE_STATUS[n.status]?.label ?? n.status}
                               </span>
                             </span>
@@ -466,9 +484,14 @@ export default function PurchaseReturnsPage() {
                                   </>
                                 )}
                               </p>
-                              {l.remarks && (
+                              {(l.remarks || (l.reasonLabel && l.reasonLabel !== r.reasonLabel)) && (
                                 <p className="text-muted-foreground mt-0.5 text-[10px]">
-                                  {l.remarks}
+                                  {[
+                                    l.reasonLabel !== r.reasonLabel ? l.reasonLabel : null,
+                                    l.remarks,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
                                 </p>
                               )}
                             </div>
@@ -587,7 +610,10 @@ export default function PurchaseReturnsPage() {
                                   >
                                     {n.noteNumber}
                                   </Link>
-                                  <span className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}>
+                                  <span
+                                    className={NOTE_STATUS[n.status]?.cls ?? 'badge-neutral'}
+                                    title={n.status === 'DRAFT' ? NOTE_DRAFT_HINT : undefined}
+                                  >
                                     {NOTE_STATUS[n.status]?.label ?? n.status}
                                   </span>
                                 </div>
@@ -650,9 +676,15 @@ export default function PurchaseReturnsPage() {
                                         </td>
                                         <td className="px-3 py-1.5">
                                           <p className="text-xs">{l.item.name}</p>
-                                          {l.remarks && (
+                                          {(l.remarks ||
+                                            (l.reasonLabel && l.reasonLabel !== r.reasonLabel)) && (
                                             <p className="text-muted-foreground text-[10px]">
-                                              {l.remarks}
+                                              {[
+                                                l.reasonLabel !== r.reasonLabel ? l.reasonLabel : null,
+                                                l.remarks,
+                                              ]
+                                                .filter(Boolean)
+                                                .join(' · ')}
                                             </p>
                                           )}
                                         </td>

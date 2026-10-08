@@ -23,6 +23,8 @@ import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
 import type { NewItem } from '@/components/purchase/NewItemDialog'
 import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
+import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 
 export interface BillLine {
   itemId: string
@@ -269,6 +271,8 @@ interface GrnOption {
    * is the mill's own record of having seen it arrive.
    */
   supplierInvoiceNo?: string | null
+  /** The date on that invoice, when the gate wrote that down too. */
+  supplierInvoiceDate?: string | null
   /** What is still unbilled on this receipt. Sent by `/purchase/grn`. */
   billing?: {
     acceptedQty: number | string
@@ -897,6 +901,66 @@ export function PurchaseBillDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [receiptChoices, filterPo, filterChallan, filterBill, filterGrn]
   )
+
+  /*
+   * The supplier's bill numbers the gate wrote down, offered in Bill no.
+   *
+   * One invoice often covers several deliveries, and the number is usually
+   * caught on only one of them — the clerk at the gate had the invoice for one
+   * lorry and not the next. So every number on the receipts ticked onto this
+   * bill is offered first, then the rest of the order's (or the supplier's,
+   * with no order chosen). Still a free box: a bill the gate never saw is typed.
+   */
+  const billNoSuggestions = useMemo(() => {
+    const byNo = new Map<string, { onBill: boolean; refs: string[] }>()
+    for (const g of receiptChoices) {
+      const no = g.supplierInvoiceNo?.trim()
+      const onBill = billedSet.has(g.grnNumber)
+      if (!no || !(onBill || matchesPo(g))) continue
+      const entry = byNo.get(no) ?? { onBill: false, refs: [] }
+      entry.onBill ||= onBill
+      entry.refs.push(g.challanNo ? `${g.grnNumber} · challan ${g.challanNo}` : g.grnNumber)
+      byNo.set(no, entry)
+    }
+    return [...byNo]
+      .sort(([a, x], [b, y]) => Number(y.onBill) - Number(x.onBill) || a.localeCompare(b))
+      .map(([value, e]) => ({ value, label: `${e.onBill ? 'On this bill — ' : ''}${e.refs.join(', ')}` }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [receiptChoices, billedSet, filterPo])
+
+  /** The date the gate wrote beside that bill number, if it wrote one. */
+  const dateForBillNo = (no: string) =>
+    receiptChoices
+      .find((g) => g.supplierInvoiceNo?.trim() === no.trim() && g.supplierInvoiceDate)
+      ?.supplierInvoiceDate?.slice(0, 10) ?? ''
+
+  const typeBillNo = (no: string) => {
+    setSupplierInvoiceNo(no)
+    // Picking a number the gate caught brings its date, into an empty box only.
+    const date = dateForBillNo(no)
+    if (date && !supplierInvoiceDate) setSupplierInvoiceDate(date)
+  }
+
+  /*
+   * Filled in for the clerk when the receipts on the bill agree on one
+   * number — the common case, one invoice for the deliveries ticked. Never
+   * over anything typed, and not when they carry two different numbers:
+   * which one is right is the clerk's call, and both are offered.
+   */
+  const onBillNos = [
+    ...new Set(
+      receiptChoices
+        .filter((g) => billedSet.has(g.grnNumber))
+        .map((g) => g.supplierInvoiceNo?.trim())
+        .filter(Boolean) as string[]
+    ),
+  ]
+  const onBillNosKey = onBillNos.join('|')
+  useEffect(() => {
+    if (onBillNos.length !== 1 || supplierInvoiceNo.trim()) return
+    typeBillNo(onBillNos[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onBillNosKey])
 
   /*
    * Whether there is anything to show the table for.
@@ -1545,7 +1609,7 @@ export function PurchaseBillDialog({
                         <span className="form-label">
                           Supplier<span className="ml-0.5 text-red-400">*</span>
                         </span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={supplierId}
                           onChange={(e) => chooseSupplier(e.target.value)}
@@ -1557,11 +1621,11 @@ export function PurchaseBillDialog({
                               {sup.code ? `${sup.code} — ${sup.name}` : sup.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">PO no.</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterPo}
                           onChange={(e) => choosePo(e.target.value)}
@@ -1573,11 +1637,11 @@ export function PurchaseBillDialog({
                               {o.poNumber}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">Challan no. (theirs)</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterChallan}
                           onChange={(e) => chooseChallan(e.target.value)}
@@ -1589,11 +1653,11 @@ export function PurchaseBillDialog({
                               {c}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">Supplier bill no.</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterBill}
                           onChange={(e) => chooseBill(e.target.value)}
@@ -1612,11 +1676,11 @@ export function PurchaseBillDialog({
                               {b}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">Receipt no. (ours)</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterGrn}
                           onChange={(e) => chooseGrn(e.target.value)}
@@ -1629,7 +1693,7 @@ export function PurchaseBillDialog({
                               {g.challanNo ? ` · ${g.challanNo}` : ''}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                     </div>
 
@@ -1865,7 +1929,7 @@ export function PurchaseBillDialog({
                   <label className="form-label" htmlFor="bill-supplier">
                     Supplier<span className="ml-0.5 text-red-400">*</span>
                   </label>
-                  <select
+                  <SmartSelect
                     id="bill-supplier"
                     className="form-input"
                     value={supplierId}
@@ -1877,7 +1941,7 @@ export function PurchaseBillDialog({
                         {s.code ? `${s.code} — ${s.name}` : s.name}
                       </option>
                     ))}
-                  </select>
+                  </SmartSelect>
                   {expenseMode && suppliers.length > 0 && supplierChoices.length === 0 && (
                     <p className="mt-1 text-xs text-amber-500">
                       No service suppliers yet. Add one in Masters → Suppliers with category
@@ -1910,12 +1974,13 @@ export function PurchaseBillDialog({
                     Bill no.<span className="ml-0.5 text-red-400">*</span>{' '}
                     <span className="text-muted-foreground">(theirs)</span>
                   </label>
-                  <input
+                  <SuggestInput
                     id="bill-supplier-no"
                     className="form-input"
                     placeholder="As printed on their bill"
                     value={supplierInvoiceNo}
-                    onChange={(e) => setSupplierInvoiceNo(e.target.value)}
+                    onValueChange={typeBillNo}
+                    suggestions={billNoSuggestions}
                   />
                   {/* A prompt, not an alarm. An empty box on a form nobody has
                 filled in yet has not gone wrong — it is simply not done, and
@@ -2174,14 +2239,14 @@ export function PurchaseBillDialog({
                           className="border-border/50 border-b last:border-0 [&>td]:align-top"
                         >
                           <td className="min-w-[200px] px-3 py-1.5">
-                            <select
+                            <SmartSelect
                               className="form-input h-8"
                               value={line.itemId}
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
                             >
                               {itemChoices(line.itemId)}
-                            </select>
+                            </SmartSelect>
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
                                 {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
@@ -2342,14 +2407,14 @@ export function PurchaseBillDialog({
 
                       <div className="space-y-1">
                         <label className={fieldLabel}>Item</label>
-                        <select
+                        <SmartSelect
                           className="form-input h-9 w-full"
                           value={line.itemId}
                           onChange={(e) => pickItem(i, e.target.value)}
                           aria-label={`Line ${i + 1} item`}
                         >
                           {itemChoices(line.itemId)}
-                        </select>
+                        </SmartSelect>
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
                             {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
@@ -2499,7 +2564,7 @@ export function PurchaseBillDialog({
                   <div className="space-y-1.5 py-0.5">
                     {charges.map((c, i) => (
                       <div key={i} className="flex items-center gap-1.5">
-                        <select
+                        <SmartSelect
                           className="form-input h-8 min-w-0 flex-1 text-xs"
                           value={c.chargeTypeId}
                           onChange={(e) => {
@@ -2528,7 +2593,7 @@ export function PurchaseBillDialog({
                               {ct.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                         <input
                           type="number"
                           step="0.01"

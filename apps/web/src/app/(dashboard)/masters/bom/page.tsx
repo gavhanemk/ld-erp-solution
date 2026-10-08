@@ -24,6 +24,7 @@ import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
 import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /** The six status colours are fixed; a BOM uses three of them. */
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -195,7 +196,7 @@ export default function BomPage() {
             className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
           />
         </div>
-        <select
+        <SmartSelect
           className="form-input w-auto"
           value={status}
           onChange={(e) => setStatus(e.target.value)}
@@ -205,7 +206,7 @@ export default function BomPage() {
           <option value="DRAFT">Draft</option>
           <option value="APPROVED">Approved</option>
           <option value="OBSOLETE">Obsolete</option>
-        </select>
+        </SmartSelect>
         <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
           <input
             type="checkbox"
@@ -928,7 +929,7 @@ function CopyBomDialog({ source, onClose, onCopied }: CopyProps) {
             <label className="form-label" htmlFor="copy-colour">
               Colour
             </label>
-            <select
+            <SmartSelect
               id="copy-colour"
               className="form-input"
               value={colour}
@@ -940,7 +941,7 @@ function CopyBomDialog({ source, onClose, onCopied }: CopyProps) {
                   {c === source.color ? `${c} (same colour)` : c}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
             <p className="text-xs text-muted-foreground mt-1">
               {colours.length === 0
                 ? 'This style has no colours listed, so the copy can only be a new version.'

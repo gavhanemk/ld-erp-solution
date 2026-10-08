@@ -11,16 +11,20 @@ import {
   Package,
   Paperclip,
   Plus,
+  Search,
   Trash2,
   Truck,
   X,
 } from 'lucide-react'
-import { api, apiErrorMessage } from '@/lib/api'
+import { api, apiErrorMessage, can } from '@/lib/api'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Raising or correcting a purchase enquiry.
@@ -195,6 +199,18 @@ export function PurchaseEnquiryDialog({
   )
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  // Narrows the tick-list of suppliers, and names a supplier to add when it
+  // finds nobody. The supplier form open over this one, if any.
+  const [supplierQuery, setSupplierQuery] = useState('')
+  const [newSupplier, setNewSupplier] = useState<{ name: string } | null>(null)
+  /** The suppliers the search leaves, with every ticked one kept in view. */
+  const shownSuppliers = useMemo(() => {
+    const words = supplierQuery.toLowerCase().split(/\s+/).filter(Boolean)
+    return suppliers.filter(
+      (s) =>
+        supplierIds.includes(s.id) || words.every((w) => `${s.name} ${s.code}`.toLowerCase().includes(w))
+    )
+  }, [suppliers, supplierIds, supplierQuery])
   const [items, setItems] = useState<Item[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
@@ -274,65 +290,12 @@ export function PurchaseEnquiryDialog({
    * The rows as they are right now, for the handlers that need to read one
    * without being rebuilt every time any of them changes.
    *
-   * `pickByCode` fires on blur and has to know which category the row it fired
-   * on is sitting under; taking that from `lines` would put the whole array in
-   * its dependencies and rebuild every input's handler on every keystroke.
+   * Adding a new item from a row has to know which row it came from; taking
+   * that from `lines` would put the whole array in its dependencies and
+   * rebuild every row's handlers on every keystroke.
    */
   const linesRef = useRef<Line[]>(lines)
   linesRef.current = lines
-
-  const pickByCode = useCallback(
-    (key: string, code: string) => {
-      /*
-       * Matched inside the row's own category first.
-       *
-       * Two items in different categories can share a code in a master nobody
-       * has policed, and taking the first of them would quietly put the wrong
-       * item on an enquiry going out to three suppliers. Falling back to the
-       * whole master is deliberate: a buyer who types a code before touching
-       * the category boxes is doing the commonest thing, and refusing them
-       * would make the category a gate rather than a filter.
-       */
-      const line = linesRef.current.find((l) => l.key === key)
-      const pool = line ? itemsFor(line) : items
-      const wanted = code.trim().toLowerCase()
-      const hit =
-        pool.find((i) => (i.code ?? '').toLowerCase() === wanted) ??
-        items.find((i) => (i.code ?? '').toLowerCase() === wanted)
-      if (!hit) {
-        setLine(key, { codeText: code, itemId: '', uom: '' })
-        return
-      }
-      const cat = categories.find((c) => c.id === hit.category?.id)
-      setLine(key, {
-        codeText: code,
-        itemId: hit.id,
-        uom: hit.uom?.symbol ?? '',
-        categoryId: cat?.parentId ?? cat?.id ?? '',
-        subcategoryId: cat?.parentId ? cat.id : '',
-      })
-    },
-    [items, categories, setLine]
-  )
-
-  /**
-   * The item codes a row may use, narrowed by the category above it.
-   *
-   * Fed to a `<datalist>` rather than a second dropdown: the old form's code
-   * box is typed into, and somebody who knows the code should be able to type
-   * it and move on. The list is what turns it from a box that accepts anything
-   * into one that suggests only what the chosen category holds.
-   */
-  const codesFor = useCallback(
-    (l: Line) =>
-      itemsFor(l)
-        .map((i) => i.code)
-        .filter(Boolean),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- itemsFor is stable
-    // in practice and listing it here would rebuild every row's list on every
-    // keystroke in the description beside it.
-    [items, categories]
-  )
 
   /** Items on offer for a row, narrowed by whatever category it has chosen. */
   /**
@@ -358,6 +321,12 @@ export function PurchaseEnquiryDialog({
     (key: string, itemId: string) => {
       if (itemId === ADD_NEW) {
         setNewItemFor(linesRef.current.find((l) => l.key === key) ?? null)
+        return
+      }
+      // Cleared to choose again: the category the row was narrowed to stays,
+      // so the lists still show only what it holds.
+      if (!itemId) {
+        setLine(key, { itemId: '', codeText: '', uom: '' })
         return
       }
       const item = items.find((i) => i.id === itemId)
@@ -633,7 +602,7 @@ export function PurchaseEnquiryDialog({
                     size={14}
                     className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                   />
-                  <select
+                  <SmartSelect
                     id="enq-location"
                     value={locationId}
                     onChange={(e) => setLocationId(e.target.value)}
@@ -645,7 +614,7 @@ export function PurchaseEnquiryDialog({
                         {w.name}
                       </option>
                     ))}
-                  </select>
+                  </SmartSelect>
                 </div>
               </div>
               <div>
@@ -779,7 +748,7 @@ export function PurchaseEnquiryDialog({
                         <div className="grid grid-cols-2 gap-2">
                           <div className="space-y-1">
                             <label className={fieldLabel}>Category</label>
-                            <select
+                            <SmartSelect
                               value={l.categoryId}
                               onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
                               className="form-input h-9 w-full"
@@ -791,11 +760,11 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
                           <div className="space-y-1">
                             <label className={fieldLabel}>Subcategory</label>
-                            <select
+                            <SmartSelect
                               value={l.subcategoryId}
                               onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
                               disabled={subsOf(l.categoryId).length === 0}
@@ -810,13 +779,13 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
                         </div>
 
                         <div className="mt-2 space-y-1">
                           <label className={fieldLabel}>Item</label>
-                          <select
+                          <SmartSelect
                             value={l.itemId}
                             onChange={(e) => pickItem(l.key, e.target.value)}
                             disabled={loadingRefs}
@@ -824,13 +793,16 @@ export function PurchaseEnquiryDialog({
                             aria-label={`Row ${i + 1} item`}
                           >
                             <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
-                            <option value={ADD_NEW}>+ Add a new item…</option>
-                            {itemsFor(l).map((it) => (
-                              <option key={it.id} value={it.id}>
-                                {it.code} · {it.name}
+                            {/* A chosen item stands alone here — its code already decided it.
+                                A new item is offered only on an empty row; on a chosen one it
+                                would replace the item, code and all. */}
+                            {!l.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                            {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
+                              <option key={it.id} value={it.id} data-sub={it.code}>
+                                {it.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                           {l.mrNumber && (
                             <p className="text-muted-foreground text-[10px]">
                               against indent {l.mrNumber}
@@ -840,25 +812,20 @@ export function PurchaseEnquiryDialog({
 
                         <div className="mt-2 space-y-1">
                           <label className={fieldLabel}>Item code</label>
-                          <input
-                            value={l.codeText}
-                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
-                            onBlur={(e) => pickByCode(l.key, e.target.value)}
-                            list={'codes-m-' + l.key}
-                            placeholder="Or type the code"
-                            className={`form-input h-9 w-full font-mono ${
-                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
-                            }`}
+                          <SmartSelect
+                            value={l.itemId}
+                            onChange={(e) => pickItem(l.key, e.target.value)}
+                            disabled={loadingRefs}
+                            className="form-input h-9 w-full font-mono"
                             aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={'codes-m-' + l.key}>
-                            {codesFor(l).map((c) => (
-                              <option key={c} value={c} />
+                          >
+                            <option value="">Or pick by code</option>
+                            {itemsFor(l).map((it) => (
+                              <option key={it.id} value={it.id} data-sub={it.name}>
+                                {it.code}
+                              </option>
                             ))}
-                          </datalist>
-                          {l.codeText && !l.itemId && (
-                            <p className="text-[10px] text-amber-400">no item with that code</p>
-                          )}
+                          </SmartSelect>
                         </div>
 
                         <div className="mt-2 space-y-1">
@@ -943,7 +910,7 @@ export function PurchaseEnquiryDialog({
                           full columns they took 256px of the row to narrow a
                           dropdown. The order form settled this the same way. */}
                           <td className="px-2 py-1.5 align-top">
-                            <select
+                            <SmartSelect
                               value={l.categoryId}
                               onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
                               className="form-input"
@@ -955,8 +922,8 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
-                            <select
+                            </SmartSelect>
+                            <SmartSelect
                               value={l.subcategoryId}
                               onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
                               disabled={subsOf(l.categoryId).length === 0}
@@ -971,7 +938,7 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </td>
                           {/* Second, and offering only what the category above it
                           holds. Still a box to type into — somebody who knows
@@ -979,30 +946,26 @@ export function PurchaseEnquiryDialog({
                           the list behind it suggests only the codes in scope,
                           so the three controls narrow in one direction. */}
                           <td className="px-2 py-1.5 align-top">
-                            <input
-                              value={l.codeText}
-                              onChange={(e) => setLine(l.key, { codeText: e.target.value })}
-                              onBlur={(e) => pickByCode(l.key, e.target.value)}
-                              list={'codes-' + l.key}
-                              placeholder="Items Code"
-                              className={`form-input font-mono ${
-                                l.codeText && !l.itemId ? 'border-amber-500/60' : ''
-                              }`}
+                            {/* The same searchable dropdown as the rest of the
+                              row: type a code or part of a name, each code
+                              with its item's name under it. */}
+                            <SmartSelect
+                              value={l.itemId}
+                              onChange={(e) => pickItem(l.key, e.target.value)}
+                              disabled={loadingRefs}
+                              className="form-input font-mono"
                               aria-label={`Row ${i + 1} item code`}
-                            />
-                            <datalist id={'codes-' + l.key}>
-                              {codesFor(l).map((c) => (
-                                <option key={c} value={c} />
+                            >
+                              <option value="">Items Code</option>
+                              {itemsFor(l).map((it) => (
+                                <option key={it.id} value={it.id} data-sub={it.name}>
+                                  {it.code}
+                                </option>
                               ))}
-                            </datalist>
-                            {l.codeText && !l.itemId && (
-                              <p className="mt-0.5 text-[10px] text-amber-400">
-                                no item with that code
-                              </p>
-                            )}
+                            </SmartSelect>
                           </td>
                           <td className="px-2 py-1.5 align-top">
-                            <select
+                            <SmartSelect
                               value={l.itemId}
                               onChange={(e) => pickItem(l.key, e.target.value)}
                               disabled={loadingRefs}
@@ -1010,13 +973,15 @@ export function PurchaseEnquiryDialog({
                               aria-label={`Row ${i + 1} item`}
                             >
                               <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
-                              <option value={ADD_NEW}>+ Add a new item…</option>
-                              {itemsFor(l).map((it) => (
-                                <option key={it.id} value={it.id}>
-                                  {it.code} · {it.name}
+                              {/* A chosen item stands alone here — its code already decided it.
+                                  A new item is offered only on an empty row. */}
+                              {!l.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                              {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
+                                <option key={it.id} value={it.id} data-sub={it.code}>
+                                  {it.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                             {l.mrNumber && (
                               <p className="text-muted-foreground mt-0.5 text-[10px]">
                                 against indent {l.mrNumber}
@@ -1099,8 +1064,41 @@ export function PurchaseEnquiryDialog({
                   Tick everybody you want a rate from. Asking two or three is what makes the
                   comparison worth reading — and you can add more once it is raised.
                 </p>
+                {/* Add new first, then search: a supplier the mill has never
+                  dealt with is added here and ticked, without leaving the
+                  enquiry. Ticked suppliers stay in view whatever is searched. */}
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  {can('masters', 'create') && (
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 px-2.5 text-xs"
+                      onClick={() => setNewSupplier({ name: supplierQuery.trim() })}
+                    >
+                      <Plus size={13} />
+                      {supplierQuery.trim() ? `Add “${supplierQuery.trim()}”` : 'Add new supplier'}
+                    </button>
+                  )}
+                  <label className="relative min-w-[10rem] flex-1">
+                    <Search
+                      size={13}
+                      className="text-muted-foreground pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2"
+                    />
+                    <input
+                      value={supplierQuery}
+                      onChange={(e) => setSupplierQuery(e.target.value)}
+                      placeholder="Search suppliers…"
+                      className="form-input h-8 pl-8 text-xs"
+                      aria-label="Search suppliers"
+                    />
+                  </label>
+                </div>
                 <div className="grid max-h-56 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
-                  {suppliers.map((s) => {
+                  {shownSuppliers.length === 0 && supplierQuery.trim() && (
+                    <p className="text-muted-foreground col-span-full px-1 py-2 text-xs">
+                      No supplier matches “{supplierQuery.trim()}”.
+                    </p>
+                  )}
+                  {shownSuppliers.map((s) => {
                     const on = supplierIds.includes(s.id)
                     return (
                       <label
@@ -1126,6 +1124,29 @@ export function PurchaseEnquiryDialog({
                     )
                   })}
                 </div>
+                {/* The full supplier form, the same as Masters → Suppliers,
+                  over this enquiry. Saved, the supplier joins the list ticked. */}
+                <MasterFormDialog<Supplier>
+                  open={newSupplier !== null}
+                  onClose={() => setNewSupplier(null)}
+                  onSaved={() => {}}
+                  onCreated={(row) => {
+                    setSuppliers((prev) =>
+                      [...prev.filter((p) => p.id !== row.id), row].sort((a, b) =>
+                        a.name.localeCompare(b.name)
+                      )
+                    )
+                    setSupplierIds((prev) => (prev.includes(row.id) ? prev : [...prev, row.id]))
+                    setSupplierQuery('')
+                  }}
+                  resource="suppliers"
+                  fields={supplierFormFields}
+                  initialValues={newSupplier?.name ? { name: newSupplier.name } : undefined}
+                  title="Supplier"
+                  columns={4}
+                  wide
+                  stacked
+                />
               </Section>
             )}
 

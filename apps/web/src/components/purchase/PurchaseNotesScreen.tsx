@@ -16,7 +16,6 @@ import {
   Printer,
   RefreshCw,
   RotateCcw,
-  Scale,
   Search,
   Send,
   Trash2,
@@ -50,11 +49,11 @@ import {
   REASON_WORDS,
   money,
   type NoteDoc,
-  type NoteGst,
   type NoteScreen,
   type NoteStatus,
   type PurchaseNote,
 } from '@/components/purchase/noteTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The list of adjustments, as one screen wearing several names.
@@ -372,52 +371,6 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
     }
   }
 
-  /**
-   * Accounts says what a note is for GST.
-   *
-   * A prompt rather than a dialog, deliberately: it is a decision taken by
-   * one desk on one note, and a modal with a Save button would be the fourth
-   * screen in a module that already has enough. The wording is the section
-   * number and the plain sentence, because "34(1)" alone is not something to
-   * pick from a list at speed.
-   */
-  const classify = async (note: PurchaseNote) => {
-    const choices: NoteGst[] = [
-      'GST_CREDIT_NOTE',
-      'GST_DEBIT_NOTE',
-      'ITC_REVERSAL_ONLY',
-      'NO_GST_IMPACT',
-    ]
-    const menu = choices.map((c, i) => `${i + 1}. ${GST_WORDS[c].label} — ${GST_WORDS[c].hint}`)
-    const answer = window.prompt(
-      `How is ${note.noteNumber} to be treated for GST?\n\n${menu.join('\n')}\n\nEnter 1-${choices.length}:`,
-      ''
-    )
-    if (!answer) return
-    const pickIndex = Number(answer.trim()) - 1
-    const picked = choices[pickIndex]
-    if (!picked) {
-      setError(`"${answer}" is not one of the choices. Nothing was changed.`)
-      return
-    }
-    const gstNote = window.prompt('Anything to record against that? (optional)', '') ?? null
-
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await api.patch<{ message?: string }>(
-        `/purchase/notes/${note.id}/gst-treatment`,
-        { gstTreatment: picked, gstNote: gstNote?.trim() || null }
-      )
-      setMessage(res.message ?? `${note.noteNumber} classified.`)
-      await load()
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'That did not go through.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const act = async (note: PurchaseNote, what: 'post' | 'cancel') => {
     let reasonText: string | null = null
 
@@ -517,31 +470,16 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
       })
     }
 
-    /* Classifying is the accounts desk's, and it no longer blocks anything —
-       so it is offered on a posted note as readily as on a draft. A
-       misclassification is corrected by correcting it, not by cancelling a
-       note that is right in every other respect and burning its number. */
-    if (mayPost && n.status !== 'CANCELLED') {
-      items.push({
-        key: 'classify',
-        label: n.gstTreatment === 'NOT_REVIEWED' ? 'Classify for GST' : 'Change the GST treatment',
-        icon: <Scale size={14} />,
-        onClick: () => void classify(n),
-      })
-    }
-
     if (live && mayPost) {
       items.push({
         key: 'post',
         label: 'Post to the bill',
         icon: <Landmark size={14} />,
         onClick: () => void act(n, 'post'),
-        /* Not disabled. An unclassified note posts; the menu says what is
-           still outstanding rather than standing in the way of it. */
-        hint:
-          n.gstTreatment === 'NOT_REVIEWED'
-            ? 'Accounts has not classified it for GST yet'
-            : undefined,
+        // GST is settled on the note first — picked in Edit, beside the tax.
+        ...(n.gstTreatment === 'NOT_REVIEWED'
+          ? { disabled: true, hint: 'Pick the GST treatment in Edit first' }
+          : {}),
       })
     }
 
@@ -625,11 +563,11 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
       },
       {
         key: 'unclassified',
-        label: 'Waiting on Accounts',
+        label: 'GST to pick',
         value: String(unclassified.count),
         sub: unclassified.count
-          ? 'not classified for GST — posting still works'
-          : 'every note here is classified',
+          ? 'pick it in Edit before posting'
+          : 'every note here has one',
         tone: unclassified.count ? 'text-amber-400' : 'text-muted-foreground',
       },
       {
@@ -766,7 +704,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
               />
             </div>
 
-            <select
+            <SmartSelect
               className="form-input h-8 w-[8.25rem] shrink-0 py-0 text-xs"
               value={period}
               onChange={(e) => pickPeriod(e.target.value)}
@@ -779,7 +717,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                 </option>
               ))}
               <option value="custom">Between…</option>
-            </select>
+            </SmartSelect>
 
             {/* The two boxes, on the row on a desk and underneath on a phone. */}
             <div className={`${custom ? 'flex' : 'hidden'} shrink-0 items-center gap-1.5 sm:flex`}>
@@ -802,7 +740,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
               />
             </div>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-36 sm:flex-none sm:basis-auto"
               value={status}
               onChange={(e) => {
@@ -820,9 +758,9 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                   {st.label}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-40 sm:flex-none sm:basis-auto"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
@@ -834,9 +772,9 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                   {label}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-44 sm:flex-none sm:basis-auto"
               value={supplierId}
               onChange={(e) => setSupplierId(e.target.value)}
@@ -848,7 +786,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                   {sup.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
             {anyFilter && (
               <button
@@ -972,7 +910,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                           className="text-[10px] text-amber-400/90"
                           title={GST_WORDS.NOT_REVIEWED.hint}
                         >
-                          GST not classified
+                          GST not picked
                         </span>
                       )}
                     </div>
@@ -1211,17 +1149,15 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                             <span className={s.cls} title={s.hint}>
                               {s.label}
                             </span>
-                            {/* Amber, and only when it is outstanding. The GST
-                            treatment stopped being a gate on posting, so this
-                            mark is the whole of what keeps it from being
-                            forgotten — it has to be on the row, not buried in
-                            a panel somebody opens. */}
+                            {/* Amber, and only when it is outstanding: a note
+                            with no GST treatment cannot be posted, and this
+                            says why before anybody tries. */}
                             {n.gstTreatment === 'NOT_REVIEWED' && n.status !== 'CANCELLED' && (
                               <span
                                 className="mt-0.5 block text-[10px] text-amber-400/90"
                                 title={GST_WORDS.NOT_REVIEWED.hint}
                               >
-                                GST not classified
+                                GST not picked
                               </span>
                             )}
                           </td>

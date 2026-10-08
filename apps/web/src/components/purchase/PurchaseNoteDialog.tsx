@@ -22,11 +22,22 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import {
   DOC_WORDS,
   EFFECT_WORDS,
+  GST_WORDS,
   type NoteDoc,
   type NoteEffect,
+  type NoteGst,
   type NoteIssuer,
   type PurchaseNote,
 } from '@/components/purchase/noteTypes'
+
+/** The GST treatments a note can be given, in the order they are offered. */
+const GST_CHOICES: NoteGst[] = [
+  'GST_CREDIT_NOTE',
+  'GST_DEBIT_NOTE',
+  'ITC_REVERSAL_ONLY',
+  'NO_GST_IMPACT',
+]
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Raising a debit or credit note against a supplier.
@@ -245,7 +256,7 @@ export function PurchaseNoteDialog({
   const [reasons, setReasons] = useState<ReasonOption[]>([])
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
-  const [warehouses, setWarehouses] = useState<Option[]>([])
+  const [warehouses, setWarehouses] = useState<Array<Option & { isActive?: boolean }>>([])
   const [bills, setBills] = useState<BillOption[]>([])
   const [grnOptions, setGrnOptions] = useState<GrnOption[]>([])
   const [grnPickerId, setGrnPickerId] = useState('')
@@ -277,6 +288,8 @@ export function PurchaseNoteDialog({
   const [otherCharges, setOtherCharges] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
+  /** How the note goes in the GST return. Needed to post, not to save a draft. */
+  const [gstTreatment, setGstTreatment] = useState<NoteGst>('NOT_REVIEWED')
 
   const [context, setContext] = useState<BillContext | null>(null)
   const [grnContext, setGrnContext] = useState<GrnContext | null>(null)
@@ -317,6 +330,7 @@ export function PurchaseNoteDialog({
     setIssuedBy(record?.issuedBy ?? DOC_WORDS[opening].issuedBy)
     setReason(record?.reason ?? '')
     setReasonNote(record?.reasonNote ?? '')
+    setGstTreatment(record?.gstTreatment ?? 'NOT_REVIEWED')
     setEffect(record?.effect ?? DOC_WORDS[opening].effect ?? 'REDUCES_PAYABLE')
     setSupplierId(record?.supplier?.id ?? '')
     setBillId(record?.bill?.id ?? initialBillId ?? '')
@@ -366,7 +380,7 @@ export function PurchaseNoteDialog({
           api.get<{ data: { reasons: ReasonOption[] } }>('/purchase/notes/reasons'),
           masterResource<Option>('suppliers').list({ limit: 500 }),
           masterResource<ItemOption>('items').list({ limit: 500, active: true }),
-          masterResource<Option>('warehouses').list({ limit: 200 }),
+          masterResource<Option & { isActive?: boolean }>('warehouses').list({ limit: 200 }),
         ])
         setReasons(r.data.reasons)
         setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
@@ -799,6 +813,7 @@ export function PurchaseNoteDialog({
     otherCharges: num(otherCharges),
     discountAmount: num(discountAmount),
     notes: notes.trim() || null,
+    gstTreatment,
     lines: picked.map((l) => ({
       itemId: l.itemId,
       billLineId: l.billLineId,
@@ -864,6 +879,9 @@ export function PurchaseNoteDialog({
     setError(null)
     const problem = validate()
     if (problem) return setError(problem)
+    if (gstTreatment === 'NOT_REVIEWED') {
+      return setError('Pick the GST treatment (beside the tax) before posting. A draft can be saved without it.')
+    }
     postedNoteRef.current = null
     setPostError(null)
     setConfirmOpen(true)
@@ -1030,7 +1048,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="reason-pick">
                           What happened
                         </label>
-                        <select
+                        <SmartSelect
                           id="reason-pick"
                           className="form-input"
                           value={reason}
@@ -1042,7 +1060,7 @@ export function PurchaseNoteDialog({
                               {r.label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="note-number">
@@ -1059,7 +1077,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="no-bill-supplier">
                           Supplier
                         </label>
-                        <select
+                        <SmartSelect
                           id="no-bill-supplier"
                           className="form-input"
                           value={supplierId}
@@ -1071,7 +1089,7 @@ export function PurchaseNoteDialog({
                               {s.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="no-bill-why">
@@ -1113,7 +1131,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="note-effect">
                           What does this do to what we owe?
                         </label>
-                        <select
+                        <SmartSelect
                           id="note-effect"
                           className="form-input"
                           value={effect}
@@ -1124,7 +1142,7 @@ export function PurchaseNoteDialog({
                               {EFFECT_WORDS[k].label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                         <p className="text-muted-foreground mt-1 text-[11px]">
                           Nothing defines the direction of an &ldquo;other&rdquo; adjustment, so it
                           has to be said.
@@ -1152,7 +1170,7 @@ export function PurchaseNoteDialog({
                           Pull rejected quantity off a receipt{' '}
                           <span className="text-muted-foreground font-normal">(optional)</span>
                         </label>
-                        <select
+                        <SmartSelect
                           id="grn-pick"
                           className="form-input"
                           value={grnPickerId}
@@ -1165,7 +1183,7 @@ export function PurchaseNoteDialog({
                               {g.po?.supplier ? ` · ${g.po.supplier.name}` : ''}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <button
                         type="button"
@@ -1196,7 +1214,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="reason-pick-bill">
                           What happened
                         </label>
-                        <select
+                        <SmartSelect
                           id="reason-pick-bill"
                           className="form-input"
                           value={reason}
@@ -1208,7 +1226,7 @@ export function PurchaseNoteDialog({
                               {r.label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="note-number-bill">
@@ -1225,7 +1243,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="bill-supplier">
                           Supplier <span className="text-muted-foreground">(narrows the list)</span>
                         </label>
-                        <select
+                        <SmartSelect
                           id="bill-supplier"
                           className="form-input"
                           value={supplierId}
@@ -1241,13 +1259,13 @@ export function PurchaseNoteDialog({
                               {s.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="bill-pick">
                           Supplier bill
                         </label>
-                        <select
+                        <SmartSelect
                           id="bill-pick"
                           className="form-input"
                           value={billId}
@@ -1261,7 +1279,7 @@ export function PurchaseNoteDialog({
                               {inr(num(b.totalAmount))}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                     </div>
 
@@ -1286,7 +1304,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="note-effect-bill">
                           What does this do to what we owe?
                         </label>
-                        <select
+                        <SmartSelect
                           id="note-effect-bill"
                           className="form-input"
                           value={effect}
@@ -1297,7 +1315,7 @@ export function PurchaseNoteDialog({
                               {EFFECT_WORDS[k].label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                         <p className="text-muted-foreground mt-1 text-[11px]">
                           Nothing defines the direction of an &ldquo;other&rdquo; adjustment, so it
                           has to be said.
@@ -1436,7 +1454,7 @@ export function PurchaseNoteDialog({
                                         </p>
                                       </>
                                     ) : (
-                                      <select
+                                      <SmartSelect
                                         className="form-input h-8 py-0 text-[13px]"
                                         value={l.itemId}
                                         onChange={(e) => pickManualItem(i, e.target.value)}
@@ -1448,7 +1466,7 @@ export function PurchaseNoteDialog({
                                             {it.code ? `${it.code} — ${it.name}` : it.name}
                                           </option>
                                         ))}
-                                      </select>
+                                      </SmartSelect>
                                     )}
                                     {problem && (
                                       <p className="mt-1 text-[11px] text-red-400">{problem}</p>
@@ -1555,7 +1573,7 @@ export function PurchaseNoteDialog({
                                     </p>
                                   </div>
                                 ) : (
-                                  <select
+                                  <SmartSelect
                                     className="form-input h-8 min-w-0 flex-1 py-0 text-[13px]"
                                     value={l.itemId}
                                     onChange={(e) => pickManualItem(i, e.target.value)}
@@ -1567,7 +1585,7 @@ export function PurchaseNoteDialog({
                                         {it.code ? `${it.code} — ${it.name}` : it.name}
                                       </option>
                                     ))}
-                                  </select>
+                                  </SmartSelect>
                                 )}
                                 <button
                                   type="button"
@@ -1925,19 +1943,24 @@ export function PurchaseNoteDialog({
                             <label className="form-label" htmlFor="note-warehouse">
                               Godown they left
                             </label>
-                            <select
+                            <SmartSelect
                               id="note-warehouse"
                               className="form-input"
                               value={warehouseId}
                               onChange={(e) => setWarehouseId(e.target.value)}
                             >
                               <option value="">Not taken out of stock</option>
-                              {warehouses.map((w) => (
+                              {/* Stores in use only, and the one a note being
+                                corrected already names even if it has since
+                                been switched off in Masters. */}
+                              {warehouses
+                                .filter((w) => w.isActive !== false || w.id === warehouseId)
+                                .map((w) => (
                                 <option key={w.id} value={w.id}>
                                   {w.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
                         )}
                         <div>
@@ -2093,6 +2116,35 @@ export function PurchaseNoteDialog({
                           placeholder="0.00"
                         />
                       </div>
+                    </div>
+
+                    {/* How this goes in the GST return, picked here beside
+                      the GST it carries — the step that used to be a
+                      separate "Classify for GST" action. */}
+                    <div>
+                      <label className="form-label" htmlFor="note-gst-treatment">
+                        GST treatment<span className="ml-0.5 text-red-400">*</span>
+                      </label>
+                      <SmartSelect
+                        id="note-gst-treatment"
+                        className="form-input"
+                        value={gstTreatment === 'NOT_REVIEWED' ? '' : gstTreatment}
+                        onChange={(e) =>
+                          setGstTreatment((e.target.value || 'NOT_REVIEWED') as NoteGst)
+                        }
+                      >
+                        <option value="">Pick before posting…</option>
+                        {GST_CHOICES.map((g) => (
+                          <option key={g} value={g} data-sub={GST_WORDS[g].hint}>
+                            {GST_WORDS[g].label}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                      <span className="text-muted-foreground mt-1 block text-xs">
+                        {gstTreatment === 'NOT_REVIEWED'
+                          ? 'How this goes in the GST return. Needed to post; a draft can wait.'
+                          : GST_WORDS[gstTreatment].hint}
+                      </span>
                     </div>
 
                     <div className="border-border/70 space-y-1 border-t pt-3">

@@ -6,6 +6,7 @@ import { ApiError } from '@/lib/api'
 import { settingsApi, type ActivityEntry, type SystemStatus } from '@/lib/settingsApi'
 import { Field, LoadingRow, Notice, SettingsCard } from '@/components/settings/ui'
 import { formatDate } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 export default function SystemSettingsPage() {
   return (
@@ -295,7 +296,7 @@ function ActivityTrail() {
       {error && <Notice kind="error">{error}</Notice>}
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
-        <select
+        <SmartSelect
           className="form-input h-9 w-44"
           value={moduleFilter}
           onChange={(e) => setModuleFilter(e.target.value)}
@@ -309,9 +310,9 @@ function ActivityTrail() {
           <option value="production">Production</option>
           <option value="settings">Settings</option>
           <option value="admin">Users &amp; roles</option>
-        </select>
+        </SmartSelect>
 
-        <select
+        <SmartSelect
           className="form-input h-9 w-40"
           value={actionFilter}
           onChange={(e) => setActionFilter(e.target.value)}
@@ -323,7 +324,7 @@ function ActivityTrail() {
           <option value="DELETE">Removed</option>
           <option value="APPROVE">Approved</option>
           <option value="REJECT">Rejected</option>
-        </select>
+        </SmartSelect>
 
         <span className="text-xs text-muted-foreground ml-auto">
           {pagination.total.toLocaleString('en-IN')} recorded

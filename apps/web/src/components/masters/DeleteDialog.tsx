@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, ArrowRight, Loader2, Trash2, X } from 'lucide-react'
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 interface Check {
   /** What has to move to another record, e.g. "1 operation". */
@@ -167,7 +168,7 @@ export function DeleteDialog({
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground shrink-0 line-through">{name}</span>
                 <ArrowRight size={14} className="text-muted-foreground shrink-0" />
-                <select
+                <SmartSelect
                   className="form-input"
                   value={moveTo}
                   onChange={(e) => setMoveTo(e.target.value)}
@@ -180,7 +181,7 @@ export function DeleteDialog({
                       {t.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </div>
             </div>
           )}

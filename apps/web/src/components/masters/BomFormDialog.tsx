@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { cn, formatDate, formatRupees } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 export interface BomLineSize {
   id?: string
@@ -894,7 +895,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
             <label className="form-label" htmlFor="bom-style">
               Style<span className="ml-0.5 text-red-400">*</span>
             </label>
-            <select
+            <SmartSelect
               id="bom-style"
               className={field}
               value={styleId}
@@ -913,7 +914,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                   {s.code} — {s.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
             {fieldErrors.styleId && <p className="mt-1 text-xs text-red-400">{fieldErrors.styleId}</p>}
           </div>
 
@@ -922,7 +923,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
               Colour
               {styleColours.length > 0 && <span className="ml-0.5 text-red-400">*</span>}
             </label>
-            <select
+            <SmartSelect
               id="bom-colour"
               className={field}
               value={color}
@@ -943,7 +944,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                   {c}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
             {fieldErrors.color && <p className="mt-1 text-xs text-red-400">{fieldErrors.color}</p>}
           </div>
         </div>
@@ -1022,7 +1023,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                         >
                           <Icon size={16} />
                         </span>
-                        <select
+                        <SmartSelect
                           className={cn(field, 'min-w-0')}
                           value={line.componentItemId}
                           disabled={frozen}
@@ -1045,11 +1046,11 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                               {i.code} — {i.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                     </td>
                     <td className="px-2 py-2 align-middle">
-                      <select
+                      <SmartSelect
                         className={cn(field, p.needsProcess && 'border-accent')}
                         value={line.departmentId}
                         disabled={frozen}
@@ -1070,7 +1071,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                             {d.name}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </td>
                     <td className="px-2 py-2 align-middle">
                       {/* The unit sits inside the box, where it reads with the figure. */}
@@ -1263,7 +1264,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 </td>
                 <td className="px-2 py-2 align-middle">
                   {kind === 'LABOUR' ? (
-                    <select
+                    <SmartSelect
                       className={field}
                       value={row.departmentId}
                       disabled={frozen}
@@ -1276,9 +1277,9 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                           {d.name}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   ) : (
-                    <select
+                    <SmartSelect
                       className={field}
                       value={row.basis}
                       disabled={frozen}
@@ -1289,7 +1290,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                     >
                       <option value="PER_PIECE">Rupees per piece</option>
                       <option value="PERCENT">% of material + labour</option>
-                    </select>
+                    </SmartSelect>
                   )}
                 </td>
                 <td className="px-2 py-2 align-middle">
@@ -1364,7 +1365,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     !frozen && routings.length > 0 ? (
       <div className="flex flex-wrap items-center gap-2">
         {routings.length > 1 && (
-          <select
+          <SmartSelect
             className={cn(field, 'h-9 w-56')}
             value={routingPick}
             aria-label="Routing to fill labour from"
@@ -1375,7 +1376,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
                 {r.code} — {r.name}
               </option>
             ))}
-          </select>
+          </SmartSelect>
         )}
         <button type="button" className="btn-secondary" onClick={fillFromRouting}>
           Fill from {routings.length === 1 && selectedRouting ? selectedRouting.code : 'routing'}

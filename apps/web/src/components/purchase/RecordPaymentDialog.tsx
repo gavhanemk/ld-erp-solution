@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 export interface PayableBill {
   id: string
@@ -347,7 +348,7 @@ export function RecordPaymentDialog({
                     size={15}
                     className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                   />
-                  <select
+                  <SmartSelect
                     id="pay-location"
                     className="form-input pl-9"
                     value={warehouseId}
@@ -359,7 +360,7 @@ export function RecordPaymentDialog({
                         {w.name}
                       </option>
                     ))}
-                  </select>
+                  </SmartSelect>
                 </div>
               </div>
 
@@ -410,7 +411,7 @@ export function RecordPaymentDialog({
                 <label className="form-label" htmlFor="pay-mode">
                   Payment Mode<span className="ml-0.5 text-red-400">*</span>
                 </label>
-                <select
+                <SmartSelect
                   id="pay-mode"
                   className="form-input"
                   value={mode}
@@ -428,7 +429,7 @@ export function RecordPaymentDialog({
                       {m.label}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </div>
 
               <div className="md:col-span-3">
@@ -436,7 +437,7 @@ export function RecordPaymentDialog({
                   Paid Through
                   {!isCash && <span className="ml-0.5 text-red-400">*</span>}
                 </label>
-                <select
+                <SmartSelect
                   id="pay-account"
                   className="form-input"
                   value={bankAccountId}
@@ -448,7 +449,7 @@ export function RecordPaymentDialog({
                       {accountLabel(a)}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
                 {!isCash && !bankAccountId && (
                   <span className="form-help">
                     {accounts.length === 0

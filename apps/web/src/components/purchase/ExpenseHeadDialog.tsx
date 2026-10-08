@@ -6,6 +6,7 @@ import { AlertCircle, Loader2, Receipt, Save, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import type { NewItem } from '@/components/purchase/NewItemDialog'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Adding or editing an expense head — Electricity, Rent, Repairs.
@@ -261,7 +262,7 @@ export function ExpenseHeadDialog({
                 <label className="form-label" htmlFor="eh-group">
                   Group <span className="text-muted-foreground font-normal">(optional)</span>
                 </label>
-                <select
+                <SmartSelect
                   id="eh-group"
                   value={groupId}
                   onChange={(e) => setGroupId(e.target.value)}
@@ -274,7 +275,7 @@ export function ExpenseHeadDialog({
                       {g.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
                 <p className="form-help">
                   {groups.length
                     ? 'e.g. Utilities, Repairs.'
@@ -285,7 +286,7 @@ export function ExpenseHeadDialog({
                 <label className="form-label" htmlFor="eh-uom">
                   Unit <span className="text-muted-foreground font-normal">(optional)</span>
                 </label>
-                <select
+                <SmartSelect
                   id="eh-uom"
                   value={uomId}
                   onChange={(e) => setUomId(e.target.value)}
@@ -299,7 +300,7 @@ export function ExpenseHeadDialog({
                         {u.symbol} · {u.name}
                       </option>
                     ))}
-                </select>
+                </SmartSelect>
                 <p className="form-help">Only to count usage, e.g. units of power.</p>
               </div>
 

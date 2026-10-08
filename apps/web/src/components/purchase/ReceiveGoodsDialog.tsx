@@ -32,6 +32,7 @@ import {
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Booking in what arrived against an order.
@@ -366,7 +367,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
               />
             </td>
             <td>
-              <select
+              <SmartSelect
                 className="form-input h-9"
                 value={alloc.warehouseId}
                 onChange={(e) => setAlloc(line.id, alloc.key, { warehouseId: e.target.value })}
@@ -375,7 +376,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
               >
                 <option value="">Choose…</option>
                 {storeOptions}
-              </select>
+              </SmartSelect>
             </td>
             <td>
               {/* One delivery can go to more than one store. The first row
@@ -564,6 +565,14 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
   )
 })
 
+/** One of the mill's stores, as the warehouse master lists it. */
+interface Store {
+  id: string
+  name: string
+  address?: string | null
+  isActive?: boolean
+}
+
 export function ReceiveGoodsDialog({
   onClose,
   onSaved,
@@ -591,9 +600,13 @@ export function ReceiveGoodsDialog({
 }) {
   const editing = Boolean(grnId)
   const [orders, setOrders] = useState<OrderOption[]>([])
-  const [warehouses, setWarehouses] = useState<
-    Array<{ id: string; name: string; address?: string | null }>
-  >([])
+  const [warehouses, setWarehouses] = useState<Store[]>([])
+  /*
+   * Stores switched off in Masters. Never offered for new goods — they are
+   * kept only so a receipt being corrected can still name the store it
+   * already put its goods in, rather than coming up blank.
+   */
+  const [retiredStores, setRetiredStores] = useState<Store[]>([])
   const [loadingLists, setLoadingLists] = useState(true)
 
   const [poId, setPoId] = useState(startOn ?? '')
@@ -657,14 +670,22 @@ export function ReceiveGoodsDialog({
    * option list was being rebuilt for each dropdown on each character typed.
    * Elements are immutable, so the one array is safe to hand to all of them.
    */
+  const usedStoreIds = [
+    ...Object.values(entries).flatMap((rows) => rows.map((a) => a.warehouseId)),
+    shippingWarehouseId,
+  ].join(',')
+  const keptRetired = useMemo(
+    () => retiredStores.filter((w) => usedStoreIds.split(',').includes(w.id)),
+    [retiredStores, usedStoreIds]
+  )
   const storeOptions = useMemo(
     () =>
-      warehouses.map((w) => (
+      [...warehouses, ...keptRetired].map((w) => (
         <option key={w.id} value={w.id}>
           {w.name}
         </option>
       )),
-    [warehouses]
+    [warehouses, keptRetired]
   )
 
   // Only orders that have actually been sent can be received against, so those
@@ -688,7 +709,7 @@ export function ReceiveGoodsDialog({
          * of three is most of the wait gone.
          */
         const [w, sent, partly] = await Promise.all([
-          masterResource<{ id: string; name: string; address?: string | null }>('warehouses').list({
+          masterResource<Store>('warehouses').list({
             limit: 100,
           }),
           editing
@@ -702,7 +723,11 @@ export function ReceiveGoodsDialog({
         ])
         if (cancelled) return
         setOrders([...(sent?.data ?? []), ...(partly?.data ?? [])])
-        setWarehouses(w.data)
+        // Only the stores in use. A store switched off in Masters is not
+        // somewhere goods can arrive, and listing it beside the real one is
+        // how a delivery ends up booked into a godown that no longer exists.
+        setWarehouses(w.data.filter((x) => x.isActive !== false))
+        setRetiredStores(w.data.filter((x) => x.isActive === false))
       } catch {
         if (!cancelled) setError('Could not load the open purchase orders.')
       } finally {
@@ -872,7 +897,9 @@ export function ReceiveGoodsDialog({
         // frozen text, never a link to the row that made it.
         const shipSnapshot = g.shippingAddress?.trim()
         const shipMatch = shipSnapshot
-          ? warehouses.find((w) => (w.address ?? '').trim() === shipSnapshot)
+          ? [...warehouses, ...retiredStores].find(
+              (w) => (w.address ?? '').trim() === shipSnapshot
+            )
           : undefined
         setShippingWarehouseId(shipMatch?.id ?? fallback)
       } catch (err) {
@@ -888,7 +915,7 @@ export function ReceiveGoodsDialog({
     return () => {
       cancelled = true
     }
-  }, [grnId, warehouses])
+  }, [grnId, warehouses, retiredStores])
 
   /*
    * The supplier's addresses on file, and which one this receipt starts on.
@@ -1292,14 +1319,22 @@ export function ReceiveGoodsDialog({
               <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 sm:contents">
                 <label className="block">
                   <span className="form-label">Purchase order</span>
-                  {editing ? (
+                  {/* Fixed when the form was opened against an order — Receive
+                    on that order's row has already answered this, and a list of
+                    every other order is only a chance to receive against the
+                    wrong one. Only the page's own "Receive goods" button, which
+                    starts from no order, offers the choice. */}
+                  {editing || startOn ? (
                     <input
                       className="form-input text-muted-foreground h-9"
-                      value={order?.poNumber ?? ''}
+                      value={
+                        order?.poNumber ?? orders.find((o) => o.id === startOn)?.poNumber ?? ''
+                      }
+                      placeholder="Loading…"
                       disabled
                     />
                   ) : (
-                    <select
+                    <SmartSelect
                       className="form-input h-9"
                       value={poId}
                       onChange={(e) => setPoId(e.target.value)}
@@ -1311,7 +1346,7 @@ export function ReceiveGoodsDialog({
                           {o.poNumber}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   )}
                 </label>
                 <label className="block">
@@ -1371,7 +1406,7 @@ export function ReceiveGoodsDialog({
                 {order.supplier &&
                   (supplierAddresses.length > 1 ? (
                     <IconField label="Supplier Address" icon={MapPin}>
-                      <select
+                      <SmartSelect
                         className="form-input pl-9"
                         value={supplierAddressId}
                         onChange={(e) => setSupplierAddressId(e.target.value)}
@@ -1383,7 +1418,7 @@ export function ReceiveGoodsDialog({
                             {addressLine(a)}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </IconField>
                   ) : (
                     <Readout label="Supplier Address" icon={MapPin}>
@@ -1393,21 +1428,21 @@ export function ReceiveGoodsDialog({
                     </Readout>
                   ))}
 
-                {warehouses.length > 1 ? (
+                {warehouses.length + keptRetired.length > 1 ? (
                   <IconField label="Shipping Address" icon={Truck}>
-                    <select
+                    <SmartSelect
                       className="form-input pl-9"
                       value={shippingWarehouseId}
                       onChange={(e) => setShippingWarehouseId(e.target.value)}
                       aria-label="Which of the mill's stores this delivery arrived at"
                     >
-                      {warehouses.map((w) => (
+                      {[...warehouses, ...keptRetired].map((w) => (
                         <option key={w.id} value={w.id}>
                           {w.name}
                           {w.address ? ` — ${w.address}` : ''}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </IconField>
                 ) : (
                   <Readout label="Shipping Address" icon={Truck}>
@@ -1559,7 +1594,7 @@ export function ReceiveGoodsDialog({
                 two characters is one somebody will mis-key.
 
                 `table-fixed`, not auto. Auto layout sizes a column off the
-                widest thing that could ever sit in it — and a `<select>`'s
+                widest thing that could ever sit in it — and a `<SmartSelect>`'s
                 "widest thing" is its longest option, not whatever is currently
                 chosen. One warehouse with a long name anywhere in the list was
                 enough to push the Store column wide and starve some other

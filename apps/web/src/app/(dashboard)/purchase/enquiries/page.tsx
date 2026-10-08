@@ -38,6 +38,7 @@ import {
   type EnquiryRecord,
   type EnquiryStatus,
 } from '@/components/purchase/enquiryTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Purchase enquiries — what the mill asks its suppliers before it orders.
@@ -445,7 +446,7 @@ export default function PurchaseEnquiriesPage() {
               className="form-input pl-8"
             />
           </div>
-          <select
+          <SmartSelect
             value={status}
             onChange={(e) => {
               setStatus(e.target.value)
@@ -460,7 +461,7 @@ export default function PurchaseEnquiriesPage() {
             <option value="QUOTED">Quoted</option>
             <option value="ORDERED">Ordered</option>
             <option value="CLOSED">Closed</option>
-          </select>
+          </SmartSelect>
           {/* Two dates, not a preset list — the enquiry date, so "what did we
             ask about between the 3rd and the 11th" is answered directly. Each
             box caps the other, so a range that reads backwards cannot be typed.
@@ -490,7 +491,7 @@ export default function PurchaseEnquiriesPage() {
               aria-label="Enquiries up to this date"
             />
           </div>
-          <select
+          <SmartSelect
             value={supplierId}
             onChange={(e) => {
               setSupplierId(e.target.value)
@@ -504,7 +505,7 @@ export default function PurchaseEnquiriesPage() {
                 {s.name}
               </option>
             ))}
-          </select>
+          </SmartSelect>
           {filtered && (
             <button type="button" onClick={clearAll} className="btn-ghost text-xs">
               <X size={14} />

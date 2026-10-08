@@ -34,6 +34,7 @@ import {
   type EnquiryQuote,
   type EnquiryRecord,
 } from '@/components/purchase/enquiryTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Comparing what came back: who was asked, what each of them said, and which of
@@ -232,7 +233,7 @@ export function EnquiryCompareDialog({
         actions={
           editable && can(MODULE, 'edit') && addable.length > 0 ? (
             <div className="flex items-center gap-2">
-              <select
+              <SmartSelect
                 value={adding}
                 onChange={(e) => setAdding(e.target.value)}
                 className="form-input w-auto text-xs"
@@ -244,7 +245,7 @@ export function EnquiryCompareDialog({
                     {s.name}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
               <button
                 type="button"
                 onClick={addSupplier}

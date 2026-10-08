@@ -292,8 +292,8 @@ export const EFFECT_WORDS: Record<NoteEffect, { label: string; hint: string; cls
  */
 export const GST_WORDS: Record<NoteGst, { label: string; hint: string; cls: string }> = {
   NOT_REVIEWED: {
-    label: 'Awaiting Accounts',
-    hint: 'Accounts has not classified this yet. It cannot be posted until they have.',
+    label: 'GST not picked',
+    hint: 'No GST treatment picked yet. Pick it on the note (Edit) before posting.',
     cls: 'badge-warning',
   },
   GST_CREDIT_NOTE: {

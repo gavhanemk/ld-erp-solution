@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
+import { RETURN_REASONS } from './purchase-return.schemas'
 
 // ─────────────────────────────────────────────────────────────
 // Shared field helpers
@@ -588,6 +589,93 @@ export const createUomSchema = z.object({
   isActive,
 })
 export const updateUomSchema = createUomSchema.partial()
+
+/**
+ * An HSN (goods) or SAC (services) code and the GST it carries.
+ *
+ * Only the total rate is taken; the CGST / SGST / IGST split follows from it
+ * and the state, so the three can never disagree. A price slab is both of
+ * `priceLimit` and `rateAbove` or neither — one without the other means
+ * nothing.
+ */
+const gstPercent = z.coerce
+  .number({ invalid_type_error: 'The GST rate has to be a number' })
+  .min(0, 'A GST rate cannot be negative')
+  .max(40, 'No GST rate is above 40%')
+
+const hsnFields = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^[0-9]{4,8}$/, 'An HSN or SAC code is 4 to 8 digits, nothing else'),
+  description: z.string().trim().min(2, 'Say what the code covers').max(300),
+  kind: z.enum(['GOODS', 'SERVICES']).default('GOODS'),
+  gstRate: gstPercent,
+  priceLimit: z.coerce.number().positive('The price limit has to be more than nought').optional().nullable(),
+  rateAbove: gstPercent.optional().nullable(),
+  effectiveFrom: z.coerce.date().optional().nullable(),
+  notes: optionalText,
+  isActive,
+})
+
+const slabBothOrNeither = (v: { priceLimit?: number | null; rateAbove?: number | null }, ctx: z.RefinementCtx) => {
+  const hasLimit = v.priceLimit != null
+  const hasRate = v.rateAbove != null
+  if (hasLimit !== hasRate) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [hasLimit ? 'rateAbove' : 'priceLimit'],
+      message: 'A price slab needs both the price per piece and the rate above it',
+    })
+  }
+}
+
+export const createHsnCodeSchema = hsnFields.superRefine(slabBothOrNeither)
+export const updateHsnCodeSchema = hsnFields.partial().superRefine(slabBothOrNeither)
+
+// ─── Dropdown Lists ─────────────────────────────────────────────────────────
+
+/** The lists Masters → Dropdown Lists keeps. One for now; more join here. */
+export const DROPDOWN_LISTS = ['RETURN_REASON'] as const
+
+const dropdownFields = z.object({
+  // Defaults to the only list there is, so a form that does not ask still
+  // files the value in the right place.
+  list: z.enum(DROPDOWN_LISTS).default('RETURN_REASON'),
+  label: z
+    .string()
+    .trim()
+    .min(2, 'Give it a name')
+    .max(60, 'Keep the name under 60 characters'),
+  behavesAs: z.string().trim().optional().nullable(),
+  sortOrder: z.number().int().min(0).max(9999).optional(),
+  isActive: z.boolean().optional(),
+})
+
+/** A return reason has to say which built-in one it works like. */
+const worksLikeBuiltIn = (
+  d: { list?: string; behavesAs?: string | null },
+  ctx: z.RefinementCtx,
+  creating: boolean
+) => {
+  const list = d.list ?? 'RETURN_REASON'
+  if (list !== 'RETURN_REASON') return
+  if (d.behavesAs === undefined && !creating) return
+  if (!d.behavesAs || !(RETURN_REASONS as readonly string[]).includes(d.behavesAs)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['behavesAs'],
+      message: 'Pick which reason it works like — it decides what happens to stock and the debit note',
+    })
+  }
+}
+
+export const createDropdownValueSchema = dropdownFields.superRefine((d, ctx) =>
+  worksLikeBuiltIn(d, ctx, true)
+)
+export const updateDropdownValueSchema = dropdownFields
+  .partial()
+  .superRefine((d, ctx) => worksLikeBuiltIn(d, ctx, false))
 
 export const createItemCategorySchema = z.object({
   name,

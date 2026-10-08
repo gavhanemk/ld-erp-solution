@@ -32,6 +32,10 @@ interface Item {
   departmentId: string | null
   department?: { id: string; name: string; code: string } | null
   uom: { id: string; name: string; symbol: string } | null
+  /** The GST the item is filled in at: its HSN code's rate when the code is listed, else its own. */
+  taxRate: { rate: string | number } | null
+  taxRateSource: 'HSN' | 'ITEM' | null
+  hsn: { code: string } | null
   styleId: string | null
   color: string | null
   style: { id: string; code: string; name: string; colors: string[] } | null
@@ -121,6 +125,31 @@ const columnsFor = (toReorder: Map<string, number>): Column<Item>[] => [
       ),
   },
   { key: 'hsnCode', header: 'HSN', className: 'font-mono text-xs text-muted-foreground' },
+  // What GST an order or bill fills in for this item, and where that comes
+  // from: the HSN list, or the item's own rate for a code not listed yet.
+  {
+    key: 'gst',
+    header: 'GST',
+    align: 'right',
+    render: (i) =>
+      i.taxRate ? (
+        <span
+          className="whitespace-nowrap text-xs tabular-nums"
+          title={
+            i.taxRateSource === 'HSN'
+              ? `From HSN ${i.hsn?.code} in the HSN list`
+              : 'Set on the item — its HSN code is not in the HSN list yet'
+          }
+        >
+          {Number(i.taxRate.rate)}%
+          <span className="text-muted-foreground ml-1 text-[10px]">
+            {i.taxRateSource === 'HSN' ? 'HSN' : 'item'}
+          </span>
+        </span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
+  },
   {
     key: 'standardRate',
     header: 'Std. Rate',
@@ -239,14 +268,24 @@ const formFields: FormField[] = [
     label: 'Department',
     type: 'select',
     section: 'Identity',
-    mustFill: true,
+    // Optional: not every item belongs to one department. Picking a
+    // sub-category still fills it in from that sub-category.
     optionsFrom: { resource: 'departments' },
+    help: 'Optional',
   },
   {
     name: 'hsnCode',
     label: 'HSN Code',
     section: 'Identity',
     placeholder: '52081200',
+    // Offered from the HSN list as you type, with each code's GST beside it.
+    // A code not listed yet can still be typed.
+    suggestFrom: {
+      resource: 'hsn-codes',
+      valueKey: 'code',
+      label: (r) => `${String(r.description ?? '')} · GST ${Number(r.gstRate)}%`,
+    },
+    help: 'GST comes from this code in Masters → HSN / SAC Codes',
   },
   {
     name: 'styleId',

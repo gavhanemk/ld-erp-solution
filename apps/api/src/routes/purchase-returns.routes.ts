@@ -8,6 +8,7 @@ import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
 import { qcRejectedByGrnLine, qcSummaryOf } from '../services/grnQc.service'
+import { returnReasonOptions } from '../lib/returnReasons'
 import {
   adjustableOn,
   DOC_RULES,
@@ -81,6 +82,8 @@ const returnInclude = {
       unitPrice: true,
       gstRate: true,
       remarks: true,
+      reason: true,
+      reasonLabel: true,
       billLineId: true,
       billLine: {
         select: {
@@ -145,6 +148,11 @@ function shape(r: ReturnRow) {
   }
   return {
     ...r,
+    // Each row's own reason in words, the challan's where the row has none.
+    lines: r.lines.map((l) => ({
+      ...l,
+      reasonLabel: l.reasonLabel ?? REASON_RULES[l.reason ?? r.reason].label,
+    })),
     taxableValue: round2(taxable),
     gstValue: round2(gst),
     totalValue: round2(taxable + gst),
@@ -323,6 +331,11 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
             ? (await balanceOf(tx, { itemId: l.itemId, warehouseId: l.warehouseId })).qty
             : null,
           qcRejectedQty: qc?.qty ?? 0,
+          // Why QC rejected it, picked from the challan's own reasons, and the
+          // checker's note — the form starts the row on both.
+          qcReasonCode: qc?.reasonCode ?? null,
+          qcReasonName: qc?.reasonName ?? null,
+          qcReasonNote: qc?.note ?? null,
           qcWarehouseId: qc?.warehouseId ?? null,
           qcWarehouseName: qc?.warehouseId ? (qcGodowns.get(qc.warehouseId) ?? null) : null,
           qcOnHand: qc?.warehouseId
@@ -339,11 +352,7 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
       bill,
       references,
       lines: withStock,
-      reasons: RETURN_REASONS.map((r) => ({
-        value: r,
-        label: REASON_RULES[r].label,
-        hint: REASON_RULES[r].hint,
-      })),
+      reasons: await returnReasonOptions(prisma),
     },
   })
 })
@@ -487,6 +496,26 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       }
     }
 
+    /*
+     * Each row's reason, and the challan's own.
+     *
+     * Every row says why it is going back (the schema refuses one that does
+     * not, unless an older caller sent a reason for the whole challan). The
+     * challan carries whichever reason sends back the most, so its one-word
+     * summary — on the list, on the note — is the main reason. The rows keep
+     * the rest.
+     */
+    const reasonOf = (l: (typeof data.lines)[number]) => (l.reason ?? data.reason)!
+    const qtyByReason = new Map<(typeof data.lines)[number]['reason'] & string, number>()
+    for (const l of data.lines) {
+      qtyByReason.set(reasonOf(l), (qtyByReason.get(reasonOf(l)) ?? 0) + l.qty)
+    }
+    const mainReason = [...qtyByReason].sort((a, b) => b[1] - a[1])[0][0]
+    // A row's reason in words: the mill's own name, or the built-in label.
+    const labelOf = (l: (typeof data.lines)[number]) =>
+      l.reasonLabel || REASON_RULES[reasonOf(l)].label
+    const mixedReasons = new Set(data.lines.map(labelOf)).size > 1
+
     const returnNumber = await nextDocumentNumber(tx, SERIES, returnDate)
 
     const created = await tx.purchaseReturn.create({
@@ -495,7 +524,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         returnDate,
         supplierId: bill.supplierId,
         billId: bill.id,
-        reason: data.reason,
+        reason: mainReason,
         reasonNote: data.reasonNote,
         vehicleNo: data.vehicleNo,
         transporterName: data.transporterName,
@@ -515,6 +544,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
               unitPrice: b.unitPrice,
               gstRate: b.gstRate,
               remarks: l.remarks,
+              reason: reasonOf(l),
+              reasonLabel: l.reasonLabel || null,
               sortOrder: i,
             }
           }),
@@ -565,7 +596,11 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         qty: round3(l.qty),
         unitPrice: Number(b.unitPrice),
         gstRate: Number(b.gstRate),
-        remarks: l.remarks,
+        // A note has one reason of its own, so on a mixed challan each line
+        // says its own — the supplier reads why every row is being charged.
+        remarks: mixedReasons
+          ? [labelOf(l), l.remarks].filter(Boolean).join(' — ')
+          : l.remarks,
       }
     })
     const priced = priceNote({ lines: noteLines, isIntraState })
@@ -574,7 +609,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     const note = await tx.purchaseNote.create({
       data: {
         noteNumber,
-        reason: data.reason,
+        reason: mainReason,
         reasonNote: data.reasonNote,
         issuedBy: 'OUR_COMPANY',
         docType: 'OUR_DEBIT_NOTE',

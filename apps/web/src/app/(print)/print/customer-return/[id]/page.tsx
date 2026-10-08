@@ -17,6 +17,7 @@ import {
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 interface Payload {
   company: Record<string, string | null>
@@ -142,11 +143,11 @@ export default function PrintCustomerReturn() {
       options={
         <label>
           Copy
-          <select value={copy} onChange={(e) => setCopy(e.target.value)}>
+          <SmartSelect value={copy} onChange={(e) => setCopy(e.target.value)}>
             {COPIES.map((x) => (
               <option key={x}>{x}</option>
             ))}
-          </select>
+          </SmartSelect>
         </label>
       }
       panels={[

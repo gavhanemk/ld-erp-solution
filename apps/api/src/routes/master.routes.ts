@@ -11,6 +11,7 @@ import * as brokerImport from '../services/brokerImport.service'
 import * as workstationImport from '../services/workstationImport.service'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
 import { writeAuditLog } from '../lib/audit'
+import { findHsn, loadHsnIndex, withHsnRates } from '../lib/hsn'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { assertItemStyleColorValid, rethrowItemStyleColorClash } from '../lib/itemStyleColor'
@@ -33,6 +34,9 @@ import {
   createStyleSchema,
   createSupplierSchema,
   createUomSchema,
+  createHsnCodeSchema,
+  createDropdownValueSchema,
+  updateDropdownValueSchema,
   createBankAccountSchema,
   createWarehouseSchema,
   createWorkstationSchema,
@@ -53,6 +57,7 @@ import {
   updateStyleSchema,
   updateSupplierSchema,
   updateUomSchema,
+  updateHsnCodeSchema,
   updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
@@ -703,6 +708,9 @@ router.use(
     facets: ['type', 'categoryId', 'departmentId', 'uomId'],
     defaultSort: { field: 'name', order: 'asc' },
     include: itemInclude,
+    // Each item goes out with the GST rate its HSN code carries in the HSN
+    // master, in `taxRate` where every order and bill form already looks.
+    afterRead: (rows) => withHsnRates(prisma, rows),
     // A finished good is one style in one colour, and the colour must be one
     // of that style's own. Checked here because it needs the style looked up,
     // which a schema cannot do. On an edit the saved type, style and colour
@@ -1076,6 +1084,143 @@ router.use(
     searchFields: ['name', 'symbol'],
     sortableFields: ['name', 'symbol'],
     defaultSort: { field: 'name', order: 'asc' },
+  }),
+)
+
+/*
+ * HSN / SAC codes and the GST each carries.
+ *
+ * "Fill from items" starts the list off from the codes the item master
+ * already uses, taking the rate those items carry. A code whose items
+ * disagree (two rates on one code) or carry no rate at all is listed back
+ * instead of guessed, for someone who knows to add by hand. Nothing is ever
+ * overwritten: a code already in the list is left as it is.
+ *
+ * Ahead of the CRUD router, whose routes would otherwise take "from-items".
+ */
+router.post('/hsn-codes/from-items', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const [items, listed] = await Promise.all([
+    prisma.item.findMany({
+      where: { isActive: true, hsnCode: { not: null } },
+      select: {
+        name: true,
+        hsnCode: true,
+        taxRate: { select: { rate: true } },
+        category: { select: { name: true, parent: { select: { name: true } } } },
+      },
+    }),
+    prisma.hsnCode.findMany({ select: { code: true } }),
+  ])
+  const index = await loadHsnIndex(prisma)
+  const known = new Set(listed.map((h) => h.code))
+
+  const byCode = new Map<string, typeof items>()
+  for (const it of items) {
+    const code = (it.hsnCode ?? '').replace(/\s+/g, '')
+    if (!code) continue
+    byCode.set(code, [...(byCode.get(code) ?? []), it])
+  }
+
+  const created: Array<{ code: string; gstRate: number; description: string }> = []
+  const skipped: Array<{ code: string; reason: string; items: number }> = []
+  for (const [code, group] of [...byCode.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (known.has(code)) continue
+    if (!/^[0-9]{4,8}$/.test(code)) {
+      skipped.push({ code, reason: 'not 4 to 8 digits — correct it on the item', items: group.length })
+      continue
+    }
+    const heading = findHsn(index, code)
+    if (heading) {
+      skipped.push({ code, reason: `already covered by ${heading.code}`, items: group.length })
+      continue
+    }
+    const rates = [...new Set(group.filter((g) => g.taxRate).map((g) => Number(g.taxRate!.rate)))].sort((a, b) => a - b)
+    if (rates.length === 0) {
+      skipped.push({ code, reason: 'no item with this code has a GST rate', items: group.length })
+      continue
+    }
+    if (rates.length > 1) {
+      skipped.push({ code, reason: `its items carry ${rates.map((r) => r + '%').join(' and ')}`, items: group.length })
+      continue
+    }
+    const names = [...new Set(group.map((g) => g.category?.name ?? g.name))]
+    const description = names.join(', ').slice(0, 300)
+    await prisma.hsnCode.create({
+      data: { code, description, kind: code.startsWith('99') ? 'SERVICES' : 'GOODS', gstRate: rates[0] },
+    })
+    created.push({ code, gstRate: rates[0], description })
+  }
+
+  if (created.length) {
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'CREATE',
+      entityType: 'HsnCode',
+      entityId: 'from-items',
+      after: { created },
+    })
+  }
+  res.json({ success: true, data: { created, skipped } })
+})
+
+/*
+ * Masters → Dropdown Lists: the small lists the mill keeps for itself, one
+ * table and one page for all of them. Names are unique within their list,
+ * without regard to capitals, so the same reason cannot be offered twice.
+ */
+router.use(
+  '/dropdown-values',
+  crudRouter({
+    model: 'dropdownValue',
+    module: MODULE,
+    entityType: 'DropdownValue',
+    createSchema: createDropdownValueSchema,
+    updateSchema: updateDropdownValueSchema,
+    searchFields: ['label'],
+    sortableFields: ['label', 'sortOrder', 'createdAt'],
+    defaultSort: { field: 'label', order: 'asc' },
+    filters: {
+      list: { where: (v) => ({ list: { in: v } }) },
+    },
+    beforeSave: async (data, before) => {
+      const list = String(data.list ?? before?.list ?? 'RETURN_REASON')
+      const label = String(data.label ?? before?.label ?? '').trim()
+      const clash = await prisma.dropdownValue.findFirst({
+        where: {
+          list,
+          label: { equals: label, mode: 'insensitive' },
+          ...(before?.id ? { id: { not: String(before.id) } } : {}),
+        },
+        select: { label: true, isActive: true },
+      })
+      if (clash) {
+        throw new AppError(
+          `There is already one called "${clash.label}"${clash.isActive ? '' : ' (switched off — edit it to bring it back)'}.`,
+          409,
+          'DUPLICATE'
+        )
+      }
+      return { data }
+    },
+  }),
+)
+
+router.use(
+  '/hsn-codes',
+  crudRouter({
+    model: 'hsnCode',
+    module: MODULE,
+    entityType: 'HsnCode',
+    createSchema: createHsnCodeSchema,
+    updateSchema: updateHsnCodeSchema,
+    uniqueFields: ['code'],
+    searchFields: ['code', 'description', 'notes'],
+    sortableFields: ['code', 'description', 'gstRate', 'createdAt'],
+    defaultSort: { field: 'code', order: 'asc' },
+    filters: {
+      kind: { where: (v) => ({ kind: { in: v.filter((k) => k === 'GOODS' || k === 'SERVICES') } }), facets: ['kind'] },
+    },
+    facets: ['kind'],
   }),
 )
 

@@ -28,7 +28,16 @@ export interface QcLine {
   receivedQty: number
   approvedQty: number
   rejectedQty: number
+  /** The checker's own words — "shade mismatch", "holes in 3 rolls". */
   reason: string | null
+  /**
+   * Why it was rejected, as one of the return challan's reasons, so the
+   * challan that sends it back starts on the same one. Absent on checks
+   * recorded before the checker picked one.
+   */
+  reasonCode?: string | null
+  /** The mill's own name for that reason, when one from Dropdown Lists was picked. */
+  reasonName?: string | null
 }
 
 export interface QcData {
@@ -101,8 +110,28 @@ export async function refuseIfInspected(
 export async function qcRejectedByGrnLine(
   tx: Prisma.TransactionClient,
   grnLineIds: string[]
-): Promise<Map<string, { qty: number; warehouseId: string | null }>> {
-  const out = new Map<string, { qty: number; warehouseId: string | null }>()
+): Promise<
+  Map<
+    string,
+    {
+      qty: number
+      warehouseId: string | null
+      reasonCode: string | null
+      reasonName: string | null
+      note: string | null
+    }
+  >
+> {
+  const out = new Map<
+    string,
+    {
+      qty: number
+      warehouseId: string | null
+      reasonCode: string | null
+      reasonName: string | null
+      note: string | null
+    }
+  >()
   if (!grnLineIds.length) return out
   const checks = await tx.inwardQC.findMany({
     where: { grn: { lines: { some: { id: { in: grnLineIds } } } } },
@@ -118,6 +147,9 @@ export async function qcRejectedByGrnLine(
       out.set(l.grnLineId, {
         qty: (prev?.qty ?? 0) + l.rejectedQty,
         warehouseId: d.rejectWarehouseId,
+        reasonCode: l.reasonCode ?? prev?.reasonCode ?? null,
+        reasonName: l.reasonName ?? prev?.reasonName ?? null,
+        note: l.reason ?? prev?.note ?? null,
       })
     }
   }

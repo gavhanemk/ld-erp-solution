@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { Plus, Download, Search, RefreshCw, AlertCircle } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { formatCurrency, formatDate } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 interface SalesOrder {
   id: string
@@ -124,7 +125,7 @@ export default function SalesOrdersPage() {
             className="bg-transparent text-sm text-foreground placeholder:text-muted-foreground flex-1 focus:outline-none"
           />
         </div>
-        <select
+        <SmartSelect
           className="form-input w-auto"
           value={status}
           onChange={(e) => setStatus(e.target.value)}
@@ -135,8 +136,8 @@ export default function SalesOrdersPage() {
               {v.label}
             </option>
           ))}
-        </select>
-        <select
+        </SmartSelect>
+        <SmartSelect
           className="form-input w-auto"
           value={jobWork}
           onChange={(e) => setJobWork(e.target.value)}
@@ -144,7 +145,7 @@ export default function SalesOrdersPage() {
           <option value="">All Types</option>
           <option value="false">Regular</option>
           <option value="true">Job Work</option>
-        </select>
+        </SmartSelect>
       </div>
 
       {error && (

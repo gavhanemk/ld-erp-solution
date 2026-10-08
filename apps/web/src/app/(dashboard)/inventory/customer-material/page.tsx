@@ -23,6 +23,7 @@ import {
   type MaterialBreakRow, type UnitQty,
 } from '@/components/inventory/MaterialCharts'
 import { formatDate } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Material customers have sent in for us to work on.
@@ -803,7 +804,7 @@ function CustomerMaterialScreen() {
             title="Received up to"
           />
         </div>
-        <select
+        <SmartSelect
           className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
           value={preset}
           onChange={(e) => pickPreset(e.target.value)}
@@ -814,7 +815,7 @@ function CustomerMaterialScreen() {
               {p.label}
             </option>
           ))}
-        </select>
+        </SmartSelect>
         {FILTERS.filter((f) => f.key !== 'department' && !(view === 'returns' && f.key === 'arrival')).map((f) => (
           <FilterMenu
             key={f.key}

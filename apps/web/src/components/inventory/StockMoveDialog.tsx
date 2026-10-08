@@ -14,6 +14,7 @@ import {
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The three ways stock moves without a purchase or a sale behind it.
@@ -261,7 +262,7 @@ export function StockMoveDialog({
               {mode === 'transfer' ? 'Take it from' : 'Store'}
               <span className="ml-0.5 text-red-500">*</span>
             </span>
-            <select
+            <SmartSelect
               className="form-input"
               value={warehouseId}
               onChange={(e) => setWarehouseId(e.target.value)}
@@ -274,7 +275,7 @@ export function StockMoveDialog({
                   {w.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
           </label>
 
           {mode === 'transfer' && (
@@ -282,7 +283,7 @@ export function StockMoveDialog({
               <span className="form-label">
                 Send it to<span className="ml-0.5 text-red-500">*</span>
               </span>
-              <select
+              <SmartSelect
                 className="form-input"
                 value={toWarehouseId}
                 onChange={(e) => setToWarehouseId(e.target.value)}
@@ -296,7 +297,7 @@ export function StockMoveDialog({
                       {w.name}
                     </option>
                   ))}
-              </select>
+              </SmartSelect>
             </label>
           )}
 
@@ -355,7 +356,7 @@ export function StockMoveDialog({
                   <tr key={i}>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
                     <td className="px-3 py-2">
-                      <select
+                      <SmartSelect
                         className="form-input h-9"
                         value={line.itemId}
                         onChange={(e) => {
@@ -381,7 +382,7 @@ export function StockMoveDialog({
                             {it.code} — {it.name}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </td>
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-2">

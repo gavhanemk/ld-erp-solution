@@ -98,8 +98,7 @@ const noteFields = z
     /* What happened, who issued it, and what kind of document it is: asked
        separately because they are separately known. `effect` is derived from
        `docType` on the server and is only read for OTHER, whose direction is
-       a decision rather than a definition. `gstTreatment` is not accepted
-       here at all — it has its own route and its own permission. */
+       a decision rather than a definition. */
     reason: z.enum(REASONS),
     reasonNote: trimmed(500),
     issuedBy: z.enum(ISSUERS),
@@ -129,6 +128,11 @@ const noteFields = z
     otherCharges: z.number().min(0).max(99_999_999).default(0),
     discountAmount: z.number().min(0).max(99_999_999).default(0),
     notes: trimmed(2000),
+
+    /* How the note goes in the GST return, picked on the note beside the GST
+       it carries. Optional on a draft; the post route refuses a note without
+       one, so GST is settled here, before anything touches the bill. */
+    gstTreatment: z.enum(GST_TREATMENTS).optional(),
 
     lines: z.array(noteLineSchema).min(1, 'A note needs at least one line'),
   })

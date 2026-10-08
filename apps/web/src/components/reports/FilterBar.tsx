@@ -3,6 +3,7 @@
 import { useMemo } from 'react'
 import { Check, Play, RotateCcw, SlidersHorizontal, X } from 'lucide-react'
 import { presetFor, presets, ymd } from '@/lib/period'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The filter bar above a report — one row of it.
@@ -159,7 +160,7 @@ export function FilterBar({
 
     if (f.type === 'select') {
       return (
-        <select
+        <SmartSelect
           key={f.key}
           title={f.help}
           aria-label={f.label}
@@ -178,7 +179,7 @@ export function FilterBar({
               {o.name}
             </option>
           ))}
-        </select>
+        </SmartSelect>
       )
     }
 
@@ -205,7 +206,7 @@ export function FilterBar({
 
         {dated && (
           <>
-            <select
+            <SmartSelect
               aria-label="Period"
               className={`${CONTROL} w-[8.5rem]`}
               value={activePreset}
@@ -226,7 +227,7 @@ export function FilterBar({
                   {p.label}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
             <input
               type="date"
               aria-label="From"

@@ -14,6 +14,13 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import {
+  optionFromCreated,
+  returnReasonFields,
+  type ReasonOption,
+} from '@/components/purchase/returnReasons'
 
 /**
  * Quality check on a goods receipt — optional, after the goods are in.
@@ -51,6 +58,8 @@ interface QcRecordLine {
   approvedQty: number
   rejectedQty: number
   reason: string | null
+  /** The reason picked, in words. Absent on checks recorded before the list. */
+  reasonLabel?: string | null
 }
 
 interface QcRecord {
@@ -78,6 +87,8 @@ interface QcData {
   lines: QcFormLine[]
   qc: QcRecord | null
   history: QcRecord[]
+  /** The return challan's reasons, so a rejection is recorded in its words. */
+  reasons: ReasonOption[]
 }
 
 export const QC_RESULT: Record<QcRecord['result'], { label: string; cls: string }> = {
@@ -114,6 +125,12 @@ export function GrnQcDialog({
   const [data, setData] = useState<QcData | null>(null)
   const [rejected, setRejected] = useState<Record<string, string>>({})
   const [reasons, setReasons] = useState<Record<string, string>>({})
+  /** Why each line was rejected — a key into `data.reasons`, built-in or the mill's own. */
+  const [reasonCodes, setReasonCodes] = useState<Record<string, string>>({})
+  /** The line a new reason is being added for, and what had been typed. */
+  const [newReasonFor, setNewReasonFor] = useState<{ grnLineId: string; typed: string } | null>(
+    null
+  )
   const [inspectionDate, setInspectionDate] = useState(today)
   const [remarks, setRemarks] = useState('')
   const [cancelReason, setCancelReason] = useState('')
@@ -169,12 +186,12 @@ export function GrnQcDialog({
       if (r > l.receivedQty + 0.0005) {
         out.push(`${l.itemName}: only ${l.receivedQty} ${l.uom ?? ''} was received`)
       }
-      if (r > 0 && (reasons[l.grnLineId]?.trim().length ?? 0) < 3) {
-        out.push(`${l.itemName}: say why it was rejected`)
+      if (r > 0 && !reasonCodes[l.grnLineId]) {
+        out.push(`${l.itemName}: pick why it was rejected`)
       }
     }
     return out
-  }, [lines, rejected, reasons])
+  }, [lines, rejected, reasonCodes])
 
   const save = async () => {
     if (problems.length || saving || !data) return
@@ -189,6 +206,15 @@ export function GrnQcDialog({
           grnLineId: l.grnLineId,
           rejectedQty: num(rejected[l.grnLineId] ?? ''),
           reason: reasons[l.grnLineId]?.trim() || null,
+          reasonCode:
+            num(rejected[l.grnLineId] ?? '') > 0
+              ? (data.reasons.find((o) => o.value === reasonCodes[l.grnLineId])?.code ?? null)
+              : null,
+          reasonLabel:
+            num(rejected[l.grnLineId] ?? '') > 0 &&
+            data.reasons.find((o) => o.value === reasonCodes[l.grnLineId])?.custom
+              ? data.reasons.find((o) => o.value === reasonCodes[l.grnLineId])?.label
+              : null,
         })),
       })
       onSaved(res.message)
@@ -389,19 +415,44 @@ export function GrnQcDialog({
                           </div>
                           <div className="space-y-1">
                             <label className={fieldLabel}>Reason</label>
-                            <input
+                            <SmartSelect
                               className={`form-input h-9 w-full ${
-                                r > 0 && !reasons[l.grnLineId]?.trim() ? 'border-amber-500/70' : ''
+                                r > 0 && !reasonCodes[l.grnLineId] ? 'border-amber-500/70' : ''
                               }`}
-                              value={reasons[l.grnLineId] ?? ''}
+                              value={reasonCodes[l.grnLineId] ?? ''}
                               onChange={(e) =>
-                                setReasons((p) => ({ ...p, [l.grnLineId]: e.target.value }))
+                                setReasonCodes((p) => ({ ...p, [l.grnLineId]: e.target.value }))
                               }
-                              placeholder={r > 0 ? 'Why?' : '—'}
                               disabled={!(r > 0)}
-                              aria-label={`${l.itemName} rejection reason`}
-                            />
+                              onCreate={
+                                can('masters', 'create')
+                                  ? (typed) => setNewReasonFor({ grnLineId: l.grnLineId, typed })
+                                  : undefined
+                              }
+                              createNoun="reason"
+                              aria-label={`Why ${l.itemName} was rejected`}
+                            >
+                              <option value="">{r > 0 ? 'Pick…' : '—'}</option>
+                              {data?.reasons.map((x) => (
+                                <option key={x.value} value={x.value}>
+                                  {x.label}
+                                </option>
+                              ))}
+                            </SmartSelect>
                           </div>
+                        </div>
+                        <div className="mt-2 space-y-1">
+                          <label className={fieldLabel}>Note</label>
+                          <input
+                            className="form-input h-9 w-full"
+                            value={reasons[l.grnLineId] ?? ''}
+                            onChange={(e) =>
+                              setReasons((p) => ({ ...p, [l.grnLineId]: e.target.value }))
+                            }
+                            placeholder={r > 0 ? 'e.g. shade mismatch (optional)' : '—'}
+                            disabled={!(r > 0)}
+                            aria-label={`${l.itemName} rejection note`}
+                          />
                         </div>
                       </div>
                     )
@@ -419,7 +470,8 @@ export function GrnQcDialog({
                           ['Received', 'w-24', 'right'],
                           ['Approved', 'w-24', 'right'],
                           ['Rejected', 'w-28', 'right'],
-                          ['Rejection reason', '', 'left'],
+                          ['Reason', 'w-48', 'left'],
+                          ['Note', '', 'left'],
                         ].map(([label, width, align]) => (
                           <th
                             key={label}
@@ -472,19 +524,41 @@ export function GrnQcDialog({
                               />
                             </td>
                             <td>
-                              <input
+                              <SmartSelect
                                 className={`form-input h-8 text-xs ${
-                                  r > 0 && !reasons[l.grnLineId]?.trim()
-                                    ? 'border-amber-500/70'
-                                    : ''
+                                  r > 0 && !reasonCodes[l.grnLineId] ? 'border-amber-500/70' : ''
                                 }`}
+                                value={reasonCodes[l.grnLineId] ?? ''}
+                                onChange={(e) =>
+                                  setReasonCodes((p) => ({ ...p, [l.grnLineId]: e.target.value }))
+                                }
+                                disabled={!(r > 0)}
+                                onCreate={
+                                  can('masters', 'create')
+                                    ? (typed) => setNewReasonFor({ grnLineId: l.grnLineId, typed })
+                                    : undefined
+                                }
+                                createNoun="reason"
+                                aria-label={`Why ${l.itemName} was rejected`}
+                              >
+                                <option value="">{r > 0 ? 'Pick…' : '—'}</option>
+                                {data?.reasons.map((x) => (
+                                  <option key={x.value} value={x.value}>
+                                    {x.label}
+                                  </option>
+                                ))}
+                              </SmartSelect>
+                            </td>
+                            <td>
+                              <input
+                                className="form-input h-8 text-xs"
                                 value={reasons[l.grnLineId] ?? ''}
                                 onChange={(e) =>
                                   setReasons((p) => ({ ...p, [l.grnLineId]: e.target.value }))
                                 }
-                                placeholder={r > 0 ? 'e.g. shade mismatch, GSM low' : '—'}
+                                placeholder={r > 0 ? 'e.g. shade mismatch, GSM low (optional)' : '—'}
                                 disabled={!(r > 0)}
-                                aria-label={`${l.itemName} rejection reason`}
+                                aria-label={`${l.itemName} rejection note`}
                               />
                             </td>
                           </tr>
@@ -554,6 +628,25 @@ export function GrnQcDialog({
           </div>
         )}
       </div>
+
+      {/* One of the mill's own reasons, added without leaving the form. It goes
+        into Masters → Dropdown Lists, where it can be renamed or switched off. */}
+      <MasterFormDialog<{ id: string; label: string; behavesAs: string | null }>
+        open={newReasonFor !== null}
+        onClose={() => setNewReasonFor(null)}
+        onSaved={() => {}}
+        onCreated={(row) => {
+          const option = optionFromCreated(row)
+          setData((prev) => (prev ? { ...prev, reasons: [...prev.reasons, option] } : prev))
+          if (newReasonFor)
+            setReasonCodes((p) => ({ ...p, [newReasonFor.grnLineId]: option.value }))
+        }}
+        resource="dropdown-values"
+        fields={returnReasonFields}
+        initialValues={newReasonFor?.typed ? { label: newReasonFor.typed } : undefined}
+        title="Return reason"
+        stacked
+      />
     </div>,
     document.body
   )
@@ -601,7 +694,11 @@ function StandingCheck({
                 <p className="text-muted-foreground font-mono text-[10px]">
                   {l.itemCode}
                 </p>
-                {l.reason && <p className="mt-0.5 text-[10px] text-amber-500">{l.reason}</p>}
+                {(l.reasonLabel || l.reason) && (
+                  <p className="warn-text mt-0.5 text-[11px] font-semibold">
+                    {[l.reasonLabel, l.reason].filter(Boolean).join(' — ')}
+                  </p>
+                )}
               </div>
               <div className="shrink-0 text-right text-xs tabular-nums">
                 <p className="text-emerald-400">

@@ -142,7 +142,16 @@ export function ActionMenu({ label, items }: { label: string; items: RowAction[]
                     onClick={() => setOpen(false)}
                   >
                     {it.icon}
-                    {it.label}
+                    {/* A link's hint is a second line saying what is behind
+                      it — "written automatically, not posted yet". */}
+                    <span className="flex flex-col items-start">
+                      {it.label}
+                      {it.hint && (
+                        <span className="text-muted-foreground text-[10px] leading-tight">
+                          {it.hint}
+                        </span>
+                      )}
+                    </span>
                   </Link>
                 ) : (
                   <button

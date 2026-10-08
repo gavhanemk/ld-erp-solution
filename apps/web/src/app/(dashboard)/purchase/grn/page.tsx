@@ -43,6 +43,7 @@ import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * What has actually turned up against the purchase orders.
@@ -1376,7 +1377,7 @@ export default function GoodsReceiptPage() {
           </div>
 
           <div className="flex items-center gap-1 sm:contents">
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 grow basis-[6.6rem] px-1 py-0 text-[10px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
               value={supplierId}
               onChange={(e) => setSupplierId(e.target.value)}
@@ -1388,13 +1389,13 @@ export default function GoodsReceiptPage() {
                   {sup.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
             {/* Built from what is actually on order, not from the item master.
               The mill has forty items today and will have four hundred; a list
               of every one of them, most with nothing outstanding, is something
               to scroll rather than a filter. */}
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 grow basis-[4.85rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
               value={itemId}
               onChange={(e) => setItemId(e.target.value)}
@@ -1406,13 +1407,13 @@ export default function GoodsReceiptPage() {
                   {it.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
             {/* The one filter the two lists cannot share: an order can be part
               received and a receipt cannot, and a receipt can be cancelled
               where an order on this list never is. */}
             {tab === 'waiting' ? (
-              <select
+              <SmartSelect
                 className="form-input h-8 min-w-0 grow basis-[8.95rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
                 value={waitStatus}
                 onChange={(e) => setWaitStatus(e.target.value)}
@@ -1421,9 +1422,9 @@ export default function GoodsReceiptPage() {
                 <option value="">Anything still due</option>
                 <option value="SENT">Nothing arrived yet</option>
                 <option value="PARTIALLY_RECEIVED">Part received</option>
-              </select>
+              </SmartSelect>
             ) : (
-              <select
+              <SmartSelect
                 className="form-input h-8 min-w-0 grow basis-[8.95rem] px-1 py-0 text-[10px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
                 value={status}
                 onChange={(e) => setStatus(e.target.value)}
@@ -1432,7 +1433,7 @@ export default function GoodsReceiptPage() {
                 <option value="">Any status</option>
                 <option value="ACCEPTED">Received</option>
                 <option value="CANCELLED">Cancelled</option>
-              </select>
+              </SmartSelect>
             )}
           </div>
 

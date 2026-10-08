@@ -36,6 +36,8 @@ import {
 } from 'lucide-react'
 import { ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 
 /** The tile in the form's title bar, by master. */
 const RESOURCE_ICONS: Record<string, LucideIcon> = {
@@ -171,6 +173,21 @@ export interface FormField {
   mustFill?: boolean | 'ifOptions'
   /** Short hint rendered under the input. */
   help?: string
+  /**
+   * A hint worked out from what is typed, shown in place of `help` once it
+   * returns something: a GST rate showing how it splits as it is entered.
+   */
+  liveHelp?: (value: unknown) => string | null
+  /**
+   * Suggestions for a text box from a master list, offered as the person
+   * types but never forced: an item's HSN code suggested from the HSN master,
+   * while a code not listed there yet can still be typed.
+   */
+  suggestFrom?: {
+    resource: string
+    valueKey: string
+    label: (row: Record<string, unknown>) => string
+  }
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
   uppercase?: boolean
   /**
@@ -213,6 +230,12 @@ interface MasterFormDialogProps<T> {
   columns?: 3 | 4
   /** A wider card, for a master with many fields to set four across. */
   wide?: boolean
+  /** Values a new record starts with: the name typed into a search that found nothing. */
+  initialValues?: Record<string, unknown>
+  /** The record just created, for a form that opened this one to pick it straight away. */
+  onCreated?: (row: T) => void
+  /** Opened from inside another dialog, so it has to sit above that one. */
+  stacked?: boolean
 }
 
 export function MasterFormDialog<T extends { id: string }>({
@@ -225,6 +248,9 @@ export function MasterFormDialog<T extends { id: string }>({
   title,
   columns = 3,
   wide = false,
+  initialValues,
+  onCreated,
+  stacked = false,
 }: MasterFormDialogProps<T>) {
   const isEdit = Boolean(record)
   const client = useMemo(() => masterResource<T>(resource), [resource])
@@ -259,11 +285,16 @@ export function MasterFormDialog<T extends { id: string }>({
       } else {
         seed[f.name] = ''
       }
+      if (!record && initialValues?.[f.name] != null && initialValues[f.name] !== '') {
+        seed[f.name] = initialValues[f.name]
+      }
     }
     setValues(seed)
     setFieldErrors({})
     setFormError(null)
     filledBy.current = {}
+    // initialValues is read once, when the form opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, record, fields])
 
   // The cursor starts in the first box, so a clerk can type straight away.
@@ -287,7 +318,7 @@ export function MasterFormDialog<T extends { id: string }>({
   useEffect(() => {
     if (!open) return
 
-    const remoteFields = fields.filter((f) => f.optionsFrom)
+    const remoteFields = fields.filter((f) => f.optionsFrom || f.suggestFrom)
     if (remoteFields.length === 0) return
 
     let cancelled = false
@@ -295,7 +326,9 @@ export function MasterFormDialog<T extends { id: string }>({
     void Promise.all(
       remoteFields.map(async (f) => {
         try {
-          const res = (await masterResource<Record<string, unknown>>(f.optionsFrom!.resource).list({
+          const res = (await masterResource<Record<string, unknown>>(
+            (f.optionsFrom ?? f.suggestFrom)!.resource,
+          ).list({
             limit: 200,
             active: true,
           })) as Paginated<Record<string, unknown>>
@@ -363,22 +396,35 @@ export function MasterFormDialog<T extends { id: string }>({
   // Escape closes, and the page behind must not scroll while the dialog is up.
   useEffect(() => {
     if (!open) return
+    // Opened over another dialog, Escape is caught first and kept here, so it
+    // closes this form and leaves the one underneath open.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      // Escape in an open dropdown list closes that list, not the form.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-radix-popper-content-wrapper]')) return
+      if (stacked) {
+        e.stopPropagation()
+        e.stopImmediatePropagation()
+      }
+      onClose()
     }
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, stacked)
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, stacked)
       document.body.style.overflow = previousOverflow
     }
-  }, [open, onClose])
+  }, [open, onClose, stacked])
 
   if (!open) return null
 
   const optionsFor = (f: FormField) => {
     if (f.optionsFromField) return fieldOptions[f.name]
+    if (f.suggestFrom) {
+      const { valueKey, label } = f.suggestFrom
+      return (remoteRows[f.name] ?? []).map((row) => ({ value: String(row[valueKey] ?? ''), label: label(row) }))
+    }
     if (!f.optionsFrom) return f.options
     const rows = remoteRows[f.name]
     if (!rows) return undefined
@@ -515,7 +561,9 @@ export function MasterFormDialog<T extends { id: string }>({
       if (isEdit && record) {
         await client.update(record.id, payload as Partial<T>)
       } else {
-        await client.create(payload as Partial<T>)
+        const created = await client.create(payload as Partial<T>)
+        const row = (created as { data?: T })?.data
+        if (row && onCreated) onCreated(row)
       }
       onSaved()
       onClose()
@@ -597,7 +645,9 @@ export function MasterFormDialog<T extends { id: string }>({
    * a phone the sidebar is a drawer, so there the cover takes the full width.
    */
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+    <div
+      className={`fixed inset-0 ${stacked ? 'z-[90]' : 'z-50'} flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3`}
+    >
       {/* Capped and centred. A master has a dozen fields, not an item table;
         stretched across a wide screen each box ran half the monitor long. */}
       <form
@@ -778,7 +828,7 @@ function Field({
       )}
 
       {type === 'select' && (
-        <select
+        <SmartSelect
           id={field.name}
           className={inputClass}
           value={String(value ?? '')}
@@ -796,7 +846,7 @@ function Field({
               {o.label}
             </option>
           ))}
-        </select>
+        </SmartSelect>
       )}
 
       {/* Boxed at the same height as the fields beside it, so a tick box
@@ -814,22 +864,33 @@ function Field({
         </label>
       )}
 
-      {(type === 'text' || type === 'number' || type === 'date' || type === 'tags') && (
-        <input
+      {field.suggestFrom && type === 'text' ? (
+        <SuggestInput
           id={field.name}
-          type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
-          step={type === 'number' ? 'any' : undefined}
           className={inputClass}
           placeholder={hint}
           value={String(value ?? '')}
-          onChange={(e) => onChange(e.target.value)}
+          onValueChange={(v) => onChange(v)}
+          suggestions={(options ?? []).map((o) => ({ value: o.value, label: o.label }))}
         />
+      ) : (
+        (type === 'text' || type === 'number' || type === 'date' || type === 'tags') && (
+          <input
+            id={field.name}
+            type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
+            step={type === 'number' ? 'any' : undefined}
+            className={inputClass}
+            placeholder={hint}
+            value={String(value ?? '')}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        )
       )}
 
       {error ? (
         <p className="form-help !text-red-400">{error}</p>
-      ) : field.help ? (
-        <p className="form-help">{field.help}</p>
+      ) : (field.liveHelp?.(value) ?? field.help) ? (
+        <p className="form-help">{field.liveHelp?.(value) ?? field.help}</p>
       ) : null}
     </div>
   )
