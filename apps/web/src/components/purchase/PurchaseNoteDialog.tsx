@@ -246,7 +246,7 @@ export function PurchaseNoteDialog({
   const [reasons, setReasons] = useState<ReasonOption[]>([])
   const [suppliers, setSuppliers] = useState<Option[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
-  const [warehouses, setWarehouses] = useState<Option[]>([])
+  const [warehouses, setWarehouses] = useState<Array<Option & { isActive?: boolean }>>([])
   const [bills, setBills] = useState<BillOption[]>([])
   const [grnOptions, setGrnOptions] = useState<GrnOption[]>([])
   const [grnPickerId, setGrnPickerId] = useState('')
@@ -367,7 +367,7 @@ export function PurchaseNoteDialog({
           api.get<{ data: { reasons: ReasonOption[] } }>('/purchase/notes/reasons'),
           masterResource<Option>('suppliers').list({ limit: 500 }),
           masterResource<ItemOption>('items').list({ limit: 500, active: true }),
-          masterResource<Option>('warehouses').list({ limit: 200 }),
+          masterResource<Option & { isActive?: boolean }>('warehouses').list({ limit: 200 }),
         ])
         setReasons(r.data.reasons)
         setSuppliers([...s.data].sort((a, b) => a.name.localeCompare(b.name)))
@@ -1933,7 +1933,12 @@ export function PurchaseNoteDialog({
                               onChange={(e) => setWarehouseId(e.target.value)}
                             >
                               <option value="">Not taken out of stock</option>
-                              {warehouses.map((w) => (
+                              {/* Stores in use only, and the one a note being
+                                corrected already names even if it has since
+                                been switched off in Masters. */}
+                              {warehouses
+                                .filter((w) => w.isActive !== false || w.id === warehouseId)
+                                .map((w) => (
                                 <option key={w.id} value={w.id}>
                                   {w.name}
                                 </option>

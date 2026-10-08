@@ -565,6 +565,14 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
   )
 })
 
+/** One of the mill's stores, as the warehouse master lists it. */
+interface Store {
+  id: string
+  name: string
+  address?: string | null
+  isActive?: boolean
+}
+
 export function ReceiveGoodsDialog({
   onClose,
   onSaved,
@@ -592,9 +600,13 @@ export function ReceiveGoodsDialog({
 }) {
   const editing = Boolean(grnId)
   const [orders, setOrders] = useState<OrderOption[]>([])
-  const [warehouses, setWarehouses] = useState<
-    Array<{ id: string; name: string; address?: string | null }>
-  >([])
+  const [warehouses, setWarehouses] = useState<Store[]>([])
+  /*
+   * Stores switched off in Masters. Never offered for new goods — they are
+   * kept only so a receipt being corrected can still name the store it
+   * already put its goods in, rather than coming up blank.
+   */
+  const [retiredStores, setRetiredStores] = useState<Store[]>([])
   const [loadingLists, setLoadingLists] = useState(true)
 
   const [poId, setPoId] = useState(startOn ?? '')
@@ -658,14 +670,22 @@ export function ReceiveGoodsDialog({
    * option list was being rebuilt for each dropdown on each character typed.
    * Elements are immutable, so the one array is safe to hand to all of them.
    */
+  const usedStoreIds = [
+    ...Object.values(entries).flatMap((rows) => rows.map((a) => a.warehouseId)),
+    shippingWarehouseId,
+  ].join(',')
+  const keptRetired = useMemo(
+    () => retiredStores.filter((w) => usedStoreIds.split(',').includes(w.id)),
+    [retiredStores, usedStoreIds]
+  )
   const storeOptions = useMemo(
     () =>
-      warehouses.map((w) => (
+      [...warehouses, ...keptRetired].map((w) => (
         <option key={w.id} value={w.id}>
           {w.name}
         </option>
       )),
-    [warehouses]
+    [warehouses, keptRetired]
   )
 
   // Only orders that have actually been sent can be received against, so those
@@ -689,7 +709,7 @@ export function ReceiveGoodsDialog({
          * of three is most of the wait gone.
          */
         const [w, sent, partly] = await Promise.all([
-          masterResource<{ id: string; name: string; address?: string | null }>('warehouses').list({
+          masterResource<Store>('warehouses').list({
             limit: 100,
           }),
           editing
@@ -703,7 +723,11 @@ export function ReceiveGoodsDialog({
         ])
         if (cancelled) return
         setOrders([...(sent?.data ?? []), ...(partly?.data ?? [])])
-        setWarehouses(w.data)
+        // Only the stores in use. A store switched off in Masters is not
+        // somewhere goods can arrive, and listing it beside the real one is
+        // how a delivery ends up booked into a godown that no longer exists.
+        setWarehouses(w.data.filter((x) => x.isActive !== false))
+        setRetiredStores(w.data.filter((x) => x.isActive === false))
       } catch {
         if (!cancelled) setError('Could not load the open purchase orders.')
       } finally {
@@ -873,7 +897,9 @@ export function ReceiveGoodsDialog({
         // frozen text, never a link to the row that made it.
         const shipSnapshot = g.shippingAddress?.trim()
         const shipMatch = shipSnapshot
-          ? warehouses.find((w) => (w.address ?? '').trim() === shipSnapshot)
+          ? [...warehouses, ...retiredStores].find(
+              (w) => (w.address ?? '').trim() === shipSnapshot
+            )
           : undefined
         setShippingWarehouseId(shipMatch?.id ?? fallback)
       } catch (err) {
@@ -889,7 +915,7 @@ export function ReceiveGoodsDialog({
     return () => {
       cancelled = true
     }
-  }, [grnId, warehouses])
+  }, [grnId, warehouses, retiredStores])
 
   /*
    * The supplier's addresses on file, and which one this receipt starts on.
@@ -1402,7 +1428,7 @@ export function ReceiveGoodsDialog({
                     </Readout>
                   ))}
 
-                {warehouses.length > 1 ? (
+                {warehouses.length + keptRetired.length > 1 ? (
                   <IconField label="Shipping Address" icon={Truck}>
                     <SmartSelect
                       className="form-input pl-9"
@@ -1410,7 +1436,7 @@ export function ReceiveGoodsDialog({
                       onChange={(e) => setShippingWarehouseId(e.target.value)}
                       aria-label="Which of the mill's stores this delivery arrived at"
                     >
-                      {warehouses.map((w) => (
+                      {[...warehouses, ...keptRetired].map((w) => (
                         <option key={w.id} value={w.id}>
                           {w.name}
                           {w.address ? ` — ${w.address}` : ''}
