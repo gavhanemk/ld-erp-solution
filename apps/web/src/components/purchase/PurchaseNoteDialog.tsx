@@ -452,9 +452,40 @@ export function PurchaseNoteDialog({
         setPoId(res.data.bill.po?.id ?? null)
         setGrnId(res.data.bill.receipts[0]?.id ?? null)
 
-        const existing = new Map(
-          (record?.lines ?? []).map((l) => [l.billLineId ?? `item:${l.item.id}`, l])
-        )
+        /*
+         * The note's own lines, one per bill line.
+         *
+         * A note written from a return challan can carry several lines for
+         * one bill line — 20 m wrong material and 30 m returned from the same
+         * delivery. The form has one row per bill line, so they are added
+         * together here, and each part keeps its words in the remark ("20
+         * Wrong material sent; 30 Material returned"). Keeping only one of
+         * them showed part of the quantity, and saving it was then refused
+         * for not matching the challan.
+         */
+        const existing = new Map<
+          string,
+          { qty: number; unitPrice: number; gstRate: number; remarks: string }
+        >()
+        const partsOf = new Map<string, NonNullable<typeof record>['lines']>()
+        for (const l of record?.lines ?? []) {
+          const key = l.billLineId ?? `item:${l.item.id}`
+          partsOf.set(key, [...(partsOf.get(key) ?? []), l])
+        }
+        for (const [key, parts] of partsOf) {
+          const qty = parts.reduce((s, p) => s + num(p.qty), 0)
+          existing.set(key, {
+            qty: Math.round(qty * 1000) / 1000,
+            unitPrice: num(parts[0].unitPrice),
+            gstRate: num(parts[0].gstRate),
+            remarks:
+              parts.length === 1
+                ? (parts[0].remarks ?? '')
+                : parts
+                    .map((p) => [String(num(p.qty)), p.remarks].filter(Boolean).join(' '))
+                    .join('; '),
+          })
+        }
 
         // Set once, from whichever suggested line is found first — the
         // godown the receipt itself named, so a note that moves goods
