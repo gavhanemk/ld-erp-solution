@@ -39,6 +39,8 @@ import { Check, ChevronDown, Plus, Search } from 'lucide-react'
 interface Opt {
   value: string
   label: string
+  /** A second, smaller line under the option, searched as well: an item code's name. */
+  sub: string | null
   disabled: boolean
   hidden: boolean
   group: string | null
@@ -63,12 +65,14 @@ function readOptions(children: ReactNode, group: string | null = null, out: Opt[
       disabled?: boolean
       hidden?: boolean
       label?: string
+      'data-sub'?: string
     }
     if (child.type === 'option') {
       const label = textOf(props.children)
       out.push({
         value: props.value === undefined ? label : String(props.value),
         label,
+        sub: props['data-sub'] ? String(props['data-sub']) : null,
         disabled: Boolean(props.disabled),
         hidden: Boolean(props.hidden),
         group,
@@ -147,7 +151,7 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     return options.filter((o) => {
       if (o.hidden) return false
       if (!words.length) return true
-      const hay = fold(`${o.label} ${o.group ?? ''}`)
+      const hay = fold(`${o.label} ${o.sub ?? ''} ${o.group ?? ''}`)
       return words.every((w) => hay.includes(w))
     })
   }, [options, query])
@@ -372,7 +376,10 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
                       isActive && !o.disabled ? 'bg-primary/15' : ''
                     } ${o.value === '' ? 'text-muted-foreground' : ''}`}
                   >
-                    <span className="min-w-0 flex-1 whitespace-normal break-words">{o.label || ' '}</span>
+                    <span className="min-w-0 flex-1 whitespace-normal break-words">
+                      {o.label || ' '}
+                      {o.sub && <span className="text-muted-foreground block text-xs font-normal">{o.sub}</span>}
+                    </span>
                     {isChosen && o.value !== '' && <Check size={14} className="text-primary shrink-0" aria-hidden />}
                   </div>
                 </div>

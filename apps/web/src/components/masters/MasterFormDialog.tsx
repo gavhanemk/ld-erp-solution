@@ -37,6 +37,7 @@ import {
 import { ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 
 /** The tile in the form's title bar, by master. */
 const RESOURCE_ICONS: Record<string, LucideIcon> = {
@@ -863,27 +864,27 @@ function Field({
         </label>
       )}
 
-      {(type === 'text' || type === 'number' || type === 'date' || type === 'tags') && (
-        <input
+      {field.suggestFrom && type === 'text' ? (
+        <SuggestInput
           id={field.name}
-          type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
-          step={type === 'number' ? 'any' : undefined}
           className={inputClass}
           placeholder={hint}
           value={String(value ?? '')}
-          onChange={(e) => onChange(e.target.value)}
-          list={field.suggestFrom ? `${field.name}-suggestions` : undefined}
-          autoComplete={field.suggestFrom ? 'off' : undefined}
+          onValueChange={(v) => onChange(v)}
+          suggestions={(options ?? []).map((o) => ({ value: o.value, label: o.label }))}
         />
-      )}
-      {field.suggestFrom && (
-        <datalist id={`${field.name}-suggestions`}>
-          {options?.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </datalist>
+      ) : (
+        (type === 'text' || type === 'number' || type === 'date' || type === 'tags') && (
+          <input
+            id={field.name}
+            type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
+            step={type === 'number' ? 'any' : undefined}
+            className={inputClass}
+            placeholder={hint}
+            value={String(value ?? '')}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        )
       )}
 
       {error ? (

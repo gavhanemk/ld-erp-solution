@@ -1399,25 +1399,6 @@ export function PurchaseOrderDialog({
   }
 
   /**
-   * The code cell resolves an item rather than merely narrowing the list.
-   *
-   * Every item has one unique code and that code is its identity — it is what
-   * is quoted on the phone and written on the rack. Typing one in full picks
-   * that item outright. Anything shorter is left alone, because it is a code
-   * half remembered, not a mistake.
-   */
-  const typeCodeFor = (index: number, raw: string) => {
-    setLine(index, { codeText: raw })
-    setError(null)
-
-    const typed = raw.trim().toLowerCase()
-    if (!typed) return
-
-    const exact = items.find((i) => (i.code ?? '').toLowerCase() === typed)
-    if (exact) pickItemFor(index, exact.id)
-  }
-
-  /**
    * The style cell keeps what was typed and links it when it can.
    *
    * `styleNo` is always whatever is in the box. `styleId` is set only on an
@@ -2601,30 +2582,25 @@ export function PurchaseOrderDialog({
                               name the same thing, so one wide cell shows both
                               whole and gives the table back a column. */}
                             <div className="space-y-1">
-                              {/* A real combobox, using the browser's own: type
-                                a code and the list narrows, or open it and pick
-                                one. `datalist` rather than a hand-built dropdown
-                                because it needs no package, it keeps the cell a
-                                plain text box for anyone who already knows the
-                                code by heart, and it cannot be scrolled out of
-                                the table the way an absolutely positioned menu
-                                inside a sideways-scrolling grid can.
-
+                              {/* The code, as the same searchable dropdown as
+                                every other on the form: type a code or part of
+                                the name and the list narrows, each code with its
+                                item's name under it. Picking one picks the item.
                                 One list per row, because each row narrows its
                                 items by its own category. */}
-                              <input
+                              <SmartSelect
                                 className={`${cell} font-mono`}
-                                list={`po-codes-${i}`}
-                                placeholder="Item code"
-                                value={line.codeText ?? ''}
-                                onChange={(e) => typeCodeFor(i, e.target.value)}
+                                value={line.itemId}
+                                onChange={(e) => pickItemFor(i, e.target.value)}
                                 aria-label={`Row ${i + 1} item code`}
-                              />
-                              <datalist id={`po-codes-${i}`}>
+                              >
+                                <option value="">Item code</option>
                                 {choices.map((it) => (
-                                  <option key={it.id} value={it.code ?? ''} label={it.name} />
+                                  <option key={it.id} value={it.id} data-sub={it.name}>
+                                    {it.code ?? it.name}
+                                  </option>
                                 ))}
-                              </datalist>
+                              </SmartSelect>
                               <SmartSelect
                                 className={cell}
                                 value={line.itemId}
@@ -2636,7 +2612,7 @@ export function PurchaseOrderDialog({
                                 </option>
                                 <option value={ADD_NEW}>+ Add a new item…</option>
                                 {choices.map((it) => (
-                                  <option key={it.id} value={it.id}>
+                                  <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                     {it.name}
                                   </option>
                                 ))}
@@ -2951,19 +2927,19 @@ export function PurchaseOrderDialog({
                             flex-basis override here — spelled out without it
                             so the fixed code column and the flexible name
                             column actually hold the widths they are given. */}
-                          <input
-                            className="form-input h-9 w-24 shrink-0 px-2 font-mono text-xs"
-                            list={`po-codes-m-${i}`}
-                            placeholder="Code"
-                            value={line.codeText ?? ''}
-                            onChange={(e) => typeCodeFor(i, e.target.value)}
+                          <SmartSelect
+                            className="form-input h-9 w-28 shrink-0 px-2 font-mono text-xs"
+                            value={line.itemId}
+                            onChange={(e) => pickItemFor(i, e.target.value)}
                             aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={`po-codes-m-${i}`}>
+                          >
+                            <option value="">Code</option>
                             {choices.map((it) => (
-                              <option key={it.id} value={it.code ?? ''} label={it.name} />
+                              <option key={it.id} value={it.id} data-sub={it.name}>
+                                {it.code ?? it.name}
+                              </option>
                             ))}
-                          </datalist>
+                          </SmartSelect>
                           <SmartSelect
                             className="form-input h-9 min-w-0 flex-1 px-2 text-xs"
                             value={line.itemId}
@@ -2975,7 +2951,7 @@ export function PurchaseOrderDialog({
                             </option>
                             <option value={ADD_NEW}>+ Add a new item…</option>
                             {choices.map((it) => (
-                              <option key={it.id} value={it.id}>
+                              <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                 {it.name}
                               </option>
                             ))}

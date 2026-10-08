@@ -6,6 +6,7 @@ import { api, ApiError, currentUser, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { SuggestInput } from '@/components/ui/SuggestInput'
 
 /**
  * A department asking the store for material.
@@ -501,15 +502,6 @@ export function RequisitionDialog({
                   </button>
                 </div>
 
-                {i === 0 && (
-                  <datalist id="requisition-styles">
-                    {styles.map((st) => (
-                      <option key={st.id} value={st.code}>
-                        {st.name}
-                      </option>
-                    ))}
-                  </datalist>
-                )}
                 {/* What: category, sub-category, item, style — each narrows the next. */}
                 <div className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-12">
                   <label className="block min-w-0 sm:col-span-3">
@@ -578,12 +570,12 @@ export function RequisitionDialog({
                   {/* Optional: the garment style the material is for. Suggests style codes; anything typed is kept. */}
                   <label className="block min-w-0 sm:col-span-2">
                     <span className="form-label">Style no.</span>
-                    <input
+                    <SuggestInput
                       className="form-input h-9 placeholder:text-muted-foreground/60"
                       value={line.styleNo}
-                      onChange={(e) => setLine(i, { styleNo: e.target.value })}
+                      onValueChange={(v) => setLine(i, { styleNo: v })}
+                      suggestions={styles.map((st) => ({ value: st.code, label: st.name }))}
                       placeholder="Optional"
-                      list="requisition-styles"
                       maxLength={50}
                       aria-label={`Style number on line ${i + 1}`}
                     />

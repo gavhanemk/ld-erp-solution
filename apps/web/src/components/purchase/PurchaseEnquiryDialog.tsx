@@ -275,65 +275,12 @@ export function PurchaseEnquiryDialog({
    * The rows as they are right now, for the handlers that need to read one
    * without being rebuilt every time any of them changes.
    *
-   * `pickByCode` fires on blur and has to know which category the row it fired
-   * on is sitting under; taking that from `lines` would put the whole array in
-   * its dependencies and rebuild every input's handler on every keystroke.
+   * Adding a new item from a row has to know which row it came from; taking
+   * that from `lines` would put the whole array in its dependencies and
+   * rebuild every row's handlers on every keystroke.
    */
   const linesRef = useRef<Line[]>(lines)
   linesRef.current = lines
-
-  const pickByCode = useCallback(
-    (key: string, code: string) => {
-      /*
-       * Matched inside the row's own category first.
-       *
-       * Two items in different categories can share a code in a master nobody
-       * has policed, and taking the first of them would quietly put the wrong
-       * item on an enquiry going out to three suppliers. Falling back to the
-       * whole master is deliberate: a buyer who types a code before touching
-       * the category boxes is doing the commonest thing, and refusing them
-       * would make the category a gate rather than a filter.
-       */
-      const line = linesRef.current.find((l) => l.key === key)
-      const pool = line ? itemsFor(line) : items
-      const wanted = code.trim().toLowerCase()
-      const hit =
-        pool.find((i) => (i.code ?? '').toLowerCase() === wanted) ??
-        items.find((i) => (i.code ?? '').toLowerCase() === wanted)
-      if (!hit) {
-        setLine(key, { codeText: code, itemId: '', uom: '' })
-        return
-      }
-      const cat = categories.find((c) => c.id === hit.category?.id)
-      setLine(key, {
-        codeText: code,
-        itemId: hit.id,
-        uom: hit.uom?.symbol ?? '',
-        categoryId: cat?.parentId ?? cat?.id ?? '',
-        subcategoryId: cat?.parentId ? cat.id : '',
-      })
-    },
-    [items, categories, setLine]
-  )
-
-  /**
-   * The item codes a row may use, narrowed by the category above it.
-   *
-   * Fed to a `<datalist>` rather than a second dropdown: the old form's code
-   * box is typed into, and somebody who knows the code should be able to type
-   * it and move on. The list is what turns it from a box that accepts anything
-   * into one that suggests only what the chosen category holds.
-   */
-  const codesFor = useCallback(
-    (l: Line) =>
-      itemsFor(l)
-        .map((i) => i.code)
-        .filter(Boolean),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- itemsFor is stable
-    // in practice and listing it here would rebuild every row's list on every
-    // keystroke in the description beside it.
-    [items, categories]
-  )
 
   /** Items on offer for a row, narrowed by whatever category it has chosen. */
   /**
@@ -841,25 +788,20 @@ export function PurchaseEnquiryDialog({
 
                         <div className="mt-2 space-y-1">
                           <label className={fieldLabel}>Item code</label>
-                          <input
-                            value={l.codeText}
-                            onChange={(e) => setLine(l.key, { codeText: e.target.value })}
-                            onBlur={(e) => pickByCode(l.key, e.target.value)}
-                            list={'codes-m-' + l.key}
-                            placeholder="Or type the code"
-                            className={`form-input h-9 w-full font-mono ${
-                              l.codeText && !l.itemId ? 'border-amber-500/60' : ''
-                            }`}
+                          <SmartSelect
+                            value={l.itemId}
+                            onChange={(e) => pickItem(l.key, e.target.value)}
+                            disabled={loadingRefs}
+                            className="form-input h-9 w-full font-mono"
                             aria-label={`Row ${i + 1} item code`}
-                          />
-                          <datalist id={'codes-m-' + l.key}>
-                            {codesFor(l).map((c) => (
-                              <option key={c} value={c} />
+                          >
+                            <option value="">Or pick by code</option>
+                            {itemsFor(l).map((it) => (
+                              <option key={it.id} value={it.id} data-sub={it.name}>
+                                {it.code}
+                              </option>
                             ))}
-                          </datalist>
-                          {l.codeText && !l.itemId && (
-                            <p className="text-[10px] text-amber-400">no item with that code</p>
-                          )}
+                          </SmartSelect>
                         </div>
 
                         <div className="mt-2 space-y-1">
@@ -980,27 +922,23 @@ export function PurchaseEnquiryDialog({
                           the list behind it suggests only the codes in scope,
                           so the three controls narrow in one direction. */}
                           <td className="px-2 py-1.5 align-top">
-                            <input
-                              value={l.codeText}
-                              onChange={(e) => setLine(l.key, { codeText: e.target.value })}
-                              onBlur={(e) => pickByCode(l.key, e.target.value)}
-                              list={'codes-' + l.key}
-                              placeholder="Items Code"
-                              className={`form-input font-mono ${
-                                l.codeText && !l.itemId ? 'border-amber-500/60' : ''
-                              }`}
+                            {/* The same searchable dropdown as the rest of the
+                              row: type a code or part of a name, each code
+                              with its item's name under it. */}
+                            <SmartSelect
+                              value={l.itemId}
+                              onChange={(e) => pickItem(l.key, e.target.value)}
+                              disabled={loadingRefs}
+                              className="form-input font-mono"
                               aria-label={`Row ${i + 1} item code`}
-                            />
-                            <datalist id={'codes-' + l.key}>
-                              {codesFor(l).map((c) => (
-                                <option key={c} value={c} />
+                            >
+                              <option value="">Items Code</option>
+                              {itemsFor(l).map((it) => (
+                                <option key={it.id} value={it.id} data-sub={it.name}>
+                                  {it.code}
+                                </option>
                               ))}
-                            </datalist>
-                            {l.codeText && !l.itemId && (
-                              <p className="mt-0.5 text-[10px] text-amber-400">
-                                no item with that code
-                              </p>
-                            )}
+                            </SmartSelect>
                           </td>
                           <td className="px-2 py-1.5 align-top">
                             <SmartSelect
