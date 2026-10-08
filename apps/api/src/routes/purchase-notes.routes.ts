@@ -598,6 +598,10 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         noteNumber,
         reason: data.reason,
         reasonNote: data.reasonNote ?? null,
+        gstTreatment: data.gstTreatment ?? 'NOT_REVIEWED',
+        ...(data.gstTreatment && data.gstTreatment !== 'NOT_REVIEWED'
+          ? { gstTreatedById: req.user!.id, gstTreatedAt: new Date() }
+          : {}),
         issuedBy: data.issuedBy,
         docType: data.docType,
         effect,
@@ -678,6 +682,7 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
         docType: true,
         supplierId: true,
         billId: true,
+        gstTreatment: true,
         purchaseReturn: {
           select: {
             returnNumber: true,
@@ -781,6 +786,14 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
       data: {
         reason: data.reason,
         reasonNote: data.reasonNote ?? null,
+        // Who settled the GST treatment, and when — only when it changed.
+        ...(data.gstTreatment && data.gstTreatment !== before.gstTreatment
+          ? {
+              gstTreatment: data.gstTreatment,
+              gstTreatedById: req.user!.id,
+              gstTreatedAt: new Date(),
+            }
+          : {}),
         issuedBy: data.issuedBy,
         docType: data.docType,
         effect,
@@ -881,21 +894,20 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
     assertTransition(before.status, 'POSTED', before.noteNumber)
 
     /*
-     * An unclassified note posts, and says so.
+     * GST is settled on the note before it touches the bill.
      *
-     * This was a hard block. It was the same jam the approval step had been,
-     * moved one press later: money the mill had genuinely agreed sat unposted
-     * waiting on a classification nobody was chasing. Blocking also puts the
-     * accounts desk on the critical path of every small adjustment, which is
-     * not where they asked to be.
-     *
-     * The separation the model exists for is kept by making the gap visible
-     * rather than impassable — the note carries NOT_REVIEWED, the list shows
-     * it amber, and the message below says it out loud at the moment of
-     * posting. What is NOT done is quietly deciding a treatment on the
-     * purchase office's behalf, which is the one outcome worth preventing.
+     * The treatment is picked on the note form, beside the CGST + SGST or
+     * IGST the note carries, by whoever is putting it through — so this no
+     * longer waits on another desk, which is what made the old block a jam.
+     * Nothing is decided on the user's behalf: no treatment, no posting.
      */
-    const unclassified = before.gstTreatment === 'NOT_REVIEWED'
+    if (before.gstTreatment === 'NOT_REVIEWED') {
+      throw new AppError(
+        `Pick the GST treatment on ${before.noteNumber} before posting it — open it with Edit and choose "GST treatment" beside the tax.`,
+        409,
+        'GST_NOT_PICKED'
+      )
+    }
 
     const moved = await moveNoteStock(tx, before, 'POST')
 
@@ -916,7 +928,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
       include: noteInclude,
     })
 
-    return { note, moved, unclassified }
+    return { note, moved }
   })
 
   await writeAuditLog(req, {
@@ -938,12 +950,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
         : '') +
       (result.moved
         ? ` ${result.moved} line${result.moved === 1 ? '' : 's'} moved in stock.`
-        : '') +
-      /* Said at the moment it matters, not swallowed. The note is through and
-         the money has moved; what has NOT happened is anybody deciding what
-         this is for GST, and the person who just pressed the button is the
-         one who can go and ask. */
-      (result.unclassified ? ' Accounts has not classified it for GST yet.' : ''),
+        : ''),
   })
 })
 

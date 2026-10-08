@@ -22,11 +22,21 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import {
   DOC_WORDS,
   EFFECT_WORDS,
+  GST_WORDS,
   type NoteDoc,
   type NoteEffect,
+  type NoteGst,
   type NoteIssuer,
   type PurchaseNote,
 } from '@/components/purchase/noteTypes'
+
+/** The GST treatments a note can be given, in the order they are offered. */
+const GST_CHOICES: NoteGst[] = [
+  'GST_CREDIT_NOTE',
+  'GST_DEBIT_NOTE',
+  'ITC_REVERSAL_ONLY',
+  'NO_GST_IMPACT',
+]
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
@@ -278,6 +288,8 @@ export function PurchaseNoteDialog({
   const [otherCharges, setOtherCharges] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [notes, setNotes] = useState('')
+  /** How the note goes in the GST return. Needed to post, not to save a draft. */
+  const [gstTreatment, setGstTreatment] = useState<NoteGst>('NOT_REVIEWED')
 
   const [context, setContext] = useState<BillContext | null>(null)
   const [grnContext, setGrnContext] = useState<GrnContext | null>(null)
@@ -318,6 +330,7 @@ export function PurchaseNoteDialog({
     setIssuedBy(record?.issuedBy ?? DOC_WORDS[opening].issuedBy)
     setReason(record?.reason ?? '')
     setReasonNote(record?.reasonNote ?? '')
+    setGstTreatment(record?.gstTreatment ?? 'NOT_REVIEWED')
     setEffect(record?.effect ?? DOC_WORDS[opening].effect ?? 'REDUCES_PAYABLE')
     setSupplierId(record?.supplier?.id ?? '')
     setBillId(record?.bill?.id ?? initialBillId ?? '')
@@ -800,6 +813,7 @@ export function PurchaseNoteDialog({
     otherCharges: num(otherCharges),
     discountAmount: num(discountAmount),
     notes: notes.trim() || null,
+    gstTreatment,
     lines: picked.map((l) => ({
       itemId: l.itemId,
       billLineId: l.billLineId,
@@ -865,6 +879,9 @@ export function PurchaseNoteDialog({
     setError(null)
     const problem = validate()
     if (problem) return setError(problem)
+    if (gstTreatment === 'NOT_REVIEWED') {
+      return setError('Pick the GST treatment (beside the tax) before posting. A draft can be saved without it.')
+    }
     postedNoteRef.current = null
     setPostError(null)
     setConfirmOpen(true)
@@ -2099,6 +2116,35 @@ export function PurchaseNoteDialog({
                           placeholder="0.00"
                         />
                       </div>
+                    </div>
+
+                    {/* How this goes in the GST return, picked here beside
+                      the GST it carries — the step that used to be a
+                      separate "Classify for GST" action. */}
+                    <div>
+                      <label className="form-label" htmlFor="note-gst-treatment">
+                        GST treatment<span className="ml-0.5 text-red-400">*</span>
+                      </label>
+                      <SmartSelect
+                        id="note-gst-treatment"
+                        className="form-input"
+                        value={gstTreatment === 'NOT_REVIEWED' ? '' : gstTreatment}
+                        onChange={(e) =>
+                          setGstTreatment((e.target.value || 'NOT_REVIEWED') as NoteGst)
+                        }
+                      >
+                        <option value="">Pick before posting…</option>
+                        {GST_CHOICES.map((g) => (
+                          <option key={g} value={g} data-sub={GST_WORDS[g].hint}>
+                            {GST_WORDS[g].label}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                      <span className="text-muted-foreground mt-1 block text-xs">
+                        {gstTreatment === 'NOT_REVIEWED'
+                          ? 'How this goes in the GST return. Needed to post; a draft can wait.'
+                          : GST_WORDS[gstTreatment].hint}
+                      </span>
                     </div>
 
                     <div className="border-border/70 space-y-1 border-t pt-3">
