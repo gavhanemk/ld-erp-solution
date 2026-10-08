@@ -11,11 +11,14 @@ import {
   Package,
   Paperclip,
   Plus,
+  Search,
   Trash2,
   Truck,
   X,
 } from 'lucide-react'
-import { api, apiErrorMessage } from '@/lib/api'
+import { api, apiErrorMessage, can } from '@/lib/api'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
@@ -196,6 +199,18 @@ export function PurchaseEnquiryDialog({
   )
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
+  // Narrows the tick-list of suppliers, and names a supplier to add when it
+  // finds nobody. The supplier form open over this one, if any.
+  const [supplierQuery, setSupplierQuery] = useState('')
+  const [newSupplier, setNewSupplier] = useState<{ name: string } | null>(null)
+  /** The suppliers the search leaves, with every ticked one kept in view. */
+  const shownSuppliers = useMemo(() => {
+    const words = supplierQuery.toLowerCase().split(/\s+/).filter(Boolean)
+    return suppliers.filter(
+      (s) =>
+        supplierIds.includes(s.id) || words.every((w) => `${s.name} ${s.code}`.toLowerCase().includes(w))
+    )
+  }, [suppliers, supplierIds, supplierQuery])
   const [items, setItems] = useState<Item[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
@@ -1038,8 +1053,41 @@ export function PurchaseEnquiryDialog({
                   Tick everybody you want a rate from. Asking two or three is what makes the
                   comparison worth reading — and you can add more once it is raised.
                 </p>
+                {/* Add new first, then search: a supplier the mill has never
+                  dealt with is added here and ticked, without leaving the
+                  enquiry. Ticked suppliers stay in view whatever is searched. */}
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  {can('masters', 'create') && (
+                    <button
+                      type="button"
+                      className="btn-secondary h-8 px-2.5 text-xs"
+                      onClick={() => setNewSupplier({ name: supplierQuery.trim() })}
+                    >
+                      <Plus size={13} />
+                      {supplierQuery.trim() ? `Add “${supplierQuery.trim()}”` : 'Add new supplier'}
+                    </button>
+                  )}
+                  <label className="relative min-w-[10rem] flex-1">
+                    <Search
+                      size={13}
+                      className="text-muted-foreground pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2"
+                    />
+                    <input
+                      value={supplierQuery}
+                      onChange={(e) => setSupplierQuery(e.target.value)}
+                      placeholder="Search suppliers…"
+                      className="form-input h-8 pl-8 text-xs"
+                      aria-label="Search suppliers"
+                    />
+                  </label>
+                </div>
                 <div className="grid max-h-56 gap-1 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
-                  {suppliers.map((s) => {
+                  {shownSuppliers.length === 0 && supplierQuery.trim() && (
+                    <p className="text-muted-foreground col-span-full px-1 py-2 text-xs">
+                      No supplier matches “{supplierQuery.trim()}”.
+                    </p>
+                  )}
+                  {shownSuppliers.map((s) => {
                     const on = supplierIds.includes(s.id)
                     return (
                       <label
@@ -1065,6 +1113,29 @@ export function PurchaseEnquiryDialog({
                     )
                   })}
                 </div>
+                {/* The full supplier form, the same as Masters → Suppliers,
+                  over this enquiry. Saved, the supplier joins the list ticked. */}
+                <MasterFormDialog<Supplier>
+                  open={newSupplier !== null}
+                  onClose={() => setNewSupplier(null)}
+                  onSaved={() => {}}
+                  onCreated={(row) => {
+                    setSuppliers((prev) =>
+                      [...prev.filter((p) => p.id !== row.id), row].sort((a, b) =>
+                        a.name.localeCompare(b.name)
+                      )
+                    )
+                    setSupplierIds((prev) => (prev.includes(row.id) ? prev : [...prev, row.id]))
+                    setSupplierQuery('')
+                  }}
+                  resource="suppliers"
+                  fields={supplierFormFields}
+                  initialValues={newSupplier?.name ? { name: newSupplier.name } : undefined}
+                  title="Supplier"
+                  columns={4}
+                  wide
+                  stacked
+                />
               </Section>
             )}
 
