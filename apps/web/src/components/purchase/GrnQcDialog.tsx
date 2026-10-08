@@ -15,6 +15,12 @@ import {
 import { api, apiErrorMessage, can } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import {
+  optionFromCreated,
+  returnReasonFields,
+  type ReasonOption,
+} from '@/components/purchase/returnReasons'
 
 /**
  * Quality check on a goods receipt — optional, after the goods are in.
@@ -82,7 +88,7 @@ interface QcData {
   qc: QcRecord | null
   history: QcRecord[]
   /** The return challan's reasons, so a rejection is recorded in its words. */
-  reasons: Array<{ value: string; label: string }>
+  reasons: ReasonOption[]
 }
 
 export const QC_RESULT: Record<QcRecord['result'], { label: string; cls: string }> = {
@@ -119,8 +125,12 @@ export function GrnQcDialog({
   const [data, setData] = useState<QcData | null>(null)
   const [rejected, setRejected] = useState<Record<string, string>>({})
   const [reasons, setReasons] = useState<Record<string, string>>({})
-  /** Why each line was rejected, as one of the return challan's reasons. */
+  /** Why each line was rejected — a key into `data.reasons`, built-in or the mill's own. */
   const [reasonCodes, setReasonCodes] = useState<Record<string, string>>({})
+  /** The line a new reason is being added for, and what had been typed. */
+  const [newReasonFor, setNewReasonFor] = useState<{ grnLineId: string; typed: string } | null>(
+    null
+  )
   const [inspectionDate, setInspectionDate] = useState(today)
   const [remarks, setRemarks] = useState('')
   const [cancelReason, setCancelReason] = useState('')
@@ -196,7 +206,15 @@ export function GrnQcDialog({
           grnLineId: l.grnLineId,
           rejectedQty: num(rejected[l.grnLineId] ?? ''),
           reason: reasons[l.grnLineId]?.trim() || null,
-          reasonCode: num(rejected[l.grnLineId] ?? '') > 0 ? reasonCodes[l.grnLineId] || null : null,
+          reasonCode:
+            num(rejected[l.grnLineId] ?? '') > 0
+              ? (data.reasons.find((o) => o.value === reasonCodes[l.grnLineId])?.code ?? null)
+              : null,
+          reasonLabel:
+            num(rejected[l.grnLineId] ?? '') > 0 &&
+            data.reasons.find((o) => o.value === reasonCodes[l.grnLineId])?.custom
+              ? data.reasons.find((o) => o.value === reasonCodes[l.grnLineId])?.label
+              : null,
         })),
       })
       onSaved(res.message)
@@ -406,6 +424,12 @@ export function GrnQcDialog({
                                 setReasonCodes((p) => ({ ...p, [l.grnLineId]: e.target.value }))
                               }
                               disabled={!(r > 0)}
+                              onCreate={
+                                can('masters', 'create')
+                                  ? (typed) => setNewReasonFor({ grnLineId: l.grnLineId, typed })
+                                  : undefined
+                              }
+                              createNoun="reason"
                               aria-label={`Why ${l.itemName} was rejected`}
                             >
                               <option value="">{r > 0 ? 'Pick…' : '—'}</option>
@@ -509,6 +533,12 @@ export function GrnQcDialog({
                                   setReasonCodes((p) => ({ ...p, [l.grnLineId]: e.target.value }))
                                 }
                                 disabled={!(r > 0)}
+                                onCreate={
+                                  can('masters', 'create')
+                                    ? (typed) => setNewReasonFor({ grnLineId: l.grnLineId, typed })
+                                    : undefined
+                                }
+                                createNoun="reason"
                                 aria-label={`Why ${l.itemName} was rejected`}
                               >
                                 <option value="">{r > 0 ? 'Pick…' : '—'}</option>
@@ -598,6 +628,25 @@ export function GrnQcDialog({
           </div>
         )}
       </div>
+
+      {/* One of the mill's own reasons, added without leaving the form. It goes
+        into Masters → Dropdown Lists, where it can be renamed or switched off. */}
+      <MasterFormDialog<{ id: string; label: string; behavesAs: string | null }>
+        open={newReasonFor !== null}
+        onClose={() => setNewReasonFor(null)}
+        onSaved={() => {}}
+        onCreated={(row) => {
+          const option = optionFromCreated(row)
+          setData((prev) => (prev ? { ...prev, reasons: [...prev.reasons, option] } : prev))
+          if (newReasonFor)
+            setReasonCodes((p) => ({ ...p, [newReasonFor.grnLineId]: option.value }))
+        }}
+        resource="dropdown-values"
+        fields={returnReasonFields}
+        initialValues={newReasonFor?.typed ? { label: newReasonFor.typed } : undefined}
+        title="Return reason"
+        stacked
+      />
     </div>,
     document.body
   )

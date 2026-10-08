@@ -532,6 +532,27 @@ model HsnCode {
   @@map("hsn_codes")
 }
 
+/// The small lists the mill keeps for itself, on one Masters page (Dropdown
+/// Lists) rather than a menu entry each. `list` says which list a value is on
+/// — RETURN_REASON for now. Where a list's choices drive the system,
+/// `behavesAs` is the built-in choice this value acts like: a return reason
+/// "Shade variation" behaves as QUALITY_REJECTION for stock and the debit
+/// note, and is printed under its own name.
+model DropdownValue {
+  id        String   @id @default(cuid())
+  list      String
+  label     String
+  behavesAs String?
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([list, label])
+  @@index([list, isActive])
+  @@map("dropdown_values")
+}
+
 model TdsSection {
   id        String   @id @default(cuid())
   companyId String
@@ -3812,6 +3833,9 @@ model PurchaseReturnLine {
   /// same lot are two rows with two reasons. Null on rows written before a
   /// row could carry one; the challan's own reason stands for those.
   reason PurchaseNoteReason?
+  /// The mill's own name for that reason, when it was one added under
+  /// Masters → Dropdown Lists ("Shade variation"); null for a built-in one.
+  reasonLabel String?
 
   @@index([returnId])
   @@index([billLineId])

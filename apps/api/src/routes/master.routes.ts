@@ -35,6 +35,8 @@ import {
   createSupplierSchema,
   createUomSchema,
   createHsnCodeSchema,
+  createDropdownValueSchema,
+  updateDropdownValueSchema,
   createBankAccountSchema,
   createWarehouseSchema,
   createWorkstationSchema,
@@ -1160,6 +1162,48 @@ router.post('/hsn-codes/from-items', requirePermission(MODULE, 'create'), async 
   }
   res.json({ success: true, data: { created, skipped } })
 })
+
+/*
+ * Masters → Dropdown Lists: the small lists the mill keeps for itself, one
+ * table and one page for all of them. Names are unique within their list,
+ * without regard to capitals, so the same reason cannot be offered twice.
+ */
+router.use(
+  '/dropdown-values',
+  crudRouter({
+    model: 'dropdownValue',
+    module: MODULE,
+    entityType: 'DropdownValue',
+    createSchema: createDropdownValueSchema,
+    updateSchema: updateDropdownValueSchema,
+    searchFields: ['label'],
+    sortableFields: ['label', 'sortOrder', 'createdAt'],
+    defaultSort: { field: 'label', order: 'asc' },
+    filters: {
+      list: { where: (v) => ({ list: { in: v } }) },
+    },
+    beforeSave: async (data, before) => {
+      const list = String(data.list ?? before?.list ?? 'RETURN_REASON')
+      const label = String(data.label ?? before?.label ?? '').trim()
+      const clash = await prisma.dropdownValue.findFirst({
+        where: {
+          list,
+          label: { equals: label, mode: 'insensitive' },
+          ...(before?.id ? { id: { not: String(before.id) } } : {}),
+        },
+        select: { label: true, isActive: true },
+      })
+      if (clash) {
+        throw new AppError(
+          `There is already one called "${clash.label}"${clash.isActive ? '' : ' (switched off — edit it to bring it back)'}.`,
+          409,
+          'DUPLICATE'
+        )
+      }
+      return { data }
+    },
+  }),
+)
 
 router.use(
   '/hsn-codes',

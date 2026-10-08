@@ -42,6 +42,11 @@ const lineSchema = z.object({
    * sends one reason for the whole challan has it stand for rows without one.
    */
   reason: z.enum(RETURN_REASONS).optional(),
+  /**
+   * The mill's own name for the reason, when it is one from Masters →
+   * Dropdown Lists. `reason` is then the built-in one it works like.
+   */
+  reasonLabel: z.string().trim().max(60).optional().nullable(),
 })
 
 export const createReturnSchema = z
@@ -83,7 +88,8 @@ export const createReturnSchema = z
           message: 'Say why each row is going back',
         })
       }
-      const key = l.billLineId + '::' + l.warehouseId + '::' + (l.reason ?? data.reason)
+      const key =
+        l.billLineId + '::' + l.warehouseId + '::' + (l.reasonLabel || (l.reason ?? data.reason))
       if (seen.has(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

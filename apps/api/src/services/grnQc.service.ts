@@ -36,6 +36,8 @@ export interface QcLine {
    * recorded before the checker picked one.
    */
   reasonCode?: string | null
+  /** The mill's own name for that reason, when one from Dropdown Lists was picked. */
+  reasonName?: string | null
 }
 
 export interface QcData {
@@ -111,12 +113,24 @@ export async function qcRejectedByGrnLine(
 ): Promise<
   Map<
     string,
-    { qty: number; warehouseId: string | null; reasonCode: string | null; note: string | null }
+    {
+      qty: number
+      warehouseId: string | null
+      reasonCode: string | null
+      reasonName: string | null
+      note: string | null
+    }
   >
 > {
   const out = new Map<
     string,
-    { qty: number; warehouseId: string | null; reasonCode: string | null; note: string | null }
+    {
+      qty: number
+      warehouseId: string | null
+      reasonCode: string | null
+      reasonName: string | null
+      note: string | null
+    }
   >()
   if (!grnLineIds.length) return out
   const checks = await tx.inwardQC.findMany({
@@ -134,6 +148,7 @@ export async function qcRejectedByGrnLine(
         qty: (prev?.qty ?? 0) + l.rejectedQty,
         warehouseId: d.rejectWarehouseId,
         reasonCode: l.reasonCode ?? prev?.reasonCode ?? null,
+        reasonName: l.reasonName ?? prev?.reasonName ?? null,
         note: l.reason ?? prev?.note ?? null,
       })
     }

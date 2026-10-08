@@ -158,6 +158,7 @@ async function qcRows({ tx, params, rowCap }: ReportContext) {
           // The reason picked; for a check recorded before there was a list,
           // the checker's words stand in for it.
           reasonType:
+            l.reasonName ??
             (l.reasonCode && l.reasonCode in REASON_RULES
               ? REASON_RULES[l.reasonCode as keyof typeof REASON_RULES].label
               : null) ??

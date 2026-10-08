@@ -8,6 +8,7 @@ import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
 import { qcRejectedByGrnLine, qcSummaryOf } from '../services/grnQc.service'
+import { returnReasonOptions } from '../lib/returnReasons'
 import {
   adjustableOn,
   DOC_RULES,
@@ -82,6 +83,7 @@ const returnInclude = {
       gstRate: true,
       remarks: true,
       reason: true,
+      reasonLabel: true,
       billLineId: true,
       billLine: {
         select: {
@@ -149,7 +151,7 @@ function shape(r: ReturnRow) {
     // Each row's own reason in words, the challan's where the row has none.
     lines: r.lines.map((l) => ({
       ...l,
-      reasonLabel: REASON_RULES[l.reason ?? r.reason].label,
+      reasonLabel: l.reasonLabel ?? REASON_RULES[l.reason ?? r.reason].label,
     })),
     taxableValue: round2(taxable),
     gstValue: round2(gst),
@@ -332,6 +334,7 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
           // Why QC rejected it, picked from the challan's own reasons, and the
           // checker's note — the form starts the row on both.
           qcReasonCode: qc?.reasonCode ?? null,
+          qcReasonName: qc?.reasonName ?? null,
           qcReasonNote: qc?.note ?? null,
           qcWarehouseId: qc?.warehouseId ?? null,
           qcWarehouseName: qc?.warehouseId ? (qcGodowns.get(qc.warehouseId) ?? null) : null,
@@ -349,11 +352,7 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
       bill,
       references,
       lines: withStock,
-      reasons: RETURN_REASONS.map((r) => ({
-        value: r,
-        label: REASON_RULES[r].label,
-        hint: REASON_RULES[r].hint,
-      })),
+      reasons: await returnReasonOptions(prisma),
     },
   })
 })
@@ -512,7 +511,10 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       qtyByReason.set(reasonOf(l), (qtyByReason.get(reasonOf(l)) ?? 0) + l.qty)
     }
     const mainReason = [...qtyByReason].sort((a, b) => b[1] - a[1])[0][0]
-    const mixedReasons = qtyByReason.size > 1
+    // A row's reason in words: the mill's own name, or the built-in label.
+    const labelOf = (l: (typeof data.lines)[number]) =>
+      l.reasonLabel || REASON_RULES[reasonOf(l)].label
+    const mixedReasons = new Set(data.lines.map(labelOf)).size > 1
 
     const returnNumber = await nextDocumentNumber(tx, SERIES, returnDate)
 
@@ -543,6 +545,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
               gstRate: b.gstRate,
               remarks: l.remarks,
               reason: reasonOf(l),
+              reasonLabel: l.reasonLabel || null,
               sortOrder: i,
             }
           }),
@@ -596,7 +599,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         // A note has one reason of its own, so on a mixed challan each line
         // says its own — the supplier reads why every row is being charged.
         remarks: mixedReasons
-          ? [REASON_RULES[reasonOf(l)].label, l.remarks].filter(Boolean).join(' — ')
+          ? [labelOf(l), l.remarks].filter(Boolean).join(' — ')
           : l.remarks,
       }
     })

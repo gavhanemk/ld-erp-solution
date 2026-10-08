@@ -14,9 +14,15 @@ import {
   Truck,
   X,
 } from 'lucide-react'
-import { api, apiErrorMessage, masterResource } from '@/lib/api'
+import { api, apiErrorMessage, can, masterResource } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import {
+  optionFromCreated,
+  returnReasonFields,
+  type ReasonOption,
+} from '@/components/purchase/returnReasons'
 
 /**
  * A return challan — goods going back to the supplier against a bill.
@@ -52,6 +58,8 @@ interface ReturnableLine {
   qcRejectedQty: number
   /** Why QC rejected it, as one of the challan's reasons; null if it did not say. */
   qcReasonCode: string | null
+  /** The mill's own name for that reason, when QC picked one of theirs. */
+  qcReasonName: string | null
   /** The checker's note on that rejection. */
   qcReasonNote: string | null
   qcWarehouseId: string | null
@@ -85,7 +93,8 @@ interface Returnable {
     }>
   }
   lines: ReturnableLine[]
-  reasons: Array<{ value: string; label: string; hint: string }>
+  /** Built-in reasons, then the mill's own from Masters → Dropdown Lists. */
+  reasons: ReasonOption[]
 }
 
 /** A date as the mill writes it: 03 Oct 2026. */
@@ -172,6 +181,11 @@ export function ReturnChallanDialog({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  /** The row a new reason is being added for, and what had been typed. */
+  const [newReasonFor, setNewReasonFor] = useState<{ rowKey: string; typed: string } | null>(
+    null
+  )
+
   useEffect(() => {
     let alive = true
     Promise.all([
@@ -206,7 +220,14 @@ export function ReturnChallanDialog({
                 return l.qcRejectedQty > 0 && left > 0 ? String(Number(left.toFixed(3))) : ''
               })(),
               remarks: l.qcRejectedQty > 0 ? (l.qcReasonNote ?? '') : '',
-              reason: l.qcRejectedQty > 0 ? (l.qcReasonCode ?? '') : '',
+              reason:
+                l.qcRejectedQty > 0
+                  ? (r.data.reasons.find(
+                      (o) => o.custom && o.label === l.qcReasonName && o.code === l.qcReasonCode
+                    )?.value ??
+                    l.qcReasonCode ??
+                    '')
+                  : '',
             }))
         )
       })
@@ -235,6 +256,10 @@ export function ReturnChallanDialog({
   }, [onClose, saving])
 
   const lineById = useMemo(() => new Map((data?.lines ?? []).map((l) => [l.billLineId, l])), [data])
+  const reasonByKey = useMemo(
+    () => new Map((data?.reasons ?? []).map((o) => [o.value, o])),
+    [data]
+  )
 
   const setRow = (key: string, patch: Partial<Row>) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
@@ -336,7 +361,12 @@ export function ReturnChallanDialog({
           warehouseId: r.warehouseId,
           qty: num(r.qty),
           remarks: r.remarks.trim() || null,
-          reason: r.reason,
+          // The built-in reason stock and the note go by, and the mill's
+          // own name for it when it is one of theirs.
+          reason: reasonByKey.get(r.reason)?.code,
+          reasonLabel: reasonByKey.get(r.reason)?.custom
+            ? reasonByKey.get(r.reason)?.label
+            : null,
         })),
       })
       onSaved(res.message, res.data.id)
@@ -659,6 +689,12 @@ export function ReturnChallanDialog({
                             className="form-input h-9 w-full"
                             value={r.reason}
                             onChange={(e) => setRow(r.key, { reason: e.target.value })}
+                            onCreate={
+                              can('masters', 'create')
+                                ? (typed) => setNewReasonFor({ rowKey: r.key, typed })
+                                : undefined
+                            }
+                            createNoun="reason"
                             aria-label={`Why ${l.itemName} is going back`}
                           >
                             <option value="">Pick…</option>
@@ -835,6 +871,12 @@ export function ReturnChallanDialog({
                                 }`}
                                 value={r.reason}
                                 onChange={(e) => setRow(r.key, { reason: e.target.value })}
+                                onCreate={
+                                  can('masters', 'create')
+                                    ? (typed) => setNewReasonFor({ rowKey: r.key, typed })
+                                    : undefined
+                                }
+                                createNoun="reason"
                                 aria-label={`Why ${l.itemName} is going back`}
                               >
                                 <option value="">Pick…</option>
@@ -942,6 +984,24 @@ export function ReturnChallanDialog({
           </div>
         </div>
       </div>
+
+      {/* One of the mill's own reasons, added without leaving the form. It goes
+        into Masters → Dropdown Lists, where it can be renamed or switched off. */}
+      <MasterFormDialog<{ id: string; label: string; behavesAs: string | null }>
+        open={newReasonFor !== null}
+        onClose={() => setNewReasonFor(null)}
+        onSaved={() => {}}
+        onCreated={(row) => {
+          const option = optionFromCreated(row)
+          setData((prev) => (prev ? { ...prev, reasons: [...prev.reasons, option] } : prev))
+          if (newReasonFor) setRow(newReasonFor.rowKey, { reason: option.value })
+        }}
+        resource="dropdown-values"
+        fields={returnReasonFields}
+        initialValues={newReasonFor?.typed ? { label: newReasonFor.typed } : undefined}
+        title="Return reason"
+        stacked
+      />
     </div>,
     document.body
   )

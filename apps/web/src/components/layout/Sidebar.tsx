@@ -69,6 +69,7 @@ const navItems: NavItem[] = [
       { label: 'Departments', href: '/masters/departments' },
       { label: 'Workstations', href: '/masters/workstations' },
       { label: 'Extra Charges', href: '/masters/charges' },
+      { label: 'Dropdown Lists', href: '/masters/dropdown-lists' },
       { label: 'Warehouses', href: '/masters/warehouses' },
       { label: 'Bank Accounts', href: '/masters/bank-accounts' },
     ],

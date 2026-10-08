@@ -21,6 +21,8 @@ const lineSchema = z.object({
    * goods back starts on it, so nobody has to read the note and translate.
    */
   reasonCode: z.enum(RETURN_REASONS).optional().nullable(),
+  /** The mill's own name for it, when the reason picked was one of theirs. */
+  reasonLabel: z.string().trim().max(60).optional().nullable(),
 })
 
 export const createQcSchema = z

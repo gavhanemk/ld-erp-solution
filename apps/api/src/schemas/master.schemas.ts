@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { checkRegistration, fromGstin, stateName } from '../lib/gstStates'
+import { RETURN_REASONS } from './purchase-return.schemas'
 
 // ─────────────────────────────────────────────────────────────
 // Shared field helpers
@@ -631,6 +632,50 @@ const slabBothOrNeither = (v: { priceLimit?: number | null; rateAbove?: number |
 
 export const createHsnCodeSchema = hsnFields.superRefine(slabBothOrNeither)
 export const updateHsnCodeSchema = hsnFields.partial().superRefine(slabBothOrNeither)
+
+// ─── Dropdown Lists ─────────────────────────────────────────────────────────
+
+/** The lists Masters → Dropdown Lists keeps. One for now; more join here. */
+export const DROPDOWN_LISTS = ['RETURN_REASON'] as const
+
+const dropdownFields = z.object({
+  // Defaults to the only list there is, so a form that does not ask still
+  // files the value in the right place.
+  list: z.enum(DROPDOWN_LISTS).default('RETURN_REASON'),
+  label: z
+    .string()
+    .trim()
+    .min(2, 'Give it a name')
+    .max(60, 'Keep the name under 60 characters'),
+  behavesAs: z.string().trim().optional().nullable(),
+  sortOrder: z.number().int().min(0).max(9999).optional(),
+  isActive: z.boolean().optional(),
+})
+
+/** A return reason has to say which built-in one it works like. */
+const worksLikeBuiltIn = (
+  d: { list?: string; behavesAs?: string | null },
+  ctx: z.RefinementCtx,
+  creating: boolean
+) => {
+  const list = d.list ?? 'RETURN_REASON'
+  if (list !== 'RETURN_REASON') return
+  if (d.behavesAs === undefined && !creating) return
+  if (!d.behavesAs || !(RETURN_REASONS as readonly string[]).includes(d.behavesAs)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['behavesAs'],
+      message: 'Pick which reason it works like — it decides what happens to stock and the debit note',
+    })
+  }
+}
+
+export const createDropdownValueSchema = dropdownFields.superRefine((d, ctx) =>
+  worksLikeBuiltIn(d, ctx, true)
+)
+export const updateDropdownValueSchema = dropdownFields
+  .partial()
+  .superRefine((d, ctx) => worksLikeBuiltIn(d, ctx, false))
 
 export const createItemCategorySchema = z.object({
   name,
