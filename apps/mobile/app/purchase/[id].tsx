@@ -48,7 +48,13 @@ interface Order {
   igst: string
   roundOff: string
   totalAmount: string
-  supplier: { name: string; gstin?: string | null; phone?: string | null }
+  placeOfSupplyCode?: string | null
+  supplier: {
+    name: string
+    gstin?: string | null
+    stateCode?: string | null
+    phone?: string | null
+  }
   deliveryWarehouse?: { name: string } | null
   lines: Line[]
 }
@@ -136,6 +142,20 @@ export default function PurchaseOrderDetail() {
 
   const cgst = Number(data.cgst)
   const igst = Number(data.igst)
+  // With no tax on the order the states decide which rows it shows, as on the
+  // printed sheet. Every line at 0% from a registered supplier is not an
+  // unregistered supplier.
+  const theirState = data.supplier.stateCode || data.supplier.gstin?.slice(0, 2)
+  const taxMode =
+    igst > 0
+      ? 'IGST'
+      : cgst > 0
+        ? 'CGST_SGST'
+        : !data.supplier.gstin
+          ? 'NONE'
+          : !data.placeOfSupplyCode || theirState === data.placeOfSupplyCode
+            ? 'CGST_SGST'
+            : 'IGST'
 
   return (
     <Screen>
@@ -236,12 +256,12 @@ export default function PurchaseOrderDetail() {
 
           {/* Which tax rows appear follows what the server worked out from the
               two state codes, so the phone can never disagree with the paper. */}
-          {cgst > 0 ? (
+          {taxMode === 'CGST_SGST' ? (
             <>
               <Row label="CGST" value={`₹${money(data.cgst)}`} />
               <Row label="SGST" value={`₹${money(data.sgst)}`} />
             </>
-          ) : igst > 0 ? (
+          ) : taxMode === 'IGST' ? (
             <Row label="IGST" value={`₹${money(data.igst)}`} />
           ) : (
             <Text className="py-1.5 text-xs text-muted-foreground">

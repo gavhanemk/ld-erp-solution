@@ -589,7 +589,27 @@ async function resolveCharges(
  */
 router.get('/order-defaults', requirePermission(MODULE, 'view'), async (_req, res) => {
   const header = await getPrintHeader('PO')
-  res.json({ success: true, data: { terms: header.template.termsText } })
+  const c = header.company
+  res.json({
+    success: true,
+    data: {
+      terms: header.template.termsText,
+      // Our own state, for the same reason. The form compares it with the
+      // supplier's to show CGST + SGST or IGST, and without it a buyer who
+      // cannot open Settings saw IGST on every order, even from a supplier in
+      // our own state. Only what is already printed on every order is sent.
+      company: {
+        name: c.name,
+        address: c.address,
+        city: c.city,
+        state: c.state,
+        pincode: c.pincode,
+        stateCode: c.stateCode,
+        gstin: c.gstin,
+        email: c.email,
+      },
+    },
+  })
 })
 
 /**
@@ -902,10 +922,32 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
       // Which tax columns to print. A purchase from an unregistered supplier
       // carries no GST at all, and showing empty columns invites the question
       // of whether something was forgotten.
-      taxMode: Number(po.igst) > 0 ? 'IGST' : Number(po.cgst) > 0 ? 'CGST_SGST' : 'NONE',
+      taxMode: poTaxMode(po),
     },
   })
 })
+
+/**
+ * Which tax rows an order shows: CGST + SGST, IGST, or none at all.
+ *
+ * The amounts saved on the order come first, because they are what was
+ * charged. With no tax on it, the states decide. Reading the amounts alone
+ * called an order "supplier not registered" whenever every line was at 0%,
+ * even from a registered supplier, and that is printed on paper the supplier
+ * keeps.
+ */
+function poTaxMode(po: {
+  cgst: Prisma.Decimal
+  igst: Prisma.Decimal
+  placeOfSupplyCode: string | null
+  supplier: { gstin: string | null; stateCode: string | null }
+}): 'IGST' | 'CGST_SGST' | 'NONE' {
+  if (Number(po.igst) > 0) return 'IGST'
+  if (Number(po.cgst) > 0) return 'CGST_SGST'
+  if (!po.supplier.gstin) return 'NONE'
+  const theirState = po.supplier.stateCode || po.supplier.gstin.slice(0, 2)
+  return !po.placeOfSupplyCode || theirState === po.placeOfSupplyCode ? 'CGST_SGST' : 'IGST'
+}
 
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)

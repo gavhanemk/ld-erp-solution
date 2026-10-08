@@ -307,6 +307,7 @@ interface CompanyLite {
   state?: string | null
   pincode?: string | null
   stateCode?: string | null
+  gstin?: string | null
   email?: string | null
 }
 
@@ -948,9 +949,9 @@ export function PurchaseOrderDialog({
       masterResource<ChargeTypeOption>('charge-types')
         .list({ limit: 100, active: true })
         .catch(() => null),
-      // The company block under "deliver to" is our own address. Settings is
-      // the only place that serves it and a purchase clerk may not be allowed
-      // in there, so the address is treated as a nicety, not a requirement.
+      // The company block under "deliver to" is our own address. A purchase
+      // clerk may not be allowed into Settings, so a refusal here falls back
+      // to the copy order-defaults carries, below.
       api.get<{ success: boolean; data: CompanyLite }>('/settings/company').catch(() => null),
       /*
        * What the next purchase order number will be, for the read-only box.
@@ -973,7 +974,9 @@ export function PurchaseOrderDialog({
        * the terms reach the supplier either way.
        */
       api
-        .get<{ success: boolean; data: { terms: string | null } }>('/purchase/order-defaults')
+        .get<{ success: boolean; data: { terms: string | null; company?: CompanyLite } }>(
+          '/purchase/order-defaults'
+        )
         .catch(() => null),
     ]).then(([s, i, w, cust, c, st, ct, co, ns, dflt]) => {
       if (cancelled) return
@@ -992,7 +995,10 @@ export function PurchaseOrderDialog({
             )
           : []
       )
-      setCompany(co?.data ?? null)
+      // Settings first; the purchase module's copy for a buyer who may not open
+      // Settings. Our state code decides CGST + SGST against IGST, so it must
+      // not depend on who is signed in.
+      setCompany(co?.data ?? dflt?.data.company ?? null)
       setNextPoNumber(ns?.data.find((x) => x.docType === 'PO')?.nextNumber ?? '')
       /*
        * Only on a new order, and only into a box still empty.
@@ -1148,13 +1154,18 @@ export function PurchaseOrderDialog({
   // Where the goods land. Our own address unless the order says a customer,
   // and it is this — not our state — that the supplier's state is compared
   // against, because goods are taxed where they are delivered.
-  const placeOfSupply = customerStateCode || company?.stateCode
+  //
+  // Read exactly as the server reads it, so the split shown here is the one
+  // that is saved: a state code left blank falls back to the GSTIN's first two
+  // digits, for the supplier and for us alike.
+  const placeOfSupply =
+    customerStateCode || company?.stateCode || company?.gstin?.slice(0, 2) || null
 
   const taxMode = !supplier
     ? null
     : !supplier.gstin
       ? 'NONE'
-      : (supplier.stateCode ?? supplier.gstin?.slice(0, 2)) === placeOfSupply
+      : (supplier.stateCode || supplier.gstin.slice(0, 2)) === placeOfSupply
         ? 'CGST_SGST'
         : 'IGST'
 
@@ -1391,10 +1402,16 @@ export function PurchaseOrderDialog({
        * The GST rate is still filled in, and that is not the same thing: the
        * tax on an item is a fact about the item and its HSN code, not
        * something negotiated with this supplier on this order.
+       *
+       * A different item brings its own rate. Filling only an empty box left
+       * the last item's rate behind when the row was changed — fabric at 5%
+       * swapped for buttons at 18% still charged 5%.
        */
-      ...(item?.taxRate && String(line.gstRate).trim() === ''
-        ? { gstRate: String(item.taxRate.rate) }
-        : {}),
+      ...(line.itemId !== itemId
+        ? { gstRate: item?.taxRate ? String(Number(item.taxRate.rate)) : '' }
+        : item?.taxRate && String(line.gstRate).trim() === ''
+          ? { gstRate: String(Number(item.taxRate.rate)) }
+          : {}),
     })
   }
 
