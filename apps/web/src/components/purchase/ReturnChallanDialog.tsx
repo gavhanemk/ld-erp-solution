@@ -163,7 +163,6 @@ export function ReturnChallanDialog({
   const [lrNumber, setLrNumber] = useState('')
   const [ewayBillNo, setEwayBillNo] = useState('')
   const [driverName, setDriverName] = useState('')
-  const [remarks, setRemarks] = useState('')
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -323,7 +322,6 @@ export function ReturnChallanDialog({
         lrNumber: lrNumber.trim() || null,
         ewayBillNo: ewayBillNo.trim() || null,
         driverName: driverName.trim() || null,
-        remarks: remarks.trim() || null,
         lines: going.map((r) => ({
           billLineId: r.billLineId,
           warehouseId: r.warehouseId,
@@ -514,7 +512,7 @@ export function ReturnChallanDialog({
                   one box for the whole challan only ever disagreed with them. */}
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
                   <label className="block sm:col-span-1 lg:col-span-3">
-                    <span className="form-label">What was wrong</span>
+                    <span className="form-label">What was wrong/Remarks</span>
                     <input
                       className="form-input"
                       value={reasonNote}
@@ -900,15 +898,6 @@ export function ReturnChallanDialog({
                       />
                     </label>
                   ))}
-                  <label className="block sm:col-span-2 lg:col-span-5">
-                    <span className="form-label">Remarks</span>
-                    <input
-                      className="form-input"
-                      value={remarks}
-                      onChange={(e) => setRemarks(e.target.value)}
-                      placeholder="Printed on the challan"
-                    />
-                  </label>
                 </div>
               </Section>
             </>
