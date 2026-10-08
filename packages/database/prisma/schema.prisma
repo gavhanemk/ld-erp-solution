@@ -3808,6 +3808,11 @@ model PurchaseReturnLine {
   remarks   String?
   sortOrder Int     @default(0)
 
+  /// Why this row is going back — 30 metres damaged and 20 off-shade from the
+  /// same lot are two rows with two reasons. Null on rows written before a
+  /// row could carry one; the challan's own reason stands for those.
+  reason PurchaseNoteReason?
+
   @@index([returnId])
   @@index([billLineId])
   @@map("purchase_return_lines")

@@ -112,6 +112,8 @@ interface Line {
   unitPrice: string | number
   gstRate: string | number
   remarks: string | null
+  /** This row's reason in words — the challan's own where the row had none. */
+  reasonLabel?: string
   billLine: {
     hsnCode: string | null
     description: string | null
@@ -196,6 +198,8 @@ export default function PurchaseReturnPrintPage() {
   }
 
   const c = data.challan
+  // Rows that went back for different reasons each print their own.
+  const mixed = c.lines.some((l) => l.reasonLabel && l.reasonLabel !== c.reasonLabel)
   const co = data.company
   const cancelled = c.status === 'CANCELLED'
 
@@ -463,9 +467,10 @@ export default function PurchaseReturnPrintPage() {
                     <td style={TD}>
                       <span style={{ fontWeight: 700, color: NAVY }}>{l.item.name}</span>
                       <span style={{ color: SOFT }}> · {l.item.code}</span>
-                      {(l.billLine.description || l.remarks || l.billLine.grnLine) && (
+                      {(mixed || l.billLine.description || l.remarks || l.billLine.grnLine) && (
                         <div style={{ color: GREY, fontSize: 10.5, marginTop: 2 }}>
                           {[
+                            mixed ? l.reasonLabel : null,
                             l.billLine.description,
                             l.remarks,
                             l.billLine.grnLine && 'received on ' + l.billLine.grnLine.grn.grnNumber,
@@ -507,7 +512,10 @@ export default function PurchaseReturnPrintPage() {
           {/* ── Why ───────────────────────────────────────────────────────── */}
           <Panel icon={MessageSquare} title="Reason for return">
             <div style={{ padding: '11px 16px 13px', fontSize: 12, lineHeight: 1.55 }}>
-              <p style={{ margin: 0, fontWeight: 700, color: NAVY }}>{c.reasonLabel}</p>
+              <p style={{ margin: 0, fontWeight: 700, color: NAVY }}>
+                {c.reasonLabel}
+                {mixed ? ' and others — see each line' : ''}
+              </p>
               {c.reasonNote && <p style={{ margin: '2px 0 0', color: GREY }}>{c.reasonNote}</p>}
               {c.remarks && (
                 <p style={{ margin: '6px 0 0', color: GREY, whiteSpace: 'pre-line' }}>

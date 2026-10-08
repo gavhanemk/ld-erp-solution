@@ -37,6 +37,11 @@ const lineSchema = z.object({
     .positive('The quantity going back has to be more than zero')
     .max(9_999_999, 'That quantity looks like a typo'),
   remarks: text(300, 'line remark'),
+  /**
+   * Why this row is going back, when it differs from the challan's reason.
+   * Left out, the row goes back for the challan's own reason.
+   */
+  reason: z.enum(RETURN_REASONS).optional(),
 })
 
 export const createReturnSchema = z
@@ -57,19 +62,20 @@ export const createReturnSchema = z
   })
   .superRefine((data, ctx) => {
     /*
-     * One bill line may appear more than once — a line received into two
-     * godowns goes back from both — but not twice from the same godown, which
-     * passes every per-line check and then takes the goods out twice.
+     * One bill line may appear more than once — from two godowns, or for two
+     * reasons (30 damaged, 20 off-shade) — but not twice with the same godown
+     * and the same reason. That pair says nothing two rows can say that one
+     * cannot, and is nearly always the same quantity typed in twice.
      */
     const seen = new Set<string>()
     data.lines.forEach((l, i) => {
-      const key = l.billLineId + '::' + l.warehouseId
+      const key = l.billLineId + '::' + l.warehouseId + '::' + (l.reason ?? data.reason)
       if (seen.has(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['lines', i, 'warehouseId'],
+          path: ['lines', i, 'reason'],
           message:
-            'This item is already going back from that godown on this challan. Put the whole quantity on one row.',
+            'This item is already going back from that godown for the same reason on this challan. Pick a different reason for this row, or put the quantity on one row.',
         })
       }
       seen.add(key)

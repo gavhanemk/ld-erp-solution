@@ -42,6 +42,8 @@ interface ReturnLine {
   unitPrice: string | number
   gstRate: string | number
   remarks: string | null
+  /** This row's reason in words — the challan's own where the row had none. */
+  reasonLabel?: string
   billLine: {
     hsnCode: string | null
     grnLine: { grn: { id: string; grnNumber: string } } | null
@@ -467,9 +469,14 @@ export default function PurchaseReturnsPage() {
                                   </>
                                 )}
                               </p>
-                              {l.remarks && (
+                              {(l.remarks || (l.reasonLabel && l.reasonLabel !== r.reasonLabel)) && (
                                 <p className="text-muted-foreground mt-0.5 text-[10px]">
-                                  {l.remarks}
+                                  {[
+                                    l.reasonLabel !== r.reasonLabel ? l.reasonLabel : null,
+                                    l.remarks,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
                                 </p>
                               )}
                             </div>
@@ -651,9 +658,15 @@ export default function PurchaseReturnsPage() {
                                         </td>
                                         <td className="px-3 py-1.5">
                                           <p className="text-xs">{l.item.name}</p>
-                                          {l.remarks && (
+                                          {(l.remarks ||
+                                            (l.reasonLabel && l.reasonLabel !== r.reasonLabel)) && (
                                             <p className="text-muted-foreground text-[10px]">
-                                              {l.remarks}
+                                              {[
+                                                l.reasonLabel !== r.reasonLabel ? l.reasonLabel : null,
+                                                l.remarks,
+                                              ]
+                                                .filter(Boolean)
+                                                .join(' · ')}
                                             </p>
                                           )}
                                         </td>
