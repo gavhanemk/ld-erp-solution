@@ -229,6 +229,12 @@ interface MasterFormDialogProps<T> {
   columns?: 3 | 4
   /** A wider card, for a master with many fields to set four across. */
   wide?: boolean
+  /** Values a new record starts with: the name typed into a search that found nothing. */
+  initialValues?: Record<string, unknown>
+  /** The record just created, for a form that opened this one to pick it straight away. */
+  onCreated?: (row: T) => void
+  /** Opened from inside another dialog, so it has to sit above that one. */
+  stacked?: boolean
 }
 
 export function MasterFormDialog<T extends { id: string }>({
@@ -241,6 +247,9 @@ export function MasterFormDialog<T extends { id: string }>({
   title,
   columns = 3,
   wide = false,
+  initialValues,
+  onCreated,
+  stacked = false,
 }: MasterFormDialogProps<T>) {
   const isEdit = Boolean(record)
   const client = useMemo(() => masterResource<T>(resource), [resource])
@@ -275,11 +284,16 @@ export function MasterFormDialog<T extends { id: string }>({
       } else {
         seed[f.name] = ''
       }
+      if (!record && initialValues?.[f.name] != null && initialValues[f.name] !== '') {
+        seed[f.name] = initialValues[f.name]
+      }
     }
     setValues(seed)
     setFieldErrors({})
     setFormError(null)
     filledBy.current = {}
+    // initialValues is read once, when the form opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, record, fields])
 
   // The cursor starts in the first box, so a clerk can type straight away.
@@ -381,17 +395,26 @@ export function MasterFormDialog<T extends { id: string }>({
   // Escape closes, and the page behind must not scroll while the dialog is up.
   useEffect(() => {
     if (!open) return
+    // Opened over another dialog, Escape is caught first and kept here, so it
+    // closes this form and leaves the one underneath open.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      // Escape in an open dropdown list closes that list, not the form.
+      if ((e.target as HTMLElement | null)?.closest?.('[data-radix-popper-content-wrapper]')) return
+      if (stacked) {
+        e.stopPropagation()
+        e.stopImmediatePropagation()
+      }
+      onClose()
     }
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, stacked)
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     return () => {
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, stacked)
       document.body.style.overflow = previousOverflow
     }
-  }, [open, onClose])
+  }, [open, onClose, stacked])
 
   if (!open) return null
 
@@ -537,7 +560,9 @@ export function MasterFormDialog<T extends { id: string }>({
       if (isEdit && record) {
         await client.update(record.id, payload as Partial<T>)
       } else {
-        await client.create(payload as Partial<T>)
+        const created = await client.create(payload as Partial<T>)
+        const row = (created as { data?: T })?.data
+        if (row && onCreated) onCreated(row)
       }
       onSaved()
       onClose()
@@ -619,7 +644,9 @@ export function MasterFormDialog<T extends { id: string }>({
    * a phone the sidebar is a drawer, so there the cover takes the full width.
    */
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3">
+    <div
+      className={`fixed inset-0 ${stacked ? 'z-[90]' : 'z-50'} flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3`}
+    >
       {/* Capped and centred. A master has a dozen fields, not an item table;
         stretched across a wide screen each box ran half the monitor long. */}
       <form

@@ -34,7 +34,9 @@ import {
 } from 'lucide-react'
 import { Section } from '@/components/purchase/Section'
 import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/purchase/enquiryTypes'
-import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, apiErrorMessage, ApiError, can, masterResource, type Paginated } from '@/lib/api'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -548,6 +550,9 @@ export function PurchaseOrderDialog({
   const quote = source?.quote ?? null
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
+  // "Add new supplier" from the supplier list: the name typed in its search,
+  // while the supplier form is open over this one.
+  const [newSupplier, setNewSupplier] = useState<{ name: string } | null>(null)
   const [items, setItems] = useState<Option[]>([])
   const [warehouses, setWarehouses] = useState<Option[]>([])
   const [customers, setCustomers] = useState<Option[]>([])
@@ -2196,6 +2201,10 @@ export function PurchaseOrderDialog({
                       value={supplierId}
                       onChange={(e) => setSupplierId(e.target.value)}
                       aria-describedby={supplierMissing ? 'po-supplier-error' : undefined}
+                      onCreate={
+                        can('masters', 'create') ? (typed) => setNewSupplier({ name: typed }) : undefined
+                      }
+                      createNoun="supplier"
                     >
                       <option value="">Choose supplier</option>
                       {suppliers.map((s) => (
@@ -2205,6 +2214,29 @@ export function PurchaseOrderDialog({
                       ))}
                     </SmartSelect>
                   </div>
+                  {/* The full supplier form, the same as Masters → Suppliers,
+                    over this order. Saved, the supplier joins the list and is
+                    picked; nothing on the order is lost or reloaded. */}
+                  <MasterFormDialog<Option>
+                    open={newSupplier !== null}
+                    onClose={() => setNewSupplier(null)}
+                    onSaved={() => {}}
+                    onCreated={(row) => {
+                      setSuppliers((prev) =>
+                        [...prev.filter((p) => p.id !== row.id), row].sort((a, b) =>
+                          a.name.localeCompare(b.name)
+                        )
+                      )
+                      setSupplierId(row.id)
+                    }}
+                    resource="suppliers"
+                    fields={supplierFormFields}
+                    initialValues={newSupplier?.name ? { name: newSupplier.name } : undefined}
+                    title="Supplier"
+                    columns={4}
+                    wide
+                    stacked
+                  />
                   {/* A prompt, not an alarm. Every Save on this form is
                     disabled while the supplier is empty, so this still says
                     which field is holding them back — but in the same grey a

@@ -15,7 +15,7 @@ import {
   type SelectHTMLAttributes,
 } from 'react'
 import * as Popover from '@radix-ui/react-popover'
-import { Check, ChevronDown, Search } from 'lucide-react'
+import { Check, ChevronDown, Plus, Search } from 'lucide-react'
 
 /**
  * A dropdown you can type into.
@@ -94,6 +94,14 @@ const SEARCH_FROM = 7
 
 type SmartSelectProps = Omit<SelectHTMLAttributes<HTMLSelectElement>, 'onChange' | 'multiple' | 'size'> & {
   onChange?: (e: ChangeEvent<HTMLSelectElement>) => void
+  /**
+   * Offers "+ Add new …" at the foot of the list, for adding the missing
+   * choice without leaving the form. Given whatever was typed in the search,
+   * so a name searched for and not found can be added as it is.
+   */
+  onCreate?: (typed: string) => void
+  /** What a new one is called in that row: "supplier", "item". */
+  createNoun?: string
 }
 
 export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(function SmartSelect(
@@ -113,6 +121,8 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
     'aria-labelledby': ariaLabelledBy,
     'aria-describedby': ariaDescribedBy,
     'aria-invalid': ariaInvalid,
+    onCreate,
+    createNoun = 'one',
   },
   ref
 ) {
@@ -215,7 +225,9 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
       setActive(visible.length - 1)
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      choose(visible[active])
+      // Nothing matches what was typed: Enter adds it, if adding is offered.
+      if (!visible.length && onCreate && query.trim()) create()
+      else choose(visible[active])
     } else if (e.key === 'Escape') {
       stopEscape(e)
     } else if (e.key === 'Tab') {
@@ -235,6 +247,13 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
       setQuery(e.key)
       setOpen(true)
     }
+  }
+
+  const create = () => {
+    const typed = query.trim()
+    setOpen(false)
+    setQuery('')
+    onCreate?.(typed)
   }
 
   let lastGroup: string | null = null
@@ -345,6 +364,19 @@ export const SmartSelect = forwardRef<HTMLButtonElement, SmartSelectProps>(funct
               )
             })}
           </div>
+          {onCreate && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={create}
+              className="border-border text-primary hover:bg-primary/10 flex shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-sm font-medium"
+            >
+              <Plus size={14} className="shrink-0" aria-hidden />
+              <span className="min-w-0 truncate">
+                {query.trim() ? `Add “${query.trim()}” as a new ${createNoun}` : `Add new ${createNoun}`}
+              </span>
+            </button>
+          )}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
