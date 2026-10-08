@@ -568,12 +568,12 @@ export function ReturnChallanDialog({
                               {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
                             </p>
                             {first && l.rejectedQty > 0 && (
-                              <p className="text-[10px] text-amber-500">
+                              <p className="warn-text text-[11px] font-semibold">
                                 {l.rejectedQty} rejected at the gate
                               </p>
                             )}
                             {first && l.qcRejectedQty > 0 && (
-                              <p className="text-[10px] text-amber-500">
+                              <p className="warn-text text-[11px] font-semibold">
                                 {l.qcRejectedQty} {l.uom ?? ''} rejected on QC
                                 {l.qcWarehouseName ? ` — in ${l.qcWarehouseName}` : ''}
                               </p>
@@ -733,13 +733,13 @@ export function ReturnChallanDialog({
                                     {l.itemCode}
                                     {l.hsnCode ? ' · HSN ' + l.hsnCode : ''} · ₹{inr(l.billedRate)}
                                     {l.rejectedQty > 0 && (
-                                      <span className="text-amber-500">
+                                      <span className="warn-text font-semibold">
                                         {' '}
                                         · {l.rejectedQty} rejected at the gate
                                       </span>
                                     )}
                                     {l.qcRejectedQty > 0 && (
-                                      <span className="text-amber-500">
+                                      <span className="warn-text font-semibold">
                                         {' '}
                                         · {l.qcRejectedQty} rejected on QC
                                         {l.qcWarehouseName ? ` (in ${l.qcWarehouseName})` : ''}
