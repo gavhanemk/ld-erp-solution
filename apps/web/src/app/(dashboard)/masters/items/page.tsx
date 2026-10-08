@@ -268,8 +268,10 @@ const formFields: FormField[] = [
     label: 'Department',
     type: 'select',
     section: 'Identity',
-    mustFill: true,
+    // Optional: not every item belongs to one department. Picking a
+    // sub-category still fills it in from that sub-category.
     optionsFrom: { resource: 'departments' },
+    help: 'Optional',
   },
   {
     name: 'hsnCode',
