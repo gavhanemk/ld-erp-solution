@@ -92,6 +92,12 @@ export interface CrudOptions {
     fileName: string
     build: (rows: Array<Record<string, unknown>>) => Promise<Buffer>
   }
+  /**
+   * Adds to what the list and the detail send back, after reading — a value
+   * worked out from another table that a relation cannot carry. Items use it
+   * to send the GST rate their HSN code carries. Returns the rows to send.
+   */
+  afterRead?: (rows: Array<Record<string, unknown>>) => Promise<Array<Record<string, unknown>>>
 }
 
 export interface DeleteUse {
@@ -171,6 +177,7 @@ export function crudRouter(options: CrudOptions): Router {
     uniqueFields = [],
     permanentDelete,
     exportSheet,
+    afterRead,
   } = options
 
   const router = Router({ mergeParams: true })
@@ -328,7 +335,7 @@ export function crudRouter(options: CrudOptions): Router {
 
     res.json({
       success: true,
-      data: rows,
+      data: afterRead ? await afterRead(rows) : rows,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
     })
   })
@@ -336,7 +343,7 @@ export function crudRouter(options: CrudOptions): Router {
   router.get('/:id', requirePermission(module, 'view'), async (req: AuthRequest, res) => {
     const row = await delegate().findUnique({ where: { id: req.params.id }, include })
     if (!row) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
-    res.json({ success: true, data: row })
+    res.json({ success: true, data: afterRead ? (await afterRead([row]))[0] : row })
   })
 
   router.post('/', requirePermission(module, 'create'), async (req: AuthRequest, res) => {

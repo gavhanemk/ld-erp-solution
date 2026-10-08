@@ -589,6 +589,49 @@ export const createUomSchema = z.object({
 })
 export const updateUomSchema = createUomSchema.partial()
 
+/**
+ * An HSN (goods) or SAC (services) code and the GST it carries.
+ *
+ * Only the total rate is taken; the CGST / SGST / IGST split follows from it
+ * and the state, so the three can never disagree. A price slab is both of
+ * `priceLimit` and `rateAbove` or neither — one without the other means
+ * nothing.
+ */
+const gstPercent = z.coerce
+  .number({ invalid_type_error: 'The GST rate has to be a number' })
+  .min(0, 'A GST rate cannot be negative')
+  .max(40, 'No GST rate is above 40%')
+
+const hsnFields = z.object({
+  code: z
+    .string()
+    .trim()
+    .regex(/^[0-9]{4,8}$/, 'An HSN or SAC code is 4 to 8 digits, nothing else'),
+  description: z.string().trim().min(2, 'Say what the code covers').max(300),
+  kind: z.enum(['GOODS', 'SERVICES']).default('GOODS'),
+  gstRate: gstPercent,
+  priceLimit: z.coerce.number().positive('The price limit has to be more than nought').optional().nullable(),
+  rateAbove: gstPercent.optional().nullable(),
+  effectiveFrom: z.coerce.date().optional().nullable(),
+  notes: optionalText,
+  isActive,
+})
+
+const slabBothOrNeither = (v: { priceLimit?: number | null; rateAbove?: number | null }, ctx: z.RefinementCtx) => {
+  const hasLimit = v.priceLimit != null
+  const hasRate = v.rateAbove != null
+  if (hasLimit !== hasRate) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [hasLimit ? 'rateAbove' : 'priceLimit'],
+      message: 'A price slab needs both the price per piece and the rate above it',
+    })
+  }
+}
+
+export const createHsnCodeSchema = hsnFields.superRefine(slabBothOrNeither)
+export const updateHsnCodeSchema = hsnFields.partial().superRefine(slabBothOrNeither)
+
 export const createItemCategorySchema = z.object({
   name,
   parentId: z.string().optional().nullable(),

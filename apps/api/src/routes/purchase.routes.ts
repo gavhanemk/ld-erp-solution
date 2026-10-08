@@ -20,6 +20,7 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
+import { withHsnRates } from '../lib/hsn'
 import { qcSummaryOf, refuseIfInspected } from '../services/grnQc.service'
 import {
   cancelGrnSchema,
@@ -782,7 +783,11 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
     })
     .filter((r) => includeDone || r.pendingQty > 0)
 
-  res.json({ success: true, data: rows })
+  // The GST each item's HSN code carries, in the same `item.taxRate` the
+  // order form fills the rate from — so a line lifted off an indent arrives
+  // at the HSN master's rate like one picked by hand.
+  const items = await withHsnRates(prisma, rows.map((r) => r.item as unknown as Record<string, unknown>))
+  res.json({ success: true, data: rows.map((r, i) => ({ ...r, item: items[i] })) })
 })
 
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {

@@ -171,6 +171,21 @@ export interface FormField {
   mustFill?: boolean | 'ifOptions'
   /** Short hint rendered under the input. */
   help?: string
+  /**
+   * A hint worked out from what is typed, shown in place of `help` once it
+   * returns something: a GST rate showing how it splits as it is entered.
+   */
+  liveHelp?: (value: unknown) => string | null
+  /**
+   * Suggestions for a text box from a master list, offered as the person
+   * types but never forced: an item's HSN code suggested from the HSN master,
+   * while a code not listed there yet can still be typed.
+   */
+  suggestFrom?: {
+    resource: string
+    valueKey: string
+    label: (row: Record<string, unknown>) => string
+  }
   /** Forces capitals as you type — GSTIN, PAN, IFSC and codes are never lower case. */
   uppercase?: boolean
   /**
@@ -287,7 +302,7 @@ export function MasterFormDialog<T extends { id: string }>({
   useEffect(() => {
     if (!open) return
 
-    const remoteFields = fields.filter((f) => f.optionsFrom)
+    const remoteFields = fields.filter((f) => f.optionsFrom || f.suggestFrom)
     if (remoteFields.length === 0) return
 
     let cancelled = false
@@ -295,7 +310,9 @@ export function MasterFormDialog<T extends { id: string }>({
     void Promise.all(
       remoteFields.map(async (f) => {
         try {
-          const res = (await masterResource<Record<string, unknown>>(f.optionsFrom!.resource).list({
+          const res = (await masterResource<Record<string, unknown>>(
+            (f.optionsFrom ?? f.suggestFrom)!.resource,
+          ).list({
             limit: 200,
             active: true,
           })) as Paginated<Record<string, unknown>>
@@ -379,6 +396,10 @@ export function MasterFormDialog<T extends { id: string }>({
 
   const optionsFor = (f: FormField) => {
     if (f.optionsFromField) return fieldOptions[f.name]
+    if (f.suggestFrom) {
+      const { valueKey, label } = f.suggestFrom
+      return (remoteRows[f.name] ?? []).map((row) => ({ value: String(row[valueKey] ?? ''), label: label(row) }))
+    }
     if (!f.optionsFrom) return f.options
     const rows = remoteRows[f.name]
     if (!rows) return undefined
@@ -823,13 +844,24 @@ function Field({
           placeholder={hint}
           value={String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
+          list={field.suggestFrom ? `${field.name}-suggestions` : undefined}
+          autoComplete={field.suggestFrom ? 'off' : undefined}
         />
+      )}
+      {field.suggestFrom && (
+        <datalist id={`${field.name}-suggestions`}>
+          {options?.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </datalist>
       )}
 
       {error ? (
         <p className="form-help !text-red-400">{error}</p>
-      ) : field.help ? (
-        <p className="form-help">{field.help}</p>
+      ) : (field.liveHelp?.(value) ?? field.help) ? (
+        <p className="form-help">{field.liveHelp?.(value) ?? field.help}</p>
       ) : null}
     </div>
   )
