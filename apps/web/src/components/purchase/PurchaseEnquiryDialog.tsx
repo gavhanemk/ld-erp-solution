@@ -323,6 +323,12 @@ export function PurchaseEnquiryDialog({
         setNewItemFor(linesRef.current.find((l) => l.key === key) ?? null)
         return
       }
+      // Cleared to choose again: the category the row was narrowed to stays,
+      // so the lists still show only what it holds.
+      if (!itemId) {
+        setLine(key, { itemId: '', codeText: '', uom: '' })
+        return
+      }
       const item = items.find((i) => i.id === itemId)
       const cat = categories.find((c) => c.id === item?.category?.id)
       setLine(key, {
@@ -788,9 +794,10 @@ export function PurchaseEnquiryDialog({
                           >
                             <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
                             <option value={ADD_NEW}>+ Add a new item…</option>
-                            {itemsFor(l).map((it) => (
-                              <option key={it.id} value={it.id}>
-                                {it.code} · {it.name}
+                            {/* A chosen item stands alone here — its code already decided it. */}
+                              {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
+                              <option key={it.id} value={it.id} data-sub={it.code}>
+                                {it.name}
                               </option>
                             ))}
                           </SmartSelect>
@@ -965,9 +972,10 @@ export function PurchaseEnquiryDialog({
                             >
                               <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
                               <option value={ADD_NEW}>+ Add a new item…</option>
-                              {itemsFor(l).map((it) => (
-                                <option key={it.id} value={it.id}>
-                                  {it.code} · {it.name}
+                              {/* A chosen item stands alone here — its code already decided it. */}
+                                {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
+                                <option key={it.id} value={it.id} data-sub={it.code}>
+                                  {it.name}
                                 </option>
                               ))}
                             </SmartSelect>

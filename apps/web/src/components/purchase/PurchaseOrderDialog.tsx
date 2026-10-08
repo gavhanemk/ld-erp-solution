@@ -2611,7 +2611,10 @@ export function PurchaseOrderDialog({
                                   {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                                 </option>
                                 <option value={ADD_NEW}>+ Add a new item…</option>
-                                {choices.map((it) => (
+                                {/* A chosen item stands alone here — its code already decided it.
+                                    The code list still offers the rest, and "Choose an item..." clears
+                                    the row to show every name again. */}
+                                  {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
                                   <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                     {it.name}
                                   </option>
@@ -2950,7 +2953,10 @@ export function PurchaseOrderDialog({
                               {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                             </option>
                             <option value={ADD_NEW}>+ Add a new item…</option>
-                            {choices.map((it) => (
+                            {/* A chosen item stands alone here — its code already decided it.
+                                The code list still offers the rest, and "Choose an item..." clears
+                                the row to show every name again. */}
+                              {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
                               <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                 {it.name}
                               </option>
