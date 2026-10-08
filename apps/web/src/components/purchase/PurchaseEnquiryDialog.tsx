@@ -793,9 +793,11 @@ export function PurchaseEnquiryDialog({
                             aria-label={`Row ${i + 1} item`}
                           >
                             <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
-                            <option value={ADD_NEW}>+ Add a new item…</option>
-                            {/* A chosen item stands alone here — its code already decided it. */}
-                              {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
+                            {/* A chosen item stands alone here — its code already decided it.
+                                A new item is offered only on an empty row; on a chosen one it
+                                would replace the item, code and all. */}
+                            {!l.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                            {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
                               <option key={it.id} value={it.id} data-sub={it.code}>
                                 {it.name}
                               </option>
@@ -971,9 +973,10 @@ export function PurchaseEnquiryDialog({
                               aria-label={`Row ${i + 1} item`}
                             >
                               <option value="">{loadingRefs ? 'Loading…' : 'Items'}</option>
-                              <option value={ADD_NEW}>+ Add a new item…</option>
-                              {/* A chosen item stands alone here — its code already decided it. */}
-                                {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
+                              {/* A chosen item stands alone here — its code already decided it.
+                                  A new item is offered only on an empty row. */}
+                              {!l.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                              {(l.itemId ? items.filter((it) => it.id === l.itemId) : itemsFor(l)).map((it) => (
                                 <option key={it.id} value={it.id} data-sub={it.code}>
                                   {it.name}
                                 </option>

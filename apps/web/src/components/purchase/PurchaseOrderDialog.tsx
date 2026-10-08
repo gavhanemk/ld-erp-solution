@@ -2627,11 +2627,13 @@ export function PurchaseOrderDialog({
                                 <option value="">
                                   {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                                 </option>
-                                <option value={ADD_NEW}>+ Add a new item…</option>
                                 {/* A chosen item stands alone here — its code already decided it.
                                     The code list still offers the rest, and "Choose an item..." clears
-                                    the row to show every name again. */}
-                                  {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
+                                    the row to show every name again. Adding a new item is offered
+                                    only on an empty row: on a chosen one it would quietly replace
+                                    the item, code and all. */}
+                                {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                                {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
                                   <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                     {it.name}
                                   </option>
@@ -2969,11 +2971,10 @@ export function PurchaseOrderDialog({
                             <option value="">
                               {choices.length === 0 ? 'Nothing matches' : 'Choose an item...'}
                             </option>
-                            <option value={ADD_NEW}>+ Add a new item…</option>
-                            {/* A chosen item stands alone here — its code already decided it.
-                                The code list still offers the rest, and "Choose an item..." clears
-                                the row to show every name again. */}
-                              {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
+                            {/* As on the desktop row: a chosen item stands alone, and a new
+                                item is offered only on an empty row. */}
+                            {!line.itemId && <option value={ADD_NEW}>+ Add a new item…</option>}
+                            {(line.itemId ? items.filter((it) => it.id === line.itemId) : choices).map((it) => (
                               <option key={it.id} value={it.id} data-sub={it.code ?? undefined}>
                                 {it.name}
                               </option>
