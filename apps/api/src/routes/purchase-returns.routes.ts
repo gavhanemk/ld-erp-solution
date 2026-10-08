@@ -496,17 +496,18 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
     /*
      * Each row's reason, and the challan's own.
      *
-     * A row left without one goes back for the challan's reason. The challan
-     * then carries whichever reason sends back the most, so its one-word
-     * summary — on the list, on the note — is the main reason rather than
-     * whatever happened to be in the box at the top. The rows keep the rest.
+     * Every row says why it is going back (the schema refuses one that does
+     * not, unless an older caller sent a reason for the whole challan). The
+     * challan carries whichever reason sends back the most, so its one-word
+     * summary — on the list, on the note — is the main reason. The rows keep
+     * the rest.
      */
-    const reasonOf = (l: (typeof data.lines)[number]) => l.reason ?? data.reason
+    const reasonOf = (l: (typeof data.lines)[number]) => (l.reason ?? data.reason)!
     const qtyByReason = new Map<(typeof data.lines)[number]['reason'] & string, number>()
     for (const l of data.lines) {
       qtyByReason.set(reasonOf(l), (qtyByReason.get(reasonOf(l)) ?? 0) + l.qty)
     }
-    const mainReason = [...qtyByReason].sort((a, b) => b[1] - a[1])[0]?.[0] ?? data.reason
+    const mainReason = [...qtyByReason].sort((a, b) => b[1] - a[1])[0][0]
     const mixedReasons = qtyByReason.size > 1
 
     const returnNumber = await nextDocumentNumber(tx, SERIES, returnDate)

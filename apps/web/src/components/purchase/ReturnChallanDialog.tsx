@@ -116,7 +116,7 @@ interface Row {
   warehouseId: string
   qty: string
   remarks: string
-  /** This row's own reason; empty follows the challan's reason above. */
+  /** Why this row is going back. Required — each row says its own. */
   reason: string
 }
 
@@ -157,7 +157,6 @@ export function ReturnChallanDialog({
   const [rows, setRows] = useState<Row[]>([])
 
   const [returnDate, setReturnDate] = useState(today)
-  const [reason, setReason] = useState('')
   const [reasonNote, setReasonNote] = useState('')
   const [vehicleNo, setVehicleNo] = useState('')
   const [transporterName, setTransporterName] = useState('')
@@ -195,14 +194,13 @@ export function ReturnChallanDialog({
                 '',
               qty: '',
               remarks: '',
-              reason: '',
+              // A line rejected at the gate or on QC is almost always going
+              // back for that, so it starts there. Suggested, never forced;
+              // any other line starts empty and has to be picked.
+              reason:
+                l.rejectedQty > l.adjustedQty || l.qcRejectedQty > 0 ? 'QUALITY_REJECTION' : '',
             }))
         )
-        // Rejected at the gate is the commonest reason a return is written,
-        // and when the bill carries a rejection it is almost always the
-        // reason for this one. Suggested, never forced.
-        if (r.data.lines.some((l) => l.rejectedQty > l.adjustedQty || l.qcRejectedQty > 0))
-          setReason('QUALITY_REJECTION')
       })
       .catch((err) => {
         if (alive) setError(apiErrorMessage(err, 'Could not read that bill.'))
@@ -233,8 +231,6 @@ export function ReturnChallanDialog({
   const setRow = (key: string, patch: Partial<Row>) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
 
-  /** The reason a row actually goes back for — its own, or the challan's. */
-  const reasonOf = (r: Row) => r.reason || reason
 
   /*
    * A second row for the same bill line.
@@ -253,7 +249,7 @@ export function ReturnChallanDialog({
       const taken = new Set(
         prev
           .filter((r) => r.billLineId === from.billLineId && r.warehouseId === from.warehouseId)
-          .map((r) => r.reason || reason)
+          .map((r) => r.reason)
       )
       const next = data?.reasons.find((x) => !taken.has(x.value))?.value ?? ''
       const copy: Row = {
@@ -262,7 +258,7 @@ export function ReturnChallanDialog({
         warehouseId: from.warehouseId,
         qty: '',
         remarks: '',
-        reason: next === reason ? '' : next,
+        reason: next,
       }
       return [...prev.slice(0, at + 1), copy, ...prev.slice(at + 1)]
     })
@@ -290,7 +286,6 @@ export function ReturnChallanDialog({
    */
   const problems = useMemo(() => {
     const out: string[] = []
-    if (!reason) out.push('Say why the goods are going back')
     if (going.length === 0) out.push('Enter what is going back on at least one line')
     for (const [billLineId, qty] of goingByLine) {
       const l = lineById.get(billLineId)
@@ -299,9 +294,10 @@ export function ReturnChallanDialog({
       }
     }
     if (going.some((r) => !r.warehouseId)) out.push('Every line needs the godown it leaves from')
+    if (going.some((r) => !r.reason)) out.push('Say why each row is going back')
     const seen = new Set<string>()
     for (const r of going) {
-      const k = r.billLineId + '::' + r.warehouseId + '::' + reasonOf(r)
+      const k = r.billLineId + '::' + r.warehouseId + '::' + r.reason
       if (seen.has(k)) {
         out.push(
           `${lineById.get(r.billLineId)?.itemName ?? 'An item'} is on two rows with the same godown and reason — give one of them another reason`
@@ -311,8 +307,7 @@ export function ReturnChallanDialog({
       seen.add(k)
     }
     return out
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reason, going, goingByLine, lineById])
+  }, [going, goingByLine, lineById])
 
   const save = async () => {
     if (problems.length || saving) return
@@ -322,7 +317,6 @@ export function ReturnChallanDialog({
       const res = await api.post<{ data: { id: string }; message: string }>('/purchase/returns', {
         billId,
         returnDate,
-        reason,
         reasonNote: reasonNote.trim() || null,
         vehicleNo: vehicleNo.trim() || null,
         transporterName: transporterName.trim() || null,
@@ -335,7 +329,7 @@ export function ReturnChallanDialog({
           warehouseId: r.warehouseId,
           qty: num(r.qty),
           remarks: r.remarks.trim() || null,
-          reason: reasonOf(r),
+          reason: r.reason,
         })),
       })
       onSaved(res.message, res.data.id)
@@ -516,28 +510,10 @@ export function ReturnChallanDialog({
 
               {/* ── Why, and when ────────────────────────────────────────── */}
               <Section icon={MessageSquare} title="Return Details">
+                {/* No reason here: each row below says why it is going back, and
+                  one box for the whole challan only ever disagreed with them. */}
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-                  <label className="block">
-                    <span className="form-label">
-                      Reason<span className="ml-0.5 text-red-400">*</span>
-                    </span>
-                    <SmartSelect
-                      className="form-input"
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                    >
-                      <option value="">Pick one…</option>
-                      {data?.reasons.map((r) => (
-                        <option key={r.value} value={r.value}>
-                          {r.label}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                    <span className="text-muted-foreground mt-1 block text-xs">
-                      For every row, unless a row picks its own below
-                    </span>
-                  </label>
-                  <label className="block lg:col-span-2">
+                  <label className="block sm:col-span-1 lg:col-span-3">
                     <span className="form-label">What was wrong</span>
                     <input
                       className="form-input"
@@ -674,12 +650,11 @@ export function ReturnChallanDialog({
                           <label className={fieldLabel}>Reason</label>
                           <SmartSelect
                             className="form-input h-9 w-full"
-                            value={reasonOf(r)}
-                            onChange={(e) =>
-                              setRow(r.key, { reason: e.target.value === reason ? '' : e.target.value })
-                            }
+                            value={r.reason}
+                            onChange={(e) => setRow(r.key, { reason: e.target.value })}
                             aria-label={`Why ${l.itemName} is going back`}
                           >
+                            <option value="">Pick…</option>
                             {data?.reasons.map((x) => (
                               <option key={x.value} value={x.value}>
                                 {x.label}
@@ -848,15 +823,14 @@ export function ReturnChallanDialog({
                             </td>
                             <td>
                               <SmartSelect
-                                className="form-input h-8 text-xs"
-                                value={reasonOf(r)}
-                                onChange={(e) =>
-                                  setRow(r.key, {
-                                    reason: e.target.value === reason ? '' : e.target.value,
-                                  })
-                                }
+                                className={`form-input h-8 text-xs ${
+                                  num(r.qty) > 0 && !r.reason ? 'border-red-500/60' : ''
+                                }`}
+                                value={r.reason}
+                                onChange={(e) => setRow(r.key, { reason: e.target.value })}
                                 aria-label={`Why ${l.itemName} is going back`}
                               >
+                                <option value="">Pick…</option>
                                 {data?.reasons.map((x) => (
                                   <option key={x.value} value={x.value}>
                                     {x.label}

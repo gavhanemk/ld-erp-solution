@@ -38,8 +38,8 @@ const lineSchema = z.object({
     .max(9_999_999, 'That quantity looks like a typo'),
   remarks: text(300, 'line remark'),
   /**
-   * Why this row is going back, when it differs from the challan's reason.
-   * Left out, the row goes back for the challan's own reason.
+   * Why this row is going back. Every row says its own; a caller that still
+   * sends one reason for the whole challan has it stand for rows without one.
    */
   reason: z.enum(RETURN_REASONS).optional(),
 })
@@ -48,9 +48,16 @@ export const createReturnSchema = z
   .object({
     billId: z.string().min(1, 'Pick the bill these goods are going back against'),
     returnDate: z.coerce.date().optional(),
-    reason: z.enum(RETURN_REASONS, {
-      errorMap: () => ({ message: 'Say why the goods are going back' }),
-    }),
+    /*
+     * The challan's own reason. Optional now that each row carries one — the
+     * server works out the main reason from the rows. Still accepted, and
+     * used for any row that does not say, so an older screen keeps working.
+     */
+    reason: z
+      .enum(RETURN_REASONS, {
+        errorMap: () => ({ message: 'Say why the goods are going back' }),
+      })
+      .optional(),
     reasonNote: text(500, 'reason'),
     vehicleNo: text(20, 'vehicle number'),
     transporterName: text(120, 'transporter name'),
@@ -69,6 +76,13 @@ export const createReturnSchema = z
      */
     const seen = new Set<string>()
     data.lines.forEach((l, i) => {
+      if (!l.reason && !data.reason) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'reason'],
+          message: 'Say why each row is going back',
+        })
+      }
       const key = l.billLineId + '::' + l.warehouseId + '::' + (l.reason ?? data.reason)
       if (seen.has(key)) {
         ctx.addIssue({
