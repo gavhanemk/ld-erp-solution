@@ -12,6 +12,7 @@ import {
   topWithRest,
 } from './shared'
 import { readQc, QC_RESULT_WORDS } from '../../services/grnQc.service'
+import { REASON_RULES } from '../../services/purchaseNote.service'
 
 const RESULT_TONE: Record<string, Tone> = {
   PASS: 'good',
@@ -154,6 +155,14 @@ async function qcRows({ tx, params, rowCap }: ReportContext) {
           rejected: l.rejectedQty,
           rejectRate: l.receivedQty > 0 ? l.rejectedQty / l.receivedQty : 0,
           rejectedValue: round2(l.rejectedQty * rate),
+          // The reason picked; for a check recorded before there was a list,
+          // the checker's words stand in for it.
+          reasonType:
+            (l.reasonCode && l.reasonCode in REASON_RULES
+              ? REASON_RULES[l.reasonCode as keyof typeof REASON_RULES].label
+              : null) ??
+            l.reason ??
+            '',
           reason: l.reason ?? '',
           godown: info?.warehouse.name ?? '',
           rejectGodown:
@@ -208,7 +217,8 @@ export const grnQcRegister: ReportDefinition = {
     { key: 'approved', label: 'Approved', type: 'qty', total: 'sum' },
     { key: 'rejected', label: 'Rejected', type: 'qty', total: 'sum' },
     { key: 'rejectRate', label: 'Reject %', type: 'percent', total: 'none' },
-    { key: 'reason', label: 'Rejection Reason', type: 'text', width: 30 },
+    { key: 'reasonType', label: 'Rejection Reason', type: 'text', width: 22 },
+    { key: 'reason', label: 'QC Note', type: 'text', width: 30 },
     { key: 'godown', label: 'Received Into', type: 'text', width: 20 },
     { key: 'inspectedBy', label: 'Checked By', type: 'text', width: 18 },
     {
@@ -222,7 +232,7 @@ export const grnQcRegister: ReportDefinition = {
   ],
   summary: {
     title: 'Worst rejections in this period',
-    columns: ['qcDate', 'grnNumber', 'supplier', 'item', 'received', 'rejected', 'reason'],
+    columns: ['qcDate', 'grnNumber', 'supplier', 'item', 'received', 'rejected', 'reasonType'],
     by: 'rejected',
     limit: 12,
   },
@@ -253,8 +263,8 @@ export const grnQcRegister: ReportDefinition = {
     for (const r of live)
       if (r.rejected > 0)
         byReason.set(
-          r.reason || 'No reason given',
-          (byReason.get(r.reason || 'No reason given') ?? 0) + r.rejectedValue
+          r.reasonType || 'No reason given',
+          (byReason.get(r.reasonType || 'No reason given') ?? 0) + r.rejectedValue
         )
 
     const monthly = byMonth(
@@ -393,7 +403,8 @@ export const qcRejections: ReportDefinition = {
     { key: 'uom', label: 'UOM', type: 'text', width: 8 },
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
     { key: 'rejected', label: 'Rejected', type: 'qty', total: 'sum' },
-    { key: 'reason', label: 'Rejection Reason', type: 'text', width: 30 },
+    { key: 'reasonType', label: 'Rejection Reason', type: 'text', width: 22 },
+    { key: 'reason', label: 'QC Note', type: 'text', width: 30 },
     { key: 'rejectGodown', label: 'Waiting In', type: 'text', width: 20 },
     { key: 'sentBack', label: 'Sent Back', type: 'qty', total: 'sum' },
     { key: 'toReturn', label: 'Still to Send Back', type: 'qty', total: 'sum' },

@@ -50,6 +50,10 @@ interface ReturnableLine {
   onHand: number | null
   /** Rejected on a quality check, and the reject godown it was moved to. */
   qcRejectedQty: number
+  /** Why QC rejected it, as one of the challan's reasons; null if it did not say. */
+  qcReasonCode: string | null
+  /** The checker's note on that rejection. */
+  qcReasonNote: string | null
   qcWarehouseId: string | null
   qcWarehouseName: string | null
   qcOnHand: number | null
@@ -191,13 +195,18 @@ export function ReturnChallanDialog({
                 l.warehouseId ??
                 w.data[0]?.id ??
                 '',
-              qty: '',
-              remarks: '',
-              // A line rejected at the gate or on QC is almost always going
-              // back for that, so it starts there. Suggested, never forced;
-              // any other line starts empty and has to be picked.
-              reason:
-                l.rejectedQty > l.adjustedQty || l.qcRejectedQty > 0 ? 'QUALITY_REJECTION' : '',
+              /*
+               * What QC rejected and has not yet gone back, why, and the
+               * checker's note — straight off the check. A line QC did not
+               * reject, or rejected without saying why, starts empty: nothing
+               * here is guessed.
+               */
+              qty: (() => {
+                const left = Math.min(l.qcRejectedQty - l.adjustedQty, l.remainingQty)
+                return l.qcRejectedQty > 0 && left > 0 ? String(Number(left.toFixed(3))) : ''
+              })(),
+              remarks: l.qcRejectedQty > 0 ? (l.qcReasonNote ?? '') : '',
+              reason: l.qcRejectedQty > 0 ? (l.qcReasonCode ?? '') : '',
             }))
         )
       })

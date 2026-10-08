@@ -7,6 +7,12 @@ import { writeAuditLog } from '../lib/audit'
 import { balanceOf, recordMovement } from '../services/stock.service'
 import { liveQcOf, readQc, type QcData, type QcLine } from '../services/grnQc.service'
 import { cancelQcSchema, createQcSchema } from '../schemas/grn-qc.schemas'
+import { RETURN_REASONS } from '../schemas/purchase-return.schemas'
+import { REASON_RULES } from '../services/purchaseNote.service'
+
+/** A reason code in words, or null for a check recorded before there was one. */
+const reasonLabel = (code?: string | null) =>
+  code && code in REASON_RULES ? REASON_RULES[code as keyof typeof REASON_RULES].label : null
 
 /**
  * Quality check on a goods receipt.
@@ -87,7 +93,11 @@ async function shapeQc(
     createdAt: row.createdAt,
     rejectWarehouse,
     cancelled: d?.cancelled ?? null,
-    lines: (d?.lines ?? []).map((l) => ({ ...l, ...lineInfo.get(l.grnLineId) })),
+    lines: (d?.lines ?? []).map((l) => ({
+      ...l,
+      ...lineInfo.get(l.grnLineId),
+      reasonLabel: reasonLabel(l.reasonCode),
+    })),
     rejectedQty: round3((d?.lines ?? []).reduce((s, l) => s + l.rejectedQty, 0)),
   }
 }
@@ -148,6 +158,9 @@ router.get('/grn/:grnId', requirePermission(MODULE, 'view'), async (req, res) =>
       lines,
       qc: shaped.find((q) => !q.cancelled) ?? null,
       history: shaped.filter((q) => q.cancelled),
+      // The return challan's own reasons, so a rejection is recorded in the
+      // words the challan that sends it back will use.
+      reasons: RETURN_REASONS.map((r) => ({ value: r, label: REASON_RULES[r].label })),
     },
   })
 })
@@ -204,7 +217,8 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         receivedQty: received,
         approvedQty: round3(received - rejected),
         rejectedQty: rejected,
-        reason: rejected > 0 ? (sent.get(l.id)?.reason?.trim() ?? null) : null,
+        reason: rejected > 0 ? sent.get(l.id)?.reason?.trim() || null : null,
+        reasonCode: rejected > 0 ? (sent.get(l.id)?.reasonCode ?? null) : null,
       }
     })
 

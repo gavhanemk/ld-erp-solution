@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { RETURN_REASONS } from './purchase-return.schemas'
 
 const qty = z
   .number({ invalid_type_error: 'Quantity has to be a number' })
@@ -13,7 +14,13 @@ const qty = z
 const lineSchema = z.object({
   grnLineId: z.string().min(1),
   rejectedQty: qty,
+  /** The checker's own words, beside the reason picked. */
   reason: z.string().max(300).optional().nullable(),
+  /**
+   * Why, as one of the return challan's reasons — the challan that sends the
+   * goods back starts on it, so nobody has to read the note and translate.
+   */
+  reasonCode: z.enum(RETURN_REASONS).optional().nullable(),
 })
 
 export const createQcSchema = z
@@ -35,11 +42,11 @@ export const createQcSchema = z
         })
       }
       seen.add(l.grnLineId)
-      if (l.rejectedQty > 0 && (l.reason?.trim().length ?? 0) < 3) {
+      if (l.rejectedQty > 0 && !l.reasonCode) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ['lines', i, 'reason'],
-          message: 'Say why it was rejected',
+          path: ['lines', i, 'reasonCode'],
+          message: 'Pick why it was rejected',
         })
       }
     })

@@ -329,6 +329,10 @@ router.get('/returnable/:billId', requirePermission(MODULE, 'view'), async (req,
             ? (await balanceOf(tx, { itemId: l.itemId, warehouseId: l.warehouseId })).qty
             : null,
           qcRejectedQty: qc?.qty ?? 0,
+          // Why QC rejected it, picked from the challan's own reasons, and the
+          // checker's note — the form starts the row on both.
+          qcReasonCode: qc?.reasonCode ?? null,
+          qcReasonNote: qc?.note ?? null,
           qcWarehouseId: qc?.warehouseId ?? null,
           qcWarehouseName: qc?.warehouseId ? (qcGodowns.get(qc.warehouseId) ?? null) : null,
           qcOnHand: qc?.warehouseId
