@@ -5,6 +5,7 @@ import { ApiError } from '@/lib/api'
 import { loadAppSettings } from '@/lib/appSettings'
 import { settingsApi, type PreferenceDefinition } from '@/lib/settingsApi'
 import { LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Preferences.
@@ -149,7 +150,7 @@ export default function PreferencesPage() {
                   )}
 
                   {def.type === 'select' && (
-                    <select
+                    <SmartSelect
                       className="form-input w-44"
                       value={String(values[def.key] ?? '')}
                       onChange={(e) => set(def.key, e.target.value)}
@@ -160,7 +161,7 @@ export default function PreferencesPage() {
                           {o.label}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   )}
 
                   {def.type === 'number' && (

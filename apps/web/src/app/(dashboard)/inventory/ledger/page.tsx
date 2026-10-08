@@ -16,6 +16,7 @@ import { DashCard, KpiTile, TONE } from '@/components/dashboard/DashKit'
 import {
   CategoryTreemap, DepartmentRadar, DocumentBars, FlowChart, MovementDonut, StoreColumns,
 } from '@/components/inventory/LedgerCharts'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Every stock movement there has ever been.
@@ -568,7 +569,7 @@ function LedgerScreen() {
             title="To"
           />
         </div>
-        <select
+        <SmartSelect
           className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
           value={preset}
           onChange={(e) => pickPreset(e.target.value)}
@@ -579,7 +580,7 @@ function LedgerScreen() {
               {p.label}
             </option>
           ))}
-        </select>
+        </SmartSelect>
         {FILTERS.filter((f) => f.menu !== false).map((f) => (
           <FilterMenu
             key={f.key}

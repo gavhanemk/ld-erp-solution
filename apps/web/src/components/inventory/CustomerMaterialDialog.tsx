@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Booking in a customer's own material.
@@ -274,7 +275,7 @@ export function CustomerMaterialDialog({
                 <span className="form-label">
                   Customer <span className="text-red-400">*</span>
                 </span>
-                <select
+                <SmartSelect
                   className="form-input"
                   value={customerId}
                   onChange={(e) => {
@@ -289,11 +290,11 @@ export function CustomerMaterialDialog({
                       {c.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">Against order</span>
-                <select
+                <SmartSelect
                   className="form-input"
                   value={soId}
                   onChange={(e) => setSoId(e.target.value)}
@@ -305,7 +306,7 @@ export function CustomerMaterialDialog({
                       {o.soNumber}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">Their challan (D.C.) no.</span>
@@ -347,7 +348,7 @@ export function CustomerMaterialDialog({
                 <span className="form-label">
                   Into which store <span className="text-red-400">*</span>
                 </span>
-                <select
+                <SmartSelect
                   className="form-input"
                   value={warehouseId}
                   onChange={(e) => setWarehouseId(e.target.value)}
@@ -359,7 +360,7 @@ export function CustomerMaterialDialog({
                       {w.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">Received on</span>
@@ -475,7 +476,7 @@ export function CustomerMaterialDialog({
                         {/* Category and sub-category narrow the item list, as on the old form. */}
                         <td className="min-w-[300px]">
                           <div className="grid grid-cols-2 gap-1.5">
-                            <select
+                            <SmartSelect
                               className="form-input h-9"
                               value={line.categoryId}
                               onChange={(e) => {
@@ -492,8 +493,8 @@ export function CustomerMaterialDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
-                            <select
+                            </SmartSelect>
+                            <SmartSelect
                               className="form-input h-9"
                               value={line.subCategoryId}
                               onChange={(e) => {
@@ -512,9 +513,9 @@ export function CustomerMaterialDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
-                          <select
+                          <SmartSelect
                             className="form-input mt-1.5 h-9"
                             value={line.itemId}
                             onChange={(e) => {
@@ -536,7 +537,7 @@ export function CustomerMaterialDialog({
                                 {it.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                         </td>
                         <td className="min-w-[110px]">{qtyInput('challanQty', 'Challan quantity')}</td>
                         <td className="min-w-[110px]">{qtyInput('receivedQty', 'Received quantity')}</td>

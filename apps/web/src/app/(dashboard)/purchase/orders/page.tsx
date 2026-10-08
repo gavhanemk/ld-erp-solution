@@ -50,6 +50,7 @@ import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 const qty = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 3 })
@@ -723,7 +724,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
           </div>
 
           <div className="flex items-center gap-2 sm:contents">
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-32 sm:flex-none sm:px-3 sm:text-xs"
               value={supplierId}
               onChange={(e) => setSupplierId(e.target.value)}
@@ -735,9 +736,9 @@ The supplier already has this order. If it was real and fell through, cancel it 
                   {sup.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
               value={itemId}
               onChange={(e) => setItemId(e.target.value)}
@@ -749,9 +750,9 @@ The supplier already has this order. If it was real and fell through, cancel it 
                   {it.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
               value={status}
               onChange={(e) => setStatus(e.target.value)}
@@ -763,7 +764,7 @@ The supplier already has this order. If it was real and fell through, cancel it 
                   {s.label}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
           </div>
 
           <div className="flex items-center gap-2 sm:contents">

@@ -19,6 +19,7 @@ import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { formatDate, itemsPreview } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Material requisitions: asked for, allowed, handed over.
@@ -921,7 +922,7 @@ function RequisitionsScreen() {
               </button>
             )}
           </div>
-          <select
+          <SmartSelect
             className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
             value={preset}
             onChange={(e) => pickPreset(e.target.value)}
@@ -932,7 +933,7 @@ function RequisitionsScreen() {
                 {p.label}
               </option>
             ))}
-          </select>
+          </SmartSelect>
           {FILTERS.filter((f) => ['stage', 'department', 'need'].includes(f.key)).map((f) => (
             <FilterMenu key={f.key} label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
           ))}

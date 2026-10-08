@@ -18,6 +18,7 @@ import {
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { qty as qtyFmt, type EnquiryRecord } from '@/components/purchase/enquiryTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The printed purchase requisition — what the mill sends a supplier.
@@ -287,7 +288,7 @@ export default function PurchaseRequisitionPrintPage() {
           <div className="req-picker no-print">
             <span style={{ fontWeight: 600 }}>Vendor on this sheet</span>
             {data.recipients.length > 1 ? (
-              <select
+              <SmartSelect
                 value={picked}
                 onChange={(ev) => setPicked(ev.target.value)}
                 aria-label="Supplier this copy is addressed to"
@@ -297,7 +298,7 @@ export default function PurchaseRequisitionPrintPage() {
                     {r.name}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
             ) : (
               <strong style={{ color: NAVY }}>{to?.name}</strong>
             )}

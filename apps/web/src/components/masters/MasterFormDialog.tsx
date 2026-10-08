@@ -36,6 +36,7 @@ import {
 } from 'lucide-react'
 import { ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /** The tile in the form's title bar, by master. */
 const RESOURCE_ICONS: Record<string, LucideIcon> = {
@@ -799,7 +800,7 @@ function Field({
       )}
 
       {type === 'select' && (
-        <select
+        <SmartSelect
           id={field.name}
           className={inputClass}
           value={String(value ?? '')}
@@ -817,7 +818,7 @@ function Field({
               {o.label}
             </option>
           ))}
-        </select>
+        </SmartSelect>
       )}
 
       {/* Boxed at the same height as the fields beside it, so a tick box

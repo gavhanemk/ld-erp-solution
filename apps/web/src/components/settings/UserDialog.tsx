@@ -5,6 +5,7 @@ import { X, Loader2 } from 'lucide-react'
 import { ApiError } from '@/lib/api'
 import { settingsApi, type SettingsRole, type SettingsUser } from '@/lib/settingsApi'
 import { Field, Notice } from './ui'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /** Add someone, or change their details. Passwords are handled separately. */
 export function UserDialog({
@@ -189,7 +190,7 @@ export function UserDialog({
               error={errors.roleId}
               help={isSelf ? 'Your own role cannot be changed here' : 'Decides what they can see and do'}
             >
-              <select
+              <SmartSelect
                 id="u-role"
                 className="form-input"
                 value={values.roleId ?? ''}
@@ -202,11 +203,11 @@ export function UserDialog({
                     {r.name}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
             </Field>
 
             <Field label="Status" htmlFor="u-status" error={errors.status}>
-              <select
+              <SmartSelect
                 id="u-status"
                 className="form-input"
                 value={values.status ?? 'ACTIVE'}
@@ -216,7 +217,7 @@ export function UserDialog({
                 <option value="ACTIVE">Active — can sign in</option>
                 <option value="INACTIVE">Inactive — cannot sign in</option>
                 <option value="SUSPENDED">Suspended — cannot sign in</option>
-              </select>
+              </SmartSelect>
             </Field>
 
             {!isEdit && (

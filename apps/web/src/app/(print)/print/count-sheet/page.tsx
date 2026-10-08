@@ -16,6 +16,7 @@ import {
   NAVY,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 interface Payload {
   company: Record<string, string | null>
@@ -72,14 +73,14 @@ function CountSheet() {
     <>
       <label>
         Store
-        <select value={warehouseId} onChange={(e) => setParam('warehouseId', e.target.value || null)}>
+        <SmartSelect value={warehouseId} onChange={(e) => setParam('warehouseId', e.target.value || null)}>
           <option value="">Choose a store...</option>
           {stores.map((s) => (
             <option key={s.id} value={s.id}>
               {s.name}
             </option>
           ))}
-        </select>
+        </SmartSelect>
       </label>
       <label>
         <input type="checkbox" checked={showBook} onChange={(e) => setParam('book', e.target.checked ? 'true' : null)} />

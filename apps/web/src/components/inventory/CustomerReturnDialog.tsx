@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, Undo2, FileText, Truck, Boxes } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Sending a customer's own material back to them unworked.
@@ -197,30 +198,30 @@ export function CustomerReturnDialog({
                 <span className="form-label">
                   Customer <span className="text-red-400">*</span>
                 </span>
-                <select className="form-input" value={customerId} onChange={(e) => pickCustomer(e.target.value)} autoFocus={!start}>
+                <SmartSelect className="form-input" value={customerId} onChange={(e) => pickCustomer(e.target.value)} autoFocus={!start}>
                   <option value="">{customers.length ? 'Choose…' : 'No customer material with us'}</option>
                   {customers.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">
                   Why it is going back <span className="text-red-400">*</span>
                 </span>
-                <select className="form-input" value={reason} onChange={(e) => setReason(e.target.value)}>
+                <SmartSelect className="form-input" value={reason} onChange={(e) => setReason(e.target.value)}>
                   {REASONS.map((r) => (
                     <option key={r.value} value={r.value}>
                       {r.label}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">Against their receipt</span>
-                <select className="form-input" value={grnId} onChange={(e) => setGrnId(e.target.value)} disabled={!customerId}>
+                <SmartSelect className="form-input" value={grnId} onChange={(e) => setGrnId(e.target.value)} disabled={!customerId}>
                   <option value="">Not against one receipt</option>
                   {receipts
                     .filter((r) => r.customerId === customerId)
@@ -229,7 +230,7 @@ export function CustomerReturnDialog({
                         {r.grnNumber} · {new Date(r.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                       </option>
                     ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">Returned on</span>
@@ -244,7 +245,7 @@ export function CustomerReturnDialog({
                 <span className="form-label">
                   From which store <span className="text-red-400">*</span>
                 </span>
-                <select
+                <SmartSelect
                   className="form-input"
                   value={warehouseId}
                   onChange={(e) => {
@@ -259,7 +260,7 @@ export function CustomerReturnDialog({
                       {w.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </label>
               <label className="block min-w-0">
                 <span className="form-label">Vehicle number</span>
@@ -327,7 +328,7 @@ export function CustomerReturnDialog({
                       <tr key={i}>
                         <td className="text-muted-foreground text-xs tabular-nums">{i + 1}</td>
                         <td className="min-w-[240px]">
-                          <select
+                          <SmartSelect
                             className="form-input h-9"
                             value={line.itemId}
                             onChange={(e) => setLine(i, { itemId: e.target.value, qty: '' })}
@@ -342,7 +343,7 @@ export function CustomerReturnDialog({
                                   {t.itemCode} · {t.itemName} · {fmt(t.qty)} {t.uom}
                                 </option>
                               ))}
-                          </select>
+                          </SmartSelect>
                         </td>
                         <td className="whitespace-nowrap text-right text-sm tabular-nums">
                           {h ? (

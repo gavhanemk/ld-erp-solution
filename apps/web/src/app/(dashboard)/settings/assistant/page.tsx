@@ -5,6 +5,7 @@ import { Loader2, ShieldCheck, ExternalLink, Zap, CheckCircle2, XCircle } from '
 import { ApiError } from '@/lib/api'
 import { settingsApi, type AiProvider, type AiSettings } from '@/lib/settingsApi'
 import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The assistant.
@@ -250,7 +251,7 @@ export default function AssistantSettingsPage() {
               htmlFor="ai-model"
               help="The smaller model is fast and cheap and answers these questions perfectly well."
             >
-              <select
+              <SmartSelect
                 id="ai-model"
                 className="form-input"
                 value={model}
@@ -263,7 +264,7 @@ export default function AssistantSettingsPage() {
                       {m.label}
                     </option>
                   ))}
-              </select>
+              </SmartSelect>
             </Field>
           </div>
 

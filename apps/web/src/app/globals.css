@@ -618,6 +618,15 @@
     background-size: 0.85rem;
   }
 
+  /* The searchable dropdown (SmartSelect) in a form: the same 42px box as a
+     select, with its own arrow drawn inside it rather than as a background.
+     `:where()` for the same reason as above, so an `h-9` or `h-8` beside
+     it in the markup still wins. */
+  :where(.smart-select-trigger).form-input {
+    @apply py-0;
+    height: 2.625rem;
+  }
+
   /* The same arrow, darkened for a light card — the dark-theme grey above
      reads as a smudge on white. */
   .light :where(select).form-input {

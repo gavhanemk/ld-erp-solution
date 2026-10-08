@@ -19,6 +19,7 @@ import {
   DaysOutBars, DueDonut, GstClock, ProcessPie, SentBackTrend, WasteColumns, WorkerBars,
 } from '@/components/inventory/JobWorkCharts'
 import { formatDate } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Our own material out at an outside unit.
@@ -758,7 +759,7 @@ function JobWorkScreen() {
             title="Sent up to"
           />
         </div>
-        <select
+        <SmartSelect
           className="h-10 cursor-pointer rounded-lg border border-border bg-secondary px-2 text-sm text-foreground outline-none"
           value={preset}
           onChange={(e) => pickPreset(e.target.value)}
@@ -769,7 +770,7 @@ function JobWorkScreen() {
               {p.label}
             </option>
           ))}
-        </select>
+        </SmartSelect>
         {FILTERS.filter((f) => f.menu).map((f) => (
           <FilterMenu key={f.key} label={f.label} choices={choicesFor(f.key)} selected={picked[f.key] ?? []} onChange={(next) => setFilter(f.key, next)} />
         ))}

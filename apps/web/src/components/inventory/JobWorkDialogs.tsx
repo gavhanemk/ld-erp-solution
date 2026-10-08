@@ -5,6 +5,7 @@ import { Loader2, Plus, Trash2, Send, Undo2, Factory, Truck, Boxes, FileText } f
 import { api, ApiError, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Sending our fabric out to an outside unit, and taking it back.
@@ -206,7 +207,7 @@ export function SendJobWorkDialog({
   )
 
   const storeSelect = (value: string, onChange: (v: string) => void, other: string, label: string) => (
-    <select className="form-input" value={value} onChange={(e) => onChange(e.target.value)} disabled={loadingLists} aria-label={label}>
+    <SmartSelect className="form-input" value={value} onChange={(e) => onChange(e.target.value)} disabled={loadingLists} aria-label={label}>
       <option value="">{loadingLists ? 'Loading...' : 'Choose a store...'}</option>
       {warehouses
         .filter((w) => w.id !== other)
@@ -215,7 +216,7 @@ export function SendJobWorkDialog({
             {w.name}
           </option>
         ))}
-    </select>
+    </SmartSelect>
   )
 
   return (
@@ -239,14 +240,14 @@ export function SendJobWorkDialog({
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
           <label className="block min-w-0">
             <Req>Unit doing the work</Req>
-            <select className="form-input" value={jobWorkerId} onChange={(e) => setJobWorkerId(e.target.value)} disabled={loadingLists} autoFocus>
+            <SmartSelect className="form-input" value={jobWorkerId} onChange={(e) => setJobWorkerId(e.target.value)} disabled={loadingLists} autoFocus>
               <option value="">{loadingLists ? 'Loading...' : 'Choose a unit...'}</option>
               {workers.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
           </label>
           <label className="block min-w-0">
             <Req>What is the work</Req>
@@ -334,7 +335,7 @@ export function SendJobWorkDialog({
                     {/* Category and sub-category narrow the item list, as on the other forms. */}
                     <td className="min-w-[320px]">
                       <div className="grid grid-cols-2 gap-1.5">
-                        <select
+                        <SmartSelect
                           className="form-input h-9"
                           value={line.categoryId}
                           onChange={(e) => {
@@ -351,8 +352,8 @@ export function SendJobWorkDialog({
                               {c.name}
                             </option>
                           ))}
-                        </select>
-                        <select
+                        </SmartSelect>
+                        <SmartSelect
                           className="form-input h-9"
                           value={line.subCategoryId}
                           onChange={(e) => {
@@ -369,9 +370,9 @@ export function SendJobWorkDialog({
                               {c.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
-                      <select
+                      <SmartSelect
                         className="form-input mt-1.5 h-9"
                         value={line.itemId}
                         onChange={(e) => {
@@ -390,7 +391,7 @@ export function SendJobWorkDialog({
                             {it.name}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </td>
                     <td className="whitespace-nowrap pt-4 text-right text-sm tabular-nums">
                       {have === null ? (
@@ -663,7 +664,7 @@ export function ReceiveJobWorkDialog({
                       )}
                     </td>
                     <td className="min-w-[200px]">
-                      <select
+                      <SmartSelect
                         className="form-input h-9"
                         value={e?.itemId ?? ''}
                         onChange={(ev) => setEntry(l.id, { itemId: ev.target.value })}
@@ -675,7 +676,7 @@ export function ReceiveJobWorkDialog({
                             {it.name}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </td>
                     <td className="min-w-[120px]">
                       {qtyInput(e?.received ?? '', (v) => setEntry(l.id, { received: v }), `Quantity back for ${l.item.name}`, backUom, done)}
@@ -684,7 +685,7 @@ export function ReceiveJobWorkDialog({
                       {qtyInput(e?.wasted ?? '', (v) => setEntry(l.id, { wasted: v }), `Wasted for ${l.item.name}`, sentUom, done)}
                     </td>
                     <td className="min-w-[160px]">
-                      <select
+                      <SmartSelect
                         className="form-input h-9"
                         value={e?.warehouseId ?? ''}
                         onChange={(ev) => setEntry(l.id, { warehouseId: ev.target.value })}
@@ -697,7 +698,7 @@ export function ReceiveJobWorkDialog({
                             {w.name}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </td>
                   </tr>
                 )

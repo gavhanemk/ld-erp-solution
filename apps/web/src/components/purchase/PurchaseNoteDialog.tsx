@@ -27,6 +27,7 @@ import {
   type NoteIssuer,
   type PurchaseNote,
 } from '@/components/purchase/noteTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Raising a debit or credit note against a supplier.
@@ -1030,7 +1031,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="reason-pick">
                           What happened
                         </label>
-                        <select
+                        <SmartSelect
                           id="reason-pick"
                           className="form-input"
                           value={reason}
@@ -1042,7 +1043,7 @@ export function PurchaseNoteDialog({
                               {r.label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="note-number">
@@ -1059,7 +1060,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="no-bill-supplier">
                           Supplier
                         </label>
-                        <select
+                        <SmartSelect
                           id="no-bill-supplier"
                           className="form-input"
                           value={supplierId}
@@ -1071,7 +1072,7 @@ export function PurchaseNoteDialog({
                               {s.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="no-bill-why">
@@ -1113,7 +1114,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="note-effect">
                           What does this do to what we owe?
                         </label>
-                        <select
+                        <SmartSelect
                           id="note-effect"
                           className="form-input"
                           value={effect}
@@ -1124,7 +1125,7 @@ export function PurchaseNoteDialog({
                               {EFFECT_WORDS[k].label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                         <p className="text-muted-foreground mt-1 text-[11px]">
                           Nothing defines the direction of an &ldquo;other&rdquo; adjustment, so it
                           has to be said.
@@ -1152,7 +1153,7 @@ export function PurchaseNoteDialog({
                           Pull rejected quantity off a receipt{' '}
                           <span className="text-muted-foreground font-normal">(optional)</span>
                         </label>
-                        <select
+                        <SmartSelect
                           id="grn-pick"
                           className="form-input"
                           value={grnPickerId}
@@ -1165,7 +1166,7 @@ export function PurchaseNoteDialog({
                               {g.po?.supplier ? ` · ${g.po.supplier.name}` : ''}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <button
                         type="button"
@@ -1196,7 +1197,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="reason-pick-bill">
                           What happened
                         </label>
-                        <select
+                        <SmartSelect
                           id="reason-pick-bill"
                           className="form-input"
                           value={reason}
@@ -1208,7 +1209,7 @@ export function PurchaseNoteDialog({
                               {r.label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="note-number-bill">
@@ -1225,7 +1226,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="bill-supplier">
                           Supplier <span className="text-muted-foreground">(narrows the list)</span>
                         </label>
-                        <select
+                        <SmartSelect
                           id="bill-supplier"
                           className="form-input"
                           value={supplierId}
@@ -1241,13 +1242,13 @@ export function PurchaseNoteDialog({
                               {s.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                       <div>
                         <label className="form-label" htmlFor="bill-pick">
                           Supplier bill
                         </label>
-                        <select
+                        <SmartSelect
                           id="bill-pick"
                           className="form-input"
                           value={billId}
@@ -1261,7 +1262,7 @@ export function PurchaseNoteDialog({
                               {inr(num(b.totalAmount))}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </div>
                     </div>
 
@@ -1286,7 +1287,7 @@ export function PurchaseNoteDialog({
                         <label className="form-label" htmlFor="note-effect-bill">
                           What does this do to what we owe?
                         </label>
-                        <select
+                        <SmartSelect
                           id="note-effect-bill"
                           className="form-input"
                           value={effect}
@@ -1297,7 +1298,7 @@ export function PurchaseNoteDialog({
                               {EFFECT_WORDS[k].label}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                         <p className="text-muted-foreground mt-1 text-[11px]">
                           Nothing defines the direction of an &ldquo;other&rdquo; adjustment, so it
                           has to be said.
@@ -1436,7 +1437,7 @@ export function PurchaseNoteDialog({
                                         </p>
                                       </>
                                     ) : (
-                                      <select
+                                      <SmartSelect
                                         className="form-input h-8 py-0 text-[13px]"
                                         value={l.itemId}
                                         onChange={(e) => pickManualItem(i, e.target.value)}
@@ -1448,7 +1449,7 @@ export function PurchaseNoteDialog({
                                             {it.code ? `${it.code} — ${it.name}` : it.name}
                                           </option>
                                         ))}
-                                      </select>
+                                      </SmartSelect>
                                     )}
                                     {problem && (
                                       <p className="mt-1 text-[11px] text-red-400">{problem}</p>
@@ -1555,7 +1556,7 @@ export function PurchaseNoteDialog({
                                     </p>
                                   </div>
                                 ) : (
-                                  <select
+                                  <SmartSelect
                                     className="form-input h-8 min-w-0 flex-1 py-0 text-[13px]"
                                     value={l.itemId}
                                     onChange={(e) => pickManualItem(i, e.target.value)}
@@ -1567,7 +1568,7 @@ export function PurchaseNoteDialog({
                                         {it.code ? `${it.code} — ${it.name}` : it.name}
                                       </option>
                                     ))}
-                                  </select>
+                                  </SmartSelect>
                                 )}
                                 <button
                                   type="button"
@@ -1925,7 +1926,7 @@ export function PurchaseNoteDialog({
                             <label className="form-label" htmlFor="note-warehouse">
                               Godown they left
                             </label>
-                            <select
+                            <SmartSelect
                               id="note-warehouse"
                               className="form-input"
                               value={warehouseId}
@@ -1937,7 +1938,7 @@ export function PurchaseNoteDialog({
                                   {w.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
                         )}
                         <div>

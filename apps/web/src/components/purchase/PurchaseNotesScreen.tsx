@@ -55,6 +55,7 @@ import {
   type NoteStatus,
   type PurchaseNote,
 } from '@/components/purchase/noteTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The list of adjustments, as one screen wearing several names.
@@ -766,7 +767,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
               />
             </div>
 
-            <select
+            <SmartSelect
               className="form-input h-8 w-[8.25rem] shrink-0 py-0 text-xs"
               value={period}
               onChange={(e) => pickPeriod(e.target.value)}
@@ -779,7 +780,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                 </option>
               ))}
               <option value="custom">Between…</option>
-            </select>
+            </SmartSelect>
 
             {/* The two boxes, on the row on a desk and underneath on a phone. */}
             <div className={`${custom ? 'flex' : 'hidden'} shrink-0 items-center gap-1.5 sm:flex`}>
@@ -802,7 +803,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
               />
             </div>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-36 sm:flex-none sm:basis-auto"
               value={status}
               onChange={(e) => {
@@ -820,9 +821,9 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                   {st.label}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-40 sm:flex-none sm:basis-auto"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
@@ -834,9 +835,9 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                   {label}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 basis-0 py-0 text-xs sm:w-44 sm:flex-none sm:basis-auto"
               value={supplierId}
               onChange={(e) => setSupplierId(e.target.value)}
@@ -848,7 +849,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
                   {sup.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
             {anyFilter && (
               <button

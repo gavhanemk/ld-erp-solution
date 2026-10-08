@@ -6,6 +6,7 @@ import {
   ResponsiveContainer, Legend, Area, AreaChart
 } from 'recharts'
 import { api } from '@/lib/api'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 interface TrendPoint {
   month: string
@@ -68,7 +69,7 @@ export function RevenueChart() {
           <h3 className="text-sm font-semibold text-foreground">Revenue vs Expenses</h3>
           <p className="text-xs text-muted-foreground mt-0.5">Invoiced sales against supplier bills</p>
         </div>
-        <select
+        <SmartSelect
           className="text-xs bg-secondary border border-border rounded-lg px-2 py-1.5 text-foreground"
           value={months}
           onChange={(e) => setMonths(Number(e.target.value))}
@@ -76,7 +77,7 @@ export function RevenueChart() {
           <option value={6}>Last 6 months</option>
           <option value={12}>Last 12 months</option>
           <option value={24}>Last 24 months</option>
-        </select>
+        </SmartSelect>
       </div>
 
       {error && <p className="text-xs text-red-400 py-16 text-center">{error}</p>}

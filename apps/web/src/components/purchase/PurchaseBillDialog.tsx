@@ -23,6 +23,7 @@ import { Section } from '@/components/purchase/PurchaseOrderDialog'
 import type { NoteDoc, NoteGst, NoteIssuer } from '@/components/purchase/noteTypes'
 import type { NewItem } from '@/components/purchase/NewItemDialog'
 import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 export interface BillLine {
   itemId: string
@@ -1545,7 +1546,7 @@ export function PurchaseBillDialog({
                         <span className="form-label">
                           Supplier<span className="ml-0.5 text-red-400">*</span>
                         </span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={supplierId}
                           onChange={(e) => chooseSupplier(e.target.value)}
@@ -1557,11 +1558,11 @@ export function PurchaseBillDialog({
                               {sup.code ? `${sup.code} — ${sup.name}` : sup.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">PO no.</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterPo}
                           onChange={(e) => choosePo(e.target.value)}
@@ -1573,11 +1574,11 @@ export function PurchaseBillDialog({
                               {o.poNumber}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">Challan no. (theirs)</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterChallan}
                           onChange={(e) => chooseChallan(e.target.value)}
@@ -1589,11 +1590,11 @@ export function PurchaseBillDialog({
                               {c}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">Supplier bill no.</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterBill}
                           onChange={(e) => chooseBill(e.target.value)}
@@ -1612,11 +1613,11 @@ export function PurchaseBillDialog({
                               {b}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                       <label className="block">
                         <span className="form-label">Receipt no. (ours)</span>
-                        <select
+                        <SmartSelect
                           className="form-input h-8 text-xs"
                           value={filterGrn}
                           onChange={(e) => chooseGrn(e.target.value)}
@@ -1629,7 +1630,7 @@ export function PurchaseBillDialog({
                               {g.challanNo ? ` · ${g.challanNo}` : ''}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                       </label>
                     </div>
 
@@ -1865,7 +1866,7 @@ export function PurchaseBillDialog({
                   <label className="form-label" htmlFor="bill-supplier">
                     Supplier<span className="ml-0.5 text-red-400">*</span>
                   </label>
-                  <select
+                  <SmartSelect
                     id="bill-supplier"
                     className="form-input"
                     value={supplierId}
@@ -1877,7 +1878,7 @@ export function PurchaseBillDialog({
                         {s.code ? `${s.code} — ${s.name}` : s.name}
                       </option>
                     ))}
-                  </select>
+                  </SmartSelect>
                   {expenseMode && suppliers.length > 0 && supplierChoices.length === 0 && (
                     <p className="mt-1 text-xs text-amber-500">
                       No service suppliers yet. Add one in Masters → Suppliers with category
@@ -2174,14 +2175,14 @@ export function PurchaseBillDialog({
                           className="border-border/50 border-b last:border-0 [&>td]:align-top"
                         >
                           <td className="min-w-[200px] px-3 py-1.5">
-                            <select
+                            <SmartSelect
                               className="form-input h-8"
                               value={line.itemId}
                               onChange={(e) => pickItem(i, e.target.value)}
                               aria-label={`Line ${i + 1} item`}
                             >
                               {itemChoices(line.itemId)}
-                            </select>
+                            </SmartSelect>
                             {item?.hsnCode && (
                               <p className="text-muted-foreground mt-0.5 font-mono text-[10px]">
                                 {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
@@ -2342,14 +2343,14 @@ export function PurchaseBillDialog({
 
                       <div className="space-y-1">
                         <label className={fieldLabel}>Item</label>
-                        <select
+                        <SmartSelect
                           className="form-input h-9 w-full"
                           value={line.itemId}
                           onChange={(e) => pickItem(i, e.target.value)}
                           aria-label={`Line ${i + 1} item`}
                         >
                           {itemChoices(line.itemId)}
-                        </select>
+                        </SmartSelect>
                         {item?.hsnCode && (
                           <p className="text-muted-foreground font-mono text-[10px]">
                             {expenseMode ? 'HSN/SAC' : 'HSN'} {item.hsnCode}
@@ -2499,7 +2500,7 @@ export function PurchaseBillDialog({
                   <div className="space-y-1.5 py-0.5">
                     {charges.map((c, i) => (
                       <div key={i} className="flex items-center gap-1.5">
-                        <select
+                        <SmartSelect
                           className="form-input h-8 min-w-0 flex-1 text-xs"
                           value={c.chargeTypeId}
                           onChange={(e) => {
@@ -2528,7 +2529,7 @@ export function PurchaseBillDialog({
                               {ct.name}
                             </option>
                           ))}
-                        </select>
+                        </SmartSelect>
                         <input
                           type="number"
                           step="0.01"

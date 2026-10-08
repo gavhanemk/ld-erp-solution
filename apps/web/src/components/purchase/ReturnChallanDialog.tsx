@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { api, apiErrorMessage, masterResource } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * A return challan — goods going back to the supplier against a bill.
@@ -495,7 +496,7 @@ export function ReturnChallanDialog({
                     <span className="form-label">
                       Reason<span className="ml-0.5 text-red-400">*</span>
                     </span>
-                    <select
+                    <SmartSelect
                       className="form-input"
                       value={reason}
                       onChange={(e) => setReason(e.target.value)}
@@ -506,7 +507,7 @@ export function ReturnChallanDialog({
                           {r.label}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </label>
                   <label className="block lg:col-span-2">
                     <span className="form-label">What was wrong</span>
@@ -619,7 +620,7 @@ export function ReturnChallanDialog({
 
                         <div className="mt-2 space-y-1">
                           <label className={fieldLabel}>From godown</label>
-                          <select
+                          <SmartSelect
                             className="form-input h-9 w-full"
                             value={r.warehouseId}
                             onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}
@@ -631,7 +632,7 @@ export function ReturnChallanDialog({
                                 {w.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                           <p
                             className={`text-[10px] ${short ? 'text-red-400' : 'text-muted-foreground'}`}
                           >
@@ -763,7 +764,7 @@ export function ReturnChallanDialog({
                               {first ? `${l.remainingQty} ${l.uom ?? ''}` : ''}
                             </td>
                             <td>
-                              <select
+                              <SmartSelect
                                 className="form-input h-8 text-xs"
                                 value={r.warehouseId}
                                 onChange={(e) => setRow(r.key, { warehouseId: e.target.value })}
@@ -775,7 +776,7 @@ export function ReturnChallanDialog({
                                     {w.name}
                                   </option>
                                 ))}
-                              </select>
+                              </SmartSelect>
                             </td>
                             <td
                               className={`whitespace-nowrap pt-2.5 text-right text-xs tabular-nums ${

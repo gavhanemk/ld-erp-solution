@@ -32,6 +32,7 @@ import {
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
 import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Booking in what arrived against an order.
@@ -366,7 +367,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
               />
             </td>
             <td>
-              <select
+              <SmartSelect
                 className="form-input h-9"
                 value={alloc.warehouseId}
                 onChange={(e) => setAlloc(line.id, alloc.key, { warehouseId: e.target.value })}
@@ -375,7 +376,7 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
               >
                 <option value="">Choose…</option>
                 {storeOptions}
-              </select>
+              </SmartSelect>
             </td>
             <td>
               {/* One delivery can go to more than one store. The first row
@@ -1299,7 +1300,7 @@ export function ReceiveGoodsDialog({
                       disabled
                     />
                   ) : (
-                    <select
+                    <SmartSelect
                       className="form-input h-9"
                       value={poId}
                       onChange={(e) => setPoId(e.target.value)}
@@ -1311,7 +1312,7 @@ export function ReceiveGoodsDialog({
                           {o.poNumber}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   )}
                 </label>
                 <label className="block">
@@ -1371,7 +1372,7 @@ export function ReceiveGoodsDialog({
                 {order.supplier &&
                   (supplierAddresses.length > 1 ? (
                     <IconField label="Supplier Address" icon={MapPin}>
-                      <select
+                      <SmartSelect
                         className="form-input pl-9"
                         value={supplierAddressId}
                         onChange={(e) => setSupplierAddressId(e.target.value)}
@@ -1383,7 +1384,7 @@ export function ReceiveGoodsDialog({
                             {addressLine(a)}
                           </option>
                         ))}
-                      </select>
+                      </SmartSelect>
                     </IconField>
                   ) : (
                     <Readout label="Supplier Address" icon={MapPin}>
@@ -1395,7 +1396,7 @@ export function ReceiveGoodsDialog({
 
                 {warehouses.length > 1 ? (
                   <IconField label="Shipping Address" icon={Truck}>
-                    <select
+                    <SmartSelect
                       className="form-input pl-9"
                       value={shippingWarehouseId}
                       onChange={(e) => setShippingWarehouseId(e.target.value)}
@@ -1407,7 +1408,7 @@ export function ReceiveGoodsDialog({
                           {w.address ? ` — ${w.address}` : ''}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </IconField>
                 ) : (
                   <Readout label="Shipping Address" icon={Truck}>
@@ -1559,7 +1560,7 @@ export function ReceiveGoodsDialog({
                 two characters is one somebody will mis-key.
 
                 `table-fixed`, not auto. Auto layout sizes a column off the
-                widest thing that could ever sit in it — and a `<select>`'s
+                widest thing that could ever sit in it — and a `<SmartSelect>`'s
                 "widest thing" is its longest option, not whatever is currently
                 chosen. One warehouse with a long name anywhere in the list was
                 enough to push the Store column wide and starve some other

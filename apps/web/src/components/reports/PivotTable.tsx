@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { LayoutGrid } from 'lucide-react'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * A pivot table, on screen.
@@ -125,7 +126,7 @@ export function PivotTable({
           Pivot table
         </h3>
         <div className="flex flex-wrap items-center gap-2">
-          <select
+          <SmartSelect
             className="form-input h-8 w-auto px-2 py-0 text-xs"
             value={rowKey}
             onChange={(e) => setRowKey(e.target.value)}
@@ -136,9 +137,9 @@ export function PivotTable({
                 {c.label}
               </option>
             ))}
-          </select>
+          </SmartSelect>
           <span className="text-muted-foreground text-xs">by</span>
-          <select
+          <SmartSelect
             className="form-input h-8 w-auto px-2 py-0 text-xs"
             value={colKey}
             onChange={(e) => setColKey(e.target.value)}
@@ -152,9 +153,9 @@ export function PivotTable({
                   {c.label}
                 </option>
               ))}
-          </select>
+          </SmartSelect>
           <span className="text-muted-foreground text-xs">totalling</span>
-          <select
+          <SmartSelect
             className="form-input h-8 w-auto px-2 py-0 text-xs"
             value={valueKey}
             onChange={(e) => setValueKey(e.target.value)}
@@ -165,7 +166,7 @@ export function PivotTable({
                 {c.label}
               </option>
             ))}
-          </select>
+          </SmartSelect>
         </div>
       </div>
 

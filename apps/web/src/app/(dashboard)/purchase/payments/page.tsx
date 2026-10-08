@@ -21,6 +21,7 @@ import { ExportButton } from '@/components/tables/ExportButton'
 import { describeReport, downloadReport } from '@/lib/reportDownload'
 import { asDate, asNumber, downloadRows, type ExportColumn, type ExportFormat } from '@/lib/export'
 import { formatDate } from '@/lib/utils'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /** A file hanging off an order or a receipt — a bill and a payment hold none of their own. */
 interface BillFile {
@@ -696,7 +697,7 @@ export default function SupplierPaymentsPage() {
 
           {/* Row: the two things you pick. */}
           <div className="flex items-center gap-2 sm:contents">
-            <select
+            <SmartSelect
               className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-44 sm:flex-none sm:px-3 sm:text-xs"
               value={supplierId}
               onChange={(e) => setSupplierId(e.target.value)}
@@ -708,14 +709,14 @@ export default function SupplierPaymentsPage() {
                   {sup.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
 
             {/* One dropdown, two meanings — an ageing bucket is nothing on
               the history tab, and how the money left is nothing on a bill
               nobody has paid. Rendering both at once would put a permanently
               useless control in front of somebody on every tab. */}
             {tab === 'outstanding' ? (
-              <select
+              <SmartSelect
                 className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
                 value={bucket}
                 onChange={(e) => setBucket(e.target.value)}
@@ -727,9 +728,9 @@ export default function SupplierPaymentsPage() {
                     {b}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
             ) : (
-              <select
+              <SmartSelect
                 className="form-input h-8 min-w-0 flex-1 px-1.5 py-0 text-[11px] sm:w-36 sm:flex-none sm:px-3 sm:text-xs"
                 value={payMode}
                 onChange={(e) => setPayMode(e.target.value)}
@@ -741,7 +742,7 @@ export default function SupplierPaymentsPage() {
                     {label}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
             )}
           </div>
 

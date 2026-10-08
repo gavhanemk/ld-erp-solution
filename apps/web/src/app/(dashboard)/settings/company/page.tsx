@@ -11,6 +11,7 @@ import {
   type TdsSection,
 } from '@/lib/settingsApi'
 import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -331,7 +332,7 @@ function CompanyProfile() {
             </Field>
 
             <Field label="Year starts in" htmlFor="fyStartMonth" error={errors.fyStartMonth}>
-              <select
+              <SmartSelect
                 id="fyStartMonth"
                 className="form-input"
                 value={String(startMonth)}
@@ -342,7 +343,7 @@ function CompanyProfile() {
                     {m}
                   </option>
                 ))}
-              </select>
+              </SmartSelect>
             </Field>
 
             <Field
@@ -507,7 +508,7 @@ function DocumentNumbering() {
                     </td>
                     <td>
                       {isEditing ? (
-                        <select
+                        <SmartSelect
                           className="form-input h-8 w-20"
                           value={draft.separator}
                           onChange={(e) => setDraft((d) => ({ ...d, separator: e.target.value }))}
@@ -516,7 +517,7 @@ function DocumentNumbering() {
                           <option value="-">dash</option>
                           <option value="/">slash</option>
                           <option value="">nothing</option>
-                        </select>
+                        </SmartSelect>
                       ) : (
                         <span className="font-mono text-muted-foreground">{s.separator || 'none'}</span>
                       )}

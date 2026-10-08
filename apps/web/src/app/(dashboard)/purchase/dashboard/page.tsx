@@ -16,6 +16,7 @@ import {
   ChaseList, ChaseTabs, PriceWatchList, SupplierScorecard, TopItemsTable,
   type ChaseTab, type PurchaseDashboard,
 } from '@/components/purchase/PurchaseDashboardTables'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Purchase at a glance.
@@ -205,7 +206,7 @@ export default function PurchaseDashboardPage() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card pl-3 pr-1 shadow-sm">
             <Truck size={14} className="text-muted-foreground" />
-            <select
+            <SmartSelect
               className="h-full max-w-[11rem] cursor-pointer bg-transparent pr-1 text-sm text-foreground outline-none"
               value={supplier}
               onChange={(e) => setSupplier(e.target.value)}
@@ -217,11 +218,11 @@ export default function PurchaseDashboardPage() {
                   {s.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
           </div>
           <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card pl-3 pr-1 shadow-sm">
             <Layers size={14} className="text-muted-foreground" />
-            <select
+            <SmartSelect
               className="h-full max-w-[10rem] cursor-pointer bg-transparent pr-1 text-sm text-foreground outline-none"
               value={category}
               onChange={(e) => setCategory(e.target.value)}
@@ -233,7 +234,7 @@ export default function PurchaseDashboardPage() {
                   {c.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
           </div>
           <div className="flex rounded-lg border border-border bg-card p-0.5 shadow-sm" role="tablist" aria-label="Period">
             {PERIODS.map((p) => (

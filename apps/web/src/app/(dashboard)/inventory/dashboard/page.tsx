@@ -14,6 +14,7 @@ import {
   ActivityHeatmap, AgeingBars, BreakdownTable, CategoryTreemap, FlowChart, MixRadar, MoversBars,
   ParetoChart, PipelineSteps, Sparkline, StoreDonut, UnitFlow, UnitTiles, inr,
 } from '@/components/inventory/InventoryDashboardCharts'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * The inventory at a glance.
@@ -217,7 +218,7 @@ export default function InventoryDashboardPage() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-card pl-3 pr-1 shadow-sm">
             <Store size={14} className="text-muted-foreground" />
-            <select
+            <SmartSelect
               className="h-full cursor-pointer bg-transparent pr-1 text-sm text-foreground outline-none"
               value={store}
               onChange={(e) => setStore(e.target.value)}
@@ -229,7 +230,7 @@ export default function InventoryDashboardPage() {
                   {s.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
           </div>
           <div className="flex rounded-lg border border-border bg-card p-0.5 shadow-sm" role="tablist" aria-label="Period">
             {PERIODS.map((p) => (

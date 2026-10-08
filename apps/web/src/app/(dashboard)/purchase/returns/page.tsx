@@ -17,6 +17,7 @@ import { api, apiErrorMessage, can, masterResource, type Paginated } from '@/lib
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { Pagination } from '@/components/tables/Pagination'
 import { RowPanel } from '@/components/tables/RowPanel'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Purchase returns — the challans goods went back to suppliers on.
@@ -284,7 +285,7 @@ export default function PurchaseReturnsPage() {
               className="form-input pl-8"
             />
           </div>
-          <select
+          <SmartSelect
             value={status}
             onChange={(e) => setStatus(e.target.value)}
             className="form-input w-auto"
@@ -292,7 +293,7 @@ export default function PurchaseReturnsPage() {
             <option value="">Any status</option>
             <option value="DISPATCHED">Dispatched</option>
             <option value="CANCELLED">Cancelled</option>
-          </select>
+          </SmartSelect>
           <div className="flex shrink-0 items-center gap-1">
             <input
               type="date"
@@ -312,7 +313,7 @@ export default function PurchaseReturnsPage() {
               aria-label="Returns up to this date"
             />
           </div>
-          <select
+          <SmartSelect
             value={supplierId}
             onChange={(e) => setSupplierId(e.target.value)}
             className="form-input w-auto"
@@ -323,7 +324,7 @@ export default function PurchaseReturnsPage() {
                 {s.name}
               </option>
             ))}
-          </select>
+          </SmartSelect>
           {filtered && (
             <button type="button" onClick={clearAll} className="btn-ghost text-xs">
               <X size={14} />

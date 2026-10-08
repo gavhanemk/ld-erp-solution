@@ -21,6 +21,7 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Raising or correcting a purchase enquiry.
@@ -633,7 +634,7 @@ export function PurchaseEnquiryDialog({
                     size={14}
                     className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
                   />
-                  <select
+                  <SmartSelect
                     id="enq-location"
                     value={locationId}
                     onChange={(e) => setLocationId(e.target.value)}
@@ -645,7 +646,7 @@ export function PurchaseEnquiryDialog({
                         {w.name}
                       </option>
                     ))}
-                  </select>
+                  </SmartSelect>
                 </div>
               </div>
               <div>
@@ -779,7 +780,7 @@ export function PurchaseEnquiryDialog({
                         <div className="grid grid-cols-2 gap-2">
                           <div className="space-y-1">
                             <label className={fieldLabel}>Category</label>
-                            <select
+                            <SmartSelect
                               value={l.categoryId}
                               onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
                               className="form-input h-9 w-full"
@@ -791,11 +792,11 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
                           <div className="space-y-1">
                             <label className={fieldLabel}>Subcategory</label>
-                            <select
+                            <SmartSelect
                               value={l.subcategoryId}
                               onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
                               disabled={subsOf(l.categoryId).length === 0}
@@ -810,13 +811,13 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </div>
                         </div>
 
                         <div className="mt-2 space-y-1">
                           <label className={fieldLabel}>Item</label>
-                          <select
+                          <SmartSelect
                             value={l.itemId}
                             onChange={(e) => pickItem(l.key, e.target.value)}
                             disabled={loadingRefs}
@@ -830,7 +831,7 @@ export function PurchaseEnquiryDialog({
                                 {it.code} · {it.name}
                               </option>
                             ))}
-                          </select>
+                          </SmartSelect>
                           {l.mrNumber && (
                             <p className="text-muted-foreground text-[10px]">
                               against indent {l.mrNumber}
@@ -943,7 +944,7 @@ export function PurchaseEnquiryDialog({
                           full columns they took 256px of the row to narrow a
                           dropdown. The order form settled this the same way. */}
                           <td className="px-2 py-1.5 align-top">
-                            <select
+                            <SmartSelect
                               value={l.categoryId}
                               onChange={(e) => narrow(l.key, { categoryId: e.target.value })}
                               className="form-input"
@@ -955,8 +956,8 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
-                            <select
+                            </SmartSelect>
+                            <SmartSelect
                               value={l.subcategoryId}
                               onChange={(e) => narrow(l.key, { subcategoryId: e.target.value })}
                               disabled={subsOf(l.categoryId).length === 0}
@@ -971,7 +972,7 @@ export function PurchaseEnquiryDialog({
                                   {c.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                           </td>
                           {/* Second, and offering only what the category above it
                           holds. Still a box to type into — somebody who knows
@@ -1002,7 +1003,7 @@ export function PurchaseEnquiryDialog({
                             )}
                           </td>
                           <td className="px-2 py-1.5 align-top">
-                            <select
+                            <SmartSelect
                               value={l.itemId}
                               onChange={(e) => pickItem(l.key, e.target.value)}
                               disabled={loadingRefs}
@@ -1016,7 +1017,7 @@ export function PurchaseEnquiryDialog({
                                   {it.code} · {it.name}
                                 </option>
                               ))}
-                            </select>
+                            </SmartSelect>
                             {l.mrNumber && (
                               <p className="text-muted-foreground mt-0.5 text-[10px]">
                                 against indent {l.mrNumber}

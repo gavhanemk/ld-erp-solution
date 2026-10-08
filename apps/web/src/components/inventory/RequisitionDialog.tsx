@@ -5,6 +5,7 @@ import { Loader2, Plus, Trash2, ClipboardList, FileText, Package } from 'lucide-
 import { api, ApiError, currentUser, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * A department asking the store for material.
@@ -409,7 +410,7 @@ export function RequisitionDialog({
             <span className="form-label">
               Department asking<span className="ml-0.5 text-red-500">*</span>
             </span>
-            <select
+            <SmartSelect
               className="form-input"
               value={departmentId}
               onChange={(e) => setDepartmentId(e.target.value)}
@@ -422,7 +423,7 @@ export function RequisitionDialog({
                   {d.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
             {departmentId && (
               <span className="mt-1 block text-[11px] leading-snug text-muted-foreground">
                 {deptHasOwn
@@ -440,14 +441,14 @@ export function RequisitionDialog({
           </label>
           <label className="block min-w-0">
             <span className="form-label">For sales order</span>
-            <select className="form-input" value={soId} onChange={(e) => setSoId(e.target.value)} disabled={loadingLists}>
+            <SmartSelect className="form-input" value={soId} onChange={(e) => setSoId(e.target.value)} disabled={loadingLists}>
               <option value="">Not for a particular order</option>
               {orders.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.soNumber} · {o.customer.name}
                 </option>
               ))}
-            </select>
+            </SmartSelect>
             <span className="mt-1 block text-[11px] leading-snug text-muted-foreground">
               Stock the store reserves for it is held for this customer.
             </span>
@@ -513,7 +514,7 @@ export function RequisitionDialog({
                 <div className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-12">
                   <label className="block min-w-0 sm:col-span-3">
                     <span className="form-label">Category</span>
-                    <select
+                    <SmartSelect
                       className="form-input h-9"
                       value={line.categoryId}
                       onChange={(e) => setLine(i, { categoryId: e.target.value, subCategoryId: '', itemId: '', warehouseId: '', owner: 'OWNED' })}
@@ -526,11 +527,11 @@ export function RequisitionDialog({
                           {c.name}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </label>
                   <label className="block min-w-0 sm:col-span-2">
                     <span className="form-label">Sub-category</span>
-                    <select
+                    <SmartSelect
                       className="form-input h-9"
                       value={line.subCategoryId}
                       onChange={(e) => setLine(i, { subCategoryId: e.target.value, itemId: '', warehouseId: '', owner: 'OWNED' })}
@@ -543,14 +544,14 @@ export function RequisitionDialog({
                           {c.name}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </label>
                   <label className="block min-w-0 sm:col-span-5">
                     <span className="form-label">
                       Item<span className="ml-0.5 text-red-500">*</span>
                       <span className="ml-1 font-normal text-muted-foreground">({choices.length})</span>
                     </span>
-                    <select
+                    <SmartSelect
                       className="form-input h-9"
                       value={line.itemId}
                       onChange={(e) => pickItem(i, e.target.value)}
@@ -572,7 +573,7 @@ export function RequisitionDialog({
                           {it.code} — {it.name}
                         </option>
                       )}
-                    </select>
+                    </SmartSelect>
                   </label>
                   {/* Optional: the garment style the material is for. Suggests style codes; anything typed is kept. */}
                   <label className="block min-w-0 sm:col-span-2">
@@ -593,7 +594,7 @@ export function RequisitionDialog({
                     <span className="form-label">
                       Store to ask<span className="ml-0.5 text-red-500">*</span>
                     </span>
-                    <select
+                    <SmartSelect
                       className="form-input h-9"
                       value={line.warehouseId}
                       onChange={(e) => setLine(i, { warehouseId: e.target.value, owner: 'OWNED' })}
@@ -622,11 +623,11 @@ export function RequisitionDialog({
                             ))}
                         </optgroup>
                       )}
-                    </select>
+                    </SmartSelect>
                   </label>
                   <label className="block min-w-0 sm:col-span-3">
                     <span className="form-label">Whose material</span>
-                    <select
+                    <SmartSelect
                       className={`form-input h-9 ${line.owner !== 'OWNED' ? 'text-sky-500' : ''}`}
                       value={line.owner}
                       onChange={(e) => setLine(i, { owner: e.target.value })}
@@ -639,7 +640,7 @@ export function RequisitionDialog({
                           {t.name}&apos;s · {fmt(t.qty)} {unit}
                         </option>
                       ))}
-                    </select>
+                    </SmartSelect>
                   </label>
                   <label className="block min-w-0 sm:col-span-2">
                     <span className="form-label">

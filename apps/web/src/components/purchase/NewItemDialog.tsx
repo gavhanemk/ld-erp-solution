@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { AlertCircle, Boxes, IndianRupee, Loader2, Package, X } from 'lucide-react'
 import { api, apiErrorMessage } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
  * Adding an item to the master without leaving the form that needed it.
@@ -242,7 +243,7 @@ export function NewItemDialog({
                 <label className="form-label" htmlFor="ni-cat">
                   Category
                 </label>
-                <select
+                <SmartSelect
                   id="ni-cat"
                   value={categoryId}
                   onChange={(e) => {
@@ -257,13 +258,13 @@ export function NewItemDialog({
                       {c.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
               </div>
               <div>
                 <label className="form-label" htmlFor="ni-sub">
                   Subcategory
                 </label>
-                <select
+                <SmartSelect
                   id="ni-sub"
                   value={subcategoryId}
                   onChange={(e) => setSubcategoryId(e.target.value)}
@@ -276,7 +277,7 @@ export function NewItemDialog({
                       {c.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
                 <p className="form-help">Where it is filed, if there is one.</p>
               </div>
             </div>
@@ -315,7 +316,7 @@ export function NewItemDialog({
                 <label className="form-label" htmlFor="ni-type">
                   Item type
                 </label>
-                <select
+                <SmartSelect
                   id="ni-type"
                   value={type}
                   onChange={(e) => setType(e.target.value)}
@@ -326,7 +327,7 @@ export function NewItemDialog({
                       {t.label}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
                 {/* Decides which lists it turns up on for everybody else. */}
                 <p className="form-help">{TYPES.find((t) => t.value === type)?.hint}</p>
               </div>
@@ -334,7 +335,7 @@ export function NewItemDialog({
                 <label className="form-label" htmlFor="ni-uom">
                   Unit of measure
                 </label>
-                <select
+                <SmartSelect
                   id="ni-uom"
                   value={uomId}
                   onChange={(e) => setUomId(e.target.value)}
@@ -346,7 +347,7 @@ export function NewItemDialog({
                       {u.symbol} · {u.name}
                     </option>
                   ))}
-                </select>
+                </SmartSelect>
                 {/* Not paperwork. An item with no unit makes every quantity ever
                   recorded against it ambiguous, and nothing later can repair it. */}
                 <p className="form-help">What its quantity is counted in.</p>
