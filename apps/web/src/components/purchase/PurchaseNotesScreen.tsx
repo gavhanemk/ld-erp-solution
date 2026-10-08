@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import {
   AlertCircle,
@@ -197,6 +197,14 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
     if (fromGrn) setDialogOpen(true)
   }, [fromGrn])
 
+  /*
+   * "Review & post" on a return challan: the note it names opens straight into
+   * its form, where the GST treatment is picked and it is posted. Once only —
+   * the address is cleared so closing the form does not open it again.
+   */
+  const review = searchParams.get('review')
+  const reviewed = useRef(false)
+
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
 
@@ -297,6 +305,17 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
         }
       >(query(page, PER_PAGE))
       setRows(res.data)
+      if (review && !reviewed.current) {
+        const asked = res.data.find((n) => n.noteNumber === review)
+        if (asked && asked.status !== 'POSTED' && asked.status !== 'CANCELLED') {
+          reviewed.current = true
+          setEditing(asked)
+          setDialogOpen(true)
+          const rest = new URLSearchParams(searchParams.toString())
+          rest.delete('review')
+          router.replace('?' + rest.toString(), { scroll: false })
+        }
+      }
       setSummary(res.summary ?? {})
       setUnclassified(res.unclassified ?? { count: 0, amount: 0 })
       setTotal(res.pagination.total)
@@ -312,7 +331,8 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
     } finally {
       setLoading(false)
     }
-  }, [query, page, words.one])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, page, words.one, review])
 
   useEffect(() => {
     void load()

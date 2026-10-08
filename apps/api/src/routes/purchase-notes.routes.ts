@@ -315,8 +315,12 @@ router.get('/adjustable/:billId', requirePermission(MODULE, 'view'), async (req,
         noteAdjustment: true,
         balanceAmount: true,
         status: true,
+        // The bill's goods value and its GST, so the note form can set the
+        // bill, this note and what is left to pay side by side.
+        taxableAmount: true,
         igst: true,
         cgst: true,
+        sgst: true,
         supplier: { select: { id: true, code: true, name: true, gstin: true } },
         po: { select: { id: true, poNumber: true } },
         lines: {

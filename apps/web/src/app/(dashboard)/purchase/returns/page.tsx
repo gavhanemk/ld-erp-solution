@@ -216,7 +216,11 @@ export default function PurchaseReturnsPage() {
           : `View debit note ${n.noteNumber}`,
         hint: draft ? 'Written automatically from this challan — not posted yet' : undefined,
         icon: <FileText size={14} />,
-        href: '/purchase/debit-notes?q=' + encodeURIComponent(n.noteNumber),
+        // A draft opens straight into its form, to pick the GST and post.
+        href:
+          '/purchase/debit-notes?q=' +
+          encodeURIComponent(n.noteNumber) +
+          (draft ? '&review=' + encodeURIComponent(n.noteNumber) : ''),
       })
     }
     if (r.status === 'DISPATCHED' && can(MODULE, 'edit')) {

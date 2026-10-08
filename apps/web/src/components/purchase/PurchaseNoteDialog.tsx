@@ -150,6 +150,11 @@ interface BillContext {
     noteAdjustment: string | number
     balanceAmount: string | number
     status: string
+    /** The bill's goods value and GST, for the bill-less-this-note table. */
+    taxableAmount?: string | number
+    cgst?: string | number
+    sgst?: string | number
+    igst?: string | number
     supplier: { id: string; code: string; name: string; gstin: string | null }
     po: { id: string; poNumber: string } | null
     receipts: Array<{ id: string; grnNumber: string }>
@@ -2177,14 +2182,15 @@ export function PurchaseNoteDialog({
                         {inr(totals.total)}
                       </p>
                       {context && effect === 'REDUCES_PAYABLE' && (
-                        <p className="text-muted-foreground mt-1 text-[11px]">
-                          {context.bill.billNumber} owes ₹{inr(num(context.bill.balanceAmount))}{' '}
-                          today. Posting this would leave{' '}
-                          <span className="text-foreground font-medium">
-                            ₹{inr(Math.max(0, num(context.bill.balanceAmount) - totals.total))}
-                          </span>
-                          .
-                        </p>
+                        <BillLessNote
+                          bill={context.bill}
+                          noteLabel={record?.noteNumber ?? 'this note'}
+                          note={{
+                            goods: totals.taxable,
+                            gst: totals.intra ? totals.cgst + totals.sgst : totals.igst,
+                            total: totals.total,
+                          }}
+                        />
                       )}
                     </div>
                   </div>
@@ -2449,5 +2455,77 @@ function Row({ label, value }: { label: string; value: number }) {
         {value < 0 ? '−' : ''}₹{inr(Math.abs(value))}
       </span>
     </div>
+  )
+}
+
+/**
+ * The bill, less this note, is what is left to pay — set out as the three
+ * lines a supplier statement would show, so whoever posts it can see the
+ * figure the payment will start from.
+ *
+ * Goods and GST are only split on the last line when nothing else has touched
+ * the bill yet. Once something has been paid or another note posted, those
+ * cannot be apportioned honestly between goods and tax, and the row says so
+ * with a dash rather than inventing a split.
+ */
+function BillLessNote({
+  bill,
+  noteLabel,
+  note,
+}: {
+  bill: BillContext['bill']
+  noteLabel: string
+  note: { goods: number; gst: number; total: number }
+}) {
+  const n = (v: string | number | undefined) => Number(v ?? 0) || 0
+  const billGoods = n(bill.taxableAmount)
+  const billGst = n(bill.cgst) + n(bill.sgst) + n(bill.igst)
+  const billTotal = n(bill.totalAmount)
+  const earlier = Math.max(0, billTotal - n(bill.balanceAmount))
+  const left = Math.max(0, n(bill.balanceAmount) - note.total)
+  const clean = earlier < 0.005
+  const money = (v: number) =>
+    '₹' + v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const cell = 'px-2 py-1 text-right tabular-nums'
+
+  return (
+    <table className="border-border mt-2 w-full overflow-hidden rounded-lg border text-[11px]">
+      <thead>
+        <tr className="bg-secondary text-muted-foreground">
+          <th className="px-2 py-1 text-left font-medium" />
+          <th className={`${cell} font-medium`}>Goods</th>
+          <th className={`${cell} font-medium`}>GST</th>
+          <th className={`${cell} font-medium`}>Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr className="border-border/60 border-t">
+          <td className="text-foreground px-2 py-1">Bill {bill.billNumber}</td>
+          <td className={cell}>{money(billGoods)}</td>
+          <td className={cell}>{money(billGst)}</td>
+          <td className={cell}>{money(billTotal)}</td>
+        </tr>
+        {!clean && (
+          <tr className="border-border/60 border-t">
+            <td className="text-muted-foreground px-2 py-1">Less: paid / earlier notes</td>
+            <td className={cell}>—</td>
+            <td className={cell}>—</td>
+            <td className={cell}>{money(earlier)}</td>
+          </tr>
+        )}
+        <tr className="border-border/60 border-t">
+          <td className="text-foreground px-2 py-1">Less: {noteLabel}</td>
+          <td className={cell}>{money(note.goods)}</td>
+          <td className={cell}>{money(note.gst)}</td>
+          <td className={cell}>{money(note.total)}</td>
+        </tr>
+        <tr className="border-border/60 bg-primary/5 text-foreground border-t font-semibold">
+          <td className="px-2 py-1">Left to pay</td>
+          <td className={cell}>{clean ? money(Math.max(0, billGoods - note.goods)) : '—'}</td>
+          <td className={cell}>{clean ? money(Math.max(0, billGst - note.gst)) : '—'}</td>
+          <td className={cell}>{money(left)}</td>
+        </tr>
+      </tbody>
+    </table>
   )
 }
