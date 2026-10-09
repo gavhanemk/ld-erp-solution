@@ -47,6 +47,9 @@ export interface PrintHeader {
 
 const DEFAULT_TITLES: Record<string, string> = {
   INV: 'TAX INVOICE',
+  // What the buyer receives back for their PO: our word that we will make
+  // and deliver this. Not a bill, and the heading must not read like one.
+  SO: 'ORDER CONFIRMATION',
   PO: 'PURCHASE ORDER',
   // Not an order, and the heading is the first thing that says so. A supplier
   // holding a sheet headed PURCHASE ORDER will treat it as one.

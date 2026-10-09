@@ -1,9 +1,59 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 28 Sep 2026 — BOM costing and pricing_
+_Last updated: Fri 9 Oct 2026 — Sales orders, Phase 1 (branch `feat/sales-orders`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Sales orders — Phase 1 (Fri 9 Oct)
+
+The first of four Sales phases (orders → dispatch and invoices → money in →
+returns, quotations, reports). The plan, screen by screen, is the Claude Doc
+"Sales Module: Screen Build Plan"; the business's answers behind it are in
+docs/07 §6.
+
+**Built:**
+
+- **Order list** (`/sales/orders`), rebuilt on the purchase order list: server
+  paging and search, four cards that filter (open, waiting for approval, due in
+  7 days, overdue), filters, size rows that open per order, phone cards, export.
+- **Order form** (`SalesOrderDialog`): own order or job work, customer panel
+  with the tax split and a credit strip, one size box per size from the style's
+  size run, typed rate with the customer's last rate shown, GST previewed from
+  HSN. Save as draft or Send for approval. Edits a draft until it is sent.
+- **Order detail** (`SalesOrderDetailDialog`): progress strip, lines, linked
+  production orders, requisitions, challans and invoices, history.
+- **Amend** (version kept in `sales_order_revisions`), **cancel** (before
+  anything is made or sent, no open requisition) and **short-close**
+  (approve rights; pending to zero).
+- **Approval** through the dashboard and the assistant, one service: draft and
+  sent only, not by whoever raised it (Admin excepted), and a customer over the
+  credit limit or blacklisted is released with a reason — not blocked.
+- **Order confirmation print** (`/print/sales-order/[id]`), heading from
+  Settings → Documents → Sales Order. Brokerage is never printed.
+- Every sales route checks a sales permission. The store's order pickers read
+  `/sales/orders/options` instead. A Brands master page.
+- GST is worked out on the server from each item's HSN code at the price per
+  piece; HSN is copied onto each line.
+- The mobile order screen showed every line as 0 pcs at ₹0.00 (it read `qty` and
+  `rate`); fixed, with the size run.
+
+**Migration:** `20261009120000_sales_order_lifecycle`, applied to the shared
+database on 9 Oct — see MIGRATION-NOTES.md.
+
+**Data to fix before real use:**
+
+- The four finished-goods items have no style linked, so the form shows one
+  pieces box per line instead of size boxes. Link each to its style and colour.
+- The HSN master has 6203 at a flat 5% and no 6205; garments above a price per
+  piece carry a higher rate. Enter the threshold and the higher rate on those
+  codes once the CA confirms them.
+- Non-admin users need sales permissions: make a Sales role in Settings.
+
+**Not in Phase 1:** attachments on an order (needs a new table), deleting a
+draft (a deleted draft would leave a gap in the numbers — cancel it instead).
 
 ---
 
@@ -849,7 +899,8 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   cancels and records the reason on the document
 
 **Sales and production**
-- Sales order list reads the real API with status filtering
+- Sales orders end to end: list, form, detail, approval, amend, cancel,
+  short-close and the order confirmation print (see the top of this file)
 - Manufacturing order list with progress against planned quantity
 
 **Inventory and stock**
@@ -952,13 +1003,13 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 
 ## What is not built yet
 
-- Creating sales orders and manufacturing orders from the UI (the API can
-  create sales orders; there is no form yet). **Purchase orders can now be
-  created** — see above
+- Creating manufacturing orders from the UI. **Sales orders and purchase
+  orders can now be created** — see above
 - **Supplier payments.** A purchase bill can be raised and matched but not
   paid; the endpoint is a 501
 - Accounts and HR are not built and now say so — 501, not an empty array
-- Detail pages: `/sales/orders/[id]`, `/production/orders/[id]`
+- Detail page `/production/orders/[id]`. A sales order opens in a dialog from
+  the list, as purchase documents do
 - Export buttons are visibly disabled rather than functional
 - GST e-invoicing, WhatsApp bot, mobile app (Phases 2–5)
 - The 4 extra AI tools from the abandoned attempt

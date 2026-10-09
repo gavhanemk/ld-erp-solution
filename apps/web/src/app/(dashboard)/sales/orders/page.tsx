@@ -13,6 +13,7 @@ import {
   Loader2,
   Pencil,
   Plus,
+  Printer,
   RefreshCw,
   Ruler,
   Scissors,
@@ -424,6 +425,14 @@ export default function SalesOrdersPage() {
   const rowActions = (o: SalesOrderRow): RowAction[] => {
     const items: RowAction[] = [
       { key: 'view', label: 'View order', icon: <Eye size={15} />, onClick: () => setViewId(o.id) },
+      // A draft prints too, banded as a draft, so it can be checked on paper.
+      {
+        key: 'print',
+        label: 'Print order',
+        icon: <Printer size={15} />,
+        href: `/print/sales-order/${o.id}`,
+        newTab: true,
+      },
     ]
     if (orderCan.edit(o)) {
       items.push({

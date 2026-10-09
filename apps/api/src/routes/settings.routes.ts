@@ -910,6 +910,7 @@ router.patch('/preferences', requirePermission(SETTINGS, 'edit'), async (req: Au
 
 /** Every document type we can print, in the order it appears on the tab. */
 const DOC_TYPES = [
+  { docType: 'SO', label: 'Sales Order', defaultTitle: 'ORDER CONFIRMATION' },
   { docType: 'INV', label: 'Sales Invoice', defaultTitle: 'TAX INVOICE' },
   { docType: 'PO', label: 'Purchase Order', defaultTitle: 'PURCHASE ORDER' },
   { docType: 'DC', label: 'Delivery Challan', defaultTitle: 'DELIVERY CHALLAN' },

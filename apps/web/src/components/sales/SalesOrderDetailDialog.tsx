@@ -12,6 +12,7 @@ import {
   Link2,
   Loader2,
   Pencil,
+  Printer,
   Ruler,
   Scissors,
   Send,
@@ -353,6 +354,17 @@ export function SalesOrderDetailDialog({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {o && (
+                <a
+                  className="btn-secondary"
+                  href={`/print/sales-order/${o.id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="The order confirmation for the buyer"
+                >
+                  <Printer size={15} /> Print
+                </a>
+              )}
               {o && orderCan.edit(o) && (
                 <button className="btn-secondary" onClick={() => onEdit(o.id)} disabled={busy}>
                   <Pencil size={15} /> Edit draft

@@ -8,6 +8,7 @@ import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
 import { stateName } from '../lib/gstStates'
+import { amountInWords, getPrintHeader } from '../lib/printData'
 import { OPEN_ORDER_STATUSES, checkCredit, creditPosition } from '../services/salesOrder.service'
 
 const router = Router()
@@ -374,6 +375,59 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
   })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
   res.json({ success: true, data: order })
+})
+
+/**
+ * GET /api/sales/orders/:id/print
+ *
+ * Everything the order confirmation prints: the company and the Sales Order
+ * template from Settings → Documents, the order with its lines and size runs,
+ * the total in words, and which tax rows to show. Brokerage travels with the
+ * order but the sheet never prints it.
+ */
+router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const order = await prisma.salesOrder.findUnique({
+    where: { id: req.params.id },
+    include: {
+      customer: true,
+      brand: { select: { name: true, type: true } },
+      createdBy: { select: { name: true } },
+      approvedBy: { select: { name: true } },
+      cancelledBy: { select: { name: true } },
+      shortClosedBy: { select: { name: true } },
+      lines: {
+        orderBy: { sortOrder: 'asc' },
+        include: {
+          item: {
+            select: {
+              code: true,
+              name: true,
+              color: true,
+              hsnCode: true,
+              uom: { select: { symbol: true } },
+              style: { select: { code: true, name: true } },
+            },
+          },
+          sizes: { include: { size: true }, orderBy: { size: { sequence: 'asc' } } },
+        },
+      },
+    },
+  })
+  if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+
+  const header = await getPrintHeader('SO')
+  const taxMode = Number(order.igst) > 0 ? 'IGST' : Number(order.cgst) > 0 ? 'CGST_SGST' : 'NONE'
+
+  res.json({
+    success: true,
+    data: {
+      ...header,
+      order,
+      totalInWords: amountInWords(Number(order.totalAmount)),
+      taxMode,
+      placeOfSupplyState: stateName(order.placeOfSupplyCode),
+    },
+  })
 })
 
 /**
