@@ -8,6 +8,8 @@ import {
   ChevronRight,
   Info,
   Loader2,
+  Pencil,
+  Plus,
   RefreshCw,
   Ruler,
   Search,
@@ -30,6 +32,7 @@ import { useAppSettings } from '@/lib/appSettings'
 import { formatCurrency, formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { OPEN_ORDER_STATUSES, SALES_ORDER_STATUS, salesOrderStatus } from '@/components/sales/status'
+import { SalesOrderDialog } from '@/components/sales/SalesOrderDialog'
 
 interface SalesOrderRow {
   id: string
@@ -293,6 +296,9 @@ export default function SalesOrdersPage() {
   const [open, setOpen] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, OrderDetail | 'loading' | { error: string }>>({})
 
+  // The order form: a new order (orderId null), or a draft being changed.
+  const [dialog, setDialog] = useState<{ open: boolean; orderId: string | null }>({ open: false, orderId: null })
+
   const [customers, setCustomers] = useState<Array<{ id: string; name: string }>>([])
   const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
 
@@ -465,6 +471,15 @@ export default function SalesOrdersPage() {
    */
   const rowActions = (o: SalesOrderRow): RowAction[] => {
     const items: RowAction[] = []
+    // A draft is changed until it is sent; after that a manager is deciding.
+    if (o.status === 'DRAFT' && !o.sentForApprovalAt && can('sales', 'edit')) {
+      items.push({
+        key: 'edit',
+        label: 'Edit draft',
+        icon: <Pencil size={15} />,
+        onClick: () => setDialog({ open: true, orderId: o.id }),
+      })
+    }
     if (o.status === 'DRAFT' && !o.sentForApprovalAt && can('sales', 'create')) {
       items.push({
         key: 'send',
@@ -576,6 +591,15 @@ export default function SalesOrdersPage() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <ExportButton onExport={exportList} disabled={loading} />
+          {can('sales', 'create') && (
+            <button
+              className="btn-primary"
+              onClick={() => setDialog({ open: true, orderId: null })}
+              aria-label="New sales order"
+            >
+              <Plus size={15} /> <span className="hidden sm:inline">New order</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -757,7 +781,7 @@ export default function SalesOrdersPage() {
                 ? 'No orders match these filters.'
                 : error
                   ? 'The orders could not be loaded.'
-                  : "No sales orders yet. Each one starts from a buyer's PO."}
+                  : "No sales orders yet. Each one starts from a buyer's PO: press New order."}
             </p>
           </div>
         ) : (
@@ -951,6 +975,17 @@ export default function SalesOrdersPage() {
           </p>
         </div>
       </div>
+
+      <SalesOrderDialog
+        open={dialog.open}
+        orderId={dialog.orderId}
+        onClose={() => setDialog({ open: false, orderId: null })}
+        onSaved={(msg) => {
+          setMessage(msg)
+          setError(null)
+          refresh()
+        }}
+      />
     </div>
   )
 }

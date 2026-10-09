@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
+import { stateName } from '../lib/gstStates'
 import { OPEN_ORDER_STATUSES, checkCredit, creditPosition } from '../services/salesOrder.service'
 
 const router = Router()
@@ -345,197 +346,256 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
 })
 
 /**
- * GET /api/sales/customers/:id/credit?value=
+ * GET /api/sales/customers/:id/context?value=
  *
- * What the customer owes and has on order against their credit limit, and
- * whether an order of `value` more would need a manager's release. The order
- * form shows it as the customer is picked.
+ * What the order form shows the moment a customer is picked: where the goods
+ * are taxed (inside the state or across it), and what the customer owes and
+ * has on order against their credit limit — with whether an order of `value`
+ * more would need a manager's release.
+ *
+ * A customer with no state code still answers: `placeOfSupply` comes back
+ * null with the reason, so the form can say what to fix instead of failing.
  */
-router.get('/customers/:id/credit', requirePermission(MODULE, 'view'), async (req, res) => {
+router.get('/customers/:id/context', requirePermission(MODULE, 'view'), async (req, res) => {
   const value = Number(req.query.value) || 0
   const position = await creditPosition(prisma, req.params.id)
-  res.json({ success: true, data: checkCredit(position, value) })
+
+  let placeOfSupply: { code: string; state: string; isIntraState: boolean } | null = null
+  let placeOfSupplyProblem: string | null = null
+  try {
+    const pos = await resolvePlaceOfSupply(prisma, req.params.id)
+    placeOfSupply = {
+      code: pos.placeOfSupplyCode,
+      state: stateName(pos.placeOfSupplyCode) ?? '',
+      isIntraState: pos.isIntraState,
+    }
+  } catch (err) {
+    if (!(err instanceof AppError)) throw err
+    placeOfSupplyProblem = err.message
+  }
+
+  res.json({
+    success: true,
+    data: { credit: checkCredit(position, value), placeOfSupply, placeOfSupplyProblem },
+  })
 })
+
+/**
+ * GET /api/sales/customers/:id/last-rates
+ *
+ * The rate this customer last ordered each item at, with the order it was on.
+ * The form shows it under the rate box: the rate itself is still typed every
+ * time, as on purchase orders, never filled in.
+ */
+router.get('/customers/:id/last-rates', requirePermission(MODULE, 'view'), async (req, res) => {
+  const lines = await prisma.salesOrderLine.findMany({
+    where: { so: { customerId: req.params.id, status: { not: 'CANCELLED' } } },
+    orderBy: [{ so: { orderDate: 'desc' } }, { so: { createdAt: 'desc' } }],
+    select: { itemId: true, unitPrice: true, so: { select: { soNumber: true, orderDate: true } } },
+    take: 1000,
+  })
+
+  const last: Record<string, { unitPrice: number; soNumber: string; orderDate: Date }> = {}
+  for (const l of lines) {
+    if (last[l.itemId]) continue
+    last[l.itemId] = { unitPrice: Number(l.unitPrice), soNumber: l.so.soNumber, orderDate: l.so.orderDate }
+  }
+  res.json({ success: true, data: last })
+})
+
+type OrderInput = z.infer<typeof createSalesOrderSchema>
+
+/**
+ * Checks an order and prices it.
+ *
+ * The one road both a new order and an edited draft go down, so the two can
+ * never be priced two ways. Returns the header's fields and the lines ready
+ * to create; the number is the caller's business.
+ */
+export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInput) {
+  const [customer, brand] = await Promise.all([
+    tx.customer.findUnique({ where: { id: data.customerId }, select: { name: true, isActive: true } }),
+    tx.brand.findUnique({ where: { id: data.brandId }, select: { name: true, isActive: true } }),
+  ])
+  if (!customer) throw new AppError('That customer does not exist', 400, 'BAD_CUSTOMER')
+  // A blacklisted customer can still have a draft: the approver decides.
+  if (!customer.isActive) {
+    throw new AppError(`${customer.name} is switched off. Reactivate them in Masters to order for them.`, 400, 'INACTIVE')
+  }
+  if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
+  if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
+
+  const items = await tx.item.findMany({
+    where: { id: { in: [...new Set(data.lines.map((l) => l.itemId))] } },
+    select: {
+      id: true,
+      code: true,
+      type: true,
+      isActive: true,
+      hsnCode: true,
+      color: true,
+      taxRate: { select: { rate: true } },
+      style: { select: { code: true, sizeGroupId: true } },
+    },
+  })
+  const itemById = new Map(items.map((i) => [i.id, i]))
+
+  const sizeIds = [...new Set(data.lines.flatMap((l) => l.sizes?.map((s) => s.sizeId) ?? []))]
+  const sizes = sizeIds.length
+    ? await tx.size.findMany({ where: { id: { in: sizeIds } }, select: { id: true, code: true, sizeGroupId: true } })
+    : []
+  const sizeById = new Map(sizes.map((s) => [s.id, s]))
+
+  // A sales order sells garments: one finished-goods item per style and
+  // colour, split into that style's own sizes.
+  data.lines.forEach((l, i) => {
+    const item = itemById.get(l.itemId)
+    if (!item) throw new AppError(`Line ${i + 1}: that item does not exist`, 400, 'BAD_ITEM')
+    if (!item.isActive) throw new AppError(`Line ${i + 1}: ${item.code} is switched off`, 400, 'INACTIVE')
+    if (item.type !== 'FINISHED_GOOD') {
+      throw new AppError(
+        `Line ${i + 1}: ${item.code} is not a finished good. Pick the garment's style-and-colour item.`,
+        400,
+        'NOT_FINISHED_GOOD',
+      )
+    }
+    for (const s of l.sizes ?? []) {
+      const size = sizeById.get(s.sizeId)
+      if (!size) throw new AppError(`Line ${i + 1}: one of the sizes does not exist`, 400, 'BAD_SIZE')
+      if (item.style?.sizeGroupId && size.sizeGroupId !== item.style.sizeGroupId) {
+        throw new AppError(`Line ${i + 1}: size ${size.code} is not in ${item.code}'s size run`, 400, 'BAD_SIZE')
+      }
+    }
+  })
+
+  const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId)
+
+  // Line discounts first, then a discount on the whole bill. LD prices at
+  // invoice level, so taxing before that discount would overstate the GST.
+  const lineTotals = data.lines.map((l) => l.totalQty * l.unitPrice * (1 - (l.discount ?? 0) / 100))
+  const subtotal = round2(lineTotals.reduce((s, n) => s + n, 0))
+
+  const discountAmount = round2(Math.min(data.discountAmount ?? 0, subtotal))
+  const taxableAmount = round2(subtotal - discountAmount)
+
+  // The bill-level discount is spread across the lines in proportion, so each
+  // line is taxed on what the customer is actually being charged for it.
+  const discountFactor = subtotal > 0 ? taxableAmount / subtotal : 1
+
+  // The rate comes from the item's HSN code, at the price each piece is
+  // actually sold for: ready-made garments change rate above a price per
+  // piece. An item whose code is not in the HSN master keeps its own rate.
+  const hsnIndex = await loadHsnIndex(tx)
+  const gstRates = data.lines.map((l) => {
+    const item = itemById.get(l.itemId)!
+    const hsn = findHsn(hsnIndex, item.hsnCode)
+    if (hsn) {
+      const perPiece = l.unitPrice * (1 - (l.discount ?? 0) / 100) * discountFactor
+      return gstRateFor(hsn, perPiece)
+    }
+    if (item.taxRate) return Number(item.taxRate.rate)
+    throw new AppError(`${item.code} has no HSN code or GST rate. Set one on the item before ordering it.`, 400, 'NO_GST_RATE')
+  })
+
+  let cgst = 0
+  let sgst = 0
+  let igst = 0
+  data.lines.forEach((_line, i) => {
+    const tax = lineTotals[i] * discountFactor * (gstRates[i] / 100)
+    if (isIntraState) {
+      cgst += tax / 2
+      sgst += tax / 2
+    } else {
+      igst += tax
+    }
+  })
+  cgst = round2(cgst)
+  sgst = round2(sgst)
+  igst = round2(igst)
+
+  const { rounded, roundOff } = applyRoundOff(taxableAmount + cgst + sgst + igst)
+
+  // Brokerage falls on the order value, not on the tax.
+  const brokeragePercent = data.brokeragePercent ?? (await defaultBrokerage(tx, data.customerId, data.brokerId))
+  const brokerageAmount = round2((taxableAmount * (brokeragePercent ?? 0)) / 100)
+
+  const header = {
+    customerId: data.customerId,
+    brandId: data.brandId,
+    deliveryDate: data.deliveryDate ?? null,
+    customerPORef: data.customerPORef ?? null,
+    customerPODate: data.customerPODate ?? null,
+    deliveryAddress: data.deliveryAddress ?? null,
+    salesperson: data.salesperson ?? null,
+    brokerId: data.brokerId ?? null,
+    brokeragePercent: brokeragePercent ?? null,
+    brokerageAmount,
+    placeOfSupplyCode,
+    isJobWork: data.isJobWork ?? false,
+    currency: data.currency ?? 'INR',
+    notes: data.notes ?? null,
+    subtotal,
+    discountAmount,
+    taxableAmount,
+    cgst,
+    sgst,
+    igst,
+    roundOff,
+    totalAmount: rounded,
+  }
+
+  const lines: Prisma.SalesOrderLineCreateWithoutSoInput[] = data.lines.map((l, i) => {
+    const item = itemById.get(l.itemId)!
+    return {
+      item: { connect: { id: l.itemId } },
+      // Copied from the item when the screen does not send them, so the order
+      // still reads right if the item is renamed later.
+      styleCode: l.styleCode ?? item.style?.code ?? null,
+      color: l.color ?? item.color ?? null,
+      totalQty: l.totalQty,
+      unitPrice: l.unitPrice,
+      discount: l.discount ?? 0,
+      gstRate: gstRates[i],
+      hsnCode: item.hsnCode ?? null,
+      amount: round2(lineTotals[i]),
+      pendingQty: l.totalQty,
+      sortOrder: i,
+      sizes: l.sizes?.length
+        ? { create: l.sizes.filter((s) => s.qty > 0).map((s) => ({ sizeId: s.sizeId, qty: s.qty })) }
+        : undefined,
+    }
+  })
+
+  return { header, lines }
+}
+
+/** What a saved order is sent back with: enough for the form to reopen it. */
+const savedOrderInclude = {
+  customer: { select: { id: true, name: true, gstin: true } },
+  brand: { select: { id: true, name: true } },
+  broker: { select: { id: true, name: true } },
+  lines: { include: { sizes: { include: { size: true } } }, orderBy: { sortOrder: 'asc' } },
+} satisfies Prisma.SalesOrderInclude
 
 // POST /api/sales/orders
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSalesOrderSchema.parse(req.body)
 
   const order = await prisma.$transaction(async (tx) => {
-    const [customer, brand] = await Promise.all([
-      tx.customer.findUnique({ where: { id: data.customerId }, select: { name: true, isActive: true } }),
-      tx.brand.findUnique({ where: { id: data.brandId }, select: { name: true, isActive: true } }),
-    ])
-    if (!customer) throw new AppError('That customer does not exist', 400, 'BAD_CUSTOMER')
-    // A blacklisted customer can still have a draft: the approver decides.
-    if (!customer.isActive) {
-      throw new AppError(`${customer.name} is switched off. Reactivate them in Masters to order for them.`, 400, 'INACTIVE')
-    }
-    if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
-    if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
-
-    const items = await tx.item.findMany({
-      where: { id: { in: [...new Set(data.lines.map((l) => l.itemId))] } },
-      select: {
-        id: true,
-        code: true,
-        type: true,
-        isActive: true,
-        hsnCode: true,
-        color: true,
-        taxRate: { select: { rate: true } },
-        style: { select: { code: true, sizeGroupId: true } },
-      },
-    })
-    const itemById = new Map(items.map((i) => [i.id, i]))
-
-    const sizeIds = [...new Set(data.lines.flatMap((l) => l.sizes?.map((s) => s.sizeId) ?? []))]
-    const sizes = sizeIds.length
-      ? await tx.size.findMany({ where: { id: { in: sizeIds } }, select: { id: true, code: true, sizeGroupId: true } })
-      : []
-    const sizeById = new Map(sizes.map((s) => [s.id, s]))
-
-    // A sales order sells garments: one finished-goods item per style and
-    // colour, split into that style's own sizes.
-    data.lines.forEach((l, i) => {
-      const item = itemById.get(l.itemId)
-      if (!item) throw new AppError(`Line ${i + 1}: that item does not exist`, 400, 'BAD_ITEM')
-      if (!item.isActive) throw new AppError(`Line ${i + 1}: ${item.code} is switched off`, 400, 'INACTIVE')
-      if (item.type !== 'FINISHED_GOOD') {
-        throw new AppError(
-          `Line ${i + 1}: ${item.code} is not a finished good. Pick the garment's style-and-colour item.`,
-          400,
-          'NOT_FINISHED_GOOD',
-        )
-      }
-      for (const s of l.sizes ?? []) {
-        const size = sizeById.get(s.sizeId)
-        if (!size) throw new AppError(`Line ${i + 1}: one of the sizes does not exist`, 400, 'BAD_SIZE')
-        if (item.style?.sizeGroupId && size.sizeGroupId !== item.style.sizeGroupId) {
-          throw new AppError(
-            `Line ${i + 1}: size ${size.code} is not in ${item.code}'s size run`,
-            400,
-            'BAD_SIZE',
-          )
-        }
-      }
-    })
-
+    // Checked and priced first, so a refused order never takes a number.
+    const { header, lines } = await prepareOrder(tx, data)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
-    const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId)
-
-    // Line discounts first, then a discount on the whole bill. LD prices at
-    // invoice level, so taxing before that discount would overstate the GST.
-    const lineTotals = data.lines.map((l) => l.totalQty * l.unitPrice * (1 - (l.discount ?? 0) / 100))
-    const subtotal = round2(lineTotals.reduce((s, n) => s + n, 0))
-
-    const discountAmount = round2(Math.min(data.discountAmount ?? 0, subtotal))
-    const taxableAmount = round2(subtotal - discountAmount)
-
-    // The bill-level discount is spread across the lines in proportion, so each
-    // line is taxed on what the customer is actually being charged for it.
-    const discountFactor = subtotal > 0 ? taxableAmount / subtotal : 1
-
-    // The rate comes from the item's HSN code, at the price each piece is
-    // actually sold for: ready-made garments change rate above a price per
-    // piece. An item whose code is not in the HSN master keeps its own rate.
-    const hsnIndex = await loadHsnIndex(tx)
-    const gstRates = data.lines.map((l) => {
-      const item = itemById.get(l.itemId)!
-      const hsn = findHsn(hsnIndex, item.hsnCode)
-      if (hsn) {
-        const perPiece = l.unitPrice * (1 - (l.discount ?? 0) / 100) * discountFactor
-        return gstRateFor(hsn, perPiece)
-      }
-      if (item.taxRate) return Number(item.taxRate.rate)
-      throw new AppError(
-        `${item.code} has no HSN code or GST rate. Set one on the item before ordering it.`,
-        400,
-        'NO_GST_RATE',
-      )
-    })
-
-    let cgst = 0
-    let sgst = 0
-    let igst = 0
-    data.lines.forEach((_line, i) => {
-      const tax = lineTotals[i] * discountFactor * (gstRates[i] / 100)
-      if (isIntraState) {
-        cgst += tax / 2
-        sgst += tax / 2
-      } else {
-        igst += tax
-      }
-    })
-    cgst = round2(cgst)
-    sgst = round2(sgst)
-    igst = round2(igst)
-
-    const beforeRounding = taxableAmount + cgst + sgst + igst
-    const { rounded, roundOff } = applyRoundOff(beforeRounding)
-
-    // Brokerage falls on the order value, not on the tax.
-    const brokeragePercent = data.brokeragePercent ?? (await defaultBrokerage(tx, data.customerId, data.brokerId))
-    const brokerageAmount = round2((taxableAmount * (brokeragePercent ?? 0)) / 100)
 
     return tx.salesOrder.create({
       data: {
+        ...header,
         soNumber,
-        customerId: data.customerId,
-        brandId: data.brandId,
         orderDate: data.orderDate ?? new Date(),
-        deliveryDate: data.deliveryDate ?? undefined,
-        customerPORef: data.customerPORef ?? null,
-        customerPODate: data.customerPODate ?? undefined,
-        deliveryAddress: data.deliveryAddress ?? null,
-        salesperson: data.salesperson ?? null,
-        brokerId: data.brokerId ?? null,
-        brokeragePercent: brokeragePercent ?? null,
-        brokerageAmount,
-        placeOfSupplyCode,
-        isJobWork: data.isJobWork ?? false,
-        currency: data.currency ?? 'INR',
-        notes: data.notes ?? null,
         sentForApprovalAt: data.sendForApproval ? new Date() : null,
-        subtotal,
-        discountAmount,
-        taxableAmount,
-        cgst,
-        sgst,
-        igst,
-        roundOff,
-        totalAmount: rounded,
         createdById: req.user!.id,
-        lines: {
-          create: data.lines.map((l, i) => {
-            const item = itemById.get(l.itemId)!
-            return {
-              itemId: l.itemId,
-              // Copied from the item when the screen does not send them, so the
-              // order still reads right if the item is renamed later.
-              styleCode: l.styleCode ?? item.style?.code ?? null,
-              color: l.color ?? item.color ?? null,
-              totalQty: l.totalQty,
-              unitPrice: l.unitPrice,
-              discount: l.discount ?? 0,
-              gstRate: gstRates[i],
-              hsnCode: item.hsnCode ?? null,
-              amount: round2(lineTotals[i]),
-              pendingQty: l.totalQty,
-              sortOrder: i,
-              sizes: l.sizes?.length
-                ? { create: l.sizes.map((s) => ({ sizeId: s.sizeId, qty: s.qty })) }
-                : undefined,
-            }
-          }),
-        },
+        lines: { create: lines },
       },
-      include: {
-        customer: { select: { id: true, name: true, gstin: true } },
-        brand: { select: { id: true, name: true } },
-        broker: { select: { id: true, name: true } },
-        lines: { include: { sizes: { include: { size: true } } }, orderBy: { sortOrder: 'asc' } },
-      },
+      include: savedOrderInclude,
     })
   })
 
@@ -547,7 +607,68 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     after: order,
   })
 
-  res.status(201).json({ success: true, data: order })
+  res.status(201).json({
+    success: true,
+    message: `${order.soNumber} ${data.sendForApproval ? 'saved and sent for approval' : 'saved as a draft'}`,
+    data: order,
+  })
+})
+
+/**
+ * PATCH /api/sales/orders/:id
+ *
+ * Changes a draft — the whole order, header and lines, as the form sends it.
+ * Only until it is sent for approval: after that a manager is deciding on it,
+ * and once approved it changes only by amending, which keeps the old version.
+ */
+router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = createSalesOrderSchema.parse(req.body)
+
+  const { before, after } = await prisma.$transaction(async (tx) => {
+    const before = await tx.salesOrder.findUnique({
+      where: { id: req.params.id },
+      include: savedOrderInclude,
+    })
+    if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+    if (before.status !== 'DRAFT') {
+      throw new AppError(`${before.soNumber} is no longer a draft. Amend it instead.`, 409, 'NOT_DRAFT')
+    }
+    if (before.sentForApprovalAt) {
+      throw new AppError(`${before.soNumber} has been sent for approval and cannot be changed now`, 409, 'ALREADY_SENT')
+    }
+
+    const { header, lines } = await prepareOrder(tx, data)
+
+    // The lines are replaced whole. A draft has nothing pointing at its lines
+    // yet — no production, no challan — so nothing is cut loose.
+    await tx.salesOrderLine.deleteMany({ where: { soId: before.id } })
+    const after = await tx.salesOrder.update({
+      where: { id: before.id },
+      data: {
+        ...header,
+        orderDate: data.orderDate ?? before.orderDate,
+        sentForApprovalAt: data.sendForApproval ? new Date() : null,
+        lines: { create: lines },
+      },
+      include: savedOrderInclude,
+    })
+    return { before, after }
+  })
+
+  await writeAuditLog(req, {
+    module: 'sales',
+    action: 'UPDATE',
+    entityType: 'SalesOrder',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({
+    success: true,
+    message: `${after.soNumber} ${data.sendForApproval ? 'saved and sent for approval' : 'saved'}`,
+    data: after,
+  })
 })
 
 /**
