@@ -171,7 +171,7 @@ const formFields: FormField[] = [
     section: 'Credit, Bank & Notes',
     placeholder: '500000',
   },
-  { name: 'creditDays', label: 'Credit Days', type: 'number', section: 'Credit, Bank & Notes', placeholder: '30' },
+  { name: 'creditDays', label: 'Credit Days', type: 'number', max: 365, section: 'Credit, Bank & Notes', placeholder: '30' },
   {
     name: 'paymentTerms',
     label: 'Payment Terms',
