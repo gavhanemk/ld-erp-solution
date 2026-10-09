@@ -161,13 +161,20 @@ router.get('/orders/summary', requirePermission(MODULE, 'view'), async (_req, re
   const late: Prisma.SalesOrderWhereInput = { ...open, deliveryDate: { lt: today } }
   const brief = { id: true, soNumber: true, deliveryDate: true, customer: { select: { name: true } } }
 
-  const [openAgg, pending, dueCount, nextDue, lateCount, oldestLate] = await Promise.all([
+  const awaiting: Prisma.SalesOrderWhereInput = {
+    status: 'DRAFT',
+    approvedAt: null,
+    sentForApprovalAt: { not: null },
+  }
+
+  const [openAgg, pending, dueCount, nextDue, lateCount, oldestLate, awaitingCount] = await Promise.all([
     prisma.salesOrder.aggregate({ where: open, _count: { _all: true }, _sum: { taxableAmount: true } }),
     prisma.salesOrderLine.aggregate({ where: { so: open }, _sum: { pendingQty: true } }),
     prisma.salesOrder.count({ where: dueThisWeek }),
     prisma.salesOrder.findFirst({ where: dueThisWeek, orderBy: { deliveryDate: 'asc' }, select: brief }),
     prisma.salesOrder.count({ where: late }),
     prisma.salesOrder.findFirst({ where: late, orderBy: { deliveryDate: 'asc' }, select: brief }),
+    prisma.salesOrder.count({ where: awaiting }),
   ])
 
   res.json({
@@ -177,6 +184,7 @@ router.get('/orders/summary', requirePermission(MODULE, 'view'), async (_req, re
       piecesToDispatch: Number(pending._sum.pendingQty ?? 0),
       dueThisWeek: { count: dueCount, next: nextDue },
       overdue: { count: lateCount, oldest: oldestLate },
+      awaitingApproval: awaitingCount,
     },
   })
 })
@@ -184,9 +192,10 @@ router.get('/orders/summary', requirePermission(MODULE, 'view'), async (_req, re
 /**
  * GET /api/sales/orders
  *
- * Filters: q (order number, buyer PO or customer), status, customerId,
- * brandId, type (own | job-work), from / to (order date), due (overdue | week |
- * month — open orders only), page, limit.
+ * Filters: q (order number, buyer PO or customer), status, open=1 (still to
+ * deliver), awaiting=1 (sent for approval, not decided), customerId, brandId,
+ * type (own | job-work), from / to (order date), due (overdue | week | month —
+ * open orders only), page, limit.
  */
 router.get('/orders', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
@@ -200,6 +209,13 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req: AuthRequest
       throw new AppError(`Unknown status '${status}'`, 400, 'BAD_STATUS')
     }
     and.push({ status: status as SalesOrderStatus })
+  }
+
+  // The list's cards: every order still to be delivered, and the drafts sent
+  // for approval that nobody has decided yet.
+  if (req.query.open === '1') and.push({ status: { in: OPEN_ORDER_STATUSES } })
+  if (req.query.awaiting === '1') {
+    and.push({ status: 'DRAFT', approvedAt: null, sentForApprovalAt: { not: null } })
   }
 
   const customerId = text(req.query.customerId)

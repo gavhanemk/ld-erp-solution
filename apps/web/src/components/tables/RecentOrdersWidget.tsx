@@ -103,7 +103,9 @@ export function RecentOrdersWidget() {
                   <tr key={o.id}>
                     <td>
                       <Link
-                        href={`/sales/orders/${o.id}`}
+                        // The list, searched to this one order: there is no
+                        // page per order, the order list is where it is read.
+                        href={`/sales/orders?q=${encodeURIComponent(o.soNumber)}`}
                         className="font-mono text-xs text-teal-400 hover:text-teal-300 transition-colors"
                       >
                         {o.soNumber}
