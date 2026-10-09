@@ -45,49 +45,79 @@ const salesOrderLineSchema = z.object({
     .optional(),
 })
 
-export const createSalesOrderSchema = z
-  .object({
-    customerId: z.string().min(1, 'Pick a customer'),
-    brandId: z.string().min(1, 'Pick a brand'),
-    orderDate: z.coerce.date().optional(),
-    deliveryDate: z.coerce.date().optional().nullable(),
-    customerPORef: z.string().max(60).optional().nullable(),
-    customerPODate: z.coerce.date().optional().nullable(),
-    deliveryAddress: z.string().max(500).optional().nullable(),
-    salesperson: z.string().max(120).optional().nullable(),
-    brokerId: z.string().optional().nullable(),
-    brokeragePercent: z.number().min(0).max(100).optional().nullable(),
-    discountAmount: z.number().min(0).optional(),
-    isJobWork: z.boolean().optional(),
-    currency: z.string().length(3).optional(),
-    notes: z.string().max(1000).optional().nullable(),
-    /** Save and send for approval in one go, rather than keep it as a draft. */
-    sendForApproval: z.boolean().optional(),
-    lines: z.array(salesOrderLineSchema).min(1, 'An order needs at least one line'),
+/** The order as the form sends it, before the checks that span its lines. */
+const salesOrderBaseSchema = z.object({
+  customerId: z.string().min(1, 'Pick a customer'),
+  brandId: z.string().min(1, 'Pick a brand'),
+  orderDate: z.coerce.date().optional(),
+  deliveryDate: z.coerce.date().optional().nullable(),
+  customerPORef: z.string().max(60).optional().nullable(),
+  customerPODate: z.coerce.date().optional().nullable(),
+  deliveryAddress: z.string().max(500).optional().nullable(),
+  salesperson: z.string().max(120).optional().nullable(),
+  brokerId: z.string().optional().nullable(),
+  brokeragePercent: z.number().min(0).max(100).optional().nullable(),
+  discountAmount: z.number().min(0).optional(),
+  isJobWork: z.boolean().optional(),
+  currency: z.string().length(3).optional(),
+  notes: z.string().max(1000).optional().nullable(),
+  /** Save and send for approval in one go, rather than keep it as a draft. */
+  sendForApproval: z.boolean().optional(),
+  lines: z.array(salesOrderLineSchema).min(1, 'An order needs at least one line'),
+})
+
+/**
+ * A size run that does not add up to the line quantity is the classic way a
+ * cutting sheet and an invoice quietly stop agreeing. Kept apart from the
+ * object so the amend schema can extend the object and still be checked —
+ * a refined schema can no longer be extended.
+ */
+function checkSizeRuns(
+  order: { lines: Array<{ totalQty: number; sizes?: Array<{ sizeId: string; qty: number }> }> },
+  ctx: z.RefinementCtx,
+) {
+  order.lines.forEach((line, i) => {
+    if (!line.sizes?.length) return
+    const sum = line.sizes.reduce((s, x) => s + x.qty, 0)
+    if (Math.abs(sum - line.totalQty) > 0.001) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['lines', i, 'sizes'],
+        message: `Size quantities add up to ${sum}, but the line total is ${line.totalQty}`,
+      })
+    }
+    const ids = line.sizes.map((s) => s.sizeId)
+    if (new Set(ids).size !== ids.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['lines', i, 'sizes'],
+        message: 'The same size appears twice on this line',
+      })
+    }
   })
-  // A size run that does not add up to the line quantity is the classic way a
-  // cutting sheet and an invoice quietly stop agreeing.
-  .superRefine((order, ctx) => {
-    order.lines.forEach((line, i) => {
-      if (!line.sizes?.length) return
-      const sum = line.sizes.reduce((s, x) => s + x.qty, 0)
-      if (Math.abs(sum - line.totalQty) > 0.001) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['lines', i, 'sizes'],
-          message: `Size quantities add up to ${sum}, but the line total is ${line.totalQty}`,
-        })
-      }
-      const ids = line.sizes.map((s) => s.sizeId)
-      if (new Set(ids).size !== ids.length) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['lines', i, 'sizes'],
-          message: 'The same size appears twice on this line',
-        })
-      }
-    })
+}
+
+export const createSalesOrderSchema = salesOrderBaseSchema.superRefine(checkSizeRuns)
+
+/**
+ * An amendment: the whole order again, each line carrying the id it already
+ * has (a new line has none), and why it changed. Ids keep a line the same
+ * line across versions, so what is later delivered against it stays tied
+ * to it.
+ */
+const amendSalesOrderSchema = salesOrderBaseSchema
+  .extend({
+    reason: z.string().trim().min(5, 'Say why the order is changing, in a few words').max(500),
+    lines: z
+      .array(salesOrderLineSchema.extend({ id: z.string().optional() }))
+      .min(1, 'An order needs at least one line'),
   })
+  .superRefine(checkSizeRuns)
+
+/** Why an order is cancelled or short-closed. */
+const reasonBody = z.object({
+  reason: z.string().trim().min(5, 'Say why, in a few words').max(500),
+})
 
 /** A non-empty trimmed query value, or nothing. */
 const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
@@ -339,6 +369,7 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
       deliveryChallans: true,
       invoices: true,
       manufacturingOrders: { select: { id: true, moNumber: true, status: true, totalPackedQty: true } },
+      materialRequisitions: { select: { id: true, mrNumber: true, status: true, closedAt: true } },
     },
   })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
@@ -730,6 +761,305 @@ async function defaultBrokerage(
   })
   return customer?.brokeragePercent != null ? Number(customer.brokeragePercent) : null
 }
+
+/**
+ * POST /api/sales/orders/:id/amend
+ *
+ * Changes a confirmed order: quantities, sizes, rates, dates, the address.
+ * What it said before is kept whole as a revision, and the order's version
+ * goes up by one. The customer cannot change — that is a different order.
+ *
+ * Lines are matched by id rather than replaced, so a line stays the same line
+ * from one version to the next. A line cannot go below what has already been
+ * sent against it, nor be taken off once anything has.
+ */
+router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = amendSalesOrderSchema.parse(req.body)
+
+  const { before, after } = await prisma.$transaction(async (tx) => {
+    const before = await tx.salesOrder.findUnique({
+      where: { id: req.params.id },
+      include: {
+        ...savedOrderInclude,
+        // Enough of each item for an earlier version to be read back on its
+        // own, even after the item is renamed.
+        lines: {
+          include: {
+            item: {
+              select: { code: true, name: true, color: true, style: { select: { code: true, name: true } } },
+            },
+            sizes: { include: { size: true } },
+          },
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
+    })
+    if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+    if (before.status === 'DRAFT') {
+      throw new AppError(`${before.soNumber} is still a draft: change it with Edit instead`, 409, 'IS_DRAFT')
+    }
+    if (!OPEN_ORDER_STATUSES.includes(before.status)) {
+      throw new AppError(
+        `${before.soNumber} is ${before.status.toLowerCase().replace(/_/g, ' ')}, so it can no longer be amended`,
+        409,
+        'NOT_OPEN',
+      )
+    }
+    if (data.customerId !== before.customerId) {
+      throw new AppError(
+        'The customer cannot change on an amendment. Cancel this order and raise a new one for the other customer.',
+        400,
+        'CUSTOMER_CHANGED',
+      )
+    }
+
+    const oldLines = new Map(before.lines.map((l) => [l.id, l]))
+    const keptIds = new Set<string>()
+    data.lines.forEach((l, i) => {
+      if (!l.id) return
+      const old = oldLines.get(l.id)
+      if (!old) throw new AppError(`Line ${i + 1} is not on ${before.soNumber}`, 400, 'BAD_LINE')
+      if (keptIds.has(l.id)) throw new AppError(`Line ${i + 1} appears twice`, 400, 'BAD_LINE')
+      keptIds.add(l.id)
+      const sent = Number(old.deliveredQty)
+      if (l.totalQty < sent) {
+        throw new AppError(
+          `Line ${i + 1}: ${sent} pieces of ${old.item.code} have already been sent, so the quantity cannot go below that`,
+          409,
+          'BELOW_DELIVERED',
+        )
+      }
+    })
+    for (const old of before.lines) {
+      if (!keptIds.has(old.id) && Number(old.deliveredQty) > 0) {
+        throw new AppError(
+          `${old.item.code} cannot come off the order: ${Number(old.deliveredQty)} pieces of it have already been sent`,
+          409,
+          'LINE_DELIVERED',
+        )
+      }
+    }
+
+    const { header, lines } = await prepareOrder(tx, data)
+
+    // The order as it stood, whole, before this change. Plain JSON, so it
+    // reads back the same however the tables change later.
+    await tx.salesOrderRevision.create({
+      data: {
+        soId: before.id,
+        version: before.version,
+        snapshot: JSON.parse(JSON.stringify(before)) as Prisma.InputJsonValue,
+        reason: data.reason,
+        changedById: req.user!.id,
+      },
+    })
+
+    // Lines taken off first, so the new ones are not caught by the sweep.
+    await tx.salesOrderLine.deleteMany({ where: { soId: before.id, id: { notIn: [...keptIds] } } })
+    for (let i = 0; i < data.lines.length; i++) {
+      const input = data.lines[i]
+      const line = lines[i]
+      if (input.id) {
+        const sent = Number(oldLines.get(input.id)!.deliveredQty)
+        await tx.salesOrderLineSize.deleteMany({ where: { lineId: input.id } })
+        await tx.salesOrderLine.update({
+          where: { id: input.id },
+          data: { ...line, pendingQty: round2(input.totalQty - sent) } as Prisma.SalesOrderLineUpdateInput,
+        })
+      } else {
+        await tx.salesOrderLine.create({ data: { ...line, so: { connect: { id: before.id } } } })
+      }
+    }
+
+    const after = await tx.salesOrder.update({
+      where: { id: before.id },
+      data: {
+        ...header,
+        orderDate: data.orderDate ?? before.orderDate,
+        version: before.version + 1,
+      },
+      include: savedOrderInclude,
+    })
+    return { before, after }
+  })
+
+  await writeAuditLog(req, {
+    module: 'sales',
+    action: 'UPDATE',
+    entityType: 'SalesOrder',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({
+    success: true,
+    message: `${after.soNumber} amended — now version ${after.version}. Version ${before.version} is kept in its history.`,
+    data: after,
+  })
+})
+
+/**
+ * GET /api/sales/orders/:id/revisions/:version
+ *
+ * One earlier version of an order, whole, as it stood before it was amended.
+ */
+router.get('/orders/:id/revisions/:version', requirePermission(MODULE, 'view'), async (req, res) => {
+  const revision = await prisma.salesOrderRevision.findUnique({
+    where: { soId_version: { soId: req.params.id, version: Number(req.params.version) || 0 } },
+    include: { changedBy: { select: { id: true, name: true } } },
+  })
+  if (!revision) throw new AppError('That version of the order was not found', 404, 'NOT_FOUND')
+  res.json({ success: true, data: revision })
+})
+
+/**
+ * POST /api/sales/orders/:id/cancel
+ *
+ * Calls an order off before anything has been made or sent against it. After
+ * that the way out is short-closing. A draft is cancelled by whoever can edit
+ * orders; a confirmed one, which the customer has been promised, only by
+ * someone who can approve them.
+ */
+router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = reasonBody.parse(req.body)
+
+  const before = await prisma.salesOrder.findUnique({
+    where: { id: req.params.id },
+    include: {
+      manufacturingOrders: { select: { moNumber: true } },
+      deliveryChallans: { where: { status: { not: 'CANCELLED' } }, select: { dcNumber: true } },
+      invoices: { where: { status: { not: 'CANCELLED' } }, select: { invoiceNumber: true } },
+      materialRequisitions: {
+        where: { closedAt: null, status: { in: ['PENDING', 'APPROVED'] } },
+        select: { mrNumber: true },
+      },
+    },
+  })
+  if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+  if (before.status !== 'DRAFT' && before.status !== 'CONFIRMED') {
+    throw new AppError(
+      before.status === 'CANCELLED'
+        ? `${before.soNumber} is already cancelled`
+        : before.status === 'COMPLETED'
+          ? `${before.soNumber} is completed and cannot be cancelled. A return goes through a credit note.`
+          : `Work has started on ${before.soNumber}. Short-close it instead, at what has been sent.`,
+      409,
+      'CANNOT_CANCEL',
+    )
+  }
+  if (before.status === 'CONFIRMED' && !userCan(req.user, MODULE, 'approve')) {
+    throw new AppError(
+      `${before.soNumber} has been confirmed to the customer, so only someone who approves orders can cancel it`,
+      403,
+      'FORBIDDEN',
+    )
+  }
+  const started = [
+    ...before.manufacturingOrders.map((m) => m.moNumber),
+    ...before.deliveryChallans.map((d) => d.dcNumber),
+    ...before.invoices.map((i) => i.invoiceNumber),
+  ]
+  if (started.length) {
+    throw new AppError(
+      `${before.soNumber} already has ${started.join(', ')} against it. Short-close it instead.`,
+      409,
+      'CANNOT_CANCEL',
+    )
+  }
+  if (before.materialRequisitions.length) {
+    throw new AppError(
+      `Requisition ${before.materialRequisitions.map((m) => m.mrNumber).join(', ')} is still open for ${before.soNumber}. Close or reject it in Inventory first, so no material is held for an order that is not coming.`,
+      409,
+      'OPEN_REQUISITION',
+    )
+  }
+
+  const after = await prisma.salesOrder.update({
+    where: { id: before.id },
+    data: { status: 'CANCELLED', cancelledById: req.user!.id, cancelledAt: new Date(), cancelReason: reason },
+  })
+  await writeAuditLog(req, {
+    module: 'sales',
+    action: 'UPDATE',
+    entityType: 'SalesOrder',
+    entityId: before.id,
+    before,
+    after,
+  })
+  res.json({ success: true, message: `${before.soNumber} cancelled`, data: after })
+})
+
+/**
+ * POST /api/sales/orders/:id/short-close
+ *
+ * Ends an order at what has been made and sent, the rest no longer wanted —
+ * the buyer called off the balance, or production came out a few short.
+ * Every line's pending pieces go to nothing; what was sent stays. Only for an
+ * order something has happened to: one with nothing made or sent is
+ * cancelled instead.
+ */
+router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { reason } = reasonBody.parse(req.body)
+
+  const { before, after } = await prisma.$transaction(async (tx) => {
+    const before = await tx.salesOrder.findUnique({
+      where: { id: req.params.id },
+      include: {
+        lines: { select: { deliveredQty: true } },
+        _count: {
+          select: {
+            manufacturingOrders: true,
+            deliveryChallans: { where: { status: { not: 'CANCELLED' } } },
+          },
+        },
+      },
+    })
+    if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+    if (!OPEN_ORDER_STATUSES.includes(before.status)) {
+      throw new AppError(
+        before.status === 'DRAFT'
+          ? `${before.soNumber} is still a draft. Cancel it instead.`
+          : `${before.soNumber} is ${before.status.toLowerCase()} already`,
+        409,
+        'CANNOT_SHORT_CLOSE',
+      )
+    }
+    const anythingDone =
+      before._count.manufacturingOrders > 0 ||
+      before._count.deliveryChallans > 0 ||
+      before.lines.some((l) => Number(l.deliveredQty) > 0)
+    if (!anythingDone) {
+      throw new AppError(
+        `Nothing has been made or sent against ${before.soNumber} yet. Cancel it instead.`,
+        409,
+        'NOTHING_STARTED',
+      )
+    }
+
+    await tx.salesOrderLine.updateMany({ where: { soId: before.id }, data: { pendingQty: 0 } })
+    const after = await tx.salesOrder.update({
+      where: { id: before.id },
+      data: {
+        status: 'COMPLETED',
+        shortClosedById: req.user!.id,
+        shortClosedAt: new Date(),
+        shortCloseReason: reason,
+      },
+    })
+    return { before, after }
+  })
+
+  await writeAuditLog(req, {
+    module: 'sales',
+    action: 'UPDATE',
+    entityType: 'SalesOrder',
+    entityId: before.id,
+    before,
+    after,
+  })
+  res.json({ success: true, message: `${before.soNumber} short-closed at what was sent`, data: after })
+})
 
 // Approving and rejecting a sales order is done through /api/approvals, which
 // holds the rules (draft only, not by whoever raised it, credit hold).

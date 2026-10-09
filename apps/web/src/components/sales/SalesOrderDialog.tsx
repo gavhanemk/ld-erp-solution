@@ -69,6 +69,8 @@ interface BrokerOption {
 /** One line as it is being typed: strings, because that is what boxes hold. */
 interface LineDraft {
   key: string
+  /** The saved line this is, on an amendment; none for a line added now. */
+  id?: string
   itemId: string
   /** Pieces by size id, for an item whose style has a size run. */
   sizes: Record<string, string>
@@ -83,6 +85,7 @@ interface SavedOrder {
   id: string
   soNumber: string
   status: string
+  version: number
   sentForApprovalAt: string | null
   customerId: string
   brandId: string
@@ -98,6 +101,7 @@ interface SavedOrder {
   isJobWork: boolean
   notes: string | null
   lines: Array<{
+    id: string
     itemId: string
     totalQty: string | number
     unitPrice: string | number
@@ -133,7 +137,8 @@ function TotalRow({ label, value, quiet = false }: { label: string; value: strin
 }
 
 /**
- * The sales order form: a new order, or a draft not yet sent for approval.
+ * The sales order form: a new order, a draft not yet sent for approval, or an
+ * amendment to a confirmed order (`amend`), which keeps the old version.
  *
  * Built on the purchase order form's shell — the full-height card that stops
  * at the sidebar, a header and footer that stay put, sections in between —
@@ -151,12 +156,15 @@ function TotalRow({ label, value, quiet = false }: { label: string; value: strin
 export function SalesOrderDialog({
   open,
   orderId,
+  amend = false,
   onClose,
   onSaved,
 }: {
   open: boolean
-  /** A draft to change, or null for a new order. */
+  /** A draft to change or an order to amend, or null for a new order. */
   orderId: string | null
+  /** Amend a confirmed order rather than edit a draft. */
+  amend?: boolean
   onClose: () => void
   onSaved: (message: string) => void
 }) {
@@ -199,7 +207,9 @@ export function SalesOrderDialog({
   const [contextLoading, setContextLoading] = useState(false)
   const [lastRates, setLastRates] = useState<LastRates>({})
 
-  const [saving, setSaving] = useState<'draft' | 'send' | null>(null)
+  const [saving, setSaving] = useState<'draft' | 'send' | 'amend' | null>(null)
+  /** Why a confirmed order is changing. Kept with the version it replaces. */
+  const [amendReason, setAmendReason] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   // Escape closes, and the page behind does not scroll while the form is up.
@@ -246,6 +256,7 @@ export function SalesOrderDialog({
     setAddressTouched(false)
     setContext(null)
     setLastRates({})
+    setAmendReason('')
     setLoadingLists(true)
 
     void (async () => {
@@ -289,6 +300,7 @@ export function SalesOrderDialog({
             o.lines.length
               ? o.lines.map((l) => ({
                   key: `l${++lineKey}`,
+                  id: l.id,
                   itemId: l.itemId,
                   sizes: Object.fromEntries(l.sizes.map((s) => [s.sizeId, String(Number(s.qty))])),
                   qty: l.sizes.length ? '' : String(Number(l.totalQty)),
@@ -471,13 +483,15 @@ export function SalesOrderDialog({
                 .join(', ')}${unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ''}.`
             : noGst.length
               ? `${noGst[0].item?.code} has no HSN code or GST rate. Set one on the item in Masters first.`
-              : null
+              : amend && amendReason.trim().length < 5
+                ? 'Say why the order is changing, in a few words, to save the amendment.'
+                : null
 
   const busy = saving !== null || loadingLists
 
   const save = async (send: boolean) => {
     if (blocker) return
-    setSaving(send ? 'send' : 'draft')
+    setSaving(amend ? 'amend' : send ? 'send' : 'draft')
     setError(null)
     const body = {
       customerId,
@@ -496,6 +510,9 @@ export function SalesOrderDialog({
       sendForApproval: send,
       // Rows with no item picked are a blank row, not a line.
       lines: filled.map((p) => ({
+        // On an amendment each saved line keeps its id, so it stays the same
+        // line from one version to the next.
+        ...(amend && p.line.id ? { id: p.line.id } : {}),
         itemId: p.line.itemId,
         totalQty: p.qty,
         unitPrice: p.rate,
@@ -508,9 +525,16 @@ export function SalesOrderDialog({
       })),
     }
     try {
-      const res = saved
-        ? await api.patch<{ message?: string }>(`/sales/orders/${saved.id}`, body)
-        : await api.post<{ message?: string }>('/sales/orders', body)
+      const res =
+        saved && amend
+          ? await api.post<{ message?: string }>(`/sales/orders/${saved.id}/amend`, {
+              ...body,
+              sendForApproval: undefined,
+              reason: amendReason.trim(),
+            })
+          : saved
+            ? await api.patch<{ message?: string }>(`/sales/orders/${saved.id}`, body)
+            : await api.post<{ message?: string }>('/sales/orders', body)
       onSaved(res.message ?? (send ? 'Order saved and sent for approval.' : 'Order saved as a draft.'))
       onClose()
     } catch (err) {
@@ -537,7 +561,12 @@ export function SalesOrderDialog({
 
   const itemLabel = (i: ItemOption) => `${i.code} — ${i.name}${i.color ? ` (${i.color})` : ''}`
 
-  const primary = (
+  const primary = amend ? (
+    <button type="button" className="btn-primary" onClick={() => void save(false)} disabled={busy || !!blocker}>
+      {saving === 'amend' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+      Save amendment
+    </button>
+  ) : (
     <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!blocker}>
       {saving === 'send' ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
       <span className="sm:hidden">Send</span>
@@ -564,9 +593,11 @@ export function SalesOrderDialog({
                 Sales Order
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
-                {saved
-                  ? `${saved.soNumber} — a draft can be changed until it is sent for approval`
-                  : 'New order from a customer · the number is given when you save'}
+                {saved && amend
+                  ? `Amending ${saved.soNumber} · version ${saved.version} is kept in its history`
+                  : saved
+                    ? `${saved.soNumber} — a draft can be changed until it is sent for approval`
+                    : 'New order from a customer · the number is given when you save'}
               </p>
             </div>
           </div>
@@ -630,7 +661,13 @@ export function SalesOrderDialog({
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                   <label className="min-w-0 md:col-span-2">
                     <span className="form-label">Customer</span>
-                    <SmartSelect className="form-input" value={customerId} onChange={(e) => pickCustomer(e.target.value)}>
+                    <SmartSelect
+                      className="form-input"
+                      value={customerId}
+                      onChange={(e) => pickCustomer(e.target.value)}
+                      disabled={amend}
+                      title={amend ? 'The customer cannot change on an amendment' : undefined}
+                    >
                       <option value="">Choose a customer</option>
                       {customers.map((c) => (
                         <option key={c.id} value={c.id}>
@@ -1048,14 +1085,26 @@ export function SalesOrderDialog({
               <span>{blocker}</span>
             </p>
           )}
+          {amend && (
+            <input
+              className="form-input h-9 min-w-0 basis-full sm:max-w-sm sm:basis-auto"
+              value={amendReason}
+              maxLength={500}
+              placeholder="Why it is changing, e.g. buyer added 200 pcs"
+              aria-label="Reason for the amendment"
+              onChange={(e) => setAmendReason(e.target.value)}
+            />
+          )}
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving !== null}>
             Cancel
           </button>
-          <button type="button" className="btn-secondary" onClick={() => void save(false)} disabled={busy || !!blocker}>
-            {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-            <span className="sm:hidden">Draft</span>
-            <span className="hidden sm:inline">Save as draft</span>
-          </button>
+          {!amend && (
+            <button type="button" className="btn-secondary" onClick={() => void save(false)} disabled={busy || !!blocker}>
+              {saving === 'draft' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+              <span className="sm:hidden">Draft</span>
+              <span className="hidden sm:inline">Save as draft</span>
+            </button>
+          )}
           {primary}
         </div>
       </div>

@@ -3,7 +3,10 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertCircle,
+  Ban,
   CalendarDays,
+  Eye,
+  FilePenLine,
   ChevronDown,
   ChevronRight,
   Info,
@@ -12,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   Ruler,
+  Scissors,
   Search,
   Send,
 } from 'lucide-react'
@@ -33,6 +37,16 @@ import { formatCurrency, formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { OPEN_ORDER_STATUSES, SALES_ORDER_STATUS, salesOrderStatus } from '@/components/sales/status'
 import { SalesOrderDialog } from '@/components/sales/SalesOrderDialog'
+import { SalesOrderDetailDialog } from '@/components/sales/SalesOrderDetailDialog'
+import { OrderLinesView, type OrderLineView } from '@/components/sales/OrderLinesView'
+import {
+  orderCan,
+  postReasonAction,
+  REASON_ACTIONS,
+  sendForApproval,
+  type ReasonAction,
+} from '@/components/sales/orderActions'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 
 interface SalesOrderRow {
   id: string
@@ -85,21 +99,7 @@ interface Summary {
 /** One order as the detail returns it — only what the expanded row reads. */
 interface OrderDetail {
   id: string
-  lines: Array<{
-    id: string
-    styleCode: string | null
-    color: string | null
-    totalQty: string | number
-    unitPrice: string | number
-    discount: string | number
-    gstRate: string | number
-    amount: string | number
-    deliveredQty: string | number
-    pendingQty: string | number
-    hsnCode: string | null
-    item: { code: string; name: string; color: string | null; style: { code: string; name: string } | null }
-    sizes: Array<{ id: string; qty: string | number; size: { code: string; label: string; sequence: number } }>
-  }>
+  lines: OrderLineView[]
 }
 
 /*
@@ -189,85 +189,7 @@ function OrderLines({ state }: { state: OrderDetail | 'loading' | { error: strin
     )
   }
   if ('error' in state) return <p className="text-destructive px-3 py-3 text-xs">{state.error}</p>
-  if (state.lines.length === 0) {
-    return <p className="text-muted-foreground px-3 py-3 text-xs">This order has no lines.</p>
-  }
-
-  return (
-    <div className="space-y-2 p-2">
-      {state.lines.map((line) => {
-        const sizes = [...line.sizes].sort((a, b) => a.size.sequence - b.size.sequence)
-        const colour = line.color || line.item.color
-        return (
-          <div key={line.id} className="border-border bg-card rounded-lg border p-2.5">
-            <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1">
-              <div className="min-w-0">
-                <p className="text-foreground text-sm font-medium leading-snug">
-                  {line.item.name}
-                  {colour && <span className="text-muted-foreground font-normal"> · {colour}</span>}
-                </p>
-                <p className="text-muted-foreground mt-0.5 text-[10px]">
-                  <span className="font-mono">{line.item.code}</span>
-                  {(line.styleCode || line.item.style?.code) && (
-                    <> · Style <span className="font-mono">{line.styleCode || line.item.style?.code}</span></>
-                  )}
-                  {line.hsnCode && (
-                    <> · HSN <span className="font-mono">{line.hsnCode}</span></>
-                  )}
-                </p>
-              </div>
-              <dl className="grid grid-cols-4 gap-x-4 text-right text-xs">
-                {[
-                  ['Rate', `₹${money(line.unitPrice)}`],
-                  ['Disc', Number(line.discount) > 0 ? `${Number(line.discount)}%` : '—'],
-                  ['GST', `${Number(line.gstRate)}%`],
-                  ['Amount', `₹${money(line.amount)}`],
-                ].map(([label, value]) => (
-                  <div key={label}>
-                    <dt className="text-muted-foreground text-[10px] uppercase tracking-wider">{label}</dt>
-                    <dd className="text-foreground tabular-nums">{value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-
-            {/* The size run across, with the total at the end, the way a
-              cutting sheet reads it. Sideways scroll only inside this box, for
-              a run too long for a phone. */}
-            <div className="mt-2 overflow-x-auto">
-              <table className="subtable w-auto">
-                <thead>
-                  <tr>
-                    <th className="text-left">Pieces</th>
-                    {sizes.map((s) => (
-                      <th key={s.id} className="text-right" title={s.size.label}>
-                        {s.size.code}
-                      </th>
-                    ))}
-                    <th className="text-right">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td className="text-muted-foreground pr-4 text-xs">Ordered</td>
-                    {sizes.map((s) => (
-                      <td key={s.id} className="px-2 text-right text-xs tabular-nums">
-                        {pcs(s.qty)}
-                      </td>
-                    ))}
-                    <td className="px-2 text-right text-xs font-semibold tabular-nums">{pcs(line.totalQty)}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p className="text-muted-foreground mt-1.5 text-[11px] tabular-nums">
-              Dispatched {pcs(line.deliveredQty)} · Still to send {pcs(line.pendingQty)}
-            </p>
-          </div>
-        )
-      })}
-    </div>
-  )
+  return <OrderLinesView lines={state.lines} />
 }
 
 export default function SalesOrdersPage() {
@@ -297,7 +219,15 @@ export default function SalesOrdersPage() {
   const [details, setDetails] = useState<Record<string, OrderDetail | 'loading' | { error: string }>>({})
 
   // The order form: a new order (orderId null), or a draft being changed.
-  const [dialog, setDialog] = useState<{ open: boolean; orderId: string | null }>({ open: false, orderId: null })
+  const [dialog, setDialog] = useState<{ open: boolean; orderId: string | null; amend: boolean }>({
+    open: false,
+    orderId: null,
+    amend: false,
+  })
+  // The order open in the detail, and an action waiting on its reason.
+  const [viewId, setViewId] = useState<string | null>(null)
+  const [asking, setAsking] = useState<{ action: ReasonAction; order: SalesOrderRow } | null>(null)
+  const [acting, setActing] = useState(false)
 
   const [customers, setCustomers] = useState<Array<{ id: string; name: string }>>([])
   const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
@@ -455,7 +385,7 @@ export default function SalesOrdersPage() {
     setError(null)
     setMessage(null)
     try {
-      const res = await api.post<{ message?: string }>(`/sales/orders/${o.id}/send`, {})
+      const res = await sendForApproval(o.id)
       setMessage(res.message ?? `${o.soNumber} sent for approval.`)
       refresh()
     } catch (err) {
@@ -463,29 +393,72 @@ export default function SalesOrdersPage() {
     }
   }
 
+  const runReason = async (reason: string) => {
+    if (!asking) return
+    setActing(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await postReasonAction(asking.order.id, asking.action, reason)
+      setMessage(res.message ?? `${asking.order.soNumber} updated.`)
+      setAsking(null)
+      refresh()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'That could not be done.')
+      setAsking(null)
+    } finally {
+      setActing(false)
+    }
+  }
+
   /*
-   * What can be done to one order. Written once and shared by the table and
-   * the phone cards, because these conditions are the rules and a second copy
-   * would one day disagree with this one. More arrive with the order form and
-   * the detail (edit, amend, cancel, short-close, print).
+   * What can be done to one order, in the order somebody reaches for them.
+   * Written once and shared by the table and the phone cards; who may do what
+   * is decided in orderActions, which the detail uses too.
+   *
+   * On the list, cancel is offered only while nothing can have started (a
+   * draft, or a confirmed order with nothing sent), and short-close only once
+   * the order is in production or part sent. The detail, which can see the
+   * production orders, offers both exactly.
    */
   const rowActions = (o: SalesOrderRow): RowAction[] => {
-    const items: RowAction[] = []
-    // A draft is changed until it is sent; after that a manager is deciding.
-    if (o.status === 'DRAFT' && !o.sentForApprovalAt && can('sales', 'edit')) {
+    const items: RowAction[] = [
+      { key: 'view', label: 'View order', icon: <Eye size={15} />, onClick: () => setViewId(o.id) },
+    ]
+    if (orderCan.edit(o)) {
       items.push({
         key: 'edit',
         label: 'Edit draft',
         icon: <Pencil size={15} />,
-        onClick: () => setDialog({ open: true, orderId: o.id }),
+        onClick: () => setDialog({ open: true, orderId: o.id, amend: false }),
       })
     }
-    if (o.status === 'DRAFT' && !o.sentForApprovalAt && can('sales', 'create')) {
+    if (orderCan.send(o)) {
+      items.push({ key: 'send', label: 'Send for approval', icon: <Send size={15} />, onClick: () => void send(o) })
+    }
+    if (orderCan.amend(o)) {
       items.push({
-        key: 'send',
-        label: 'Send for approval',
-        icon: <Send size={15} />,
-        onClick: () => void send(o),
+        key: 'amend',
+        label: 'Amend order',
+        icon: <FilePenLine size={15} />,
+        onClick: () => setDialog({ open: true, orderId: o.id, amend: true }),
+      })
+    }
+    if (orderCan.shortClose(o) && (o.status !== 'CONFIRMED' || o.dispatched > 0)) {
+      items.push({
+        key: 'short-close',
+        label: 'Short-close',
+        icon: <Scissors size={15} />,
+        onClick: () => setAsking({ action: 'short-close', order: o }),
+      })
+    }
+    if (orderCan.cancel(o) && o.dispatched === 0) {
+      items.push({
+        key: 'cancel',
+        label: 'Cancel order',
+        icon: <Ban size={15} />,
+        danger: true,
+        onClick: () => setAsking({ action: 'cancel', order: o }),
       })
     }
     return items
@@ -594,7 +567,7 @@ export default function SalesOrdersPage() {
           {can('sales', 'create') && (
             <button
               className="btn-primary"
-              onClick={() => setDialog({ open: true, orderId: null })}
+              onClick={() => setDialog({ open: true, orderId: null, amend: false })}
               aria-label="New sales order"
             >
               <Plus size={15} /> <span className="hidden sm:inline">New order</span>
@@ -801,7 +774,13 @@ export default function SalesOrdersPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-primary font-mono text-xs font-semibold">{o.soNumber}</span>
+                          <button
+                            type="button"
+                            className="text-primary font-mono text-xs font-semibold hover:underline"
+                            onClick={() => setViewId(o.id)}
+                          >
+                            {o.soNumber}
+                          </button>
                           <span className={s.cls}>{s.label}</span>
                           {o.isJobWork && <span className="badge-purple">Job work</span>}
                         </div>
@@ -895,7 +874,14 @@ export default function SalesOrdersPage() {
                             </button>
                           </td>
                           <td className="whitespace-nowrap">
-                            <div className="text-primary font-mono text-xs font-semibold">{o.soNumber}</div>
+                            <button
+                              type="button"
+                              className="text-primary font-mono text-xs font-semibold hover:underline"
+                              onClick={() => setViewId(o.id)}
+                              title={`Open ${o.soNumber}`}
+                            >
+                              {o.soNumber}
+                            </button>
                             <div className="text-muted-foreground flex items-center gap-1 text-[11px]">
                               <CalendarDays size={11} className="shrink-0" />
                               {formatDate(o.orderDate)}
@@ -976,16 +962,47 @@ export default function SalesOrdersPage() {
         </div>
       </div>
 
+      <SalesOrderDetailDialog
+        orderId={viewId}
+        onClose={() => setViewId(null)}
+        onEdit={(id) => {
+          setViewId(null)
+          setDialog({ open: true, orderId: id, amend: false })
+        }}
+        onAmend={(id) => {
+          setViewId(null)
+          setDialog({ open: true, orderId: id, amend: true })
+        }}
+        onChanged={(msg) => {
+          setMessage(msg)
+          refresh()
+        }}
+      />
+
       <SalesOrderDialog
         open={dialog.open}
         orderId={dialog.orderId}
-        onClose={() => setDialog({ open: false, orderId: null })}
+        amend={dialog.amend}
+        onClose={() => setDialog({ open: false, orderId: null, amend: false })}
         onSaved={(msg) => {
           setMessage(msg)
           setError(null)
           refresh()
         }}
       />
+
+      {asking && (
+        <ReasonDialog
+          title={REASON_ACTIONS[asking.action].title(asking.order.soNumber)}
+          description={REASON_ACTIONS[asking.action].description}
+          confirmLabel={REASON_ACTIONS[asking.action].confirmLabel}
+          placeholder={REASON_ACTIONS[asking.action].placeholder}
+          danger={asking.action === 'cancel'}
+          busy={acting}
+          onCancel={() => setAsking(null)}
+          onConfirm={(reason) => void runReason(reason)}
+        />
+      )}
     </div>
   )
 }
