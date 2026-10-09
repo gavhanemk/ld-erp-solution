@@ -180,6 +180,15 @@ export interface FormField {
   /** Height of a textarea, in lines. */
   rows?: number
   /**
+   * Limits on a number box, the same as the server's. A number box starts at
+   * nought: a negative GST rate, stock level or credit limit means nothing,
+   * so the minus sign is not taken at all unless `allowNegative` is set (an
+   * opening balance, which can be overdrawn).
+   */
+  min?: number
+  max?: number
+  allowNegative?: boolean
+  /**
    * Must be filled on this form, though the API allows it empty. True, or
    * 'ifOptions' for a list that is only asked for when it has something in
    * it: a sub-category, when the category chosen has any.
@@ -554,6 +563,13 @@ export function MasterFormDialog<T extends { id: string }>({
   const insists = (f: FormField) =>
     f.mustFill === true || (f.mustFill === 'ifOptions' && (optionsFor(f)?.length ?? 0) > 0)
 
+  /** The fields shown now whose number is out of its limits, with why. */
+  const outOfRange = () =>
+    visibleFields.flatMap((f) => {
+      const problem = rangeProblem(f, values[f.name])
+      return problem ? [[f, problem] as const] : []
+    })
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     // Opened from inside another form (a unit added from a purchase order's
@@ -575,6 +591,17 @@ export function MasterFormDialog<T extends { id: string }>({
       )
       setFormError(
         `Could not save. Check ${unfilled.map((f) => f.label).join(', ')} — the problem is marked in red below.`,
+      )
+      bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
+
+    // Said here rather than sent: the server would refuse it anyway.
+    const wrong = outOfRange()
+    if (wrong.length) {
+      setFieldErrors(Object.fromEntries(wrong.map(([f, problem]) => [f.name, problem])))
+      setFormError(
+        `Could not save. Check ${wrong.map(([f]) => f.label).join(', ')} — the problem is marked in red below.`,
       )
       bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
       return
@@ -673,7 +700,7 @@ export function MasterFormDialog<T extends { id: string }>({
   const saveButton = (
     <button type="submit" form={formId} className="btn-primary" disabled={saving}>
       {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-      {isEdit ? 'Save changes' : `Save ${title.toLowerCase()}`}
+      {isEdit ? 'Save changes' : `Save ${sentenceCase(title)}`}
     </button>
   )
 
@@ -791,7 +818,7 @@ export function MasterFormDialog<T extends { id: string }>({
               <span className="font-medium">Active</span>
               {activeField.placeholder && (
                 <span className="text-muted-foreground hidden sm:inline">
-                  · {activeField.placeholder.toLowerCase()}
+                  · {sentenceCase(activeField.placeholder)}
                 </span>
               )}
             </label>
@@ -860,7 +887,10 @@ function Field({
   const wrapper = `min-w-0 ${
     field.span ? SPAN[columns][field.span] : type === 'textarea' ? 'col-span-full' : ''
   }`
-  const invalid = Boolean(error)
+  // Out of its limits is said as it is typed, not only on Save.
+  const problem = error || rangeProblem(field, value)
+  const invalid = Boolean(problem)
+  const noMinus = type === 'number' && !field.allowNegative && (field.min ?? 0) >= 0
   const inputClass = `form-input placeholder:text-muted-foreground/60 ${invalid ? 'border-red-500/60' : ''}`
   // The screens give a sample value as the hint. Shown bare, "Rajan Traders"
   // or "500" in an empty box reads as already filled in; "e.g." says it is not.
@@ -961,19 +991,44 @@ function Field({
             id={id}
             type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
             step={type === 'number' ? 'any' : undefined}
+            min={type === 'number' ? (field.min ?? (field.allowNegative ? undefined : 0)) : undefined}
+            max={type === 'number' ? field.max : undefined}
             className={inputClass}
             placeholder={hint}
             value={String(value ?? '')}
             onChange={(e) => onChange(e.target.value)}
+            // The minus key does nothing where a number cannot be negative.
+            onKeyDown={noMinus ? (e) => e.key === '-' && e.preventDefault() : undefined}
           />
         )
       )}
 
-      {error ? (
-        <p className="form-help !text-red-400">{error}</p>
+      {problem ? (
+        <p className="form-help !text-red-400">{problem}</p>
       ) : (field.liveHelp?.(value) ?? field.help) ? (
         <p className="form-help">{field.liveHelp?.(value) ?? field.help}</p>
       ) : null}
     </div>
   )
+}
+
+/** Why a number box's value is outside its limits, or null when it is fine. */
+function rangeProblem(f: FormField, value: unknown): string | null {
+  if (f.type !== 'number' || value === '' || value == null) return null
+  const n = Number(value)
+  if (!Number.isFinite(n)) return `${f.label} has to be a number`
+  const min = f.min ?? (f.allowNegative ? undefined : 0)
+  if (min !== undefined && n < min) {
+    return min === 0 ? `${f.label} cannot be negative` : `${f.label} cannot be less than ${min}`
+  }
+  if (f.max !== undefined && n > f.max) return `${f.label} cannot be more than ${f.max}`
+  return null
+}
+
+/** "HSN / SAC Code" → "HSN / SAC code": lower case, but an abbreviation keeps its capitals. */
+function sentenceCase(title: string): string {
+  return title
+    .split(' ')
+    .map((w) => (w.length > 1 && w === w.toUpperCase() ? w : w.toLowerCase()))
+    .join(' ')
 }

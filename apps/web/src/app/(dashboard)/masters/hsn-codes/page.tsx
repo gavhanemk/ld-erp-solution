@@ -140,6 +140,7 @@ const formFields: FormField[] = [
     name: 'gstRate',
     label: 'GST %',
     type: 'number',
+    max: 40,
     required: true,
     placeholder: '5',
     help: 'The total rate. It is split for you on every document.',
@@ -160,6 +161,7 @@ const formFields: FormField[] = [
     name: 'rateAbove',
     label: 'GST % above that price',
     type: 'number',
+    max: 40,
     placeholder: '18',
   },
   {
