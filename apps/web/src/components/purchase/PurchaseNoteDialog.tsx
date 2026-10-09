@@ -822,7 +822,8 @@ export function PurchaseNoteDialog({
     }
     if (!picked.length) return 'Tick at least one line and say how much is coming off it.'
     if (firstProblem) return firstProblem
-    if (rule?.movesGoods && !warehouseId && !noBill) {
+    // Not for a challan's note: the challan already took the goods out.
+    if (rule?.movesGoods && !noGoods && !warehouseId && !noBill) {
       return 'Name the godown the goods left. Posting the note takes that quantity out of its stock.'
     }
     return null
@@ -2104,7 +2105,7 @@ export function PurchaseNoteDialog({
                           />
                         </div>
                       </div>
-                      {rule?.movesGoods && (
+                      {rule?.movesGoods && !noGoods && (
                         <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-[11px]">
                           <Info size={12} className="mt-0.5 shrink-0 opacity-70" />
                           Naming a godown is what takes the quantity out of its stock when the note
