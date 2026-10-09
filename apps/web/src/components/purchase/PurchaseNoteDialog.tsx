@@ -33,8 +33,8 @@ import {
 /** The GST treatments a note can be given, in the order they are offered. */
 const GST_CHOICES: NoteGst[] = [
   'GST_CREDIT_NOTE',
-  'GST_DEBIT_NOTE',
   'ITC_REVERSAL_ONLY',
+  'GST_DEBIT_NOTE',
   'NO_GST_IMPACT',
 ]
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -150,6 +150,11 @@ interface BillContext {
     noteAdjustment: string | number
     balanceAmount: string | number
     status: string
+    /** The bill's goods value and GST, for the bill-less-this-note table. */
+    taxableAmount?: string | number
+    cgst?: string | number
+    sgst?: string | number
+    igst?: string | number
     supplier: { id: string; code: string; name: string; gstin: string | null }
     po: { id: string; poNumber: string } | null
     receipts: Array<{ id: string; grnNumber: string }>
@@ -447,9 +452,40 @@ export function PurchaseNoteDialog({
         setPoId(res.data.bill.po?.id ?? null)
         setGrnId(res.data.bill.receipts[0]?.id ?? null)
 
-        const existing = new Map(
-          (record?.lines ?? []).map((l) => [l.billLineId ?? `item:${l.item.id}`, l])
-        )
+        /*
+         * The note's own lines, one per bill line.
+         *
+         * A note written from a return challan can carry several lines for
+         * one bill line — 20 m wrong material and 30 m returned from the same
+         * delivery. The form has one row per bill line, so they are added
+         * together here, and each part keeps its words in the remark ("20
+         * Wrong material sent; 30 Material returned"). Keeping only one of
+         * them showed part of the quantity, and saving it was then refused
+         * for not matching the challan.
+         */
+        const existing = new Map<
+          string,
+          { qty: number; unitPrice: number; gstRate: number; remarks: string }
+        >()
+        const partsOf = new Map<string, NonNullable<typeof record>['lines']>()
+        for (const l of record?.lines ?? []) {
+          const key = l.billLineId ?? `item:${l.item.id}`
+          partsOf.set(key, [...(partsOf.get(key) ?? []), l])
+        }
+        for (const [key, parts] of partsOf) {
+          const qty = parts.reduce((s, p) => s + num(p.qty), 0)
+          existing.set(key, {
+            qty: Math.round(qty * 1000) / 1000,
+            unitPrice: num(parts[0].unitPrice),
+            gstRate: num(parts[0].gstRate),
+            remarks:
+              parts.length === 1
+                ? (parts[0].remarks ?? '')
+                : parts
+                    .map((p) => [String(num(p.qty)), p.remarks].filter(Boolean).join(' '))
+                    .join('; '),
+          })
+        }
 
         // Set once, from whichever suggested line is found first — the
         // godown the receipt itself named, so a note that moves goods
@@ -786,7 +822,8 @@ export function PurchaseNoteDialog({
     }
     if (!picked.length) return 'Tick at least one line and say how much is coming off it.'
     if (firstProblem) return firstProblem
-    if (rule?.movesGoods && !warehouseId && !noBill) {
+    // Not for a challan's note: the challan already took the goods out.
+    if (rule?.movesGoods && !noGoods && !warehouseId && !noBill) {
       return 'Name the godown the goods left. Posting the note takes that quantity out of its stock.'
     }
     return null
@@ -2068,7 +2105,7 @@ export function PurchaseNoteDialog({
                           />
                         </div>
                       </div>
-                      {rule?.movesGoods && (
+                      {rule?.movesGoods && !noGoods && (
                         <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-[11px]">
                           <Info size={12} className="mt-0.5 shrink-0 opacity-70" />
                           Naming a godown is what takes the quantity out of its stock when the note
@@ -2142,7 +2179,7 @@ export function PurchaseNoteDialog({
                       </SmartSelect>
                       <span className="text-muted-foreground mt-1 block text-xs">
                         {gstTreatment === 'NOT_REVIEWED'
-                          ? 'How this goes in the GST return. Needed to post; a draft can wait.'
+                          ? 'How this is reported in the GST return. Needed to post.'
                           : GST_WORDS[gstTreatment].hint}
                       </span>
                     </div>
@@ -2177,14 +2214,15 @@ export function PurchaseNoteDialog({
                         {inr(totals.total)}
                       </p>
                       {context && effect === 'REDUCES_PAYABLE' && (
-                        <p className="text-muted-foreground mt-1 text-[11px]">
-                          {context.bill.billNumber} owes ₹{inr(num(context.bill.balanceAmount))}{' '}
-                          today. Posting this would leave{' '}
-                          <span className="text-foreground font-medium">
-                            ₹{inr(Math.max(0, num(context.bill.balanceAmount) - totals.total))}
-                          </span>
-                          .
-                        </p>
+                        <BillLessNote
+                          bill={context.bill}
+                          noteLabel={record?.noteNumber ?? 'this note'}
+                          note={{
+                            goods: totals.taxable,
+                            gst: totals.intra ? totals.cgst + totals.sgst : totals.igst,
+                            total: totals.total,
+                          }}
+                        />
                       )}
                     </div>
                   </div>
@@ -2449,5 +2487,77 @@ function Row({ label, value }: { label: string; value: number }) {
         {value < 0 ? '−' : ''}₹{inr(Math.abs(value))}
       </span>
     </div>
+  )
+}
+
+/**
+ * The bill, less this note, is what is left to pay — set out as the three
+ * lines a supplier statement would show, so whoever posts it can see the
+ * figure the payment will start from.
+ *
+ * Goods and GST are only split on the last line when nothing else has touched
+ * the bill yet. Once something has been paid or another note posted, those
+ * cannot be apportioned honestly between goods and tax, and the row says so
+ * with a dash rather than inventing a split.
+ */
+function BillLessNote({
+  bill,
+  noteLabel,
+  note,
+}: {
+  bill: BillContext['bill']
+  noteLabel: string
+  note: { goods: number; gst: number; total: number }
+}) {
+  const n = (v: string | number | undefined) => Number(v ?? 0) || 0
+  const billGoods = n(bill.taxableAmount)
+  const billGst = n(bill.cgst) + n(bill.sgst) + n(bill.igst)
+  const billTotal = n(bill.totalAmount)
+  const earlier = Math.max(0, billTotal - n(bill.balanceAmount))
+  const left = Math.max(0, n(bill.balanceAmount) - note.total)
+  const clean = earlier < 0.005
+  const money = (v: number) =>
+    '₹' + v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const cell = 'px-2 py-1 text-right tabular-nums'
+
+  return (
+    <table className="border-border mt-2 w-full overflow-hidden rounded-lg border text-[11px]">
+      <thead>
+        <tr className="bg-secondary text-muted-foreground">
+          <th className="px-2 py-1 text-left font-medium" />
+          <th className={`${cell} font-medium`}>Goods</th>
+          <th className={`${cell} font-medium`}>GST</th>
+          <th className={`${cell} font-medium`}>Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr className="border-border/60 border-t">
+          <td className="text-foreground px-2 py-1">Bill {bill.billNumber}</td>
+          <td className={cell}>{money(billGoods)}</td>
+          <td className={cell}>{money(billGst)}</td>
+          <td className={cell}>{money(billTotal)}</td>
+        </tr>
+        {!clean && (
+          <tr className="border-border/60 border-t">
+            <td className="text-muted-foreground px-2 py-1">Less: paid / earlier notes</td>
+            <td className={cell}>—</td>
+            <td className={cell}>—</td>
+            <td className={cell}>{money(earlier)}</td>
+          </tr>
+        )}
+        <tr className="border-border/60 border-t">
+          <td className="text-foreground px-2 py-1">Less: {noteLabel}</td>
+          <td className={cell}>{money(note.goods)}</td>
+          <td className={cell}>{money(note.gst)}</td>
+          <td className={cell}>{money(note.total)}</td>
+        </tr>
+        <tr className="border-border/60 bg-primary/5 text-foreground border-t font-semibold">
+          <td className="px-2 py-1">Left to pay</td>
+          <td className={cell}>{clean ? money(Math.max(0, billGoods - note.goods)) : '—'}</td>
+          <td className={cell}>{clean ? money(Math.max(0, billGst - note.gst)) : '—'}</td>
+          <td className={cell}>{money(left)}</td>
+        </tr>
+      </tbody>
+    </table>
   )
 }

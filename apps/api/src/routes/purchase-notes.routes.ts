@@ -315,8 +315,12 @@ router.get('/adjustable/:billId', requirePermission(MODULE, 'view'), async (req,
         noteAdjustment: true,
         balanceAmount: true,
         status: true,
+        // The bill's goods value and its GST, so the note form can set the
+        // bill, this note and what is left to pay side by side.
+        taxableAmount: true,
         igst: true,
         cgst: true,
+        sgst: true,
         supplier: { select: { id: true, code: true, name: true, gstin: true } },
         po: { select: { id: true, poNumber: true } },
         lines: {
@@ -424,7 +428,20 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
       docLabel: DOC_RULES[note.docType].label,
       gstLabel: GST_TREATMENTS[note.gstTreatment].label,
       totalInWords: amountInWords(Number(note.totalAmount)),
-      taxMode: Number(note.igst) > 0 ? 'IGST' : Number(note.cgst) > 0 ? 'CGST_SGST' : 'NONE',
+      // The amounts first; with no tax on the note, the supplier's registration
+      // and the note's own state split decide the rows. Reading the amounts
+      // alone printed "Supplier is not registered" on a 0% note from a
+      // registered supplier.
+      taxMode:
+        Number(note.igst) > 0
+          ? 'IGST'
+          : Number(note.cgst) > 0
+            ? 'CGST_SGST'
+            : !note.supplier?.gstin
+              ? 'NONE'
+              : note.isIntraState
+                ? 'CGST_SGST'
+                : 'IGST',
     },
   })
 })
@@ -903,7 +920,7 @@ router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequ
      */
     if (before.gstTreatment === 'NOT_REVIEWED') {
       throw new AppError(
-        `Pick the GST treatment on ${before.noteNumber} before posting it — open it with Edit and choose "GST treatment" beside the tax.`,
+        `Pick the GST treatment on ${before.noteNumber} before posting it — open it with Edit; it is beside the tax.`,
         409,
         'GST_NOT_PICKED'
       )

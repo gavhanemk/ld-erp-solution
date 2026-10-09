@@ -70,23 +70,6 @@ function addressLines(p: Record<string, string | null> | null | undefined): stri
   )
 }
 
-function BlockHead({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        background: TINT,
-        borderBottom: `1px solid ${RULE}`,
-        padding: '7px 11px',
-        fontSize: '11px',
-        fontWeight: 700,
-        color: NAVY,
-      }}
-    >
-      {children}
-    </div>
-  )
-}
-
 export default function PurchaseNotePrintPage() {
   const params = useParams<{ id: string }>()
   const [data, setData] = useState<PrintData | null>(null)
@@ -123,47 +106,45 @@ export default function PurchaseNotePrintPage() {
      printed as though we had written it. */
   const ours = note.issuedBy === 'OUR_COMPANY'
 
-  /* Who issued it decides which way round the two boxes read. */
-  const parties = ours
-    ? [
-        { head: 'From', party: company, name: companyName, gstin: company.gstin },
-        {
-          head: 'To',
-          party: note.supplier as unknown as Record<string, string | null>,
-          name: note.supplier.name,
-          gstin: note.supplier.gstin,
-        },
-      ]
-    : [
-        {
-          head: 'From',
-          party: note.supplier as unknown as Record<string, string | null>,
-          name: note.supplier.name,
-          gstin: note.supplier.gstin,
-        },
-        { head: 'To', party: company, name: companyName, gstin: company.gstin },
-      ]
+  /* The mill is the letterhead, so only the supplier needs a box: who our
+     debit note goes to, or whose credit note this is. A second box naming
+     the mill under its own letterhead was a quarter of the page saying
+     nothing new. */
+  const supplierParty = note.supplier as unknown as Record<string, string | null>
 
+  /* What the note is, in the title block: its number and date. */
   const meta: Array<{ label: string; value: string }> = [
     ...(ours
       ? [{ label: 'Note No.', value: note.noteNumber }]
       : [
           { label: 'Their Note No.', value: note.supplierDocNo || '—' },
-          { label: 'Our Reference', value: note.noteNumber },
+          { label: 'Our Ref.', value: note.noteNumber },
         ]),
     {
       label: 'Date',
       value: shortDate(ours ? note.noteDate : note.supplierDocDate || note.noteDate),
     },
+  ]
+
+  /* What it is against — the papers the supplier will look it up by. A note
+     a return challan wrote names the challan rather than a single receipt,
+     since one challan can carry goods from several. */
+  const refs: Array<{ label: string; value: string; sub?: string }> = [
     ...(note.bill
       ? [
-          { label: 'Against Bill', value: note.bill.supplierInvoiceNo || note.bill.billNumber },
-          { label: 'Bill Date', value: shortDate(note.bill.billDate) },
+          {
+            label: 'Their invoice',
+            value: note.bill.supplierInvoiceNo || note.bill.billNumber,
+            sub: shortDate(note.bill.billDate),
+          },
         ]
       : []),
-    ...(note.po ? [{ label: 'Order No.', value: note.po.poNumber }] : []),
-    ...(note.grn ? [{ label: 'Receipt No.', value: note.grn.grnNumber }] : []),
-    { label: 'Reason', value: reasonLabel },
+    ...(note.po ? [{ label: 'Order', value: note.po.poNumber }] : []),
+    ...(note.purchaseReturn
+      ? [{ label: 'Return challan', value: note.purchaseReturn.returnNumber }]
+      : note.grn
+        ? [{ label: 'Receipt', value: note.grn.grnNumber }]
+        : []),
   ]
 
   /* The HSN-wise summary, grouped by code and rate together — one code can
@@ -204,8 +185,8 @@ export default function PurchaseNotePrintPage() {
     { label: 'Taxable Value', value: money(note.taxableAmount) },
     ...(taxMode === 'CGST_SGST'
       ? [
-          { label: 'SGST', value: money(note.sgst) },
           { label: 'CGST', value: money(note.cgst) },
+          { label: 'SGST', value: money(note.sgst) },
         ]
       : []),
     ...(taxMode === 'IGST' ? [{ label: 'IGST', value: money(note.igst) }] : []),
@@ -221,17 +202,17 @@ export default function PurchaseNotePrintPage() {
   const th: React.CSSProperties = {
     background: NAVY,
     color: '#fff',
-    fontSize: '10.5px',
+    fontSize: '9.5px',
     fontWeight: 700,
-    padding: '10px 9px',
-    border: `1px solid ${NAVY}`,
+    padding: '7px 8px',
     textAlign: 'left',
+    letterSpacing: '0.2px',
   }
 
   const td: React.CSSProperties = {
-    fontSize: '11px',
-    padding: '10px 9px',
-    border: `1px solid ${RULE}`,
+    fontSize: '10px',
+    padding: '7px 8px',
+    borderBottom: `1px solid ${RULE}`,
     color: INK,
     verticalAlign: 'top',
   }
@@ -239,24 +220,48 @@ export default function PurchaseNotePrintPage() {
   const sumTh: React.CSSProperties = {
     background: TINT,
     color: NAVY,
-    fontSize: '10px',
+    fontSize: '9px',
     fontWeight: 700,
-    padding: '8px 7px',
-    border: `1px solid ${RULE}`,
-    textAlign: 'center',
+    padding: '5px 7px',
+    borderBottom: `1px solid ${RULE}`,
+    textAlign: 'right',
   }
 
   const sumTd: React.CSSProperties = {
-    fontSize: '10.5px',
-    padding: '8px 7px',
-    border: `1px solid ${RULE}`,
+    fontSize: '9.5px',
+    padding: '5px 7px',
+    borderBottom: `1px solid ${TINT}`,
     color: INK,
-    textAlign: 'center',
+    textAlign: 'right',
   }
 
-  /* Ruled space under a short note, the way an invoice book rules its rows to
-     the foot of the page — it is what says nothing was added after signing. */
-  const fillerRows = Math.max(0, 5 - note.lines.length)
+  /* A small card: a tinted label strip over its contents. */
+  const card: React.CSSProperties = {
+    flex: 1,
+    minWidth: 0,
+    border: `1px solid ${RULE}`,
+    borderRadius: '4px',
+    overflow: 'hidden',
+  }
+  const cardHead: React.CSSProperties = {
+    background: TINT,
+    color: NAVY,
+    fontSize: '8.5px',
+    fontWeight: 700,
+    letterSpacing: '0.6px',
+    textTransform: 'uppercase',
+    padding: '5px 10px',
+  }
+  const cardBody: React.CSSProperties = {
+    padding: '8px 10px',
+    fontSize: '10px',
+    lineHeight: 1.5,
+  }
+
+  /* Ruled space under a short note, the way an invoice book rules its rows —
+     it says nothing was added after signing. Kept to a row or two so a short
+     note still fits one sheet. */
+  const fillerRows = Math.max(0, 3 - note.lines.length)
 
   return (
     <>
@@ -281,119 +286,75 @@ export default function PurchaseNotePrintPage() {
           background: '#fff',
           color: INK,
           fontFamily: SANS,
-          padding: '14mm 12mm',
+          padding: '11mm 12mm 10mm',
           boxSizing: 'border-box',
         }}
       >
-        {/* ── Masthead ─────────────────────────────────────────────────── */}
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'stretch' }}>
-          <div style={{ flex: 1, minWidth: 0, paddingBottom: '8px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '13px' }}>
+        {/* ── Letterhead and title ─────────────────────────────────────── */}
+        <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '11px' }}>
               {company.logoUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={company.logoUrl}
                   alt=""
-                  style={{ height: '58px', width: 'auto', objectFit: 'contain', flexShrink: 0 }}
+                  style={{ height: '44px', width: 'auto', objectFit: 'contain', flexShrink: 0 }}
                 />
               )}
               <div
                 style={{
-                  fontSize: '22px',
+                  fontSize: '19px',
                   fontWeight: 800,
                   color: NAVY,
                   letterSpacing: '0.2px',
                   textTransform: 'uppercase',
-                  lineHeight: 1.08,
+                  lineHeight: 1.1,
                 }}
               >
                 {companyName}
               </div>
             </div>
-
-            <div style={{ marginTop: '9px', fontSize: '10.5px', color: GREY, lineHeight: 1.65 }}>
-              {addressLines(company).map((l) => (
-                <div key={l} style={{ textTransform: 'uppercase' }}>
-                  {l}
-                </div>
-              ))}
+            <div style={{ marginTop: '7px', fontSize: '9.5px', color: GREY, lineHeight: 1.55 }}>
+              {addressLines(company).join(', ')}
             </div>
-
-            <div
-              style={{
-                marginTop: '8px',
-                fontSize: '10.5px',
-                color: GREY,
-                display: 'flex',
-                flexWrap: 'wrap',
-                alignItems: 'center',
-                gap: '4px 12px',
-              }}
-            >
-              {company.phone && <span>{company.phone}</span>}
-              {company.phone && company.email && <span style={{ color: RULE }}>|</span>}
-              {company.email && <span>{company.email}</span>}
+            <div style={{ marginTop: '3px', fontSize: '9.5px', color: GREY }}>
+              {[company.phone, company.email].filter(Boolean).join('  |  ')}
             </div>
             {company.gstin && (
-              <div style={{ marginTop: '5px', fontSize: '11px', fontWeight: 700, color: NAVY }}>
+              <div style={{ marginTop: '3px', fontSize: '10px', fontWeight: 700, color: NAVY }}>
                 GSTIN: {company.gstin}
               </div>
             )}
           </div>
 
-          <div
-            style={{
-              width: '73mm',
-              flexShrink: 0,
-              background: TINT_SOFT,
-              border: `1px solid ${RULE}`,
-              padding: '13px 15px',
-            }}
-          >
+          <div style={{ width: '62mm', flexShrink: 0, textAlign: 'right' }}>
             <div
               style={{
-                fontSize: ours ? '27px' : '21px',
+                fontSize: ours ? '24px' : '18px',
                 fontWeight: 800,
                 color: NAVY,
                 lineHeight: 1,
-                marginBottom: '11px',
                 textTransform: 'uppercase',
+                letterSpacing: '0.4px',
               }}
             >
-              {template.title || (ours ? 'DEBIT NOTE' : "SUPPLIER'S CREDIT NOTE")}
+              {template.title || (ours ? 'Debit Note' : "Supplier's Credit Note")}
             </div>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <table style={{ marginTop: '8px', marginLeft: 'auto', borderCollapse: 'collapse' }}>
               <tbody>
                 {meta.map((m) => (
                   <tr key={m.label}>
-                    <td
-                      style={{
-                        fontSize: '10.5px',
-                        color: GREY,
-                        padding: '3px 0',
-                        whiteSpace: 'nowrap',
-                        verticalAlign: 'top',
-                      }}
-                    >
+                    <td style={{ fontSize: '9.5px', color: GREY, padding: '1.5px 10px 1.5px 0' }}>
                       {m.label}
-                    </td>
-                    <td
-                      style={{
-                        fontSize: '10.5px',
-                        color: GREY,
-                        padding: '3px 6px',
-                        verticalAlign: 'top',
-                      }}
-                    >
-                      :
                     </td>
                     <td
                       style={{
                         fontSize: '10.5px',
                         fontWeight: 700,
                         color: INK,
-                        padding: '3px 0',
-                        wordBreak: 'break-word',
+                        padding: '1.5px 0',
+                        textAlign: 'right',
                         ...NUM,
                       }}
                     >
@@ -406,93 +367,117 @@ export default function PurchaseNotePrintPage() {
           </div>
         </div>
 
-        <div style={{ height: '1.5px', background: NAVY, margin: '4px 0 10px' }} />
+        <div style={{ height: '2px', background: NAVY, margin: '9px 0 9px' }} />
 
-        {/* ── The two parties ──────────────────────────────────────────── */}
+        {/* ── Supplier, references, reason ─────────────────────────────── */}
         <div style={{ display: 'flex', gap: '8px' }}>
-          {parties.map((box) => (
-            <div
-              key={box.head}
-              style={{ flex: 1, minWidth: 0, border: `1px solid ${RULE}`, background: '#fff' }}
-            >
-              <BlockHead>{box.head}</BlockHead>
-              <div style={{ padding: '11px 12px', fontSize: '10.5px', lineHeight: 1.65 }}>
-                <div style={{ fontWeight: 700, color: NAVY, fontSize: '12px' }}>{box.name}</div>
-                {addressLines(box.party).map((l) => (
-                  <div key={l} style={{ color: GREY }}>
-                    {l}
+          <div style={{ ...card, flex: 1.25 }}>
+            <div style={cardHead}>{ours ? 'To' : 'From'}</div>
+            <div style={cardBody}>
+              <div style={{ fontWeight: 700, color: NAVY, fontSize: '11px' }}>
+                {note.supplier.name}
+              </div>
+              {addressLines(supplierParty).map((l) => (
+                <div key={l} style={{ color: GREY }}>
+                  {l}
+                </div>
+              ))}
+              {note.supplier.gstin && (
+                <div style={{ marginTop: '2px', fontWeight: 700, color: INK }}>
+                  GSTIN: {note.supplier.gstin}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {refs.length > 0 && (
+            <div style={card}>
+              <div style={cardHead}>Against</div>
+              <div style={cardBody}>
+                {refs.map((r) => (
+                  <div
+                    key={r.label}
+                    style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}
+                  >
+                    <span style={{ color: GREY }}>{r.label}</span>
+                    <span style={{ fontWeight: 700, textAlign: 'right', ...NUM }}>
+                      {r.value}
+                      {r.sub && (
+                        <span style={{ fontWeight: 400, color: GREY }}> · {r.sub}</span>
+                      )}
+                    </span>
                   </div>
                 ))}
-                {box.gstin && (
-                  <div style={{ marginTop: '4px', fontWeight: 700, color: INK }}>
-                    GSTIN: {box.gstin}
-                  </div>
-                )}
               </div>
             </div>
-          ))}
-        </div>
-
-        {/* ── Why ──────────────────────────────────────────────────────────
-            Top of the sheet, not buried in a remark at the foot. Whoever opens
-            this envelope wants to know what is being claimed before they read
-            a single figure. */}
-        <div
-          style={{
-            marginTop: '8px',
-            border: `1px solid ${RULE}`,
-            background: TINT_SOFT,
-            padding: '9px 12px',
-            fontSize: '10.5px',
-            color: INK,
-          }}
-        >
-          <span style={{ fontWeight: 700, color: NAVY }}>{reasonLabel}</span>
-          {note.reasonNote && <span style={{ color: GREY }}> — {note.reasonNote}</span>}
-          {note.warehouse && (
-            <span style={{ color: GREY }}>
-              {' '}
-              · Goods out of {note.warehouse.name}
-              {note.lrNumber ? ` · LR ${note.lrNumber}` : ''}
-              {note.vehicleNo ? ` · Vehicle ${note.vehicleNo}` : ''}
-            </span>
           )}
+
+          {/* Why — at the top, not buried at the foot: whoever opens this
+              wants to know what is being claimed before reading a figure. */}
+          <div style={card}>
+            <div style={cardHead}>Reason</div>
+            <div style={cardBody}>
+              <div style={{ fontWeight: 700, color: NAVY }}>{reasonLabel}</div>
+              {note.reasonNote && <div style={{ color: GREY }}>{note.reasonNote}</div>}
+              {(note.warehouse || note.lrNumber || note.vehicleNo) && (
+                <div style={{ color: GREY, fontSize: '9px', marginTop: '2px' }}>
+                  {[
+                    note.warehouse ? `Goods out of ${note.warehouse.name}` : null,
+                    note.lrNumber ? `LR ${note.lrNumber}` : null,
+                    note.vehicleNo ? `Vehicle ${note.vehicleNo}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* ── The lines ────────────────────────────────────────────────── */}
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '8px' }}>
+        <table
+          style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            marginTop: '10px',
+            border: `1px solid ${RULE}`,
+          }}
+        >
           <thead>
             <tr>
-              <th style={{ ...th, width: '7%', textAlign: 'center' }}>#</th>
+              <th style={{ ...th, width: '5%', textAlign: 'center' }}>#</th>
               <th style={th}>Particulars</th>
-              <th style={{ ...th, width: '11%', textAlign: 'center' }}>HSN</th>
-              <th style={{ ...th, width: '13%', textAlign: 'right' }}>Qty</th>
-              <th style={{ ...th, width: '13%', textAlign: 'right' }}>Rate</th>
-              <th style={{ ...th, width: '9%', textAlign: 'center' }}>GST%</th>
-              <th style={{ ...th, width: '16%', textAlign: 'right' }}>Amount</th>
+              <th style={{ ...th, width: '10%', textAlign: 'center' }}>HSN</th>
+              <th style={{ ...th, width: '12%', textAlign: 'right' }}>Qty</th>
+              <th style={{ ...th, width: '11%', textAlign: 'right' }}>Rate</th>
+              <th style={{ ...th, width: '8%', textAlign: 'center' }}>GST%</th>
+              <th style={{ ...th, width: '15%', textAlign: 'right' }}>Amount</th>
             </tr>
           </thead>
           <tbody>
             {note.lines.map((l, i) => (
-              <tr key={l.id}>
-                <td style={{ ...td, textAlign: 'center', ...NUM }}>{i + 1}</td>
+              <tr key={l.id} style={{ background: i % 2 ? TINT_SOFT : '#fff' }}>
+                <td style={{ ...td, textAlign: 'center', color: GREY, ...NUM }}>{i + 1}</td>
                 <td style={td}>
                   <div style={{ fontWeight: 600 }}>{l.item.name}</div>
-                  <div style={{ fontSize: '9.5px', color: GREY }}>
-                    {l.item.code}
-                    {l.description ? ` · ${l.description}` : ''}
+                  {/* The code, and what the bill said beside what is coming
+                      off it — a reader should not have to fetch the invoice
+                      to check the claim. */}
+                  <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>
+                    {[
+                      l.item.code,
+                      l.description,
+                      l.originalQty != null
+                        ? `billed ${qtyFmt(l.originalQty)}${l.item.uom ? ` ${l.item.uom.symbol}` : ''}${
+                            l.originalRate != null ? ` @ ₹${money(l.originalRate)}` : ''
+                          }`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
                   </div>
-                  {/* What the bill said, beside what is coming off it. A reader
-                      should not have to fetch the invoice to check the claim. */}
-                  {l.originalQty != null && (
-                    <div style={{ fontSize: '9.5px', color: GREY }}>
-                      Billed {qtyFmt(l.originalQty)}
-                      {l.item.uom ? ` ${l.item.uom.symbol}` : ''}
-                      {l.originalRate != null ? ` @ ₹${money(l.originalRate)}` : ''}
-                    </div>
-                  )}
                   {l.remarks && (
-                    <div style={{ fontSize: '9.5px', color: GREY, fontStyle: 'italic' }}>
+                    <div style={{ fontSize: '8.5px', color: GREY, fontStyle: 'italic' }}>
                       {l.remarks}
                     </div>
                   )}
@@ -511,49 +496,34 @@ export default function PurchaseNotePrintPage() {
             ))}
             {Array.from({ length: fillerRows }).map((_, i) => (
               <tr key={`filler-${i}`}>
-                <td style={{ ...td, height: '22px' }} />
-                <td style={td} />
-                <td style={td} />
-                <td style={td} />
-                <td style={td} />
-                <td style={td} />
-                <td style={td} />
+                <td style={{ ...td, height: '16px' }} colSpan={7} />
               </tr>
             ))}
           </tbody>
         </table>
 
-        {/* ── Words on the left, figures on the right ──────────────────── */}
+        {/* ── Words and notes on the left, figures on the right ────────── */}
         <div style={{ display: 'flex', gap: '8px', marginTop: '8px', alignItems: 'stretch' }}>
-          <div style={{ flex: 1, minWidth: 0, border: `1px solid ${RULE}`, background: '#fff' }}>
-            <BlockHead>Amount in Words</BlockHead>
-            <div style={{ padding: '11px 12px', fontSize: '11px', color: INK, lineHeight: 1.6 }}>
-              {data.totalInWords}
-            </div>
+          <div style={{ ...card, display: 'flex', flexDirection: 'column' }}>
+            <div style={cardHead}>Amount in words</div>
+            <div style={{ ...cardBody, fontWeight: 600, color: INK }}>{data.totalInWords}</div>
             {note.notes && (
-              <div
-                style={{
-                  padding: '0 12px 11px',
-                  fontSize: '10px',
-                  color: GREY,
-                  lineHeight: 1.6,
-                }}
-              >
+              <div style={{ padding: '0 10px 8px', fontSize: '9px', color: GREY, lineHeight: 1.5 }}>
                 {note.notes}
               </div>
             )}
           </div>
 
-          <div style={{ width: '73mm', flexShrink: 0, border: `1px solid ${RULE}` }}>
+          <div style={{ width: '66mm', flexShrink: 0, ...card, flex: 'none' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <tbody>
                 {totals.map((t) => (
                   <tr key={t.label}>
                     <td
                       style={{
-                        fontSize: '10.5px',
+                        fontSize: '9.5px',
                         color: GREY,
-                        padding: '6px 12px',
+                        padding: '4px 10px',
                         borderBottom: `1px solid ${TINT}`,
                       }}
                     >
@@ -561,10 +531,10 @@ export default function PurchaseNotePrintPage() {
                     </td>
                     <td
                       style={{
-                        fontSize: '10.5px',
+                        fontSize: '10px',
                         fontWeight: 600,
                         color: INK,
-                        padding: '6px 12px',
+                        padding: '4px 10px',
                         textAlign: 'right',
                         borderBottom: `1px solid ${TINT}`,
                         ...NUM,
@@ -577,10 +547,10 @@ export default function PurchaseNotePrintPage() {
                 <tr style={{ background: NAVY }}>
                   <td
                     style={{
-                      fontSize: '11.5px',
+                      fontSize: '10.5px',
                       fontWeight: 800,
                       color: '#fff',
-                      padding: '9px 12px',
+                      padding: '7px 10px',
                       textTransform: 'uppercase',
                     }}
                   >
@@ -588,15 +558,15 @@ export default function PurchaseNotePrintPage() {
                   </td>
                   <td
                     style={{
-                      fontSize: '13px',
+                      fontSize: '12.5px',
                       fontWeight: 800,
                       color: '#fff',
-                      padding: '9px 12px',
+                      padding: '7px 10px',
                       textAlign: 'right',
                       ...NUM,
                     }}
                   >
-                    {money(note.totalAmount)}
+                    ₹{money(note.totalAmount)}
                   </td>
                 </tr>
               </tbody>
@@ -606,77 +576,87 @@ export default function PurchaseNotePrintPage() {
 
         {/* ── HSN-wise tax summary ─────────────────────────────────────── */}
         {hsnRows.length > 0 && (
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '8px' }}>
+          <table
+            style={{
+              width: '100%',
+              borderCollapse: 'collapse',
+              marginTop: '8px',
+              border: `1px solid ${RULE}`,
+            }}
+          >
             <thead>
               <tr>
                 <th style={{ ...sumTh, textAlign: 'left' }}>HSN</th>
-                <th style={{ ...sumTh, textAlign: 'right' }}>Taxable</th>
+                <th style={sumTh}>Taxable</th>
                 {taxMode === 'IGST' ? (
                   <>
                     <th style={sumTh}>IGST %</th>
-                    <th style={{ ...sumTh, textAlign: 'right' }}>IGST</th>
+                    <th style={sumTh}>IGST</th>
                   </>
                 ) : (
                   <>
-                    <th style={sumTh}>SGST %</th>
-                    <th style={{ ...sumTh, textAlign: 'right' }}>SGST</th>
                     <th style={sumTh}>CGST %</th>
-                    <th style={{ ...sumTh, textAlign: 'right' }}>CGST</th>
+                    <th style={sumTh}>CGST</th>
+                    <th style={sumTh}>SGST %</th>
+                    <th style={sumTh}>SGST</th>
                   </>
                 )}
+                <th style={sumTh}>Total Tax</th>
               </tr>
             </thead>
             <tbody>
               {hsnRows.map((g) => (
                 <tr key={`${g.hsn}|${g.rate}`}>
                   <td style={{ ...sumTd, textAlign: 'left', ...NUM }}>{g.hsn}</td>
-                  <td style={{ ...sumTd, textAlign: 'right', ...NUM }}>{money(g.taxable)}</td>
+                  <td style={{ ...sumTd, ...NUM }}>{money(g.taxable)}</td>
                   {taxMode === 'IGST' ? (
                     <>
                       <td style={{ ...sumTd, ...NUM }}>{g.rate}</td>
-                      <td style={{ ...sumTd, textAlign: 'right', ...NUM }}>{money(g.igst)}</td>
+                      <td style={{ ...sumTd, ...NUM }}>{money(g.igst)}</td>
                     </>
                   ) : (
                     <>
                       <td style={{ ...sumTd, ...NUM }}>{g.rate / 2}</td>
-                      <td style={{ ...sumTd, textAlign: 'right', ...NUM }}>{money(g.sgst)}</td>
+                      <td style={{ ...sumTd, ...NUM }}>{money(g.cgst)}</td>
                       <td style={{ ...sumTd, ...NUM }}>{g.rate / 2}</td>
-                      <td style={{ ...sumTd, textAlign: 'right', ...NUM }}>{money(g.cgst)}</td>
+                      <td style={{ ...sumTd, ...NUM }}>{money(g.sgst)}</td>
                     </>
                   )}
+                  <td style={{ ...sumTd, fontWeight: 600, ...NUM }}>
+                    {money(g.cgst + g.sgst + g.igst)}
+                  </td>
                 </tr>
               ))}
-              <tr style={{ background: TINT_SOFT }}>
-                <td style={{ ...sumTd, textAlign: 'left', fontWeight: 800, color: NAVY }}>Total</td>
-                <td style={{ ...sumTd, textAlign: 'right', fontWeight: 800, ...NUM }}>
-                  {money(hsnTotal.taxable)}
-                </td>
-                {taxMode === 'IGST' ? (
-                  <>
-                    <td style={sumTd} />
-                    <td style={{ ...sumTd, textAlign: 'right', fontWeight: 800, ...NUM }}>
-                      {money(hsnTotal.igst)}
-                    </td>
-                  </>
-                ) : (
-                  <>
-                    <td style={sumTd} />
-                    <td style={{ ...sumTd, textAlign: 'right', fontWeight: 800, ...NUM }}>
-                      {money(hsnTotal.sgst)}
-                    </td>
-                    <td style={sumTd} />
-                    <td style={{ ...sumTd, textAlign: 'right', fontWeight: 800, ...NUM }}>
-                      {money(hsnTotal.cgst)}
-                    </td>
-                  </>
-                )}
-              </tr>
+              {hsnRows.length > 1 && (
+                <tr style={{ background: TINT_SOFT }}>
+                  <td style={{ ...sumTd, textAlign: 'left', fontWeight: 800, color: NAVY }}>
+                    Total
+                  </td>
+                  <td style={{ ...sumTd, fontWeight: 800, ...NUM }}>{money(hsnTotal.taxable)}</td>
+                  {taxMode === 'IGST' ? (
+                    <>
+                      <td style={sumTd} />
+                      <td style={{ ...sumTd, fontWeight: 800, ...NUM }}>{money(hsnTotal.igst)}</td>
+                    </>
+                  ) : (
+                    <>
+                      <td style={sumTd} />
+                      <td style={{ ...sumTd, fontWeight: 800, ...NUM }}>{money(hsnTotal.cgst)}</td>
+                      <td style={sumTd} />
+                      <td style={{ ...sumTd, fontWeight: 800, ...NUM }}>{money(hsnTotal.sgst)}</td>
+                    </>
+                  )}
+                  <td style={{ ...sumTd, fontWeight: 800, ...NUM }}>
+                    {money(hsnTotal.cgst + hsnTotal.sgst + hsnTotal.igst)}
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         )}
 
         {taxMode === 'NONE' && (
-          <div style={{ marginTop: '8px', fontSize: '10.5px', fontWeight: 700, color: NAVY }}>
+          <div style={{ marginTop: '8px', fontSize: '9.5px', fontWeight: 700, color: NAVY }}>
             Supplier is not registered under GST. No tax on this note.
           </div>
         )}
@@ -687,51 +667,62 @@ export default function PurchaseNotePrintPage() {
           <div
             style={{
               marginTop: '8px',
-              fontSize: '10.5px',
+              fontSize: '9.5px',
               fontWeight: 700,
               color: '#a03030',
               textTransform: 'uppercase',
+              letterSpacing: '0.3px',
             }}
           >
             {note.status === 'CANCELLED' || note.status === 'REJECTED'
               ? `${note.status.toLowerCase()} — this note claims nothing`
-              : 'Not yet posted — for review only'}
+              : 'Draft — not yet posted, for review only'}
           </div>
         )}
 
         {template.declaration && (
-          <div style={{ marginTop: '8px', fontSize: '9px', color: GREY, lineHeight: 1.5 }}>
+          <div style={{ marginTop: '8px', fontSize: '8.5px', color: GREY, lineHeight: 1.5 }}>
             {template.declaration}
           </div>
         )}
 
-        <div style={{ marginTop: 'auto', paddingTop: '16px' }}>
-          <div style={{ height: '1px', background: RULE, marginBottom: '8px' }} />
+        {/* ── Foot: what we ask, and who signs ─────────────────────────── */}
+        <div style={{ marginTop: 'auto', paddingTop: '14px' }}>
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: '12px' }}>
-            <div style={{ flex: 1, minWidth: 0, fontSize: '10px', color: GREY }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: '9.5px', color: GREY }}>
               {template.footerNote ||
                 (ours
                   ? 'Please credit our account with the amount above.'
                   : 'Recorded against the bill named above.')}
               {note.createdBy?.name && (
-                <div style={{ marginTop: '2px', fontSize: '9px' }}>
+                <div style={{ marginTop: '2px', fontSize: '8.5px' }}>
                   Raised by {note.createdBy.name}
                   {note.approvedBy?.name ? ` · Approved by ${note.approvedBy.name}` : ''}
                 </div>
               )}
             </div>
             {template.showSignature && (
-              <div style={{ width: '64mm', textAlign: 'right' }}>
-                {company.signatureUrl && (
+              <div style={{ width: '60mm', textAlign: 'center' }}>
+                <div style={{ fontSize: '9px', color: GREY, marginBottom: '4px' }}>
+                  For {companyName}
+                </div>
+                {company.signatureUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={company.signatureUrl}
                     alt=""
-                    style={{ height: '26px', objectFit: 'contain', marginBottom: '2px' }}
+                    style={{ height: '28px', objectFit: 'contain', display: 'block', margin: '0 auto 2px' }}
                   />
+                ) : (
+                  <div style={{ height: '28px' }} />
                 )}
                 <div
-                  style={{ borderTop: `1px solid ${RULE}`, paddingTop: '5px', fontSize: '10px' }}
+                  style={{
+                    borderTop: `1px solid ${RULE}`,
+                    paddingTop: '4px',
+                    fontSize: '9.5px',
+                    color: INK,
+                  }}
                 >
                   Authorised Signatory
                 </div>

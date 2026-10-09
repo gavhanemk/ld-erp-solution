@@ -293,27 +293,27 @@ export const EFFECT_WORDS: Record<NoteEffect, { label: string; hint: string; cls
 export const GST_WORDS: Record<NoteGst, { label: string; hint: string; cls: string }> = {
   NOT_REVIEWED: {
     label: 'GST not picked',
-    hint: 'No GST treatment picked yet. Pick it on the note (Edit) before posting.',
+    hint: 'Pick the GST treatment in Edit before posting.',
     cls: 'badge-warning',
   },
   GST_CREDIT_NOTE: {
-    label: 'GST credit note — s.34(1)',
-    hint: 'Supplier issued a credit note. Our input credit reduces.',
+    label: 'Supplier credit note — Sec 34(1)',
+    hint: 'Goods returned; ITC reduces',
     cls: 'badge-info',
   },
   GST_DEBIT_NOTE: {
-    label: 'GST debit note — s.34(3)',
-    hint: 'Supplier issued a debit note. Further input credit is available.',
+    label: 'Supplier debit note — Sec 34(3)',
+    hint: 'Supplier charged extra; ITC increases',
     cls: 'badge-info',
   },
   ITC_REVERSAL_ONLY: {
-    label: 'Input credit reversal',
-    hint: 'No supplier document. We reverse the credit ourselves.',
+    label: 'ITC reversal — no credit note',
+    hint: 'We reverse the ITC ourselves',
     cls: 'badge-info',
   },
   NO_GST_IMPACT: {
-    label: 'No GST effect',
-    hint: 'Commercial only. The invoice and the input credit both stand.',
+    label: 'No GST impact',
+    hint: 'Amount only; GST stays as billed',
     cls: 'badge-neutral',
   },
 }

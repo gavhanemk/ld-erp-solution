@@ -31,6 +31,33 @@ export const errorHandler = (
     })
   }
 
+  /*
+   * The database could not be reached, or dropped the connection mid-request.
+   *
+   * Supabase's pooler does this for a minute or two now and then. Unmapped,
+   * it reached the screen as Prisma's own text — "Invalid
+   * `tx.purchaseNoteLine.findMany()` invocation … Server has closed the
+   * connection" — which reads as the system being broken rather than a
+   * moment's outage, and on the live site as a bare "Internal server error".
+   * Not retried here: a save might already have gone through, and only the
+   * person at the screen can tell.
+   */
+  const prismaCode = (err as { code?: string }).code
+  if (
+    err.name === 'PrismaClientInitializationError' ||
+    ['P1001', 'P1002', 'P1008', 'P1017', 'P2024'].includes(prismaCode ?? '') ||
+    /closed the connection|can't reach database|timed out fetching a new connection/i.test(
+      err.message
+    )
+  ) {
+    return res.status(503).json({
+      success: false,
+      message:
+        'Lost the connection to the database for a moment. Wait a few seconds, then reopen or try again — check whether anything you saved went through.',
+      code: 'DB_UNAVAILABLE',
+    })
+  }
+
   // Prisma errors
   if (err.name === 'PrismaClientKnownRequestError') {
     const prismaErr = err as any

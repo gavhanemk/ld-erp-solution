@@ -265,24 +265,24 @@ export function assertIssuerMatches(
  */
 export const GST_TREATMENTS: Record<PurchaseGstTreatment, { label: string; hint: string }> = {
   NOT_REVIEWED: {
-    label: 'Not reviewed yet',
-    hint: 'Accounts has not classified this. It cannot be posted while it says this.',
+    label: 'Not picked yet',
+    hint: 'Pick the GST treatment before posting.',
   },
   GST_CREDIT_NOTE: {
-    label: 'GST credit note — s.34(1)',
-    hint: 'Supplier issued a credit note. Our input credit reduces.',
+    label: 'Supplier credit note — Sec 34(1)',
+    hint: 'Goods returned; ITC reduces',
   },
   GST_DEBIT_NOTE: {
-    label: 'GST debit note — s.34(3)',
-    hint: 'Supplier issued a debit note. Further input credit is available.',
+    label: 'Supplier debit note — Sec 34(3)',
+    hint: 'Supplier charged extra; ITC increases',
   },
   ITC_REVERSAL_ONLY: {
-    label: 'Input credit reversal only',
-    hint: 'No supplier document. We reverse the credit ourselves.',
+    label: 'ITC reversal — no credit note',
+    hint: 'We reverse the ITC ourselves',
   },
   NO_GST_IMPACT: {
-    label: 'No GST effect',
-    hint: 'Commercial only. The invoice and the input credit both stand.',
+    label: 'No GST impact',
+    hint: 'Amount only; GST stays as billed',
   },
 }
 
