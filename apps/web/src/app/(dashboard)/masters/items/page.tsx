@@ -6,6 +6,7 @@ import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { api } from '@/lib/api'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { createUomFrom } from '@/components/masters/uomFormFields'
 
 /**
  * A rate in full, in Indian grouping: ₹1,290 and ₹0.35, never "₹1.3K". A rate
@@ -229,6 +230,8 @@ const formFields: FormField[] = [
     required: true,
     section: 'Identity',
     optionsFrom: { resource: 'uoms' },
+    // A unit not in the list is added here and kept in Masters → Units of Measure.
+    createFrom: createUomFrom,
   },
   {
     name: 'mainCategoryId',

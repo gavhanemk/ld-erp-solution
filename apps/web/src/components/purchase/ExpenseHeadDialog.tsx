@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Loader2, Receipt, Save, X } from 'lucide-react'
-import { api, apiErrorMessage } from '@/lib/api'
+import { api, apiErrorMessage, can } from '@/lib/api'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { uomFormFields } from '@/components/masters/uomFormFields'
 import { Section } from '@/components/purchase/Section'
 import type { NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -104,6 +106,8 @@ export function ExpenseHeadDialog({
   const [isActive, setIsActive] = useState(head?.isActive ?? true)
 
   const [uoms, setUoms] = useState<Uom[]>([])
+  // A unit being added from the list, with what was typed in its search.
+  const [newUom, setNewUom] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -291,6 +295,8 @@ export function ExpenseHeadDialog({
                   value={uomId}
                   onChange={(e) => setUomId(e.target.value)}
                   className="form-input"
+                  onCreate={can('masters', 'create') ? (typed) => setNewUom(typed) : undefined}
+                  createNoun="unit"
                 >
                   <option value="">Not needed</option>
                   {uoms
@@ -378,6 +384,21 @@ export function ExpenseHeadDialog({
           </div>
         </div>
       </div>
+      {/* A unit not in the list (kWh for power), added to Masters → Units of Measure and picked here. */}
+      <MasterFormDialog<Uom>
+        open={newUom !== null}
+        onClose={() => setNewUom(null)}
+        onSaved={() => {}}
+        onCreated={(row) => {
+          setUoms((prev) => [...prev.filter((u) => u.id !== row.id), row].sort((a, b) => a.name.localeCompare(b.name)))
+          setUomId(row.id)
+        }}
+        resource="uoms"
+        fields={uomFormFields}
+        initialValues={newUom ? { name: newUom } : undefined}
+        title="Unit of measure"
+        stacked
+      />
     </div>,
     document.body
   )

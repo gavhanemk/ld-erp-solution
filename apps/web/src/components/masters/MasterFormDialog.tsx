@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   X,
@@ -27,6 +27,7 @@ import {
   Receipt,
   Route,
   Ruler,
+  Scale,
   Shirt,
   Tag,
   Truck,
@@ -34,7 +35,7 @@ import {
   Warehouse,
   type LucideIcon,
 } from 'lucide-react'
-import { ApiError, masterResource, type Paginated, type Single } from '@/lib/api'
+import { ApiError, can, masterResource, type Paginated, type Single } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
@@ -56,6 +57,7 @@ const RESOURCE_ICONS: Record<string, LucideIcon> = {
   'bank-accounts': Landmark,
   routings: Route,
   departments: Building2,
+  uoms: Scale,
 }
 
 /** Each panel's icon, by the section name the screens already give their fields. */
@@ -121,6 +123,22 @@ export interface FormField {
      * now. How a sub-category list shows only the chosen category's children.
      */
     filter?: (row: Record<string, unknown>, values: Record<string, unknown>) => boolean
+  }
+  /**
+   * Offers "Add new …" in an optionsFrom select, for a choice that is not in
+   * the list yet: a unit nobody has needed before. It opens that master's own
+   * form over this one, saves it to the master, and picks it here, so it is
+   * in the list from then on.
+   */
+  createFrom?: {
+    /** The master's form, the same one its own page uses. */
+    fields: FormField[]
+    /** Its name in the form's title: "Unit of measure". */
+    title: string
+    /** What a new one is called in the list: "unit". */
+    noun: string
+    /** Which field of the new form takes what was typed in the search. Defaults to 'name'. */
+    typedInto?: string
   }
   /**
    * Populates a select from a property on whatever record another field on
@@ -262,6 +280,11 @@ export function MasterFormDialog<T extends { id: string }>({
   const bodyRef = useRef<HTMLDivElement>(null)
   // What `fills` last put in each field, to tell it from a person's choice.
   const filledBy = useRef<Record<string, unknown>>({})
+  // Ids of this form's own, so a second form opened over it (see createFrom)
+  // has a Save button and labels that point at its own boxes, not these.
+  const uid = useId()
+  // The select whose "Add new" opened a form over this one, and what was typed.
+  const [adding, setAdding] = useState<{ field: FormField; typed: string } | null>(null)
 
   // Reset whenever the dialog opens, so a previous record's values and errors
   // never leak into the next one.
@@ -292,6 +315,7 @@ export function MasterFormDialog<T extends { id: string }>({
     setValues(seed)
     setFieldErrors({})
     setFormError(null)
+    setAdding(null)
     filledBy.current = {}
     // initialValues is read once, when the form opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -532,6 +556,10 @@ export function MasterFormDialog<T extends { id: string }>({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
+    // Opened from inside another form (a unit added from a purchase order's
+    // new item), the submit would otherwise bubble up the React tree, through
+    // the portal, and save that form as well.
+    e.stopPropagation()
 
     const unfilled = fields.filter(
       (f) => !f.generated && insists(f) && (values[f.name] === '' || values[f.name] == null),
@@ -626,8 +654,24 @@ export function MasterFormDialog<T extends { id: string }>({
   const code = isEdit ? (fields.find((f) => f.generated) ?? null) : null
   const codeValue = code ? String(values[code.name] ?? '') : ''
 
+  const formId = `${uid}-form`
+  const titleId = `${uid}-title`
+
+  // A unit added from the item form joins the list here and is picked, as
+  // though it had always been there.
+  const added = (f: FormField, row: Record<string, unknown>) => {
+    const { valueKey = 'id', labelKey = 'name' } = f.optionsFrom ?? {}
+    setRemoteRows((prev) => ({
+      ...prev,
+      [f.name]: [...(prev[f.name] ?? []).filter((r) => r[valueKey] !== row[valueKey]), row].sort((a, b) =>
+        String(a[labelKey] ?? '').localeCompare(String(b[labelKey] ?? '')),
+      ),
+    }))
+    set(f.name, String(row[valueKey] ?? ''))
+  }
+
   const saveButton = (
-    <button type="submit" form="master-form" className="btn-primary" disabled={saving}>
+    <button type="submit" form={formId} className="btn-primary" disabled={saving}>
       {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
       {isEdit ? 'Save changes' : `Save ${title.toLowerCase()}`}
     </button>
@@ -644,22 +688,23 @@ export function MasterFormDialog<T extends { id: string }>({
    * covered and you can still move to another screen with the form open. On
    * a phone the sidebar is a drawer, so there the cover takes the full width.
    */
-  return createPortal(
+  const portal = createPortal(
     <div
       className={`fixed inset-0 ${stacked ? 'z-[90]' : 'z-50'} flex items-stretch justify-center bg-black/60 p-2 backdrop-blur-sm sm:left-[var(--sidebar-current-width)] sm:p-3`}
     >
       {/* Capped and centred. A master has a dozen fields, not an item table;
         stretched across a wide screen each box ran half the monitor long. */}
       <form
-        id="master-form"
+        id={formId}
         onSubmit={submit}
         noValidate
         // As tall as what it holds, up to the screen. A short master fills a
         // short card rather than a full-height one with a blank lower half.
-        className={`glass-card po-form flex max-h-full w-full ${wide ? 'max-w-6xl' : 'max-w-5xl'} flex-col self-center overflow-hidden`}
+        // One of a few fields, opened over another form, is narrower still.
+        className={`glass-card po-form flex max-h-full w-full ${wide ? 'max-w-6xl' : stacked && fields.length <= 4 ? 'max-w-2xl' : 'max-w-5xl'} flex-col self-center overflow-hidden`}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="master-form-title"
+        aria-labelledby={titleId}
       >
         {/* Header: stays put while the body scrolls, so it is always clear what is being filled in. */}
         <div className="border-border flex shrink-0 items-center justify-between gap-4 border-b px-5 py-3.5">
@@ -669,7 +714,7 @@ export function MasterFormDialog<T extends { id: string }>({
             </div>
             <div className="min-w-0">
               <h2
-                id="master-form-title"
+                id={titleId}
                 className="text-foreground truncate text-xl font-semibold tracking-tight"
               >
                 {heading}
@@ -679,9 +724,9 @@ export function MasterFormDialog<T extends { id: string }>({
                   ? codeValue
                     ? `${codeValue} · changes apply to new documents from now on`
                     : 'Changes apply to new documents from now on'
-                  : fields.some((f) => f.name === 'code')
-                    ? 'Nothing is saved until you press Save'
-                    : 'The code is given by the system when you save'}
+                  : // Only masters with a code field get one made up, so "the code
+                    // is given by the system" was wrong on every form without one.
+                    'Nothing is saved until you press Save'}
               </p>
             </div>
           </div>
@@ -713,6 +758,7 @@ export function MasterFormDialog<T extends { id: string }>({
                 {sectionFields.map((f) => (
                   <Field
                     key={f.name}
+                    id={`${uid}-${f.name}`}
                     field={f}
                     value={values[f.name]}
                     error={fieldErrors[f.name]}
@@ -720,6 +766,11 @@ export function MasterFormDialog<T extends { id: string }>({
                     columns={columns}
                     starred={Boolean(f.required) || insists(f)}
                     onChange={(v) => set(f.name, v)}
+                    onCreate={
+                      f.createFrom && f.optionsFrom && can('masters', 'create')
+                        ? (typed) => setAdding({ field: f, typed })
+                        : undefined
+                    }
                   />
                 ))}
               </div>
@@ -754,9 +805,33 @@ export function MasterFormDialog<T extends { id: string }>({
     </div>,
     document.body,
   )
+
+  if (!adding?.field.createFrom || !adding.field.optionsFrom) return portal
+  const { field: addingTo, typed } = adding
+  const { fields: newFields, title: newTitle, typedInto = 'name' } = addingTo.createFrom!
+
+  // Beside this form's portal, not inside its <form>: a submit inside a
+  // portal still bubbles up the React tree, and would save this form too.
+  return (
+    <>
+      {portal}
+      <MasterFormDialog<{ id: string } & Record<string, unknown>>
+        open
+        onClose={() => setAdding(null)}
+        onSaved={() => {}}
+        onCreated={(row) => added(addingTo, row)}
+        resource={addingTo.optionsFrom!.resource}
+        fields={newFields}
+        initialValues={typed ? { [typedInto]: typed } : undefined}
+        title={newTitle}
+        stacked
+      />
+    </>
+  )
 }
 
 function Field({
+  id,
   field,
   value,
   error,
@@ -764,7 +839,10 @@ function Field({
   columns,
   starred,
   onChange,
+  onCreate,
 }: {
+  /** The box's id, unique on the page even with a second form open over this one. */
+  id: string
   field: FormField
   value: unknown
   error?: string
@@ -773,6 +851,8 @@ function Field({
   /** Shows the red asterisk: required by the API, or by this form. */
   starred: boolean
   onChange: (v: unknown) => void
+  /** Adds a missing choice from inside the list (see createFrom). */
+  onCreate?: (typed: string) => void
 }) {
   const type = field.type ?? 'text'
   // A description or an address is read as a paragraph, so it takes the whole
@@ -792,11 +872,11 @@ function Field({
   if (field.generated) {
     return (
       <div className={wrapper}>
-        <label className="form-label" htmlFor={field.name}>
+        <label className="form-label" htmlFor={id}>
           {field.label}
         </label>
         <input
-          id={field.name}
+          id={id}
           className="form-input font-mono text-muted-foreground cursor-not-allowed"
           value={String(value ?? '')}
           readOnly
@@ -811,14 +891,14 @@ function Field({
 
   return (
     <div className={wrapper}>
-      <label className="form-label" htmlFor={field.name}>
+      <label className="form-label" htmlFor={id}>
         {field.label}
         {starred && <span className="text-red-400 ml-0.5">*</span>}
       </label>
 
       {type === 'textarea' && (
         <textarea
-          id={field.name}
+          id={id}
           rows={field.rows ?? 2}
           className={inputClass}
           placeholder={hint}
@@ -829,10 +909,12 @@ function Field({
 
       {type === 'select' && (
         <SmartSelect
-          id={field.name}
+          id={id}
           className={inputClass}
           value={String(value ?? '')}
           onChange={(e) => onChange(e.target.value)}
+          onCreate={onCreate}
+          createNoun={field.createFrom?.noun}
         >
           <option value="">
             {field.optionsFrom && !options
@@ -854,7 +936,7 @@ function Field({
       {type === 'checkbox' && (
         <label className="form-readout text-foreground h-[2.625rem] cursor-pointer select-none items-center">
           <input
-            id={field.name}
+            id={id}
             type="checkbox"
             className="h-4 w-4 shrink-0 accent-teal-500"
             checked={Boolean(value)}
@@ -866,7 +948,7 @@ function Field({
 
       {field.suggestFrom && type === 'text' ? (
         <SuggestInput
-          id={field.name}
+          id={id}
           className={inputClass}
           placeholder={hint}
           value={String(value ?? '')}
@@ -876,7 +958,7 @@ function Field({
       ) : (
         (type === 'text' || type === 'number' || type === 'date' || type === 'tags') && (
           <input
-            id={field.name}
+            id={id}
             type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
             step={type === 'number' ? 'any' : undefined}
             className={inputClass}

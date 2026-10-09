@@ -102,6 +102,16 @@ const DEPARTMENT_USES: Record<string, DeleteUse> = {
   productionEntries: { one: 'production entry', many: 'production entries', model: 'productionEntry', field: 'departmentId', then: 'move' },
 }
 
+/*
+ * What uses a unit. A unit added by mistake ("Mtrs" beside Meter) can be
+ * deleted, its items moved to the right one; a challan already printed in it
+ * keeps it.
+ */
+const UOM_USES: Record<string, DeleteUse> = {
+  items: { one: 'item', many: 'items', model: 'item', field: 'uomId', then: 'move' },
+  challanLines: { one: 'delivery challan line', many: 'delivery challan lines', then: 'refuse' },
+}
+
 const router = Router()
 const MODULE = 'masters'
 
@@ -1078,12 +1088,41 @@ router.use(
   crudRouter({
     model: 'uOM',
     module: MODULE,
-    entityType: 'UOM',
+    entityType: 'Unit',
+    permanentDelete: UOM_USES,
     createSchema: createUomSchema,
     updateSchema: updateUomSchema,
     searchFields: ['name', 'symbol'],
     sortableFields: ['name', 'symbol'],
     defaultSort: { field: 'name', order: 'asc' },
+    // How many items are counted in each unit, so nobody switches off Meter
+    // without seeing how many items are bought in it.
+    include: { _count: { select: { items: true } } },
+    // Units are mostly added from inside an item form, by whoever is typing,
+    // so "Mtr" and "mtr" must not become two units. Name and symbol are each
+    // unique, ignoring case, and a clash is said under the box it is in.
+    beforeSave: async (data, before) => {
+      for (const key of ['name', 'symbol'] as const) {
+        const value = data[key]
+        if (typeof value !== 'string' || !value) continue
+        const same = { equals: value, mode: 'insensitive' as const }
+        const clash = await prisma.uOM.findFirst({
+          where: {
+            ...(key === 'name' ? { name: same } : { symbol: same }),
+            ...(before?.id ? { id: { not: String(before.id) } } : {}),
+          },
+          select: { name: true, symbol: true, isActive: true },
+        })
+        if (!clash) continue
+        const off = clash.isActive ? '' : ' It is switched off; edit it to bring it back.'
+        const message =
+          key === 'name'
+            ? `There is already a unit called ${clash.name} (${clash.symbol}).${off}`
+            : `${clash.symbol} is already the symbol of ${clash.name}.${off}`
+        throw new ZodError([{ code: 'custom', path: [key], message }])
+      }
+      return { data }
+    },
   }),
 )
 
