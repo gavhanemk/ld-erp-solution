@@ -133,7 +133,8 @@ interface ApproveOptions {
  * Approve a draft sales order. The one place the rules live, so the dashboard
  * and the assistant cannot drift apart:
  *
- *   - only a draft can be approved — not a cancelled or already-confirmed one;
+ *   - only a draft can be approved — not a cancelled or already-confirmed one —
+ *     and only once it has been sent for approval, not while still being typed;
  *   - the person who raised it cannot approve it (the Admin excepted);
  *   - a customer over their credit limit, or blacklisted, is not a hard stop:
  *     the approver releases it with a reason, which is kept on the order.
@@ -146,6 +147,13 @@ export async function approveSalesOrder(id: string, userId: string, opts: Approv
       `${before.soNumber} is ${statusWords(before.status)}, so it cannot be approved`,
       409,
       'NOT_DRAFT',
+    )
+  }
+  if (!before.sentForApprovalAt) {
+    throw new AppError(
+      `${before.soNumber} has not been sent for approval yet`,
+      409,
+      'NOT_SENT',
     )
   }
   if (before.createdById === userId && !opts.admin) {
@@ -165,21 +173,28 @@ export async function approveSalesOrder(id: string, userId: string, opts: Approv
     throw new AppError(creditWarning(credit), 409, 'CREDIT_HOLD')
   }
 
-  // Until the order has columns of its own for the release, it is written
-  // into the notes the way a rejection is, so it is never lost.
-  const notes = credit.needsRelease
-    ? appendLine(before.notes, `Credit released on approval: ${reason}`)
-    : before.notes
-
+  const now = new Date()
   const after = await prisma.salesOrder.update({
     where: { id },
-    data: { status: 'CONFIRMED', approvedById: userId, approvedAt: new Date(), notes },
+    data: {
+      status: 'CONFIRMED',
+      approvedById: userId,
+      approvedAt: now,
+      ...(credit.needsRelease && {
+        creditReleasedById: userId,
+        creditReleasedAt: now,
+        creditReleaseReason: reason,
+      }),
+    },
   })
   return { before, after, credit }
 }
 
-/** Refuse a draft sales order. The order is cancelled and the reason kept. */
-export async function rejectSalesOrder(id: string, reason: string) {
+/**
+ * Refuse a draft sales order. It is cancelled, with who refused it and why;
+ * a cancelled order that was never approved is one that was rejected.
+ */
+export async function rejectSalesOrder(id: string, userId: string, reason: string) {
   const before = await prisma.salesOrder.findUnique({ where: { id } })
   if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
   if (before.status !== 'DRAFT') {
@@ -192,18 +207,13 @@ export async function rejectSalesOrder(id: string, reason: string) {
 
   const after = await prisma.salesOrder.update({
     where: { id },
-    data: { status: 'CANCELLED', notes: appendLine(before.notes, `Rejected: ${reason}`) },
+    data: { status: 'CANCELLED', cancelledById: userId, cancelledAt: new Date(), cancelReason: reason },
   })
   return { before, after }
 }
 
 function statusWords(status: SalesOrderStatus): string {
   return status.toLowerCase().replace(/_/g, ' ')
-}
-
-/** Keeps whatever the order already said and adds one line under it. */
-function appendLine(existing: string | null, line: string): string {
-  return existing ? `${existing}\n${line}` : line
 }
 
 function round2(n: number): number {

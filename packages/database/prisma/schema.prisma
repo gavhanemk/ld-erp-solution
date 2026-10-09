@@ -288,6 +288,10 @@ model User {
   aiConversations      AIConversation[]
   createdSOs           SalesOrder[]                @relation("SOCreatedBy")
   approvedSOs          SalesOrder[]                @relation("SOApprovedBy")
+  creditReleasedSOs    SalesOrder[]                @relation("SOCreditReleasedBy")
+  cancelledSOs         SalesOrder[]                @relation("SOCancelledBy")
+  shortClosedSOs       SalesOrder[]                @relation("SOShortClosedBy")
+  soRevisions          SalesOrderRevision[]        @relation("SORevisionChangedBy")
   createdEnquiries     PurchaseEnquiry[]           @relation("EnquiryCreatedBy")
   createdPOs           PurchaseOrder[]             @relation("POCreatedBy")
   approvedPOs          PurchaseOrder[]             @relation("POApprovedBy")
@@ -1160,10 +1164,32 @@ model SalesOrder {
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
+  /// Set by "Send for approval". Until then a draft is still being typed, and
+  /// it does not reach the approvals list.
+  sentForApprovalAt   DateTime?
+  /// An order for a customer over their credit limit, or blacklisted, is
+  /// approved only with a reason for releasing it: who, when and why.
+  creditReleasedById  String?
+  creditReleasedBy    User?     @relation("SOCreditReleasedBy", fields: [creditReleasedById], references: [id])
+  creditReleasedAt    DateTime?
+  creditReleaseReason String?
+  /// Rejected before approval, or cancelled before anything was made.
+  cancelledById       String?
+  cancelledBy         User?     @relation("SOCancelledBy", fields: [cancelledById], references: [id])
+  cancelledAt         DateTime?
+  cancelReason        String?
+  /// Closed at what was delivered, the rest no longer wanted.
+  shortClosedById     String?
+  shortClosedBy       User?     @relation("SOShortClosedBy", fields: [shortClosedById], references: [id])
+  shortClosedAt       DateTime?
+  shortCloseReason    String?
+
   lines               SalesOrderLine[]
   deliveryChallans    DeliveryChallan[]
   invoices            SalesInvoice[]
   manufacturingOrders ManufacturingOrder[]
+  /// What the order said before each amendment. The order itself is the latest.
+  revisions           SalesOrderRevision[]
 
   @@index([soNumber])
   @@index([customerId])
@@ -1183,13 +1209,17 @@ model SalesOrderLine {
   /// Free text, unvalidated, and can drift from what `item` actually is.
   /// Item.styleId/color is now the real source of truth for this; these two
   /// fields are a Sales-module follow-up to derive from item and retire, not
-  /// fixed here.
+  /// fixed here. Since 9 Oct 2026 they are filled from the item when a screen
+  /// does not send them.
   styleCode    String?
   color        String?
   totalQty     Decimal    @db.Decimal(10, 2)
   unitPrice    Decimal    @default(0) @db.Decimal(10, 2)
   discount     Decimal    @default(0) @db.Decimal(5, 2)
   gstRate      Decimal    @default(0) @db.Decimal(5, 2)
+  /// Copied from the item when the line is saved, so a later change to the
+  /// item never alters an order already sent.
+  hsnCode      String?
   amount       Decimal    @default(0) @db.Decimal(12, 2)
   deliveredQty Decimal    @default(0) @db.Decimal(10, 2)
   pendingQty   Decimal    @default(0) @db.Decimal(10, 2)
@@ -1200,6 +1230,24 @@ model SalesOrderLine {
   sizes SalesOrderLineSize[]
 
   @@map("sales_order_lines")
+}
+
+/// One earlier version of a sales order, kept when the order is amended.
+/// The order always holds the latest; `snapshot` is the whole order — header,
+/// lines and sizes — as it stood at `version`, before the change.
+model SalesOrderRevision {
+  id          String     @id @default(cuid())
+  soId        String
+  so          SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
+  version     Int
+  snapshot    Json
+  reason      String
+  changedById String
+  changedBy   User       @relation("SORevisionChangedBy", fields: [changedById], references: [id])
+  changedAt   DateTime   @default(now())
+
+  @@unique([soId, version])
+  @@map("sales_order_revisions")
 }
 
 model SalesInvoice {

@@ -89,8 +89,9 @@ router.post('/:type/:id/reject', guard('approve'), async (req: AuthRequest, res)
     entityType: result.entityType,
     entityId: id,
     before: result.before,
-    // The reason is appended to the document's notes, so the after snapshot
-    // already carries it — the audit row needs no separate field for it.
+    // The reason is kept on the document — in its notes, or a column of its
+    // own — so the after snapshot already carries it; the audit row needs no
+    // separate field for it.
     after: result.after,
   })
 
@@ -169,7 +170,7 @@ async function reject(type: DocumentType, id: string, reason: string, userId: st
 
   if (type === 'SO') {
     // A confirmed order is cancelled or short-closed, not rejected.
-    const { before, after } = await rejectSalesOrder(id, reason)
+    const { before, after } = await rejectSalesOrder(id, userId, reason)
     return { entityType: 'SalesOrder', number: before.soNumber, before, after }
   }
 

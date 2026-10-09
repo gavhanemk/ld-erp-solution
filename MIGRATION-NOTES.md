@@ -7,6 +7,31 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 9 Oct 2026 — sales orders: sent, released, cancelled, short-closed, amended
+
+**Migration:** `20261009120000_sales_order_lifecycle`
+**Branch:** `feat/sales-orders`
+**Status: applied to the shared database on 9 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+Ten nullable columns on `sales_orders`: `sentForApprovalAt`, and who / when /
+why for a credit release (`creditReleasedById`, `creditReleasedAt`,
+`creditReleaseReason`), a cancellation (`cancelledById`, `cancelledAt`,
+`cancelReason`) and a short-close (`shortClosedById`, `shortClosedAt`,
+`shortCloseReason`). The three user columns are set null if the user goes.
+`sales_order_lines.hsnCode`, nullable. A new table, `sales_order_revisions`:
+one row per earlier version of an amended order (`soId`, `version`, the whole
+order as `snapshot`, `reason`, `changedById`, `changedAt`), unique on
+`soId` + `version`.
+
+Nothing is dropped and no row changes. On a branch without this folder,
+`prisma migrate dev` will propose dropping all of it. Say no.
+
+Only drafts with `sentForApprovalAt` set now reach Pending Approvals. No sales
+order existed when this was applied, so none was left out.
+
 ## 29 Sep 2026 — an item category's department
 
 **Migration:** `20260929140000_category_department`

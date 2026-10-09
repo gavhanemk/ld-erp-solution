@@ -323,7 +323,8 @@ router.get('/pending-approvals', async (req, res) => {
       include: { supplier: { select: { name: true } } },
     }),
     prisma.salesOrder.findMany({
-      where: { status: 'DRAFT', approvedAt: null },
+      // A draft still being typed is nobody's to approve until it is sent.
+      where: { status: 'DRAFT', approvedAt: null, sentForApprovalAt: { not: null } },
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: { customer: { select: { name: true } } },

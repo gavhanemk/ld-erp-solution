@@ -1102,7 +1102,7 @@ async function findDocument(number: string) {
         try {
           const { after } = approve
             ? await approveSalesOrder(so.id, userId)
-            : await rejectSalesOrder(so.id, reason ?? 'No reason given')
+            : await rejectSalesOrder(so.id, userId, reason ?? 'No reason given')
           return after
         } catch (err) {
           if (err instanceof AppError && err.code === 'CREDIT_HOLD') {

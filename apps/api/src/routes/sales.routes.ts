@@ -60,6 +60,8 @@ export const createSalesOrderSchema = z
     isJobWork: z.boolean().optional(),
     currency: z.string().length(3).optional(),
     notes: z.string().max(1000).optional().nullable(),
+    /** Save and send for approval in one go, rather than keep it as a draft. */
+    sendForApproval: z.boolean().optional(),
     lines: z.array(salesOrderLineSchema).min(1, 'An order needs at least one line'),
   })
   // A size run that does not add up to the line quantity is the classic way a
@@ -286,6 +288,21 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
       broker: { select: { id: true, name: true, brokeragePercent: true } },
       createdBy: { select: { id: true, name: true } },
       approvedBy: { select: { id: true, name: true } },
+      creditReleasedBy: { select: { id: true, name: true } },
+      cancelledBy: { select: { id: true, name: true } },
+      shortClosedBy: { select: { id: true, name: true } },
+      // The list of earlier versions; each one's full snapshot is fetched on
+      // its own when somebody opens it.
+      revisions: {
+        orderBy: { version: 'desc' },
+        select: {
+          id: true,
+          version: true,
+          reason: true,
+          changedAt: true,
+          changedBy: { select: { id: true, name: true } },
+        },
+      },
       lines: {
         orderBy: { sortOrder: 'asc' },
         include: {
@@ -463,6 +480,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         isJobWork: data.isJobWork ?? false,
         currency: data.currency ?? 'INR',
         notes: data.notes ?? null,
+        sentForApprovalAt: data.sendForApproval ? new Date() : null,
         subtotal,
         discountAmount,
         taxableAmount,
@@ -485,6 +503,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
               unitPrice: l.unitPrice,
               discount: l.discount ?? 0,
               gstRate: gstRates[i],
+              hsnCode: item.hsnCode ?? null,
               amount: round2(lineTotals[i]),
               pendingQty: l.totalQty,
               sortOrder: i,
@@ -513,6 +532,37 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   })
 
   res.status(201).json({ success: true, data: order })
+})
+
+/**
+ * POST /api/sales/orders/:id/send
+ *
+ * A draft saved earlier goes to the approvals list. Until it is sent it is
+ * still being typed, and nobody is asked to approve it.
+ */
+router.post('/orders/:id/send', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const before = await prisma.salesOrder.findUnique({ where: { id: req.params.id } })
+  if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+  if (before.status !== 'DRAFT') {
+    throw new AppError(`${before.soNumber} is no longer a draft`, 409, 'NOT_DRAFT')
+  }
+  if (before.sentForApprovalAt) {
+    throw new AppError(`${before.soNumber} is already waiting for approval`, 409, 'ALREADY_SENT')
+  }
+
+  const after = await prisma.salesOrder.update({
+    where: { id: before.id },
+    data: { sentForApprovalAt: new Date() },
+  })
+  await writeAuditLog(req, {
+    module: 'sales',
+    action: 'UPDATE',
+    entityType: 'SalesOrder',
+    entityId: before.id,
+    before,
+    after,
+  })
+  res.json({ success: true, message: `${before.soNumber} sent for approval`, data: after })
 })
 
 /** Money is stored to two decimals; accumulating floats without rounding drifts. */
