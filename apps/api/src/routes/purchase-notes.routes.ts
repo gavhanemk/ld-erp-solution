@@ -428,7 +428,20 @@ router.get('/:id/print', requirePermission(MODULE, 'view'), async (req, res) => 
       docLabel: DOC_RULES[note.docType].label,
       gstLabel: GST_TREATMENTS[note.gstTreatment].label,
       totalInWords: amountInWords(Number(note.totalAmount)),
-      taxMode: Number(note.igst) > 0 ? 'IGST' : Number(note.cgst) > 0 ? 'CGST_SGST' : 'NONE',
+      // The amounts first; with no tax on the note, the supplier's registration
+      // and the note's own state split decide the rows. Reading the amounts
+      // alone printed "Supplier is not registered" on a 0% note from a
+      // registered supplier.
+      taxMode:
+        Number(note.igst) > 0
+          ? 'IGST'
+          : Number(note.cgst) > 0
+            ? 'CGST_SGST'
+            : !note.supplier?.gstin
+              ? 'NONE'
+              : note.isIntraState
+                ? 'CGST_SGST'
+                : 'IGST',
     },
   })
 })

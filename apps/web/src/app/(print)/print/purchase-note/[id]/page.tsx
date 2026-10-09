@@ -163,6 +163,10 @@ export default function PurchaseNotePrintPage() {
       : []),
     ...(note.po ? [{ label: 'Order No.', value: note.po.poNumber }] : []),
     ...(note.grn ? [{ label: 'Receipt No.', value: note.grn.grnNumber }] : []),
+    // The gate pass the goods went back on, for a note a return challan wrote.
+    ...(note.purchaseReturn
+      ? [{ label: 'Return Challan', value: note.purchaseReturn.returnNumber }]
+      : []),
     { label: 'Reason', value: reasonLabel },
   ]
 
