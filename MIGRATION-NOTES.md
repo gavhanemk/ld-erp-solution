@@ -7,6 +7,32 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 9 Oct 2026 — finished goods by size, into stock and out on a challan
+
+**Migration:** `20261009180000_sales_dispatch_and_fg_stock`
+**Branch:** `feat/sales-dispatch` (stacked on `feat/sales-orders`)
+**Status: applied to the shared database on 9 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `stock_ledger.sizeId`, nullable, a size. A finished garment's stock is kept
+  per size; everything else passes no size and keeps one balance per item. All
+  48 balances in the database read the same through `stock.service` after it.
+- New `finished_goods_receipts` and `finished_goods_receipt_lines`: packed
+  garments into the finished-goods store, by size, with the rate per piece and
+  where it came from (approved BOM cost, else standard rate).
+- `delivery_challans`: customer, store, delivery address, cartons, packing
+  note, who made / dispatched / cancelled it and when. `delivery_challan_lines`:
+  the order line and item, and a note when more went than was pending. New
+  `delivery_challan_line_sizes`.
+- `sales_order_line_sizes.deliveredQty`, default 0.
+
+Nothing is dropped and no row changes. A size with stock, a receipt or a
+challan row against it can no longer be deleted (foreign key RESTRICT). On a
+branch without this folder, `prisma migrate dev` will propose dropping all of
+it. Say no.
+
 ## 9 Oct 2026 — sales orders: sent, released, cancelled, short-closed, amended
 
 **Migration:** `20261009120000_sales_order_lifecycle`

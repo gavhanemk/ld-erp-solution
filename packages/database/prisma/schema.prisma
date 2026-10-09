@@ -336,6 +336,11 @@ model User {
   jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
   jobWorkCancelled     JobWorkChallan[] @relation("JobWorkChallanCancelledBy")
   jobWorkReturnsTaken  JobWorkReturn[]  @relation("JobWorkReturnReceivedBy")
+  fgReceiptsMade       FinishedGoodsReceipt[] @relation("FGRCreatedBy")
+  fgReceiptsCancelled  FinishedGoodsReceipt[] @relation("FGRCancelledBy")
+  challansMade         DeliveryChallan[]      @relation("DCCreatedBy")
+  challansDispatched   DeliveryChallan[]      @relation("DCDispatchedBy")
+  challansCancelled    DeliveryChallan[]      @relation("DCCancelledBy")
 }
 
 model Role {
@@ -682,6 +687,8 @@ model Item {
   customerReturnLines CustomerMaterialReturnLine[] @relation("CustomerReturnLines")
   jobWorkChallanLines JobWorkChallanLine[] @relation("JobWorkChallanLines")
   jobWorkReturnLines  JobWorkReturnLine[]  @relation("JobWorkReturnLines")
+  fgReceiptLines      FinishedGoodsReceiptLine[] @relation("FGRLineItem")
+  challanLines        DeliveryChallanLine[]      @relation("DCLineItem")
 }
 
 model Style {
@@ -930,6 +937,7 @@ model Customer {
   @@index([code])
   stockReservations StockReservation[] @relation("ReservedForCustomer")
   @@map("customers")
+  deliveryChallans  DeliveryChallan[]  @relation("DCCustomer")
 }
 
 /// One of the places a supplier bills from.
@@ -1048,6 +1056,8 @@ model Warehouse {
   jobWorkSentFrom          JobWorkChallan[] @relation("JobWorkChallanFrom")
   jobWorkSentTo            JobWorkChallan[] @relation("JobWorkChallanTo")
   jobWorkReturnLines       JobWorkReturnLine[] @relation("JobWorkReturnLines")
+  fgReceipts               FinishedGoodsReceipt[] @relation("FGRWarehouse")
+  deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
 }
 
 model Department {
@@ -1198,6 +1208,7 @@ model SalesOrder {
   stockReservations    StockReservation[]    @relation("ReservationSalesOrder")
   @@map("sales_orders")
   customerMaterial CustomerGRN[] @relation("SalesOrderCustomerMaterial")
+  fgReceipts       FinishedGoodsReceipt[] @relation("FGRSalesOrder")
 }
 
 model SalesOrderLine {
@@ -1228,6 +1239,8 @@ model SalesOrderLine {
   /// The size run. Rows rather than a JSON blob, so "XL" and "xl" cannot both
   /// exist and the quantities still reconcile at the invoice.
   sizes SalesOrderLineSize[]
+  /// What has been sent against this line, challan by challan.
+  challanLines DeliveryChallanLine[]
 
   @@map("sales_order_lines")
 }
@@ -1314,8 +1327,32 @@ model DeliveryChallan {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
+  /// Who it goes to, from which store, and where. The order carries the
+  /// customer too, but a challan is read on its own at the gate.
+  customerId      String?
+  customer        Customer?  @relation("DCCustomer", fields: [customerId], references: [id])
+  warehouseId     String?
+  warehouse       Warehouse? @relation("DCWarehouse", fields: [warehouseId], references: [id])
+  deliveryAddress String?
+  /// The packing: how many cartons, and what is in them.
+  cartons         Int?
+  packingNote     String?
+  createdById     String?
+  createdBy       User?      @relation("DCCreatedBy", fields: [createdById], references: [id])
+  /// Dispatching is what takes the goods out of stock.
+  dispatchedAt    DateTime?
+  dispatchedById  String?
+  dispatchedBy    User?      @relation("DCDispatchedBy", fields: [dispatchedById], references: [id])
+  deliveredAt     DateTime?
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledBy     User?      @relation("DCCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason    String?
+
   lines DeliveryChallanLine[]
 
+  @@index([soId])
+  @@index([customerId])
   @@map("delivery_challans")
 }
 
@@ -1329,7 +1366,78 @@ model DeliveryChallanLine {
   uom         UOM             @relation(fields: [uomId], references: [id])
   sizeBreakup Json?
 
+  /// The order line these pieces were sent against, and the garment.
+  soLineId String?
+  soLine   SalesOrderLine? @relation(fields: [soLineId], references: [id])
+  itemId   String?
+  item     Item?           @relation("DCLineItem", fields: [itemId], references: [id])
+  /// Why more went than the order line still wanted, when that happened.
+  overNote String?
+  /// Pieces by size. Replaces `sizeBreakup`, which nothing ever wrote.
+  sizes    DeliveryChallanLineSize[]
+
+  @@index([soLineId])
   @@map("delivery_challan_lines")
+}
+
+/// One size on one challan line.
+model DeliveryChallanLineSize {
+  id     String              @id @default(cuid())
+  lineId String
+  line   DeliveryChallanLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size                @relation(fields: [sizeId], references: [id])
+  qty    Decimal             @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("delivery_challan_line_sizes")
+}
+
+/// Packed garments going into the finished-goods store, by style, colour and
+/// size. With an opening balance, the only way finished goods come into
+/// stock; a delivery challan takes them out again. Valued at the style's
+/// approved BOM cost per piece, else the item's standard rate.
+model FinishedGoodsReceipt {
+  id            String     @id @default(cuid())
+  fgrNumber     String     @unique
+  receiptDate   DateTime   @default(now())
+  warehouseId   String
+  warehouse     Warehouse  @relation("FGRWarehouse", fields: [warehouseId], references: [id])
+  /// The order it was packed for, when it was packed for one.
+  soId          String?
+  so            SalesOrder? @relation("FGRSalesOrder", fields: [soId], references: [id])
+  notes         String?
+  createdById   String
+  createdBy     User       @relation("FGRCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  /// Cancelling takes the pieces back out of stock, so only while they are there.
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?      @relation("FGRCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason  String?
+
+  lines FinishedGoodsReceiptLine[]
+
+  @@index([soId])
+  @@map("finished_goods_receipts")
+}
+
+model FinishedGoodsReceiptLine {
+  id         String               @id @default(cuid())
+  receiptId  String
+  receipt    FinishedGoodsReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  itemId     String
+  item       Item                 @relation("FGRLineItem", fields: [itemId], references: [id])
+  sizeId     String?
+  size       Size?                @relation(fields: [sizeId], references: [id], onDelete: Restrict)
+  qty        Decimal              @db.Decimal(10, 2)
+  /// What one piece went into stock at, and where that figure came from:
+  /// BOM (the approved costing) or STANDARD (the item's standard rate).
+  unitRate   Decimal              @db.Decimal(10, 2)
+  rateSource String
+
+  @@map("finished_goods_receipt_lines")
 }
 
 model PaymentReceipt {
@@ -2188,6 +2296,11 @@ model StockLedger {
   ownership       StockOwnership  @default(OWNED)
   ownerCustomerId String?
   ownerCustomer   Customer?       @relation("CustomerOwnedStock", fields: [ownerCustomerId], references: [id])
+  /// The size of a finished garment, so a shirt in M and the same shirt in
+  /// XL are two balances. Null for everything that has no size — fabric,
+  /// trims, packing — which keeps one balance per item, as before.
+  sizeId          String?
+  size            Size?           @relation(fields: [sizeId], references: [id], onDelete: Restrict)
   inQty           Decimal         @default(0) @db.Decimal(10, 3)
   outQty          Decimal         @default(0) @db.Decimal(10, 3)
   closingStock    Decimal         @db.Decimal(10, 3)
@@ -2199,6 +2312,7 @@ model StockLedger {
   @@index([itemId, warehouseId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
+  @@index([itemId, warehouseId, sizeId])
   @@map("stock_ledger")
 }
 
@@ -3281,6 +3395,9 @@ model Size {
   moLineSizes  MOLineSize[]
   bomLineSizes BOMLineSize[]
   baseSizeBoms BOM[]
+  stockLedger  StockLedger[]
+  fgrLines     FinishedGoodsReceiptLine[]
+  challanSizes DeliveryChallanLineSize[]
 
   @@unique([sizeGroupId, code])
   @@map("sizes")
@@ -3293,6 +3410,9 @@ model SalesOrderLineSize {
   sizeId String
   size   Size           @relation(fields: [sizeId], references: [id])
   qty    Decimal        @db.Decimal(10, 2)
+  /// Sent so far in this size, added to by each dispatched challan. Pending
+  /// in this size is qty less this, never below nothing.
+  deliveredQty Decimal  @default(0) @db.Decimal(10, 2)
 
   @@unique([lineId, sizeId])
   @@map("sales_order_line_sizes")

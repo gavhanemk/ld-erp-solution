@@ -21,6 +21,11 @@ import { AppError } from '../middleware/errorHandler'
  * And one about time: a movement is dated no earlier than the last movement of
  * the same item in the same store, and never after today (see `settleDate`).
  *
+ * A finished garment's balance is also kept per size: a shirt in M and the
+ * same shirt in XL are two balances, because a challan sends sizes, not
+ * shirts. Everything without a size — fabric, trims, packing — passes no size
+ * and keeps one balance per item, exactly as before sizes existed.
+ *
  * Valuation is weighted average, chosen once for the whole system. It is what a
  * Tally-trained accountant expects, it survives a part-received order, and it
  * does not need batches to be tracked before the mill is ready to track them.
@@ -38,6 +43,8 @@ export interface StockKey {
   ownership?: StockOwnership
   /** Required when ownership is CUSTOMER_OWNED — whose cloth this is. */
   ownerCustomerId?: string | null
+  /** A finished garment's size; left out for anything that has no size. */
+  sizeId?: string | null
 }
 
 export interface Movement extends StockKey {
@@ -82,6 +89,7 @@ async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise
     key.warehouseId,
     key.ownership ?? 'OWNED',
     key.ownerCustomerId ?? '',
+    key.sizeId ?? '',
   ].join('|')
 
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
@@ -110,6 +118,7 @@ export async function balanceOf(
       AND "warehouseId" = ${key.warehouseId}
       AND "ownership" = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
+      AND "sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
   `
 
   const qty = round3(rows[0]?.qty ?? 0)
@@ -187,6 +196,7 @@ async function settleDate(
       AND "warehouseId" = ${key.warehouseId}
       AND "ownership" = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
+      AND "sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
   `
   const last = rows[0]?.last ?? null
   if (!last) return asked
@@ -267,10 +277,14 @@ export async function recordMovement(
         where: { id: m.warehouseId },
         select: { name: true },
       })
+      const size = m.sizeId
+        ? await tx.size.findUnique({ where: { id: m.sizeId }, select: { code: true } })
+        : null
       const unit = item?.uom?.symbol ?? ''
+      const what = `${item?.name ?? 'that item'}${size ? ` in size ${size.code}` : ''}`
 
       throw new AppError(
-        `Only ${before.qty} ${unit} of ${item?.name ?? 'that item'} in ${warehouse?.name ?? 'that warehouse'}. You are trying to take out ${qty}.`.replace(
+        `Only ${before.qty} ${unit} of ${what} in ${warehouse?.name ?? 'that warehouse'}. You are trying to take out ${qty}.`.replace(
           /\s+/g,
           ' ',
         ),
@@ -295,6 +309,7 @@ export async function recordMovement(
       batchNumber: m.batchNumber ?? null,
       ownership: m.ownership ?? 'OWNED',
       ownerCustomerId: m.ownerCustomerId ?? null,
+      sizeId: m.sizeId ?? null,
       inQty: m.direction === 'IN' ? qty : 0,
       outQty: m.direction === 'OUT' ? qty : 0,
       // A snapshot for the ledger view to print, so a printed statement does
@@ -329,6 +344,8 @@ export async function transferStock(
     referenceId: string
     ownership?: StockOwnership
     ownerCustomerId?: string | null
+    /** A finished garment's size: it moves as that size, and arrives as it. */
+    sizeId?: string | null
     transactionDate?: Date
     notes?: string | null
   },
@@ -351,6 +368,7 @@ export async function transferStock(
     referenceId: args.referenceId,
     ownership: args.ownership,
     ownerCustomerId: args.ownerCustomerId,
+    sizeId: args.sizeId,
     transactionDate: args.transactionDate,
     notes: args.notes,
   })
@@ -372,12 +390,14 @@ export async function transferStock(
               warehouseId: args.toWarehouseId,
               ownership: args.ownership,
               ownerCustomerId: args.ownerCustomerId,
+              sizeId: args.sizeId,
             })
           ).avgRate,
     referenceType: args.referenceType,
     referenceId: args.referenceId,
     ownership: args.ownership,
     ownerCustomerId: args.ownerCustomerId,
+    sizeId: args.sizeId,
     transactionDate: args.transactionDate,
     notes: args.notes,
   })
