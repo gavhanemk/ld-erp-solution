@@ -136,7 +136,7 @@ const EXPORT_COLUMNS: ExportColumn<PurchaseNote>[] = [
   /* The accounts desk's classification travels with the export, because the
      first question asked of a sheet of adjustments is which of them are
      cleared to go through and which are still sitting with accounts. */
-  { header: 'GST on this note', value: (n) => GST_WORDS[n.gstTreatment]?.label ?? n.gstTreatment },
+  { header: 'GST treatment', value: (n) => GST_WORDS[n.gstTreatment]?.label ?? n.gstTreatment },
   { header: 'Classified By', value: (n) => n.gstTreatedBy?.name ?? '' },
   { header: 'Order No.', value: (n) => n.po?.poNumber ?? '' },
   { header: 'Receipt No.', value: (n) => n.grn?.grnNumber ?? '' },
@@ -498,7 +498,7 @@ function PurchaseNotesScreenInner({ moduleType }: { moduleType: NoteScreen }) {
         onClick: () => void act(n, 'post'),
         // GST is settled on the note first — picked in Edit, beside the tax.
         ...(n.gstTreatment === 'NOT_REVIEWED'
-          ? { disabled: true, hint: 'Pick "GST on this note" in Edit first' }
+          ? { disabled: true, hint: 'Pick the GST treatment in Edit first' }
           : {}),
       })
     }

@@ -266,23 +266,23 @@ export function assertIssuerMatches(
 export const GST_TREATMENTS: Record<PurchaseGstTreatment, { label: string; hint: string }> = {
   NOT_REVIEWED: {
     label: 'Not picked yet',
-    hint: 'Pick how the GST is handled before posting.',
+    hint: 'Pick the GST treatment before posting.',
   },
   GST_CREDIT_NOTE: {
-    label: 'Supplier will send a credit note',
-    hint: 'Usual for returns. The supplier cancels the GST on these goods, and the GST you claim goes down by the same amount.',
+    label: 'Supplier credit note — Sec 34(1)',
+    hint: 'Goods returned; ITC reduces',
   },
   GST_DEBIT_NOTE: {
-    label: 'Supplier charged extra (their debit note)',
-    hint: 'Not for returns. The supplier billed more later, so the extra GST can be claimed.',
+    label: 'Supplier debit note — Sec 34(3)',
+    hint: 'Supplier charged extra; ITC increases',
   },
   ITC_REVERSAL_ONLY: {
-    label: 'No credit note — we reduce our GST claim',
-    hint: "For returns when the supplier won't send a credit note. Your accountant lowers the GST you claimed.",
+    label: 'ITC reversal — no credit note',
+    hint: 'We reverse the ITC ourselves',
   },
   NO_GST_IMPACT: {
-    label: 'No GST change — amount only',
-    hint: 'Not for returns. Only the amount changes, such as a discount given later; the GST stays as billed.',
+    label: 'No GST impact',
+    hint: 'Amount only; GST stays as billed',
   },
 }
 

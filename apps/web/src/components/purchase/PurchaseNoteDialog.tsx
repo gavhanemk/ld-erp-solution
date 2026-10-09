@@ -916,7 +916,7 @@ export function PurchaseNoteDialog({
     const problem = validate()
     if (problem) return setError(problem)
     if (gstTreatment === 'NOT_REVIEWED') {
-      return setError('Pick "GST on this note" (beside the tax) before posting. A draft can be saved without it.')
+      return setError('Pick the GST treatment (beside the tax) before posting. A draft can be saved without it.')
     }
     postedNoteRef.current = null
     setPostError(null)
@@ -2159,7 +2159,7 @@ export function PurchaseNoteDialog({
                       separate "Classify for GST" action. */}
                     <div>
                       <label className="form-label" htmlFor="note-gst-treatment">
-                        GST on this note<span className="ml-0.5 text-red-400">*</span>
+                        GST treatment<span className="ml-0.5 text-red-400">*</span>
                       </label>
                       <SmartSelect
                         id="note-gst-treatment"
@@ -2178,7 +2178,7 @@ export function PurchaseNoteDialog({
                       </SmartSelect>
                       <span className="text-muted-foreground mt-1 block text-xs">
                         {gstTreatment === 'NOT_REVIEWED'
-                          ? 'Tells your accountant how to report this GST. Needed to post; a draft can wait.'
+                          ? 'How this is reported in the GST return. Needed to post.'
                           : GST_WORDS[gstTreatment].hint}
                       </span>
                     </div>

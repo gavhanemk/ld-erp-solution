@@ -141,7 +141,7 @@ export function NoteDetail({ note }: { note: PurchaseNote }) {
               sub={EFFECT_WORDS[note.effect]?.hint}
             />
             <Fact
-              label="GST on this note"
+              label="GST treatment"
               value={GST_WORDS[note.gstTreatment]?.label ?? note.gstTreatment}
               sub={
                 note.gstTreatedBy
