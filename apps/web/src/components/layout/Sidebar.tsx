@@ -61,6 +61,7 @@ const navItems: NavItem[] = [
       { label: 'HSN / SAC Codes', href: '/masters/hsn-codes' },
       { label: 'Expense Heads', href: '/masters/expense-heads' },
       { label: 'Styles & SKU', href: '/masters/styles' },
+      { label: 'Brands', href: '/masters/brands' },
       { label: 'Bill of Materials', href: '/masters/bom' },
       { label: 'Size Runs', href: '/masters/size-runs' },
       { label: 'Customers', href: '/masters/customers' },

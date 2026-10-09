@@ -361,6 +361,8 @@ router.get('/pending-approvals', async (req, res) => {
       amount: Number(so.totalAmount),
       date: so.createdAt,
       urgent: isUrgent(so.createdAt),
+      // Whoever raised it cannot approve it, so the screen can say so up front.
+      raisedById: so.createdById,
     })),
     ...requisitions.map((mr) => ({
       id: mr.id,

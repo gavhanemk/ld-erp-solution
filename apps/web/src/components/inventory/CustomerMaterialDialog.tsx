@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save } from 'lucide-react'
-import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
+import { api, ApiError, masterResource } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -110,8 +110,9 @@ export function CustomerMaterialDialog({
           // Active only: a switched-off item or store is not offered for anything new.
           masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
           masterResource<Option>('warehouses').list({ limit: 100, active: true }),
-          api.get<Paginated<{ id: string; soNumber: string; customerId: string }>>(
-            '/sales/orders?limit=100'
+          // The picker list, open to the store, which has no sales permission.
+          api.get<{ data: Array<{ id: string; soNumber: string; customerId: string }> }>(
+            '/sales/orders/options'
           ),
         ])
         if (cancelled) return

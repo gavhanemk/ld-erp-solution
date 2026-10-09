@@ -56,6 +56,7 @@ const RESOURCE_ICONS: Record<string, LucideIcon> = {
   'bank-accounts': Landmark,
   routings: Route,
   departments: Building2,
+  brands: Tag,
 }
 
 /** Each panel's icon, by the section name the screens already give their fields. */

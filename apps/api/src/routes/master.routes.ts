@@ -1428,6 +1428,8 @@ router.use(
     createSchema: createBrandSchema,
     updateSchema: updateBrandSchema,
     injectOnCreate: currentCompanyId,
+    // How many orders carry each brand, so nobody switches one off unaware.
+    include: { _count: { select: { salesOrders: true, manufacturingOrders: true } } },
     searchFields: ['name', 'description'],
     sortableFields: ['name', 'createdAt'],
     defaultSort: { field: 'name', order: 'asc' },

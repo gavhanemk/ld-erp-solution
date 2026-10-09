@@ -126,7 +126,7 @@ export function RequisitionDialog({
           api.get<{ data: StockRow[] }>('/inventory/stock').catch(() => ({ data: [] as StockRow[] })),
           // Sales orders still being worked on, for "For sales order".
           api
-            .get<{ data: Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> }>('/sales/orders?limit=200')
+            .get<{ data: Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> }>('/sales/orders/options?open=1')
             .catch(() => ({ data: [] as Array<{ id: string; soNumber: string; status: string; customer: { name: string } }> })),
           // Style numbers to suggest in the Style no. box.
           masterResource<{ id: string; code: string; name: string }>('styles')

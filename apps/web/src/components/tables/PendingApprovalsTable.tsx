@@ -13,7 +13,7 @@ interface Approval {
   amount: number | null
   date: string
   urgent: boolean
-  /** Requisitions only: who raised it, who therefore may not approve it. */
+  /** Requisitions and sales orders: who raised it, who therefore may not approve it. */
   raisedById?: string | null
 }
 
@@ -75,7 +75,21 @@ export function PendingApprovalsTable() {
     setBusyId(a.id)
     setError(null)
     try {
-      await api.post(`/approvals/${a.type}/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
+      try {
+        await api.post(`/approvals/${a.type}/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
+      } catch (err) {
+        // A customer over their credit limit, or blacklisted, is not a hard
+        // stop: the server sends the figures, and the approver releases the
+        // order with a reason that is kept on it.
+        if (!(decision === 'approve' && err instanceof ApiError && err.code === 'CREDIT_HOLD')) throw err
+        const why = window.prompt(`${err.message}\n\nWhy is the credit hold being released?`)
+        if (why === null) return
+        if (why.trim().length < 5) {
+          setError('Say why the credit hold is being released, in a few words.')
+          return
+        }
+        await api.post(`/approvals/${a.type}/${a.id}/approve`, { creditReleaseReason: why.trim() })
+      }
       // Refetch rather than splicing locally: approving a document can change
       // what else is outstanding.
       await load()
@@ -85,6 +99,15 @@ export function PendingApprovalsTable() {
       setBusyId(null)
     }
   }
+
+  /**
+   * Whoever raised a document cannot approve it. The Admin may approve their
+   * own sales order, as the server allows; requisitions keep their own rule.
+   */
+  const ownBlocked = (a: Approval) =>
+    !!a.raisedById &&
+    a.raisedById === me?.id &&
+    (a.type === 'MR' || (a.type === 'SO' && me?.role !== 'Admin'))
 
   return (
     <div className="glass-card p-6">
@@ -151,7 +174,7 @@ export function PendingApprovalsTable() {
                   <td className="text-muted-foreground text-xs">{formatDate(a.date)}</td>
                   <td>
                     <div className="flex items-center gap-2 justify-end">
-                      {a.type === 'MR' && a.raisedById && a.raisedById === me?.id ? (
+                      {ownBlocked(a) ? (
                         <span className="text-[11px] text-muted-foreground" title="You raised it, so somebody else has to approve it">
                           Yours — someone else approves
                         </span>
