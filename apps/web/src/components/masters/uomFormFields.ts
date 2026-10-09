@@ -16,9 +16,8 @@ export const uomFormFields: FormField[] = [
   {
     name: 'symbol',
     label: 'Symbol',
-    required: true,
     placeholder: 'ltr',
-    help: 'The short form printed beside quantities on orders, GRNs and challans',
+    help: 'Optional. The short form printed beside quantities; left empty, the name is used',
   },
   {
     name: 'isActive',

@@ -1102,6 +1102,10 @@ router.use(
     // so "Mtr" and "mtr" must not become two units. Name and symbol are each
     // unique, ignoring case, and a clash is said under the box it is in.
     beforeSave: async (data, before) => {
+      // The symbol is optional on the form. Every print and list shows one
+      // beside a quantity, so a new unit without one is shown by its name.
+      const filled = !before && !data.symbol && typeof data.name === 'string'
+      if (filled) data = { ...data, symbol: data.name }
       for (const key of ['name', 'symbol'] as const) {
         const value = data[key]
         if (typeof value !== 'string' || !value) continue
@@ -1119,7 +1123,8 @@ router.use(
           key === 'name'
             ? `There is already a unit called ${clash.name} (${clash.symbol}).${off}`
             : `${clash.symbol} is already the symbol of ${clash.name}.${off}`
-        throw new ZodError([{ code: 'custom', path: [key], message }])
+        // A symbol taken from the name is said under the name, the box that was typed in.
+        throw new ZodError([{ code: 'custom', path: [filled ? 'name' : key], message }])
       }
       return { data }
     },

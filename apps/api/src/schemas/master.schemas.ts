@@ -586,7 +586,14 @@ export const updateMachineSchema = createMachineSchema.partial()
 // Trimmed, so " mtr" cannot slip past the duplicate check as a unit of its own.
 export const createUomSchema = z.object({
   name: z.string().trim().min(1, 'Unit name is required').max(50),
-  symbol: z.string().trim().min(1, 'Symbol is required').max(20),
+  // Optional: left empty on a new unit, the name is used (see the uoms route).
+  // Emptied on an edit, the symbol it had is kept.
+  symbol: z
+    .string()
+    .trim()
+    .max(20)
+    .optional()
+    .transform((v) => v || undefined),
   isActive,
 })
 export const updateUomSchema = createUomSchema.partial()

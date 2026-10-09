@@ -350,7 +350,7 @@ export function NewItemDialog({
                   <option value="">Pick a unit</option>
                   {uoms.map((u) => (
                     <option key={u.id} value={u.id}>
-                      {u.symbol} · {u.name}
+                      {u.symbol.toLowerCase() === u.name.toLowerCase() ? u.name : `${u.symbol} · ${u.name}`}
                     </option>
                   ))}
                 </SmartSelect>
