@@ -76,14 +76,12 @@ add a colour, look at it in both themes before raising the PR.
 
 ### The only exception
 
-Charts. Chart libraries need real colour codes, so the files in
-[components/charts/](../apps/web/src/components/charts/) use hex. Use the same
-values that are already there:
-
-```
-teal   #14b8a6      amber  #f59e0b      slate  #64748b
-red    #f87171      green  #10b981
-```
+Charts. Chart libraries need real colour codes, so chart code uses hex. Take
+them from the shared dashboard kit,
+[components/dashboard/DashKit.tsx](../apps/web/src/components/dashboard/DashKit.tsx)
+(`PALETTE` for data, `TONE` for figure tiles), which every dashboard is drawn
+from, so the charts read as one family. A colour the kit does not have is named
+once at the top of the chart file, never typed inline.
 
 ---
 
@@ -292,7 +290,7 @@ The purchase order print page is the pattern to copy.
 
 ## 8. Before you raise the PR
 
-- [ ] No hex colour outside `components/charts/`
+- [ ] No hex colour outside chart code
 - [ ] No Tailwind colour outside teal / amber / navy / slate / emerald / red / purple
 - [ ] Every colour I used is a role class or a variable
 - [ ] I opened the screen in light mode and it is readable

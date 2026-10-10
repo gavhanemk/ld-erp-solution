@@ -76,7 +76,8 @@ const formFields: FormField[] = [
   },
   { name: 'branch', label: 'Branch', placeholder: 'Ichalkaranji' },
   { name: 'accountType', label: 'Account Type', type: 'select', options: TYPES },
-  { name: 'openingBalance', label: 'Opening Balance', type: 'number' },
+  // Can be below nought: an overdrawn account.
+  { name: 'openingBalance', label: 'Opening Balance', type: 'number', allowNegative: true },
   {
     name: 'isActive',
     label: 'Active',

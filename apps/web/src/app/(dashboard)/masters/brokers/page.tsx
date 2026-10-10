@@ -128,7 +128,7 @@ const formFields: FormField[] = [
     placeholder: '2 (on order value)',
   },
   { name: 'tdsSection', label: 'TDS Section', section: 'Commission & Notes', placeholder: '194H', uppercase: true },
-  { name: 'tdsRate', label: 'TDS %', type: 'number', section: 'Commission & Notes', placeholder: '5' },
+  { name: 'tdsRate', label: 'TDS %', type: 'number', max: 100, section: 'Commission & Notes', placeholder: '5' },
   { name: 'notes', label: 'Notes', type: 'textarea', section: 'Commission & Notes', span: 1, rows: 1 },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available on new orders', section: 'Commission & Notes' },
 ]

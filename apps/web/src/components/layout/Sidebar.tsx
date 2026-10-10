@@ -59,6 +59,7 @@ const navItems: NavItem[] = [
       { label: 'Items & Products', href: '/masters/items' },
       { label: 'Item Categories', href: '/masters/item-categories' },
       { label: 'HSN / SAC Codes', href: '/masters/hsn-codes' },
+      { label: 'Units of Measure', href: '/masters/units' },
       { label: 'Expense Heads', href: '/masters/expense-heads' },
       { label: 'Styles & SKU', href: '/masters/styles' },
       { label: 'Brands', href: '/masters/brands' },

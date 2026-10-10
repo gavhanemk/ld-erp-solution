@@ -11,6 +11,16 @@ import { purchasesByItem } from './definitions/purchases-by-item'
 import { expenseRegister } from './definitions/expense-register'
 import { grnQcRegister, qcRejections } from './definitions/grn-qc'
 import { SALES_REPORTS } from './definitions/sales'
+import { stockSummary } from './definitions/stock-summary'
+import { stockMovement } from './definitions/stock-movement'
+import { itemStockLedger } from './definitions/item-stock-ledger'
+import { reorderStatus } from './definitions/reorder-status'
+import { stockAgeing } from './definitions/stock-ageing'
+import { materialConsumption } from './definitions/material-consumption'
+import { requisitionFulfilment } from './definitions/requisition-fulfilment'
+import { jobWorkPending } from './definitions/job-work-pending'
+import { customerMaterialStock } from './definitions/customer-material-stock'
+import { stockCountVariance } from './definitions/stock-count-variance'
 
 /**
  * Every report the ERP knows about.
@@ -31,6 +41,17 @@ export const REPORTS: ReportDefinition[] = [
   indentAgainstPo,
   supplierOutstanding,
   noteRegister,
+  // Inventory
+  stockSummary,
+  stockMovement,
+  itemStockLedger,
+  reorderStatus,
+  stockAgeing,
+  materialConsumption,
+  requisitionFulfilment,
+  jobWorkPending,
+  customerMaterialStock,
+  stockCountVariance,
   ...SALES_REPORTS,
 ]
 
