@@ -931,6 +931,41 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
+    // Each size keeps what was already sent in it. A size cannot drop below
+    // that, nor come off a line while any of it has gone.
+    data.lines.forEach((l, i) => {
+      if (!l.id) return
+      const old = oldLines.get(l.id)!
+      const wanted = new Map((l.sizes ?? []).map((s) => [s.sizeId, s.qty]))
+      for (const os of old.sizes) {
+        const sent = Number(os.deliveredQty)
+        if (sent > 0 && (wanted.get(os.sizeId) ?? 0) < sent) {
+          throw new AppError(
+            `Line ${i + 1}: ${sent} pieces of ${old.item.code} in size ${os.size.code} have already been sent, so that size cannot go below ${sent}`,
+            409,
+            'BELOW_DELIVERED',
+          )
+        }
+      }
+    })
+
+    // A line with a challan still standing against it, even a draft one,
+    // cannot come off: the challan would be left pointing at nothing.
+    const leaving = before.lines.filter((l) => !keptIds.has(l.id)).map((l) => l.id)
+    if (leaving.length) {
+      const onChallan = await tx.deliveryChallanLine.findFirst({
+        where: { soLineId: { in: leaving }, dc: { status: { not: 'CANCELLED' } } },
+        select: { dc: { select: { dcNumber: true } }, soLine: { select: { item: { select: { code: true } } } } },
+      })
+      if (onChallan) {
+        throw new AppError(
+          `${onChallan.soLine?.item.code ?? 'A line'} cannot come off the order: it is on challan ${onChallan.dc.dcNumber}. Cancel that challan first.`,
+          409,
+          'LINE_ON_CHALLAN',
+        )
+      }
+    }
+
     const { header, lines } = await prepareOrder(tx, data)
 
     // The order as it stood, whole, before this change. Plain JSON, so it
@@ -951,11 +986,21 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       const input = data.lines[i]
       const line = lines[i]
       if (input.id) {
-        const sent = Number(oldLines.get(input.id)!.deliveredQty)
+        const old = oldLines.get(input.id)!
+        const sent = Number(old.deliveredQty)
+        // The sizes are written afresh, carrying over what each had sent.
+        const sentBySize = new Map(old.sizes.map((os) => [os.sizeId, Number(os.deliveredQty)]))
+        const sizeRows = (input.sizes ?? [])
+          .filter((sz) => sz.qty > 0)
+          .map((sz) => ({ sizeId: sz.sizeId, qty: sz.qty, deliveredQty: sentBySize.get(sz.sizeId) ?? 0 }))
         await tx.salesOrderLineSize.deleteMany({ where: { lineId: input.id } })
         await tx.salesOrderLine.update({
           where: { id: input.id },
-          data: { ...line, pendingQty: round2(input.totalQty - sent) } as Prisma.SalesOrderLineUpdateInput,
+          data: {
+            ...line,
+            sizes: sizeRows.length ? { create: sizeRows } : undefined,
+            pendingQty: Math.max(0, round2(input.totalQty - sent)),
+          } as Prisma.SalesOrderLineUpdateInput,
         })
       } else {
         await tx.salesOrderLine.create({ data: { ...line, so: { connect: { id: before.id } } } })
