@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Ruler,
   Scissors,
+  Factory,
   Search,
   Truck,
 } from 'lucide-react'
@@ -462,6 +463,9 @@ export default function SalesOrdersPage() {
         icon: <CheckCircle2 size={15} />,
         onClick: () => void confirm(o),
       })
+    }
+    if (OPEN_ORDER_STATUSES.includes(o.status) && can('production', 'create')) {
+      items.push({ key: 'make', label: 'Plan production', icon: <Factory size={15} />, href: `/production/orders?make=${o.id}` })
     }
     if (orderCan.dispatch(o) && o.pending > 0) {
       items.push({ key: 'dispatch', label: 'Dispatch', icon: <Truck size={15} />, href: dispatchHref(o.id) })

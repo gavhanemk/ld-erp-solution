@@ -296,6 +296,11 @@ function RequisitionsScreen() {
   const [exporting, setExporting] = useState(false)
 
   const [search, setSearch] = useState('')
+  // Arriving from a manufacturing order, which links to its requisitions by number.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get('q')
+    if (q) setSearch(q)
+  }, [])
   const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({})
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')

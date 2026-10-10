@@ -1146,7 +1146,8 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
   const before = await prisma.salesOrder.findUnique({
     where: { id: req.params.id },
     include: {
-      manufacturingOrders: { select: { moNumber: true } },
+      // A closed manufacturing order made nothing, and stands in nobody's way.
+      manufacturingOrders: { where: { status: { not: 'CLOSED' } }, select: { moNumber: true } },
       deliveryChallans: { where: { status: { not: 'CANCELLED' } }, select: { dcNumber: true } },
       invoices: { where: { status: { not: 'CANCELLED' } }, select: { invoiceNumber: true } },
       materialRequisitions: {
@@ -1228,7 +1229,7 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
         lines: { select: { deliveredQty: true } },
         _count: {
           select: {
-            manufacturingOrders: true,
+            manufacturingOrders: { where: { status: { notIn: ['DRAFT', 'CLOSED'] } } },
             deliveryChallans: { where: { status: { not: 'CANCELLED' } } },
           },
         },

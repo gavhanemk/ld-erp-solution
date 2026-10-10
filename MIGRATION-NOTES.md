@@ -7,6 +7,24 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 10 Oct 2026 — manufacturing orders raised from sales orders
+
+**Migration:** `20261010210000_mo_from_sales_order`
+**Branch:** `feat/production-orders` (stacked on `feat/sales-dispatch`)
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `mo_lines.soLineId` (the sales order line it makes, SET NULL) and
+  `mo_lines.bomId` (the approved BOM its materials come from, SET NULL).
+- `manufacturing_orders.closedAt`, `closedById`, `closeReason`: closed with a
+  reason, never deleted.
+- `finished_goods_receipts.moId`: packed garments booked in against a
+  manufacturing order, which is how its packed pieces are counted.
+
+Nothing is dropped and no row changes (no manufacturing orders existed).
+
 ## 10 Oct 2026 — payments received from customers
 
 **Migration:** `20261010180000_sales_receipts`

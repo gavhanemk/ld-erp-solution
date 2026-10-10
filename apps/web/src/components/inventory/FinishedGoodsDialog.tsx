@@ -76,12 +76,37 @@ export function FinishedGoodsDialog({
   const [warehouseId, setWarehouseId] = useState('')
   const [receiptDate, setReceiptDate] = useState(today())
   const [soId, setSoId] = useState('')
+  /** The manufacturing order packed for, among the order's open ones. */
+  const [moId, setMoId] = useState('')
+  const [mos, setMos] = useState<Array<{ id: string; moNumber: string; totalPlannedQty: number; totalPackedQty: number }>>([])
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<LineDraft[]>([blankLine()])
   const [rates, setRates] = useState<Record<string, Rate>>({})
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  /*
+   * An order picked: its manufacturing orders on the floor, so the pieces
+   * count as packed against the right one. With exactly one, it is picked.
+   * Someone without production rights simply does not see the box.
+   */
+  const pickOrder = (id: string) => {
+    setSoId(id)
+    setMoId('')
+    setMos([])
+    if (!id) return
+    api
+      .get<{ data: Array<{ id: string; moNumber: string; status: string; totalPlannedQty: number; totalPackedQty: number }> }>(
+        `/production/orders?soId=${id}&limit=50`
+      )
+      .then((res) => {
+        const live = res.data.filter((m) => !['DRAFT', 'CLOSED', 'COMPLETED'].includes(m.status))
+        setMos(live)
+        if (live.length === 1) setMoId(live[0].id)
+      })
+      .catch(() => {})
+  }
 
   useEffect(() => {
     if (!open) return
@@ -103,6 +128,8 @@ export function FinishedGoodsDialog({
     setError(null)
     setReceiptDate(today())
     setSoId('')
+    setMoId('')
+    setMos([])
     setNotes('')
     setLines([blankLine()])
     setRates({})
@@ -195,6 +222,7 @@ export function FinishedGoodsDialog({
       receiptDate,
       warehouseId,
       soId: soId || null,
+      moId: moId || null,
       notes: notes.trim() || null,
       lines: filled.flatMap((p): Array<{ itemId: string; sizeId: string | null; qty: number }> =>
         p.run
@@ -272,7 +300,7 @@ export function FinishedGoodsDialog({
                   </label>
                   <label className="min-w-0">
                     <span className="form-label">Packed for order (optional)</span>
-                    <SmartSelect className="form-input" value={soId} onChange={(e) => setSoId(e.target.value)}>
+                    <SmartSelect className="form-input" value={soId} onChange={(e) => pickOrder(e.target.value)}>
                       <option value="">Not for one order</option>
                       {orders.map((o) => (
                         <option key={o.id} value={o.id}>
@@ -281,6 +309,19 @@ export function FinishedGoodsDialog({
                       ))}
                     </SmartSelect>
                   </label>
+                  {mos.length > 0 && (
+                    <label className="min-w-0">
+                      <span className="form-label">Manufacturing order</span>
+                      <SmartSelect className="form-input" value={moId} onChange={(e) => setMoId(e.target.value)}>
+                        <option value="">Not against one</option>
+                        {mos.map((m) => (
+                          <option key={m.id} value={m.id} data-sub={`${m.totalPackedQty} of ${m.totalPlannedQty} pcs packed`}>
+                            {m.moNumber}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </label>
+                  )}
                   <label className="min-w-0 md:col-span-3">
                     <span className="form-label">Notes</span>
                     <input className="form-input" maxLength={500} value={notes} placeholder="Carton numbers, packing lot" onChange={(e) => setNotes(e.target.value)} />

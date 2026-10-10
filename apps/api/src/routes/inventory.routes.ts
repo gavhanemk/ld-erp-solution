@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import type { z } from 'zod'
 import { prisma, Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { isAdmin, requirePermission, userCan, type AuthRequest } from '../middleware/auth'
@@ -1294,72 +1295,83 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
   res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys, reservations } })
 })
 
+/**
+ * Raises a requisition inside the caller's transaction. Shared by the store's
+ * own form and by production, which raises them from a manufacturing order's
+ * material plan, so both are checked and numbered the same way.
+ */
+export async function createRequisition(
+  tx: Prisma.TransactionClient,
+  data: z.infer<typeof createRequisitionSchema>,
+  userId: string,
+) {
+  // Each line's store: its own, or the requisition's when the caller sent one for all.
+  const storeOf = (l: (typeof data.lines)[number]) => (l.warehouseId || data.warehouseId)!
+  const storeIds = [...new Set(data.lines.map(storeOf))]
+  const [department, stores] = await Promise.all([
+    tx.department.findUnique({ where: { id: data.departmentId } }),
+    tx.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true } }),
+  ])
+  if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
+  if (stores.length !== storeIds.length) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+
+  const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
+  if (owners.length) {
+    const found = await tx.customer.count({ where: { id: { in: owners } } })
+    if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
+  }
+
+  if (data.soId) {
+    const so = await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true } })
+    if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
+  }
+
+  // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
+  const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
+  const styleIdOf = new Map(
+    (typedStyles.length
+      ? await tx.style.findMany({ where: { code: { in: typedStyles, mode: 'insensitive' } }, select: { id: true, code: true } })
+      : []
+    ).map((st) => [st.code.toLowerCase(), st.id]),
+  )
+
+  const mrNumber = await nextDocumentNumber(tx, 'MR')
+
+  return tx.materialRequisition.create({
+    data: {
+      mrNumber,
+      departmentId: data.departmentId,
+      moId: data.moId || null,
+      soId: data.soId || null,
+      requiredDate: data.requiredDate ?? null,
+      notes: data.notes ?? null,
+      raisedById: userId,
+      lines: {
+        create: data.lines.map((l) => ({
+          itemId: l.itemId,
+          requestedQty: l.requestedQty,
+          // Whose material this line draws. Without it a request for a
+          // customer's fabric would be issued out of our own balance of the
+          // same cloth.
+          ownership: l.ownership ?? 'OWNED',
+          ownerCustomerId: l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null,
+          // The store this line is asked of. The form picks it per item,
+          // from the stores that hold it; issuing and the slip read it here.
+          warehouseId: storeOf(l),
+          purpose: l.purpose ?? null,
+          styleNo: l.styleNo?.trim() || null,
+          styleId: (l.styleNo && styleIdOf.get(l.styleNo.trim().toLowerCase())) || null,
+        })),
+      },
+    },
+    include: mrInclude,
+  })
+}
+
 router.post('/requisitions', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createRequisitionSchema.parse(req.body)
 
-  const mr = await prisma.$transaction(async (tx) => {
-    // Each line's store: its own, or the requisition's when the caller sent one for all.
-    const storeOf = (l: (typeof data.lines)[number]) => (l.warehouseId || data.warehouseId)!
-    const storeIds = [...new Set(data.lines.map(storeOf))]
-    const [department, stores] = await Promise.all([
-      tx.department.findUnique({ where: { id: data.departmentId } }),
-      tx.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true } }),
-    ])
-    if (!department) throw new AppError('That department does not exist', 404, 'NOT_FOUND')
-    if (stores.length !== storeIds.length) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
-
-    const owners = [...new Set(data.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomerId!))]
-    if (owners.length) {
-      const found = await tx.customer.count({ where: { id: { in: owners } } })
-      if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
-    }
-
-    if (data.soId) {
-      const so = await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true } })
-      if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
-    }
-
-    // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
-    const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
-    const styleIdOf = new Map(
-      (typedStyles.length
-        ? await tx.style.findMany({ where: { code: { in: typedStyles, mode: 'insensitive' } }, select: { id: true, code: true } })
-        : []
-      ).map((st) => [st.code.toLowerCase(), st.id]),
-    )
-
-    const mrNumber = await nextDocumentNumber(tx, 'MR')
-
-    return tx.materialRequisition.create({
-      data: {
-        mrNumber,
-        departmentId: data.departmentId,
-        moId: data.moId || null,
-        soId: data.soId || null,
-        requiredDate: data.requiredDate ?? null,
-        notes: data.notes ?? null,
-        raisedById: req.user!.id,
-        lines: {
-          create: data.lines.map((l) => ({
-            itemId: l.itemId,
-            requestedQty: l.requestedQty,
-            // Whose material this line draws. Without it a request for a
-            // customer's fabric would be issued out of our own balance of the
-            // same cloth.
-            ownership: l.ownership ?? 'OWNED',
-            ownerCustomerId: l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null,
-            // The store this line is asked of. The form picks it per item,
-            // from the stores that hold it; issuing and the slip read it here.
-            warehouseId: storeOf(l),
-            purpose: l.purpose ?? null,
-            styleNo: l.styleNo?.trim() || null,
-            styleId: (l.styleNo && styleIdOf.get(l.styleNo.trim().toLowerCase())) || null,
-          })),
-        },
-      },
-      include: mrInclude,
-    })
-  })
+  const mr = await prisma.$transaction((tx) => createRequisition(tx, data, req.user!.id))
 
   await writeAuditLog(req, {
     module: MODULE,

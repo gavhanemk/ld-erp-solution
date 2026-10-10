@@ -15,11 +15,12 @@ import {
   Printer,
   Ruler,
   Scissors,
+  Factory,
   ShoppingBag,
   Truck,
   X,
 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -236,7 +237,9 @@ export function SalesOrderDetailDialog({
   const look = o ? salesOrderStatus(o) : null
   const dispatched = o ? o.lines.reduce((s, l) => s + Number(l.deliveredQty), 0) : 0
   const pieces = o ? o.lines.reduce((s, l) => s + Number(l.totalQty), 0) : 0
-  const started = o ? o.manufacturingOrders.length > 0 || o.deliveryChallans.length > 0 || dispatched > 0 : false
+  const started = o
+    ? o.manufacturingOrders.some((m) => m.status !== 'CLOSED') || o.deliveryChallans.length > 0 || dispatched > 0
+    : false
   const late =
     o && o.deliveryDate && OPEN_ORDER_STATUSES.includes(o.status) && new Date(o.deliveryDate) < new Date(new Date().toDateString())
   const rejected = o?.status === 'CANCELLED' && !o.approvedAt && !!o.sentForApprovalAt
@@ -421,6 +424,11 @@ export function SalesOrderDetailDialog({
                 <button className="btn-primary" onClick={() => void confirm()} disabled={busy}>
                   {busy ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Confirm order
                 </button>
+              )}
+              {o && OPEN_ORDER_STATUSES.includes(o.status) && can('production', 'create') && (
+                <a className="btn-secondary" href={`/production/orders?make=${o.id}`} title="Raise a manufacturing order for what is still to make">
+                  <Factory size={15} /> Plan production
+                </a>
               )}
               {o && orderCan.dispatch(o) && dispatched < pieces && (
                 <a className="btn-primary" href={dispatchHref(o.id)} title="Raise a delivery challan for what is still to send">

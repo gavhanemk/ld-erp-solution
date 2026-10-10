@@ -308,6 +308,7 @@ model User {
   salesInvoicesRaised    SalesInvoice[]            @relation("SICreatedBy")
   salesInvoicesCancelled SalesInvoice[]            @relation("SICancelledBy")
   receiptsRecorded       PaymentReceipt[]          @relation("ReceiptCreatedBy")
+  mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
   receiptsReversed       PaymentReceipt[]          @relation("ReceiptReversedBy")
   uploadedReceiptFiles   PaymentReceiptAttachment[] @relation("ReceiptAttachmentUploadedBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
@@ -792,6 +793,7 @@ model BOM {
   lines     BOMLine[]
   costLines BOMCostLine[]
   copies    BOM[]         @relation("BOMCopy")
+  moLines   MOLine[]
 
   // White v1.0 and Dusty Blue v1.0 of the same style are two different BOMs.
   // Postgres counts two blank colours as different, so two colourless BOMs at
@@ -1270,6 +1272,8 @@ model SalesOrderLine {
   challanLines DeliveryChallanLine[]
   /// What has been billed against this line, invoice by invoice.
   invoiceLines SalesInvoiceLine[]
+  /// What has been planned for the factory against this line.
+  moLines      MOLine[]
 
   @@map("sales_order_lines")
 }
@@ -1463,6 +1467,9 @@ model FinishedGoodsReceipt {
   /// The order it was packed for, when it was packed for one.
   soId          String?
   so            SalesOrder? @relation("FGRSalesOrder", fields: [soId], references: [id])
+  /// The manufacturing order these were packed for, when there is one.
+  moId          String?
+  mo            ManufacturingOrder? @relation("FGRManufacturingOrder", fields: [moId], references: [id])
   notes         String?
   createdById   String
   createdBy     User       @relation("FGRCreatedBy", fields: [createdById], references: [id])
@@ -2964,8 +2971,15 @@ model ManufacturingOrder {
   createdBy        User        @relation("MOCreatedBy", fields: [createdById], references: [id])
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
+  /// Called off before or during the work, with a reason. Status CLOSED.
+  closedAt         DateTime?
+  closedById       String?
+  closedBy         User?       @relation("MOClosedBy", fields: [closedById], references: [id])
+  closeReason      String?
 
   lines                MOLine[]
+  /// Packed garments booked in against it, which count as its packed pieces.
+  fgReceipts           FinishedGoodsReceipt[] @relation("FGRManufacturingOrder")
   materialRequisitions MaterialRequisition[]
   cuttingOrders        CuttingOrder[]
   productionEntries    ProductionEntry[]
@@ -2988,9 +3002,16 @@ model MOLine {
   /// line references one, not fixed here.
   color       String
   totalQty    Int
+  /// The sales order line this makes, so planned pieces reconcile to the order.
+  soLineId    String?
+  soLine      SalesOrderLine? @relation(fields: [soLineId], references: [id], onDelete: SetNull)
+  /// The approved BOM the materials are worked out from, as it was chosen.
+  bomId       String?
+  bom         BOM?            @relation(fields: [bomId], references: [id], onDelete: SetNull)
 
   sizes MOLineSize[]
 
+  @@index([soLineId])
   @@map("mo_lines")
 }
 

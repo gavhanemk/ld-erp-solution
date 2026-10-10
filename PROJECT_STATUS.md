@@ -1,9 +1,46 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sat 10 Oct 2026 — Sales Phase 3, payments received (branch `feat/sales-dispatch`)_
+_Last updated: Sat 10 Oct 2026 — Order to factory: manufacturing orders from sales orders (branch `feat/production-orders`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Order to factory — manufacturing orders (Sat 10 Oct)
+
+The link between a confirmed sales order and Finished Goods In, which had
+been manual. Branch `feat/production-orders`, stacked on `feat/sales-dispatch`.
+
+**Built:**
+
+- **Manufacturing order from a sales order** (`/production/orders`, New MO, or
+  Plan production on the order list and detail): the order's lines come in
+  with their style, colour and approved BOM, and per size what is ordered,
+  already planned and left. A line's style is the item's own, or the style
+  no. typed on the order line when it is a style in the master. Draft, then
+  Release — which puts the sales order In production. Close with a reason
+  frees its pieces and, if nothing else is being made, puts the order back to
+  Confirmed.
+- **Material plan from the BOM**: pieces by size × the BOM's quantity per
+  piece for that size (wastage included), grouped by material, by whose it is
+  (customer-supplied lines draw on the customer's stock) and by the BOM
+  line's department; against stock, store by store, and what is already asked.
+- **Raise requisitions** in one press: one per department, into the existing
+  approve → issue / buy flow (`createRequisition` is now shared with the
+  store's own form).
+- **Packed** = Finished Goods In against the MO (new MO picker on that form).
+  Fully packed → Completed; a cancelled receipt reopens it.
+- Order cancel / short-close and challan status ignore draft and closed MOs.
+
+**To make it work on real data:** link the finished-goods items to their style
+and colour (none are), or type the style no. on each order line; and approve a
+BOM for each style-colour sold (5 approved today).
+
+**Not yet:** the shop-floor steps that follow the routing (cutting, stitching,
+QC, packing entries) — the MO statuses for them exist but nothing moves them.
+
+**Migration:** `20261010210000_mo_from_sales_order`.
 
 ---
 

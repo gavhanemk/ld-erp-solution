@@ -429,7 +429,7 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
 
   const order = await tx.salesOrder.findUniqueOrThrow({
     where: { id: dc.soId },
-    select: { status: true, lines: { select: { pendingQty: true, deliveredQty: true } }, _count: { select: { manufacturingOrders: true } } },
+    select: { status: true, lines: { select: { pendingQty: true, deliveredQty: true } }, _count: { select: { manufacturingOrders: { where: { status: { notIn: ['DRAFT', 'CLOSED'] } } } } } },
   })
   const status = statusAfter(
     order.status,
@@ -641,7 +641,7 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
     }
     const order = await tx.salesOrder.findUniqueOrThrow({
       where: { id: before.soId },
-      select: { status: true, shortClosedAt: true, lines: { select: { pendingQty: true, deliveredQty: true } }, _count: { select: { manufacturingOrders: true } } },
+      select: { status: true, shortClosedAt: true, lines: { select: { pendingQty: true, deliveredQty: true } }, _count: { select: { manufacturingOrders: { where: { status: { notIn: ['DRAFT', 'CLOSED'] } } } } } },
     })
     // A short-closed order stays closed: what came back goes to stock.
     if (!order.shortClosedAt) {

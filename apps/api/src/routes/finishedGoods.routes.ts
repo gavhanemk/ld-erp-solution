@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { recordMovement } from '../services/stock.service'
+import { syncMoPacked } from '../services/manufacturing.service'
 
 /**
  * Finished goods in: packed garments going into the finished-goods store.
@@ -39,6 +40,8 @@ const createSchema = z
     receiptDate: z.coerce.date().optional(),
     warehouseId: z.string().min(1, 'Pick the finished-goods store'),
     soId: z.string().optional().nullable(),
+    /** The manufacturing order these were packed for; their pieces count as its packed. */
+    moId: z.string().optional().nullable(),
     notes: z.string().max(500).optional().nullable(),
     lines: z.array(lineSchema).min(1, 'Add at least one item'),
   })
@@ -162,6 +165,7 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
 const receiptInclude = {
   warehouse: { select: { id: true, name: true } },
   so: { select: { id: true, soNumber: true, customer: { select: { name: true } } } },
+  mo: { select: { id: true, moNumber: true } },
   createdBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
   lines: {
@@ -253,6 +257,20 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
         : []
       const sizeById = new Map(sizes.map((s) => [s.id, s]))
 
+      // Packed for a manufacturing order: it has to be released and not
+      // finished, and its sales order is the one these are for.
+      if (data.moId) {
+        const mo = await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { moNumber: true, status: true, soId: true } })
+        if (!mo) throw new AppError('That manufacturing order does not exist', 400, 'BAD_MO')
+        if (mo.status === 'DRAFT' || mo.status === 'CLOSED') {
+          throw new AppError(`${mo.moNumber} is ${mo.status === 'DRAFT' ? 'still a draft' : 'closed'}, so nothing is packed for it`, 400, 'MO_NOT_OPEN')
+        }
+        if (data.soId && mo.soId && data.soId !== mo.soId) {
+          throw new AppError(`${mo.moNumber} is for another sales order`, 400, 'WRONG_ORDER')
+        }
+        data.soId = data.soId ?? mo.soId
+      }
+
       // Packed for an order: it has to be one still being made, and every
       // garment on the receipt has to be on it.
       if (data.soId) {
@@ -312,6 +330,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           receiptDate,
           warehouseId: data.warehouseId,
           soId: data.soId ?? null,
+          moId: data.moId ?? null,
           notes: data.notes ?? null,
           createdById: req.user!.id,
           lines: {
@@ -345,6 +364,7 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           notes: `Finished goods in, ${fgrNumber}`,
         })
       }
+      if (created.moId) await syncMoPacked(tx, created.moId)
       return created
     },
     { timeout: 30_000 },
@@ -392,6 +412,8 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         data: { cancelledAt: new Date(), cancelledById: req.user!.id, cancelReason: reason },
         include: receiptInclude,
       })
+      // Its pieces come off the manufacturing order's packed again.
+      if (after.moId) await syncMoPacked(tx, after.moId)
       return { before, after }
     },
     { timeout: 30_000 },
