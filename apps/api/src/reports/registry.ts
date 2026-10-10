@@ -10,6 +10,7 @@ import { grnAgainstBill } from './definitions/grn-against-bill'
 import { purchasesByItem } from './definitions/purchases-by-item'
 import { expenseRegister } from './definitions/expense-register'
 import { grnQcRegister, qcRejections } from './definitions/grn-qc'
+import { SALES_REPORTS } from './definitions/sales'
 
 /**
  * Every report the ERP knows about.
@@ -30,6 +31,7 @@ export const REPORTS: ReportDefinition[] = [
   indentAgainstPo,
   supplierOutstanding,
   noteRegister,
+  ...SALES_REPORTS,
 ]
 
 export function findReport(id: string): ReportDefinition | undefined {

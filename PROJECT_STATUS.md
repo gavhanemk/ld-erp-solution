@@ -1,9 +1,35 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sat 10 Oct 2026 — Order to factory: manufacturing orders from sales orders (branch `feat/production-orders`)_
+_Last updated: Sun 11 Oct 2026 — Sales Phase 4: quotations, returns, dashboard, reports — Sales complete (branch `feat/sales-phase4`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Sales Phase 4 — Sales complete (Sun 11 Oct)
+
+Branch `feat/sales-phase4`, stacked on `feat/production-orders`.
+
+- **Quotations** (`/sales/quotations`): draft → sent → won / lost (with why),
+  expired when past valid-until. Priced by the order's own `prepareOrder`;
+  each line shows the BOM cost, BOM price and margin. Convert to order opens
+  the order form filled in; saving marks the quotation won. Print. Needs a
+  **QT** number series.
+- **Returns & credit notes** (`/sales/returns`, and Return / credit note on an
+  invoice): goods back by size into a store at the invoice's own rate and GST,
+  or an amount off a line. Reduces the invoice; beyond what it owed, held as
+  the customer's credit (counted with advances in outstanding and the credit
+  check). Nothing returned or credited twice. Cancel takes goods back out.
+  GST credit note print. Uses the **CN** series.
+- **Sales dashboard** (`/sales/dashboard`): this month booked, dispatched,
+  invoiced, received; still to send; owed and overdue; six-month chart; top
+  customers; orders due in two weeks; overdue invoices; things to act on.
+- **Reports** (Reports → Sales): Sales Register, Order Book, Dispatch Register,
+  Customer Outstanding (ageing), Brokerage (base still to confirm with the
+  accountant), Sales Returns, Outward Supplies by HSN (GSTR-1).
+
+Migration `20261011090000_sales_quotes_and_credit_notes`.
 
 ---
 

@@ -7,6 +7,26 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 11 Oct 2026 — sales quotations and credit notes
+
+**Migration:** `20261011090000_sales_quotes_and_credit_notes`
+**Branch:** `feat/sales-phase4` (stacked on `feat/production-orders`)
+**Status: applied to the shared database with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- New `sales_quotations` and `sales_quotation_lines` (with `bomCost`, the
+  BOM cost per piece when quoted). `sales_orders.quotationId` (SET NULL).
+- `credit_notes`: `type` (RETURN / ADJUSTMENT, default RETURN), `warehouseId`,
+  `placeOfSupplyCode`, `taxableAmount`, `onAccount`, `createdById`, cancel
+  fields. `credit_note_lines`: `invoiceLineId`, `cgst`, `sgst`, `igst`. New
+  `credit_note_line_sizes`.
+- `sales_invoices.creditedAmount`, default 0.
+
+Nothing is dropped and no row changes (no quotations or credit notes existed).
+Quotations need a **QT** number series; credit notes use the existing **CN**.
+
 ## 10 Oct 2026 — manufacturing orders raised from sales orders
 
 **Migration:** `20261010210000_mo_from_sales_order`
