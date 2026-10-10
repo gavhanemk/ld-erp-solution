@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "node scripts/build.cjs",
     "start": "node dist/apps/api/src/index.js",
     "type-check": "tsc --noEmit"
   },

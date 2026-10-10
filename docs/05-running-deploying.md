@@ -210,6 +210,15 @@ Not fine for the mill — the first person to sign in each morning waits half a
 minute at a screen that gives no reason. Move to the paid plan before staff
 use it.
 
+Note on the build: `pnpm --filter api build` runs
+[apps/api/scripts/build.cjs](../apps/api/scripts/build.cjs), not `tsc`. A full
+`tsc` reads the Prisma client's generated types and needs about 950 MB, and
+the free plan has 512 MB; after the Sales module's tables were added (10 Oct
+2026) the deploy never came up and the site answered "Route not found" on the
+new screens. The script writes the same JavaScript one file at a time in
+under 200 MB. It does not look for type errors: run
+`pnpm --filter api type-check` before merging.
+
 ### Database changes going live
 
 Migrations do **not** run automatically. After merging a schema change:
