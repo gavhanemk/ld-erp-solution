@@ -291,7 +291,16 @@ export function QuotationDialog({
         const linked = st ? (st.items.find((i) => same(i.color, colour)) ?? st.items.find((i) => !i.color) ?? (st.items.length === 1 ? st.items[0] : undefined)) : undefined
         const sibling = ls.find((o) => o.key !== key && o.itemId && same(o.styleCode, styleCode))
         const bom = st ? pickBom(st.boms, colour) : null
-        const next: LineDraft = { ...l, styleCode, color: colour, itemId: linked?.id ?? sibling?.itemId ?? l.itemId }
+        // Without a linked item, the item whose name carries the style's
+        // garment type ("Trouser" → Men's Cotton Trouser) when only one does.
+        // The item already on the line stays only while it is that garment,
+        // so a trouser style is never left billed as a shirt.
+        const garment = st?.category?.trim().toLowerCase() ?? ''
+        const fits = (id: string) => !garment || (itemById.get(id)?.name.toLowerCase().includes(garment) ?? false)
+        const byType = garment ? items.filter((i) => i.name.toLowerCase().includes(garment)) : []
+        const kept = l.itemId && (same(l.styleCode, styleCode) || fits(l.itemId)) ? l.itemId : ''
+        const itemId = linked?.id ?? sibling?.itemId ?? (kept || (byType.length === 1 ? byType[0].id : ''))
+        const next: LineDraft = { ...l, styleCode, color: colour, itemId }
         if (l.rateFromBom || !l.unitPrice.trim()) {
           next.unitPrice = bom?.price != null ? String(bom.price) : l.rateFromBom ? '' : l.unitPrice
           next.rateFromBom = true
@@ -557,12 +566,24 @@ export function QuotationDialog({
                             <td>
                               <SmartSelect className={cell} value={p.l.itemId} onChange={(e) => setLine(p.l.key, { itemId: e.target.value })} aria-label={`Row ${i + 1} item billed as`}>
                                 <option value="">Choose the item</option>
-                                {items.map((it) => (
-                                  <option key={it.id} value={it.id} data-sub={it.code}>
-                                    {it.name}
-                                    {it.color ? ` (${it.color})` : ''}
-                                  </option>
-                                ))}
+                                {(() => {
+                                  // The style's own garment type first: a trouser style lists the trousers on top.
+                                  const garment = st?.category?.trim() ?? ''
+                                  const opt = (it: ItemOption) => (
+                                    <option key={it.id} value={it.id} data-sub={it.code}>
+                                      {it.name}
+                                      {it.color ? ` (${it.color})` : ''}
+                                    </option>
+                                  )
+                                  const match = garment ? items.filter((it) => it.name.toLowerCase().includes(garment.toLowerCase())) : []
+                                  if (!match.length) return items.map(opt)
+                                  return (
+                                    <>
+                                      <optgroup label={garment}>{match.map(opt)}</optgroup>
+                                      <optgroup label="Other items">{items.filter((it) => !match.includes(it)).map(opt)}</optgroup>
+                                    </>
+                                  )
+                                })()}
                               </SmartSelect>
                             </td>
                             <td>
