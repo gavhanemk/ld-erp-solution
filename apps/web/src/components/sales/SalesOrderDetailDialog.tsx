@@ -16,6 +16,7 @@ import {
   Ruler,
   Scissors,
   ShoppingBag,
+  Truck,
   X,
 } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
@@ -24,7 +25,7 @@ import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { OrderLinesView, type OrderLineView } from './OrderLinesView'
 import { OPEN_ORDER_STATUSES, salesOrderStatus } from './status'
-import { confirmOrder, orderCan, postReasonAction, REASON_ACTIONS, type ReasonAction } from './orderActions'
+import { confirmOrder, dispatchHref, orderCan, postReasonAction, REASON_ACTIONS, type ReasonAction } from './orderActions'
 
 interface Person {
   id: string
@@ -416,8 +417,13 @@ export function SalesOrderDetailDialog({
                   {busy ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Confirm order
                 </button>
               )}
+              {o && orderCan.dispatch(o) && dispatched < pieces && (
+                <a className="btn-primary" href={dispatchHref(o.id)} title="Raise a delivery challan for what is still to send">
+                  <Truck size={15} /> Dispatch
+                </a>
+              )}
               {o && orderCan.amend(o) && (
-                <button className="btn-primary" onClick={() => onAmend(o.id)} disabled={busy}>
+                <button className="btn-secondary" onClick={() => onAmend(o.id)} disabled={busy}>
                   <FilePenLine size={15} /> Amend
                 </button>
               )}

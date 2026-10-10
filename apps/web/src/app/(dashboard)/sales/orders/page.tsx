@@ -19,6 +19,7 @@ import {
   Ruler,
   Scissors,
   Search,
+  Truck,
 } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
@@ -45,6 +46,7 @@ import {
   postReasonAction,
   REASON_ACTIONS,
   confirmOrder,
+  dispatchHref,
   type ReasonAction,
 } from '@/components/sales/orderActions'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -460,6 +462,9 @@ export default function SalesOrdersPage() {
         icon: <CheckCircle2 size={15} />,
         onClick: () => void confirm(o),
       })
+    }
+    if (orderCan.dispatch(o) && o.pending > 0) {
+      items.push({ key: 'dispatch', label: 'Dispatch', icon: <Truck size={15} />, href: dispatchHref(o.id) })
     }
     if (orderCan.amend(o)) {
       items.push({

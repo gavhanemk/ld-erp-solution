@@ -32,7 +32,12 @@ export const orderCan = {
     (o.status === 'DRAFT' && can('sales', 'edit')) || (o.status === 'CONFIRMED' && can('sales', 'approve')),
   /** Once work has started: ends the order at what was sent. */
   shortClose: (o: OrderLike) => OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'approve'),
+  /** Confirmed and not finished: goods go out on a delivery challan. */
+  dispatch: (o: OrderLike) => OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'create'),
 }
+
+/** Where a dispatch against one order starts: the challan form, opened for it. */
+export const dispatchHref = (orderId: string) => `/sales/challan?dispatch=${orderId}`
 
 export type ReasonAction = 'cancel' | 'short-close' | 'release'
 

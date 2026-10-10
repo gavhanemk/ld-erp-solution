@@ -1,9 +1,45 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Fri 9 Oct 2026 — Sales orders, Phase 1 (branch `feat/sales-orders`)_
+_Last updated: Sat 10 Oct 2026 — Sales dispatch, Phase 2 (branch `feat/sales-dispatch`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Sales dispatch — Phase 2, steps 1–3 (Sat 10 Oct)
+
+Stacked on Phase 1 (branch `feat/sales-dispatch`, from `feat/sales-orders`).
+
+**Built:**
+
+- **Stock by size.** `stock_ledger.sizeId`; `stock.service` keys every balance,
+  lock and FIFO cost by size as well (a fabric's is null, as before). The 48
+  existing balances read the same afterwards.
+- **Finished goods in** (`/inventory/finished-goods`, Inventory rights): packed
+  garments into a store, by size, valued at the approved BOM's cost per piece
+  for that colour, else the item's standard rate. Needs an **FGR** number series
+  made in Settings → Documents before first use.
+- **Delivery challan** (`/sales/challan`, sidebar Sales → Delivery Challan):
+  "Waiting to dispatch" lists confirmed orders with pieces to send, soonest due
+  first; "Challans" lists every challan with print, dispatch a draft, mark
+  delivered and cancel. The form shows per size what is pending and what is in
+  the chosen store, with "Fill what can go". Over-sending needs a note; more
+  than is in stock is refused. Save as draft takes nothing; Dispatch takes the
+  pieces out of stock and moves the order to part dispatched / completed.
+  Cancelling a dispatched challan puts the pieces back. E-way bill number is
+  typed in; the form says when the consignment is over ₹50,000.
+- **Challan print** (`/print/delivery-challan/[id]`), heading from Settings →
+  Documents → DC (JW for a job-work order). No rates per line; the
+  consignment value is printed once.
+- A **Dispatch** button on the order list and order detail opens the challan
+  form for that order. Amending an order cannot drop a line that is on a
+  live challan, or a size below what has gone.
+
+**Migration:** `20261009180000_sales_dispatch_and_fg_stock`, applied to the
+shared database — see MIGRATION-NOTES.md.
+
+**Next:** step 4, the invoice raised from a dispatched challan (no IRN).
 
 ---
 

@@ -79,7 +79,7 @@ const navItems: NavItem[] = [
     label: 'Sales', icon: ShoppingCart,
     children: [
       { label: 'Sales Orders', href: '/sales/orders' },
-      { label: 'Delivery Challan', href: '/sales/challan', planned: true },
+      { label: 'Delivery Challan', href: '/sales/challan' },
       { label: 'Invoices', href: '/sales/invoices', planned: true },
       { label: 'Payments Received', href: '/sales/payments', planned: true },
     ],

@@ -45,3 +45,18 @@ export function salesOrderStatus(order: {
   }
   return SALES_ORDER_STATUS[order.status] ?? { label: order.status, cls: 'badge-neutral' }
 }
+
+/**
+ * A delivery challan's status. Dispatched is on its way, so it reads as under
+ * way rather than done; delivered is done.
+ */
+export const CHALLAN_STATUS: Record<string, StatusLook> = {
+  DRAFT: { label: 'Draft', cls: 'badge-info' },
+  DISPATCHED: { label: 'Dispatched', cls: 'badge-warning' },
+  DELIVERED: { label: 'Delivered', cls: 'badge-success' },
+  RETURNED: { label: 'Returned', cls: 'badge-danger' },
+  CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
+}
+
+export const challanStatus = (status: string): StatusLook =>
+  CHALLAN_STATUS[status] ?? { label: status, cls: 'badge-neutral' }
