@@ -3,6 +3,7 @@ import { prisma } from '@ld-erp/database'
 import { reorderStatus } from '../services/stock.service'
 import { AuthRequest, userCan } from '../middleware/auth'
 import { getNumericPreference } from '../lib/preferences'
+import { homeDashboard } from '../services/homeDashboard.service'
 
 const router = Router()
 
@@ -379,6 +380,26 @@ router.get('/pending-approvals', async (req, res) => {
     .slice(0, limit)
 
   res.json({ success: true, data: approvals })
+})
+
+// GET /api/dashboard/overview?days=30
+// The home screen in one call: every module the signed-in role may see, where
+// it stands now and what moved in the period. A module the role may not see
+// comes back null, and money owed either way is accounts only, as above.
+router.get('/overview', async (req: AuthRequest, res) => {
+  const data = await homeDashboard({
+    days: Number(req.query.days) || 30,
+    access: {
+      sales: userCan(req.user, 'sales', 'view'),
+      purchase: userCan(req.user, 'purchase', 'view'),
+      inventory: userCan(req.user, 'inventory', 'view'),
+      production: userCan(req.user, 'production', 'view'),
+      money: userCan(req.user, 'accounts', 'view'),
+      masters: userCan(req.user, 'masters', 'view'),
+      settings: userCan(req.user, 'settings', 'view'),
+    },
+  })
+  res.json({ success: true, data })
 })
 
 export default router
