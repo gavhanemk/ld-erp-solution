@@ -1,9 +1,212 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 28 Sep 2026 — BOM costing and pricing_
+_Last updated: Sun 11 Oct 2026 — Sales Phase 4: quotations, returns, dashboard, reports — Sales complete (branch `feat/sales-phase4`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Sales Phase 4 — Sales complete (Sun 11 Oct)
+
+Branch `feat/sales-phase4`, stacked on `feat/production-orders`.
+
+- **Quotations** (`/sales/quotations`): draft → sent → won / lost (with why),
+  expired when past valid-until. Priced by the order's own `prepareOrder`.
+  Each line starts from the **style** (dropdown, with "+ Add new style" opening
+  the Masters → Styles form over the quotation): picking style and colour fills
+  the rate with the BOM's selling price (approved BOM first, else a draft; the
+  colour's BOM, else the all-colours one) and the item to bill with the item
+  linked to that style. The margin over the BOM cost shows under the rate. Convert to order opens
+  the order form filled in; saving marks the quotation won. Print. Needs a
+  **QT** number series.
+- **Returns & credit notes** (`/sales/returns`, and Return / credit note on an
+  invoice): goods back by size into a store at the invoice's own rate and GST,
+  or an amount off a line. Reduces the invoice; beyond what it owed, held as
+  the customer's credit (counted with advances in outstanding and the credit
+  check). Nothing returned or credited twice. Cancel takes goods back out.
+  GST credit note print. Uses the **CN** series.
+- **Sales dashboard** (`/sales/dashboard`), built like the Purchase one:
+  period 7D/30D/90D/1Y with brand and customer filters; highlights; tiles for
+  booked, invoiced, collected (with sparklines and change on the period
+  before), order book, customers owe (ageing bar) and sent on time; a pulse
+  strip; sales over time; bookings by customer; a "Needs attention" list
+  (late, due soon, overdue payments, sent not billed, quotes lapsing, credit
+  hold); quotation-to-cash steps; ageing; when orders are due; quotation win
+  rate; bookings by style (treemap); size mix (radar); best-selling styles and
+  colours; brand and order type; salesperson / broker; customer scorecard.
+  `salesDashboard(db, query)` is exported for rolled-back tests.
+- **Reports** (Reports → Sales): Sales Register, Order Book, Dispatch Register,
+  Customer Outstanding (ageing), Brokerage (base still to confirm with the
+  accountant), Sales Returns, Outward Supplies by HSN (GSTR-1).
+
+Migration `20261011090000_sales_quotes_and_credit_notes`.
+
+---
+
+## Order to factory — manufacturing orders (Sat 10 Oct)
+
+The link between a confirmed sales order and Finished Goods In, which had
+been manual. Branch `feat/production-orders`, stacked on `feat/sales-dispatch`.
+
+**Built:**
+
+- **Manufacturing order from a sales order** (`/production/orders`, New MO, or
+  Plan production on the order list and detail): the order's lines come in
+  with their style, colour and approved BOM, and per size what is ordered,
+  already planned and left. A line's style is the item's own, or the style
+  no. typed on the order line when it is a style in the master. Draft, then
+  Release — which puts the sales order In production. Close with a reason
+  frees its pieces and, if nothing else is being made, puts the order back to
+  Confirmed.
+- **Material plan from the BOM**: pieces by size × the BOM's quantity per
+  piece for that size (wastage included), grouped by material, by whose it is
+  (customer-supplied lines draw on the customer's stock) and by the BOM
+  line's department; against stock, store by store, and what is already asked.
+- **Raise requisitions** in one press: one per department, into the existing
+  approve → issue / buy flow (`createRequisition` is now shared with the
+  store's own form).
+- **Packed** = Finished Goods In against the MO (new MO picker on that form).
+  Fully packed → Completed; a cancelled receipt reopens it.
+- Order cancel / short-close and challan status ignore draft and closed MOs.
+
+**To make it work on real data:** link the finished-goods items to their style
+and colour (none are), or type the style no. on each order line; and approve a
+BOM for each style-colour sold (5 approved today).
+
+**Not yet:** the shop-floor steps that follow the routing (cutting, stitching,
+QC, packing entries) — the MO statuses for them exist but nothing moves them.
+
+**Migration:** `20261010210000_mo_from_sales_order`.
+
+---
+
+## Sales dispatch — Phase 2, steps 1–3 (Sat 10 Oct)
+
+Stacked on Phase 1 (branch `feat/sales-dispatch`, from `feat/sales-orders`).
+
+**Built:**
+
+- **Stock by size.** `stock_ledger.sizeId`; `stock.service` keys every balance,
+  lock and FIFO cost by size as well (a fabric's is null, as before). The 48
+  existing balances read the same afterwards.
+- **Finished goods in** (`/inventory/finished-goods`, Inventory rights): packed
+  garments into a store, by size, valued at the approved BOM's cost per piece
+  for that colour, else the item's standard rate. Needs an **FGR** number series
+  made in Settings → Documents before first use.
+- **Delivery challan** (`/sales/challan`, sidebar Sales → Delivery Challan):
+  "Waiting to dispatch" lists confirmed orders with pieces to send, soonest due
+  first; "Challans" lists every challan with print, dispatch a draft, mark
+  delivered and cancel. The form shows per size what is pending and what is in
+  the chosen store, with "Fill what can go". Over-sending needs a note; more
+  than is in stock is refused. Save as draft takes nothing; Dispatch takes the
+  pieces out of stock and moves the order to part dispatched / completed.
+  Cancelling a dispatched challan puts the pieces back. E-way bill number is
+  typed in; the form says when the consignment is over ₹50,000.
+- **Challan print** (`/print/delivery-challan/[id]`), heading from Settings →
+  Documents → DC (JW for a job-work order). No rates per line; the
+  consignment value is printed once.
+- A **Dispatch** button on the order list and order detail opens the challan
+  form for that order. Amending an order cannot drop a line that is on a
+  live challan, or a size below what has gone.
+
+**Migration:** `20261009180000_sales_dispatch_and_fg_stock`, applied to the
+shared database — see MIGRATION-NOTES.md.
+
+**The order form, filled out to match the old ERP (10 Oct):** Basic Details
+in five columns — order no., date, customer, type, brand / broker, brokerage,
+buyer PO no. and date, salesperson / ship-to and delivery date / bill-to and
+reference. A place-of-supply picker beside the customer for an order shipped
+to another state. Each line now has colour (another colour of the style, or
+typed), gender, a size run picked on the line when the style has none, fabric,
+print name, description, tax exempt, and the style's sketch. Charges are
+picked from Masters → Charges with their own GST, as on the purchase bill,
+plus other charges with no GST. Terms and attachments sit beside the totals.
+Every number box steps with the mouse wheel and arrow keys and never goes
+below nothing. Migration `20261010120000_sales_order_details`.
+
+**Invoices (step 4, 10 Oct):** `/sales/invoices` with "Waiting to invoice"
+(dispatched challans not billed) and "Invoices" (unpaid, overdue, this month;
+print; cancel with a reason while nothing is received). One invoice bills one
+challan: pieces from the challan, rate, discount and GST rate from the order
+line, the order's bill discount shared out pro rata, and the order's charges
+offered as whatever earlier invoices have not billed. Final when saved, no
+draft; INV number taken after every check. "Dispatch & invoice" on the challan
+form goes straight on to the invoice. A billed challan cannot be cancelled
+until its invoice is. Tax invoice print (`/print/sales-invoice/[id]`) with HSN
+summary, amount and tax in words, bank details, three copies; no IRN. Unpaid
+invoices now count in the credit check. Migration
+`20261010150000_sales_invoice_from_challan`.
+
+**Payments received (Phase 3, 10 Oct):** `/sales/payments` with
+"Outstanding" (each customer's dues aged not due / 1–30 / 31–60 / 61–90 /
+90+, less advances, invoices under each row, Receive button, export) and
+"Receipts" (print, apply advance, mark cheque cleared, reverse). One receipt
+settles several invoices (Settle oldest first); the rest stays on account and
+is applied later; TDS the customer deducted settles an invoice like cash.
+Cheques and PDCs settle when recorded and are marked cleared later; a bounced
+cheque or a mistake is reversed with a reason and its invoices reopen. An
+invoice with money against it cannot be cancelled. Advances count against the
+credit limit. "Record receipt" on the invoice list. Receipt print
+(`/print/payment-receipt/[id]`). Sales or Accounts rights both work here.
+Needs an **RCPT** number series. Customer dues from the old system (about
+₹1.74 crore at 31 Mar 2025) are not here — no data migrates. Migration
+`20261010180000_sales_receipts`.
+
+**Next:** Phase 4 — sales returns and credit notes, quotations, the Sales
+dashboard and reports.
+
+---
+
+## Sales orders — Phase 1 (Fri 9 Oct)
+
+The first of four Sales phases (orders → dispatch and invoices → money in →
+returns, quotations, reports). The plan, screen by screen, is the Claude Doc
+"Sales Module: Screen Build Plan"; the business's answers behind it are in
+docs/07 §6.
+
+**Built:**
+
+- **Order list** (`/sales/orders`), rebuilt on the purchase order list: server
+  paging and search, four cards that filter (open, waiting for approval, due in
+  7 days, overdue), filters, size rows that open per order, phone cards, export.
+- **Order form** (`SalesOrderDialog`): own order or job work, customer panel
+  with the tax split and a credit strip, one size box per size from the style's
+  size run, typed rate with the customer's last rate shown, GST previewed from
+  HSN. Save as draft or Confirm order. Edits a draft until it is confirmed.
+- **Order detail** (`SalesOrderDetailDialog`): progress strip, lines, linked
+  production orders, requisitions, challans and invoices, history.
+- **Amend** (version kept in `sales_order_revisions`), **cancel** (before
+  anything is made or sent, no open requisition) and **short-close**
+  (approve rights; pending to zero).
+- **Confirm, not approve.** Save as draft, then Confirm order — no approval
+  step for an ordinary order (business, 10 Oct). Only a customer over the
+  credit limit or blacklisted puts the order on credit hold: it waits in the
+  dashboard's Pending Approvals for someone with approve rights who did not
+  raise it, or the Admin releases it on the spot with a reason.
+- **Order confirmation print** (`/print/sales-order/[id]`), heading from
+  Settings → Documents → Sales Order. Brokerage is never printed.
+- Every sales route checks a sales permission. The store's order pickers read
+  `/sales/orders/options` instead. A Brands master page.
+- GST is worked out on the server from each item's HSN code at the price per
+  piece; HSN is copied onto each line.
+- The mobile order screen showed every line as 0 pcs at ₹0.00 (it read `qty` and
+  `rate`); fixed, with the size run.
+
+**Migration:** `20261009120000_sales_order_lifecycle`, applied to the shared
+database on 9 Oct — see MIGRATION-NOTES.md.
+
+**Data to fix before real use:**
+
+- The four finished-goods items have no style linked, so the form shows one
+  pieces box per line instead of size boxes. Link each to its style and colour.
+- The HSN master has 6203 at a flat 5% and no 6205; garments above a price per
+  piece carry a higher rate. Enter the threshold and the higher rate on those
+  codes once the CA confirms them.
+- Non-admin users need sales permissions: make a Sales role in Settings.
+
+**Not in Phase 1:** attachments on an order (needs a new table), deleting a
+draft (a deleted draft would leave a gap in the numbers — cancel it instead).
 
 ---
 
@@ -849,7 +1052,8 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
   cancels and records the reason on the document
 
 **Sales and production**
-- Sales order list reads the real API with status filtering
+- Sales orders end to end: list, form, detail, approval, amend, cancel,
+  short-close and the order confirmation print (see the top of this file)
 - Manufacturing order list with progress against planned quantity
 
 **Inventory and stock**
@@ -952,13 +1156,13 @@ identical, but its `ai.service.ts` has 4 extra AI tools worth porting
 
 ## What is not built yet
 
-- Creating sales orders and manufacturing orders from the UI (the API can
-  create sales orders; there is no form yet). **Purchase orders can now be
-  created** — see above
+- Creating manufacturing orders from the UI. **Sales orders and purchase
+  orders can now be created** — see above
 - **Supplier payments.** A purchase bill can be raised and matched but not
   paid; the endpoint is a 501
 - Accounts and HR are not built and now say so — 501, not an empty array
-- Detail pages: `/sales/orders/[id]`, `/production/orders/[id]`
+- Detail page `/production/orders/[id]`. A sales order opens in a dialog from
+  the list, as purchase documents do
 - Export buttons are visibly disabled rather than functional
 - GST e-invoicing, WhatsApp bot, mobile app (Phases 2–5)
 - The 4 extra AI tools from the abandoned attempt

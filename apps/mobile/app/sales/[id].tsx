@@ -10,13 +10,32 @@ import {
 
 /** One sales order. Read only, for the same reason as the purchase one. */
 
+/*
+ * The fields as the API sends them. This read `qty` and `rate`, which an order
+ * line has never had (they are `totalQty` and `unitPrice`), so every line
+ * showed 0 pieces at ₹0.00.
+ */
 interface Line {
   id: string
-  qty: string | number
-  rate: string | number
+  totalQty: string | number
+  unitPrice: string | number
   amount: string | number
-  item: { code: string; name: string }
+  color: string | null
+  deliveredQty: string | number
+  pendingQty: string | number
+  item: { code: string; name: string; color: string | null }
+  sizes?: { id: string; qty: string | number; size: { code: string; sequence: number } }[]
 }
+
+/** Pieces are counted, not money: whole numbers, Indian grouping. */
+const pcs = (v: string | number) => Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 })
+
+/** "S 100 · M 250 · L 300", smallest size first. */
+const sizeRun = (line: Line) =>
+  [...(line.sizes ?? [])]
+    .sort((a, b) => a.size.sequence - b.size.sequence)
+    .map((s) => `${s.size.code} ${pcs(s.qty)}`)
+    .join(' · ')
 
 interface Order {
   id: string
@@ -91,14 +110,19 @@ export default function SalesOrderDetail() {
           <Card key={line.id}>
             <View className="flex-row items-start justify-between gap-3">
               <View className="flex-1">
-                <Text className="text-sm font-semibold text-foreground">{line.item.name}</Text>
+                <Text className="text-sm font-semibold text-foreground">
+                  {line.item.name}
+                  {line.color || line.item.color ? ` · ${line.color || line.item.color}` : ''}
+                </Text>
                 <Text className="mt-0.5 text-xs text-muted-foreground">{line.item.code}</Text>
               </View>
               <Text className="text-sm font-bold text-foreground">₹{money(line.amount)}</Text>
             </View>
             <View className="mt-3 border-t border-border pt-2">
-              <Row label="Quantity" value={money(line.qty)} />
-              <Row label="Rate" value={`₹${money(line.rate)}`} />
+              <Row label="Pieces" value={pcs(line.totalQty)} />
+              {line.sizes?.length ? <Row label="Sizes" value={sizeRun(line)} /> : null}
+              <Row label="Rate" value={`₹${money(line.unitPrice)}`} />
+              <Row label="Dispatched" value={`${pcs(line.deliveredQty)} · ${pcs(line.pendingQty)} to go`} />
             </View>
           </Card>
         ))}

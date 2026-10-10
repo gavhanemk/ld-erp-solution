@@ -133,6 +133,8 @@ export function formatDocumentNumber(series: {
 export async function resolvePlaceOfSupply(
   tx: Prisma.TransactionClient,
   customerId: string,
+  /** The state this one document is delivered to, when it is not the customer's own. */
+  shipToStateCode?: string | null,
 ): Promise<{ companyStateCode: string; placeOfSupplyCode: string; isIntraState: boolean }> {
   const [company, customer] = await Promise.all([
     tx.company.findFirst({ select: { stateCode: true, gstin: true } }),
@@ -157,7 +159,7 @@ export async function resolvePlaceOfSupply(
 
   // Goods are taxed where they are delivered, so shipping wins over billing.
   const placeOfSupply =
-    customer.shippingStateCode || customer.billingStateCode || customer.gstin?.slice(0, 2)
+    shipToStateCode || customer.shippingStateCode || customer.billingStateCode || customer.gstin?.slice(0, 2)
 
   if (!placeOfSupply) {
     throw new AppError(

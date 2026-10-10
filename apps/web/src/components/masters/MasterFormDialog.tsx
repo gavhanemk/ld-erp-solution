@@ -57,6 +57,7 @@ const RESOURCE_ICONS: Record<string, LucideIcon> = {
   'bank-accounts': Landmark,
   routings: Route,
   departments: Building2,
+  brands: Tag,
   uoms: Scale,
 }
 

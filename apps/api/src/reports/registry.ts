@@ -10,6 +10,7 @@ import { grnAgainstBill } from './definitions/grn-against-bill'
 import { purchasesByItem } from './definitions/purchases-by-item'
 import { expenseRegister } from './definitions/expense-register'
 import { grnQcRegister, qcRejections } from './definitions/grn-qc'
+import { SALES_REPORTS } from './definitions/sales'
 import { stockSummary } from './definitions/stock-summary'
 import { stockMovement } from './definitions/stock-movement'
 import { itemStockLedger } from './definitions/item-stock-ledger'
@@ -51,6 +52,7 @@ export const REPORTS: ReportDefinition[] = [
   jobWorkPending,
   customerMaterialStock,
   stockCountVariance,
+  ...SALES_REPORTS,
 ]
 
 export function findReport(id: string): ReportDefinition | undefined {

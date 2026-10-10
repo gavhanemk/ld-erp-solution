@@ -288,6 +288,10 @@ model User {
   aiConversations      AIConversation[]
   createdSOs           SalesOrder[]                @relation("SOCreatedBy")
   approvedSOs          SalesOrder[]                @relation("SOApprovedBy")
+  creditReleasedSOs    SalesOrder[]                @relation("SOCreditReleasedBy")
+  cancelledSOs         SalesOrder[]                @relation("SOCancelledBy")
+  shortClosedSOs       SalesOrder[]                @relation("SOShortClosedBy")
+  soRevisions          SalesOrderRevision[]        @relation("SORevisionChangedBy")
   createdEnquiries     PurchaseEnquiry[]           @relation("EnquiryCreatedBy")
   createdPOs           PurchaseOrder[]             @relation("POCreatedBy")
   approvedPOs          PurchaseOrder[]             @relation("POApprovedBy")
@@ -300,6 +304,16 @@ model User {
   createdPayments      SupplierPayment[]           @relation("PaymentCreatedBy")
   reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
   uploadedFiles        PurchaseOrderAttachment[]   @relation("AttachmentUploadedBy")
+  uploadedSalesFiles   SalesOrderAttachment[]      @relation("SOAttachmentUploadedBy")
+  salesInvoicesRaised    SalesInvoice[]            @relation("SICreatedBy")
+  salesInvoicesCancelled SalesInvoice[]            @relation("SICancelledBy")
+  receiptsRecorded       PaymentReceipt[]          @relation("ReceiptCreatedBy")
+  mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
+  quotesCreated          SalesQuotation[]          @relation("QuoteCreatedBy")
+  creditNotesRaised      CreditNote[]              @relation("CNCreatedBy")
+  creditNotesCancelled   CreditNote[]              @relation("CNCancelledBy")
+  receiptsReversed       PaymentReceipt[]          @relation("ReceiptReversedBy")
+  uploadedReceiptFiles   PaymentReceiptAttachment[] @relation("ReceiptAttachmentUploadedBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
@@ -332,6 +346,11 @@ model User {
   jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
   jobWorkCancelled     JobWorkChallan[] @relation("JobWorkChallanCancelledBy")
   jobWorkReturnsTaken  JobWorkReturn[]  @relation("JobWorkReturnReceivedBy")
+  fgReceiptsMade       FinishedGoodsReceipt[] @relation("FGRCreatedBy")
+  fgReceiptsCancelled  FinishedGoodsReceipt[] @relation("FGRCancelledBy")
+  challansMade         DeliveryChallan[]      @relation("DCCreatedBy")
+  challansDispatched   DeliveryChallan[]      @relation("DCDispatchedBy")
+  challansCancelled    DeliveryChallan[]      @relation("DCCancelledBy")
 }
 
 model Role {
@@ -457,6 +476,7 @@ model Brand {
 
   salesOrders         SalesOrder[]
   manufacturingOrders ManufacturingOrder[]
+  quotations          SalesQuotation[] @relation("QuoteBrand")
 
   @@map("brands")
 }
@@ -678,6 +698,9 @@ model Item {
   customerReturnLines CustomerMaterialReturnLine[] @relation("CustomerReturnLines")
   jobWorkChallanLines JobWorkChallanLine[] @relation("JobWorkChallanLines")
   jobWorkReturnLines  JobWorkReturnLine[]  @relation("JobWorkReturnLines")
+  fgReceiptLines      FinishedGoodsReceiptLine[] @relation("FGRLineItem")
+  challanLines        DeliveryChallanLine[]      @relation("DCLineItem")
+  quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
 }
 
 model Style {
@@ -775,6 +798,7 @@ model BOM {
   lines     BOMLine[]
   costLines BOMCostLine[]
   copies    BOM[]         @relation("BOMCopy")
+  moLines   MOLine[]
 
   // White v1.0 and Dusty Blue v1.0 of the same style are two different BOMs.
   // Postgres counts two blank colours as different, so two colourless BOMs at
@@ -926,6 +950,8 @@ model Customer {
   @@index([code])
   stockReservations StockReservation[] @relation("ReservedForCustomer")
   @@map("customers")
+  deliveryChallans  DeliveryChallan[]  @relation("DCCustomer")
+  quotations        SalesQuotation[]   @relation("QuoteCustomer")
 }
 
 /// One of the places a supplier bills from.
@@ -1044,6 +1070,9 @@ model Warehouse {
   jobWorkSentFrom          JobWorkChallan[] @relation("JobWorkChallanFrom")
   jobWorkSentTo            JobWorkChallan[] @relation("JobWorkChallanTo")
   jobWorkReturnLines       JobWorkReturnLine[] @relation("JobWorkReturnLines")
+  fgReceipts               FinishedGoodsReceipt[] @relation("FGRWarehouse")
+  deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
+  creditNotes              CreditNote[]           @relation("CNWarehouse")
 }
 
 model Department {
@@ -1128,6 +1157,11 @@ model SalesOrder {
   orderDate         DateTime         @default(now())
   deliveryDate      DateTime?
   deliveryAddress   String?
+  /// The buyer's billing address as it stood for this order: copied from the
+  /// customer and changeable for this order only, as the old ERP allowed.
+  billingAddress    String?
+  /// Any reference the order is known by besides the buyer's PO.
+  reference         String?
   salesperson       String?
   /// The agent on this sale and what they earn. Brokerage is a real cost with
   /// TDS deducted against it, so it cannot live only in someone's notebook.
@@ -1150,6 +1184,10 @@ model SalesOrder {
   currency          String           @default("INR")
   isJobWork         Boolean          @default(false)
   notes             String?
+  /// Terms and conditions printed on the order confirmation.
+  terms             String?
+  /// Added after tax and carrying none of its own, as on the purchase order.
+  otherCharges      Decimal          @default(0) @db.Decimal(12, 2)
   attachmentUrl     String?
   version           Int              @default(1)
   createdById       String
@@ -1160,10 +1198,39 @@ model SalesOrder {
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
+  /// Set by "Send for approval". Until then a draft is still being typed, and
+  /// it does not reach the approvals list.
+  sentForApprovalAt   DateTime?
+  /// An order for a customer over their credit limit, or blacklisted, is
+  /// approved only with a reason for releasing it: who, when and why.
+  creditReleasedById  String?
+  creditReleasedBy    User?     @relation("SOCreditReleasedBy", fields: [creditReleasedById], references: [id])
+  creditReleasedAt    DateTime?
+  creditReleaseReason String?
+  /// Rejected before approval, or cancelled before anything was made.
+  cancelledById       String?
+  cancelledBy         User?     @relation("SOCancelledBy", fields: [cancelledById], references: [id])
+  cancelledAt         DateTime?
+  cancelReason        String?
+  /// Closed at what was delivered, the rest no longer wanted.
+  shortClosedById     String?
+  shortClosedBy       User?     @relation("SOShortClosedBy", fields: [shortClosedById], references: [id])
+  shortClosedAt       DateTime?
+  shortCloseReason    String?
+
   lines               SalesOrderLine[]
+  /// Transport, freight, packing: each taxed at its own rate.
+  charges             SalesOrderCharge[]
+  /// The buyer's PO, a sketch, a spec sheet.
+  attachments         SalesOrderAttachment[]
   deliveryChallans    DeliveryChallan[]
   invoices            SalesInvoice[]
   manufacturingOrders ManufacturingOrder[]
+  /// What the order said before each amendment. The order itself is the latest.
+  revisions           SalesOrderRevision[]
+  /// The quotation it was won from, when there was one.
+  quotationId         String?
+  quotation           SalesQuotation? @relation("SOFromQuote", fields: [quotationId], references: [id], onDelete: SetNull)
 
   @@index([soNumber])
   @@index([customerId])
@@ -1172,6 +1239,7 @@ model SalesOrder {
   stockReservations    StockReservation[]    @relation("ReservationSalesOrder")
   @@map("sales_orders")
   customerMaterial CustomerGRN[] @relation("SalesOrderCustomerMaterial")
+  fgReceipts       FinishedGoodsReceipt[] @relation("FGRSalesOrder")
 }
 
 model SalesOrderLine {
@@ -1183,13 +1251,25 @@ model SalesOrderLine {
   /// Free text, unvalidated, and can drift from what `item` actually is.
   /// Item.styleId/color is now the real source of truth for this; these two
   /// fields are a Sales-module follow-up to derive from item and retire, not
-  /// fixed here.
+  /// fixed here. Since 9 Oct 2026 they are filled from the item when a screen
+  /// does not send them.
   styleCode    String?
   color        String?
+  /// MALE, FEMALE or UNISEX, as on the size-run master.
+  gender       String?
+  fabric       String?
+  /// The print or design name the buyer orders by.
+  printName    String?
+  description  String?
+  /// No GST on this line: the rate is 0 whatever the HSN code says.
+  taxExempt    Boolean    @default(false)
   totalQty     Decimal    @db.Decimal(10, 2)
   unitPrice    Decimal    @default(0) @db.Decimal(10, 2)
   discount     Decimal    @default(0) @db.Decimal(5, 2)
   gstRate      Decimal    @default(0) @db.Decimal(5, 2)
+  /// Copied from the item when the line is saved, so a later change to the
+  /// item never alters an order already sent.
+  hsnCode      String?
   amount       Decimal    @default(0) @db.Decimal(12, 2)
   deliveredQty Decimal    @default(0) @db.Decimal(10, 2)
   pendingQty   Decimal    @default(0) @db.Decimal(10, 2)
@@ -1198,8 +1278,32 @@ model SalesOrderLine {
   /// The size run. Rows rather than a JSON blob, so "XL" and "xl" cannot both
   /// exist and the quantities still reconcile at the invoice.
   sizes SalesOrderLineSize[]
+  /// What has been sent against this line, challan by challan.
+  challanLines DeliveryChallanLine[]
+  /// What has been billed against this line, invoice by invoice.
+  invoiceLines SalesInvoiceLine[]
+  /// What has been planned for the factory against this line.
+  moLines      MOLine[]
 
   @@map("sales_order_lines")
+}
+
+/// One earlier version of a sales order, kept when the order is amended.
+/// The order always holds the latest; `snapshot` is the whole order — header,
+/// lines and sizes — as it stood at `version`, before the change.
+model SalesOrderRevision {
+  id          String     @id @default(cuid())
+  soId        String
+  so          SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
+  version     Int
+  snapshot    Json
+  reason      String
+  changedById String
+  changedBy   User       @relation("SORevisionChangedBy", fields: [changedById], references: [id])
+  changedAt   DateTime   @default(now())
+
+  @@unique([soId, version])
+  @@map("sales_order_revisions")
 }
 
 model SalesInvoice {
@@ -1230,6 +1334,10 @@ model SalesInvoice {
   roundOff          Decimal       @default(0) @db.Decimal(6, 2)
   totalAmount       Decimal       @db.Decimal(12, 2)
   paidAmount        Decimal       @default(0) @db.Decimal(12, 2)
+  /// TDS the customer deducted against this invoice; settles it like cash.
+  tdsAmount         Decimal       @default(0) @db.Decimal(12, 2)
+  /// Credit notes issued against it, up to what it still owed.
+  creditedAmount    Decimal       @default(0) @db.Decimal(12, 2)
   balanceAmount     Decimal       @db.Decimal(12, 2)
   status            InvoiceStatus @default(UNPAID)
   irnNumber         String?
@@ -1240,13 +1348,37 @@ model SalesInvoice {
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
+  /// The challan whose goods this bills. One live invoice per challan; a
+  /// cancelled invoice keeps its link, so the challan can be billed again.
+  dcId              String?
+  dc                DeliveryChallan? @relation(fields: [dcId], references: [id])
+  /// As printed: copied from the order and changeable on the invoice.
+  billingAddress    String?
+  shippingAddress   String?
+  transporter       String?
+  vehicleNumber     String?
+  lrNumber          String?
+  eWayBillNumber    String?
+  eWayBillDate      DateTime?
+  /// Added after tax and carrying none of its own, as on the order.
+  otherCharges      Decimal          @default(0) @db.Decimal(12, 2)
+  terms             String?
+  createdById       String?
+  createdBy         User?            @relation("SICreatedBy", fields: [createdById], references: [id])
+  cancelledAt       DateTime?
+  cancelledById     String?
+  cancelledBy       User?            @relation("SICancelledBy", fields: [cancelledById], references: [id])
+  cancelReason      String?
+
   payments    PaymentReceipt[]
+  allocations PaymentReceiptAllocation[]
   lines       SalesInvoiceLine[]
   charges     SalesInvoiceCharge[]
   creditNotes CreditNote[]
 
   @@index([invoiceNumber])
   @@index([customerId])
+  @@index([dcId])
   @@map("sales_invoices")
 }
 
@@ -1266,8 +1398,34 @@ model DeliveryChallan {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
-  lines DeliveryChallanLine[]
+  /// Who it goes to, from which store, and where. The order carries the
+  /// customer too, but a challan is read on its own at the gate.
+  customerId      String?
+  customer        Customer?  @relation("DCCustomer", fields: [customerId], references: [id])
+  warehouseId     String?
+  warehouse       Warehouse? @relation("DCWarehouse", fields: [warehouseId], references: [id])
+  deliveryAddress String?
+  /// The packing: how many cartons, and what is in them.
+  cartons         Int?
+  packingNote     String?
+  createdById     String?
+  createdBy       User?      @relation("DCCreatedBy", fields: [createdById], references: [id])
+  /// Dispatching is what takes the goods out of stock.
+  dispatchedAt    DateTime?
+  dispatchedById  String?
+  dispatchedBy    User?      @relation("DCDispatchedBy", fields: [dispatchedById], references: [id])
+  deliveredAt     DateTime?
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledBy     User?      @relation("DCCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason    String?
 
+  lines DeliveryChallanLine[]
+  /// The invoice billing these goods (and any cancelled before it).
+  invoices SalesInvoice[]
+
+  @@index([soId])
+  @@index([customerId])
   @@map("delivery_challans")
 }
 
@@ -1281,7 +1439,81 @@ model DeliveryChallanLine {
   uom         UOM             @relation(fields: [uomId], references: [id])
   sizeBreakup Json?
 
+  /// The order line these pieces were sent against, and the garment.
+  soLineId String?
+  soLine   SalesOrderLine? @relation(fields: [soLineId], references: [id])
+  itemId   String?
+  item     Item?           @relation("DCLineItem", fields: [itemId], references: [id])
+  /// Why more went than the order line still wanted, when that happened.
+  overNote String?
+  /// Pieces by size. Replaces `sizeBreakup`, which nothing ever wrote.
+  sizes    DeliveryChallanLineSize[]
+
+  @@index([soLineId])
   @@map("delivery_challan_lines")
+}
+
+/// One size on one challan line.
+model DeliveryChallanLineSize {
+  id     String              @id @default(cuid())
+  lineId String
+  line   DeliveryChallanLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size                @relation(fields: [sizeId], references: [id])
+  qty    Decimal             @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("delivery_challan_line_sizes")
+}
+
+/// Packed garments going into the finished-goods store, by style, colour and
+/// size. With an opening balance, the only way finished goods come into
+/// stock; a delivery challan takes them out again. Valued at the style's
+/// approved BOM cost per piece, else the item's standard rate.
+model FinishedGoodsReceipt {
+  id            String     @id @default(cuid())
+  fgrNumber     String     @unique
+  receiptDate   DateTime   @default(now())
+  warehouseId   String
+  warehouse     Warehouse  @relation("FGRWarehouse", fields: [warehouseId], references: [id])
+  /// The order it was packed for, when it was packed for one.
+  soId          String?
+  so            SalesOrder? @relation("FGRSalesOrder", fields: [soId], references: [id])
+  /// The manufacturing order these were packed for, when there is one.
+  moId          String?
+  mo            ManufacturingOrder? @relation("FGRManufacturingOrder", fields: [moId], references: [id])
+  notes         String?
+  createdById   String
+  createdBy     User       @relation("FGRCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  /// Cancelling takes the pieces back out of stock, so only while they are there.
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?      @relation("FGRCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason  String?
+
+  lines FinishedGoodsReceiptLine[]
+
+  @@index([soId])
+  @@map("finished_goods_receipts")
+}
+
+model FinishedGoodsReceiptLine {
+  id         String               @id @default(cuid())
+  receiptId  String
+  receipt    FinishedGoodsReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  itemId     String
+  item       Item                 @relation("FGRLineItem", fields: [itemId], references: [id])
+  sizeId     String?
+  size       Size?                @relation(fields: [sizeId], references: [id], onDelete: Restrict)
+  qty        Decimal              @db.Decimal(10, 2)
+  /// What one piece went into stock at, and where that figure came from:
+  /// BOM (the approved costing) or STANDARD (the item's standard rate).
+  unitRate   Decimal              @db.Decimal(10, 2)
+  rateSource String
+
+  @@map("finished_goods_receipt_lines")
 }
 
 model PaymentReceipt {
@@ -1289,6 +1521,8 @@ model PaymentReceipt {
   receiptNumber   String        @unique
   customerId      String
   customer        Customer      @relation(fields: [customerId], references: [id])
+  /// Left from the first model, when a receipt could settle one invoice only.
+  /// What a receipt settles is now its allocations.
   invoiceId       String?
   invoice         SalesInvoice? @relation(fields: [invoiceId], references: [id])
   receiptDate     DateTime      @default(now())
@@ -1300,7 +1534,63 @@ model PaymentReceipt {
   notes           String?
   createdAt       DateTime      @default(now())
 
+  /// The account the money went into; none for cash in hand.
+  bankAccountId   String?
+  bankAccount     BankAccount?  @relation(fields: [bankAccountId], references: [id], onDelete: Restrict)
+  chequeNo        String?
+  clearedAt       DateTime?
+  /// Tax the customer deducted at source and paid to the government for us.
+  /// It settles the invoices it is allocated to exactly as the cash does.
+  tdsAmount       Decimal       @default(0) @db.Decimal(12, 2)
+  /// Received and not yet applied to any invoice: an advance, kept on account.
+  onAccount       Decimal       @default(0) @db.Decimal(12, 2)
+  status          PaymentStatus @default(POSTED)
+  createdById     String?
+  createdBy       User?         @relation("ReceiptCreatedBy", fields: [createdById], references: [id])
+  reversedAt      DateTime?
+  reversedById    String?
+  reversedBy      User?         @relation("ReceiptReversedBy", fields: [reversedById], references: [id])
+  reversalReason  String?
+
+  allocations PaymentReceiptAllocation[]
+  attachments PaymentReceiptAttachment[]
+
+  @@index([customerId])
   @@map("payment_receipts")
+}
+
+/// The part of one receipt that settles one invoice: cash, and any TDS the
+/// customer deducted on it. A receipt for one NEFT can settle several invoices.
+model PaymentReceiptAllocation {
+  id        String         @id @default(cuid())
+  receiptId String
+  receipt   PaymentReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  invoiceId String
+  invoice   SalesInvoice   @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  amount    Decimal        @db.Decimal(12, 2)
+  tdsAmount Decimal        @default(0) @db.Decimal(12, 2)
+  createdAt DateTime       @default(now())
+
+  @@unique([receiptId, invoiceId])
+  @@index([invoiceId])
+  @@map("payment_receipt_allocations")
+}
+
+/// A file kept against a receipt: the bank advice, the cheque, the UTR.
+model PaymentReceiptAttachment {
+  id           String         @id @default(cuid())
+  receiptId    String
+  receipt      PaymentReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String         @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User           @relation("ReceiptAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime       @default(now())
+
+  @@index([receiptId])
+  @@map("payment_receipt_attachments")
 }
 
 // ═══════════════════════════════════════════
@@ -2140,6 +2430,11 @@ model StockLedger {
   ownership       StockOwnership  @default(OWNED)
   ownerCustomerId String?
   ownerCustomer   Customer?       @relation("CustomerOwnedStock", fields: [ownerCustomerId], references: [id])
+  /// The size of a finished garment, so a shirt in M and the same shirt in
+  /// XL are two balances. Null for everything that has no size — fabric,
+  /// trims, packing — which keeps one balance per item, as before.
+  sizeId          String?
+  size            Size?           @relation(fields: [sizeId], references: [id], onDelete: Restrict)
   inQty           Decimal         @default(0) @db.Decimal(10, 3)
   outQty          Decimal         @default(0) @db.Decimal(10, 3)
   closingStock    Decimal         @db.Decimal(10, 3)
@@ -2151,6 +2446,7 @@ model StockLedger {
   @@index([itemId, warehouseId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
+  @@index([itemId, warehouseId, sizeId])
   @@map("stock_ledger")
 }
 
@@ -2687,8 +2983,15 @@ model ManufacturingOrder {
   createdBy        User        @relation("MOCreatedBy", fields: [createdById], references: [id])
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
+  /// Called off before or during the work, with a reason. Status CLOSED.
+  closedAt         DateTime?
+  closedById       String?
+  closedBy         User?       @relation("MOClosedBy", fields: [closedById], references: [id])
+  closeReason      String?
 
   lines                MOLine[]
+  /// Packed garments booked in against it, which count as its packed pieces.
+  fgReceipts           FinishedGoodsReceipt[] @relation("FGRManufacturingOrder")
   materialRequisitions MaterialRequisition[]
   cuttingOrders        CuttingOrder[]
   productionEntries    ProductionEntry[]
@@ -2711,9 +3014,16 @@ model MOLine {
   /// line references one, not fixed here.
   color       String
   totalQty    Int
+  /// The sales order line this makes, so planned pieces reconcile to the order.
+  soLineId    String?
+  soLine      SalesOrderLine? @relation(fields: [soLineId], references: [id], onDelete: SetNull)
+  /// The approved BOM the materials are worked out from, as it was chosen.
+  bomId       String?
+  bom         BOM?            @relation(fields: [bomId], references: [id], onDelete: SetNull)
 
   sizes MOLineSize[]
 
+  @@index([soLineId])
   @@map("mo_lines")
 }
 
@@ -2893,6 +3203,7 @@ model BankAccount {
   createdAt      DateTime @default(now())
 
   supplierPayments SupplierPayment[]
+  paymentReceipts  PaymentReceipt[]
 
   @@map("bank_accounts")
 }
@@ -3233,6 +3544,10 @@ model Size {
   moLineSizes  MOLineSize[]
   bomLineSizes BOMLineSize[]
   baseSizeBoms BOM[]
+  stockLedger  StockLedger[]
+  fgrLines     FinishedGoodsReceiptLine[]
+  challanSizes DeliveryChallanLineSize[]
+  creditSizes  CreditNoteLineSize[]
 
   @@unique([sizeGroupId, code])
   @@map("sizes")
@@ -3245,6 +3560,9 @@ model SalesOrderLineSize {
   sizeId String
   size   Size           @relation(fields: [sizeId], references: [id])
   qty    Decimal        @db.Decimal(10, 2)
+  /// Sent so far in this size, added to by each dispatched challan. Pending
+  /// in this size is qty less this, never below nothing.
+  deliveredQty Decimal  @default(0) @db.Decimal(10, 2)
 
   @@unique([lineId, sizeId])
   @@map("sales_order_line_sizes")
@@ -3286,8 +3604,14 @@ model SalesInvoiceLine {
   igst         Decimal      @default(0) @db.Decimal(12, 2)
   amount       Decimal      @default(0) @db.Decimal(12, 2)
   sortOrder    Int          @default(0)
+  /// The order line this bills, so what is invoiced reconciles to the order.
+  soLineId     String?
+  soLine       SalesOrderLine? @relation(fields: [soLineId], references: [id])
+  /// Credit notes against this line: returns and adjustments.
+  creditLines  CreditNoteLine[]
 
   @@index([invoiceId])
+  @@index([soLineId])
   @@map("sales_invoice_lines")
 }
 
@@ -3360,6 +3684,7 @@ model ChargeType {
   createdAt       DateTime @default(now())
 
   salesCharges         SalesInvoiceCharge[]
+  salesOrderCharges    SalesOrderCharge[]
   purchaseCharges      PurchaseInvoiceCharge[]
   purchaseOrderCharges PurchaseOrderCharge[]
 
@@ -3407,6 +3732,43 @@ model PurchaseOrderCharge {
   @@map("purchase_order_charges")
 }
 
+/// A charge on a sales order — transport, freight, packing. The same shape as
+/// the purchase order's, so the invoice raised later can carry it line for line.
+model SalesOrderCharge {
+  id           String     @id @default(cuid())
+  soId         String
+  so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
+  chargeTypeId String
+  chargeType   ChargeType @relation(fields: [chargeTypeId], references: [id])
+  amount       Decimal    @db.Decimal(12, 2)
+  gstRate      Decimal    @default(0) @db.Decimal(5, 2)
+  cgst         Decimal    @default(0) @db.Decimal(12, 2)
+  sgst         Decimal    @default(0) @db.Decimal(12, 2)
+  igst         Decimal    @default(0) @db.Decimal(12, 2)
+  sortOrder    Int        @default(0)
+
+  @@unique([soId, chargeTypeId])
+  @@index([soId])
+  @@map("sales_order_charges")
+}
+
+/// A file kept against a sales order, as on the purchase order.
+model SalesOrderAttachment {
+  id           String     @id @default(cuid())
+  soId         String
+  so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String     @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User       @relation("SOAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime   @default(now())
+
+  @@index([soId])
+  @@map("sales_order_attachments")
+}
+
 model PurchaseInvoiceCharge {
   id           String          @id @default(cuid())
   billId       String
@@ -3425,6 +3787,73 @@ model PurchaseInvoiceCharge {
 // ═══════════════════════════════════════════
 // SALES RETURNS
 // ═══════════════════════════════════════════
+
+/// A price offered to a customer before they order: optional for regular
+/// buyers, the first step for new ones or when price or terms change. A won
+/// quotation becomes a sales order, filled in from it.
+model SalesQuotation {
+  id                String    @id @default(cuid())
+  quoteNumber       String    @unique
+  customerId        String
+  customer          Customer  @relation("QuoteCustomer", fields: [customerId], references: [id])
+  brandId           String
+  brand             Brand     @relation("QuoteBrand", fields: [brandId], references: [id])
+  quoteDate         DateTime  @default(now())
+  validUntil        DateTime?
+  /// DRAFT, SENT, WON (a sales order was made from it), LOST.
+  status            String    @default("DRAFT")
+  isJobWork         Boolean   @default(false)
+  customerRef       String?
+  salesperson       String?
+  placeOfSupplyCode String?
+  subtotal          Decimal   @default(0) @db.Decimal(12, 2)
+  discountAmount    Decimal   @default(0) @db.Decimal(12, 2)
+  taxableAmount     Decimal   @default(0) @db.Decimal(12, 2)
+  cgst              Decimal   @default(0) @db.Decimal(12, 2)
+  sgst              Decimal   @default(0) @db.Decimal(12, 2)
+  igst              Decimal   @default(0) @db.Decimal(12, 2)
+  roundOff          Decimal   @default(0) @db.Decimal(6, 2)
+  totalAmount       Decimal   @default(0) @db.Decimal(12, 2)
+  terms             String?
+  notes             String?
+  sentAt            DateTime?
+  decidedAt         DateTime?
+  lostReason        String?
+  createdById       String
+  createdBy         User      @relation("QuoteCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  lines  SalesQuotationLine[]
+  orders SalesOrder[]         @relation("SOFromQuote")
+
+  @@index([customerId])
+  @@index([status])
+  @@map("sales_quotations")
+}
+
+model SalesQuotationLine {
+  id          String         @id @default(cuid())
+  quoteId     String
+  quote       SalesQuotation @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item           @relation("QuoteLineItem", fields: [itemId], references: [id])
+  styleCode   String?
+  color       String?
+  description String?
+  qty         Decimal        @db.Decimal(10, 2)
+  unitPrice   Decimal        @db.Decimal(10, 2)
+  discount    Decimal        @default(0) @db.Decimal(5, 2)
+  gstRate     Decimal        @default(0) @db.Decimal(5, 2)
+  hsnCode     String?
+  amount      Decimal        @default(0) @db.Decimal(12, 2)
+  /// The BOM's cost per piece when quoted, so the margin can be read back.
+  bomCost     Decimal?       @db.Decimal(10, 2)
+  sortOrder   Int            @default(0)
+
+  @@index([quoteId])
+  @@map("sales_quotation_lines")
+}
 
 /// Issued to a customer when goods come back or a bill is reduced. Without it a
 /// return leaves the original invoice standing and overstates GST payable.
@@ -3448,9 +3877,28 @@ model CreditNote {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  /// RETURN: goods come back into stock. ADJUSTMENT: an amount only — a rate
+  /// difference, a discount given after the invoice.
+  type              String     @default("RETURN")
+  /// The store returned goods go into.
+  warehouseId       String?
+  warehouse         Warehouse? @relation("CNWarehouse", fields: [warehouseId], references: [id])
+  placeOfSupplyCode String?
+  taxableAmount     Decimal    @default(0) @db.Decimal(12, 2)
+  /// The part of the credit the invoice did not need (it was already paid):
+  /// credit the customer holds, as an advance does.
+  onAccount         Decimal    @default(0) @db.Decimal(12, 2)
+  createdById       String?
+  createdBy         User?      @relation("CNCreatedBy", fields: [createdById], references: [id])
+  cancelledAt       DateTime?
+  cancelledById     String?
+  cancelledBy       User?      @relation("CNCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason      String?
+
   lines CreditNoteLine[]
 
   @@index([customerId])
+  @@index([invoiceId])
   @@map("credit_notes")
 }
 
@@ -3468,8 +3916,30 @@ model CreditNoteLine {
   gstRate      Decimal    @default(0) @db.Decimal(5, 2)
   amount       Decimal    @default(0) @db.Decimal(12, 2)
   sortOrder    Int        @default(0)
+  /// The invoice line credited, so nothing is returned twice.
+  invoiceLineId String?
+  invoiceLine   SalesInvoiceLine? @relation(fields: [invoiceLineId], references: [id], onDelete: SetNull)
+  cgst         Decimal    @default(0) @db.Decimal(12, 2)
+  sgst         Decimal    @default(0) @db.Decimal(12, 2)
+  igst         Decimal    @default(0) @db.Decimal(12, 2)
 
+  sizes CreditNoteLineSize[]
+
+  @@index([invoiceLineId])
   @@map("credit_note_lines")
+}
+
+/// Returned pieces of one credit note line, size by size, as stock holds them.
+model CreditNoteLineSize {
+  id     String         @id @default(cuid())
+  lineId String
+  line   CreditNoteLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size           @relation(fields: [sizeId], references: [id])
+  qty    Decimal        @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("credit_note_line_sizes")
 }
 
 // ═══════════════════════════════════════════

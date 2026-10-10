@@ -7,6 +7,155 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 11 Oct 2026 — sales quotations and credit notes
+
+**Migration:** `20261011090000_sales_quotes_and_credit_notes`
+**Branch:** `feat/sales-phase4` (stacked on `feat/production-orders`)
+**Status: applied to the shared database with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- New `sales_quotations` and `sales_quotation_lines` (with `bomCost`, the
+  BOM cost per piece when quoted). `sales_orders.quotationId` (SET NULL).
+- `credit_notes`: `type` (RETURN / ADJUSTMENT, default RETURN), `warehouseId`,
+  `placeOfSupplyCode`, `taxableAmount`, `onAccount`, `createdById`, cancel
+  fields. `credit_note_lines`: `invoiceLineId`, `cgst`, `sgst`, `igst`. New
+  `credit_note_line_sizes`.
+- `sales_invoices.creditedAmount`, default 0.
+
+Nothing is dropped and no row changes (no quotations or credit notes existed).
+Quotations need a **QT** number series; credit notes use the existing **CN**.
+
+## 10 Oct 2026 — manufacturing orders raised from sales orders
+
+**Migration:** `20261010210000_mo_from_sales_order`
+**Branch:** `feat/production-orders` (stacked on `feat/sales-dispatch`)
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `mo_lines.soLineId` (the sales order line it makes, SET NULL) and
+  `mo_lines.bomId` (the approved BOM its materials come from, SET NULL).
+- `manufacturing_orders.closedAt`, `closedById`, `closeReason`: closed with a
+  reason, never deleted.
+- `finished_goods_receipts.moId`: packed garments booked in against a
+  manufacturing order, which is how its packed pieces are counted.
+
+Nothing is dropped and no row changes (no manufacturing orders existed).
+
+## 10 Oct 2026 — payments received from customers
+
+**Migration:** `20261010180000_sales_receipts`
+**Branch:** `feat/sales-dispatch`
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `payment_receipts`: `bankAccountId`, `chequeNo`, `clearedAt`, `tdsAmount`
+  and `onAccount` (both default 0), `status` (POSTED / REVERSED, default
+  POSTED), `createdById`, `reversedAt`, `reversedById`, `reversalReason`.
+  The old single `invoiceId` stays, unused by new receipts.
+- New `payment_receipt_allocations` (one row per invoice a receipt settles:
+  cash and TDS) and `payment_receipt_attachments`.
+- `sales_invoices.tdsAmount`, default 0: TDS the customer deducted, which
+  settles the invoice like cash.
+
+Nothing is dropped and no row changes (both tables were empty). Receipts need
+an **RCPT** number series in Settings → Company → Document numbering.
+
+## 10 Oct 2026 — sales invoices raised from a challan
+
+**Migration:** `20261010150000_sales_invoice_from_challan`
+**Branch:** `feat/sales-dispatch`
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `sales_invoices`: `dcId` (the challan it bills, foreign key, SET NULL),
+  `billingAddress`, `shippingAddress`, `transporter`, `vehicleNumber`,
+  `lrNumber`, `eWayBillNumber`, `eWayBillDate`, `otherCharges` (default 0),
+  `terms`, `createdById`, `cancelledAt`, `cancelledById`, `cancelReason`.
+- `sales_invoice_lines.soLineId`: the order line each invoice line bills.
+
+Nothing is dropped and no row changes (the table was empty). On a branch
+without this folder, `prisma migrate dev` will propose dropping these columns.
+Say no.
+
+## 10 Oct 2026 — sales order details, charges and files
+
+**Migration:** `20261010120000_sales_order_details`
+**Branch:** `feat/sales-dispatch`
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `sales_orders`: `billingAddress`, `reference`, `terms`, and `otherCharges`
+  (default 0) — what the old ERP's order carried and ours did not.
+- `sales_order_lines`: `gender`, `fabric`, `printName`, `description`, and
+  `taxExempt` (default false).
+- New `sales_order_charges` (transport, freight, packing — one row per charge
+  type, each with its own GST, like `purchase_order_charges`) and
+  `sales_order_attachments` (files, like `purchase_order_attachments`).
+
+Nothing is dropped and no row changes. On a branch without this folder,
+`prisma migrate dev` will propose dropping all of it. Say no.
+
+## 9 Oct 2026 — finished goods by size, into stock and out on a challan
+
+**Migration:** `20261009180000_sales_dispatch_and_fg_stock`
+**Branch:** `feat/sales-dispatch` (stacked on `feat/sales-orders`)
+**Status: applied to the shared database on 9 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `stock_ledger.sizeId`, nullable, a size. A finished garment's stock is kept
+  per size; everything else passes no size and keeps one balance per item. All
+  48 balances in the database read the same through `stock.service` after it.
+- New `finished_goods_receipts` and `finished_goods_receipt_lines`: packed
+  garments into the finished-goods store, by size, with the rate per piece and
+  where it came from (approved BOM cost, else standard rate).
+- `delivery_challans`: customer, store, delivery address, cartons, packing
+  note, who made / dispatched / cancelled it and when. `delivery_challan_lines`:
+  the order line and item, and a note when more went than was pending. New
+  `delivery_challan_line_sizes`.
+- `sales_order_line_sizes.deliveredQty`, default 0.
+
+Nothing is dropped and no row changes. A size with stock, a receipt or a
+challan row against it can no longer be deleted (foreign key RESTRICT). On a
+branch without this folder, `prisma migrate dev` will propose dropping all of
+it. Say no.
+
+## 9 Oct 2026 — sales orders: sent, released, cancelled, short-closed, amended
+
+**Migration:** `20261009120000_sales_order_lifecycle`
+**Branch:** `feat/sales-orders`
+**Status: applied to the shared database on 9 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+Ten nullable columns on `sales_orders`: `sentForApprovalAt`, and who / when /
+why for a credit release (`creditReleasedById`, `creditReleasedAt`,
+`creditReleaseReason`), a cancellation (`cancelledById`, `cancelledAt`,
+`cancelReason`) and a short-close (`shortClosedById`, `shortClosedAt`,
+`shortCloseReason`). The three user columns are set null if the user goes.
+`sales_order_lines.hsnCode`, nullable. A new table, `sales_order_revisions`:
+one row per earlier version of an amended order (`soId`, `version`, the whole
+order as `snapshot`, `reason`, `changedById`, `changedAt`), unique on
+`soId` + `version`.
+
+Nothing is dropped and no row changes. On a branch without this folder,
+`prisma migrate dev` will propose dropping all of it. Say no.
+
+Only drafts with `sentForApprovalAt` set now reach Pending Approvals. No sales
+order existed when this was applied, so none was left out.
+
 ## 29 Sep 2026 — an item category's department
 
 **Migration:** `20260929140000_category_department`

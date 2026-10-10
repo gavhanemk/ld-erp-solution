@@ -438,7 +438,8 @@ export async function executeTool(
           take: 15,
         }),
         prisma.salesOrder.findMany({
-          where: { status: 'DRAFT', approvedAt: null },
+          // Only drafts sent for approval; one still being typed is not waiting on anyone.
+          where: { status: 'DRAFT', approvedAt: null, sentForApprovalAt: { not: null } },
           include: { customer: { select: { name: true } } },
           orderBy: { createdAt: 'asc' },
           take: 15,

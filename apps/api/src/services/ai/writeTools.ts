@@ -4,6 +4,8 @@ import { nextDocumentNumber } from '../../lib/docNumber'
 import { withGeneratedCode } from '../../lib/masterCode'
 import { assertItemStyleColorValid } from '../../lib/itemStyleColor'
 import { logger } from '../../utils/logger'
+import { AppError } from '../../middleware/errorHandler'
+import { approveSalesOrder, rejectSalesOrder } from '../salesOrder.service'
 import {
   createCustomerSchema,
   createItemSchema,
@@ -1093,15 +1095,23 @@ async function findDocument(number: string) {
       raisedById: so.createdById,
       before: so,
       describe: `${so.customer.name}, ₹${Number(so.totalAmount).toLocaleString('en-IN')}`,
+      // The same rules the Pending Approvals screen goes through: draft only,
+      // and a customer over their credit limit is released with a reason —
+      // which is asked for on that screen, not taken from a chat.
       decide: async (approve: boolean, userId: string, reason: string | null) => {
-        if (so.approvedAt) throw new Error(`${so.soNumber} is already approved.`)
-        if (so.status === 'CANCELLED') throw new Error(`${so.soNumber} is cancelled.`)
-        return prisma.salesOrder.update({
-          where: { id: so.id },
-          data: approve
-            ? { status: 'CONFIRMED', approvedById: userId, approvedAt: new Date() }
-            : { status: 'CANCELLED', notes: [so.notes, `Refused: ${reason}`].filter(Boolean).join('\n') },
-        })
+        try {
+          const { after } = approve
+            ? await approveSalesOrder(so.id, userId)
+            : await rejectSalesOrder(so.id, userId, reason ?? 'No reason given')
+          return after
+        } catch (err) {
+          if (err instanceof AppError && err.code === 'CREDIT_HOLD') {
+            throw new Error(
+              `${err.message} Approve it from Pending Approvals on the dashboard, where the reason is asked for.`,
+            )
+          }
+          throw err
+        }
       },
     }
   }

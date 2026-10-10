@@ -62,6 +62,7 @@ const navItems: NavItem[] = [
       { label: 'Units of Measure', href: '/masters/units' },
       { label: 'Expense Heads', href: '/masters/expense-heads' },
       { label: 'Styles & SKU', href: '/masters/styles' },
+      { label: 'Brands', href: '/masters/brands' },
       { label: 'Bill of Materials', href: '/masters/bom' },
       { label: 'Size Runs', href: '/masters/size-runs' },
       { label: 'Customers', href: '/masters/customers' },
@@ -78,10 +79,13 @@ const navItems: NavItem[] = [
   {
     label: 'Sales', icon: ShoppingCart,
     children: [
+      { label: 'Dashboard', href: '/sales/dashboard' },
+      { label: 'Quotations', href: '/sales/quotations' },
       { label: 'Sales Orders', href: '/sales/orders' },
-      { label: 'Delivery Challan', href: '/sales/challan', planned: true },
-      { label: 'Invoices', href: '/sales/invoices', planned: true },
-      { label: 'Payments Received', href: '/sales/payments', planned: true },
+      { label: 'Delivery Challan', href: '/sales/challan' },
+      { label: 'Invoices', href: '/sales/invoices' },
+      { label: 'Payments Received', href: '/sales/payments' },
+      { label: 'Returns & Credit Notes', href: '/sales/returns' },
     ],
   },
   {
@@ -119,6 +123,7 @@ const navItems: NavItem[] = [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Material Requisitions', href: '/inventory/requisitions' },
       { label: 'Stock Documents', href: '/inventory/documents' },
+      { label: 'Finished Goods In', href: '/inventory/finished-goods' },
       { label: 'Customer Material', href: '/inventory/customer-material' },
       { label: 'Job Work', href: '/inventory/job-work' },
       { label: 'Stock Ledger', href: '/inventory/ledger' },

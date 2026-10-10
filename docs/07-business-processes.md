@@ -28,7 +28,7 @@ different names and no document says how they relate. Treat that section as
 | **LD Cotton Mills** | The garment manufacturer this ERP is for. Bhiwandi. | Own GSTIN | The company |
 | **LD Silk Mills** | Sister company, same ownership, supplies fabric to LD Cotton Mills. | Own, separate GSTIN | A supplier, flagged `isGroupCompany` — [never a second company in this database](04-business-rules.md#10-one-company-per-database) |
 | **Linkd Prints** | A third entity — digital print business. Appears in LD Silk Mills' sales register (its `comp` column) and in SCOT (§6) as "LinkD," sharing SCOT's infrastructure with LD. | Unconfirmed | Not modelled yet — **open question, see §11** |
-| **VHAGAR** | A separate garment production-and-traceability operation with its own app, currently single-tenant. Not clearly a retail/D2C brand — the evidence is manufacturing and QC, not a storefront. | — | Not connected to this ERP at all yet — see §5 |
+| **VHAGAR** | A garment brand of LD Cotton Mills, its parent, with its own production-and-traceability app, currently single-tenant. | None of its own — billed on LD Cotton Mills' GSTIN (confirmed 9 Oct 2026) | A brand on sales and production orders; the app is not connected yet — see §5 |
 
 LD Silk Mills is LD Cotton Mills' single largest creditor in the old
 system's books — ₹1,75,76,855 owed as of 31 Mar 2025, plus a separate
@@ -574,17 +574,52 @@ moving the call to Monday — 18 of 31 weekly LD clients are affected.
 
 ### What this means for building Sales here
 
-CRR looks, from its own description, like the real home of the enquiry
-process — but nothing confirms whether CRR **is** Textile LMS or Incoming
-NBD under a different name, a successor to one of them, or a fourth
-system entirely. **This needs a direct answer from the business before
-Sales is designed** — see §11.
+CRR is not used at LD Cotton Mills: asked on 9 Oct 2026, the business
+had not heard of it. It seems to sit on the LD Silk Mills / Linkd Prints
+side of the group, so Sales here neither reads from it nor replaces it.
 
 Once a lead becomes an order, the old system's flow continues: **Sales
 Order → Delivery Challan (or DC Returnable / Non-Returnable) → Sales
 Invoice → Payment Receipt**, with Credit Notes and Debit Notes for returns
 and adjustments. Only the Sales Order (list, no create form yet) and
 Sales Invoice model exist here so far.
+
+### Decisions already made (9 Oct 2026)
+
+What the business answered before Sales was built:
+
+1. **Credit limit is a warning, not a block.** An order for a customer
+   over their limit, or blacklisted, can be approved only by someone with
+   approval rights, who gives a reason; the reason is kept on the order.
+2. **VHAGAR has no GSTIN of its own.** It is a brand of LD Cotton Mills, so
+   a VHAGAR order is an ordinary sale on LD Cotton Mills' GSTIN — no
+   inter-company invoice, no transfer price.
+3. **Finished-goods stock carries sizes**, so dispatch can check packed
+   stock size by size.
+4. **Dispatch may send more than the order's pending quantity** in an edge
+   case, with a note saying why. Never more than is in stock.
+5. **No e-invoice (IRN).** LD Cotton Mills is below the turnover limit.
+   E-way bills still apply above the value limit.
+6. **Sales returns are built in this ERP**, not handled by the LD Silk
+   Mills Head Office/Bhiwandi return process.
+7. **Quotations are optional.** Regular clients usually go straight to an
+   order; a quotation goes to a new client, for a new style, or to a
+   regular client when price or terms change.
+8. **No approval step for ordinary orders** (10 Oct 2026). An order is
+   saved as a draft, then confirmed in one click — the standard ERP flow.
+   A manager is brought in only for a credit hold (point 1): the order
+   waits in Pending Approvals until someone with approval rights, other
+   than whoever raised it, OKs it. The Admin can release it on the spot
+   with a reason.
+
+Two were "not sure", so a default was chosen that is easy to change:
+
+- **Who raises the invoice.** There is no separate dispatch team — anyone
+  does anything — so dispatch and invoice are one flow ("Dispatch and
+  create invoice"), and a challan can still be billed later.
+- **Brokerage base.** Worked out on the taxable value, before GST, earned
+  on each invoice and cut by credit notes. To confirm with the accountant
+  before the brokerage report is built.
 
 ---
 
@@ -741,15 +776,12 @@ guess at:
    independent stock? No document says.
 2. **Linkd Prints** — is it a company with its own GSTIN like LD Silk
    Mills, or part of the LD group some other way?
-3. **Which sales/lead system is actually current** — Textile LMS,
-   Incoming NBD, or is CRR the real one, with SCOT confirmed live
-   downstream of it? All three/four were found; none of the documents
-   say how they relate.
+3. ~~**Which sales/lead system is actually current**~~ — answered 9 Oct
+   2026: CRR is not used at LD Cotton Mills; see §6.
 4. **The LD Silk Mills GP tool's scope** — does it need to cover LD
    Cotton Mills and Linkd Prints too, or LD Silk Mills alone?
-5. **Goods returns** — does LD Cotton Mills use the same Head
-   Office/Bhiwandi process as LD Silk Mills? Should it become a module
-   here?
+5. ~~**Goods returns**~~ — answered 9 Oct 2026: sales returns are built
+   in this ERP; see §6.
 6. **Shop-floor pay** — piece-rate, daily wage, or something else? And how
    is attendance actually captured? Nothing surveyed says.
 7. **GST rates beyond garments at 5%** — still needs the CA's written
