@@ -113,6 +113,8 @@ interface LineDraft {
   categoryId: string
   subcategoryId: string
   styleId: string
+  /** The style number as typed, or as filled in from the item. */
+  styleCode: string
   itemId: string
   /**
    * The size run picked on the line, for a garment whose style has none.
@@ -171,6 +173,7 @@ interface SavedOrder {
   lines: Array<{
     id: string
     itemId: string
+    styleCode: string | null
     color: string | null
     gender: string | null
     fabric: string | null
@@ -198,6 +201,7 @@ const blankLine = (): LineDraft => ({
   categoryId: '',
   subcategoryId: '',
   styleId: '',
+  styleCode: '',
   itemId: '',
   sizeGroupId: '',
   sizes: {},
@@ -540,6 +544,7 @@ export function SalesOrderDialog({
                     id: l.id,
                     ...filingOf(item, cat.rows),
                     styleId: item?.styleId ?? '',
+                    styleCode: l.styleCode ?? (item?.styleId ? (styleMap.get(item.styleId)?.code ?? '') : ''),
                     itemId: l.itemId,
                     // A garment with no run of its own: the run its sizes came from.
                     sizeGroupId: !styleRun && l.sizes.length ? (groupOfSize.get(l.sizes[0].sizeId) ?? '') : '',
@@ -668,12 +673,6 @@ export function SalesOrderDialog({
   const itemsFor = (line: LineDraft) =>
     itemsInFiling(line).filter((it) => !line.styleId || it.styleId === line.styleId)
 
-  /** The styles with an item in the row's filing — a style with nothing to sell is not offered. */
-  const stylesFor = (line: LineDraft) => {
-    const ids = new Set(itemsInFiling(line).map((it) => it.styleId).filter(Boolean))
-    return styles.filter((s) => ids.has(s.id))
-  }
-
   const setLine = (key: string, patch: Partial<LineDraft>) =>
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
 
@@ -710,6 +709,8 @@ export function SalesOrderDialog({
       itemId,
       ...filingOf(item),
       styleId: item?.styleId ?? '',
+      // The item's own style when it has one; a typed one stays otherwise.
+      styleCode: (item?.styleId ? styleById.get(item.styleId)?.code : null) ?? line.styleCode,
       ...defaultsFrom(item, line),
       ...(line.itemId !== itemId && !sameRun ? { sizes: {}, qty: '', sizeGroupId: '' } : {}),
     })
@@ -724,15 +725,22 @@ export function SalesOrderDialog({
     setLine(key, { ...patch, ...(keeps ? {} : { itemId: '', sizes: {}, qty: '', sizeGroupId: '' }) })
   }
 
-  /** A style picked: its one colour is picked with it; with several, the colours are offered. */
-  const pickStyle = (key: string, styleId: string) => {
+  /**
+   * The style number typed. One that is in the style master narrows the items
+   * to that style, and with only one colour picks it; anything else is kept
+   * as typed and narrows nothing.
+   */
+  const typeStyle = (key: string, styleCode: string) => {
     const line = lines.find((l) => l.key === key)
     if (!line) return
-    const next = { ...line, styleId }
+    const typed = styleCode.trim().toLowerCase()
+    const styleId = (typed && styles.find((st) => st.code.toLowerCase() === typed)?.id) || ''
+    const next = { ...line, styleCode, styleId }
     const choices = itemsFor(next)
     if (styleId && choices.length === 1 && !lines.some((l) => l.key !== key && l.itemId === choices[0].id)) {
       const item = choices[0]
       setLine(key, {
+        styleCode,
         styleId,
         itemId: item.id,
         ...filingOf(item),
@@ -741,7 +749,8 @@ export function SalesOrderDialog({
       })
       return
     }
-    narrow(key, { styleId })
+    // An item of a different style no longer fits once a known style is typed.
+    narrow(key, { styleCode, styleId })
   }
 
   /** A size run picked on a line whose style has none. */
@@ -918,6 +927,7 @@ export function SalesOrderDialog({
         // line from one version to the next.
         ...(amend && p.line.id ? { id: p.line.id } : {}),
         itemId: p.line.itemId,
+        styleCode: p.line.styleCode.trim() || null,
         color: p.item?.color || p.line.color.trim() || null,
         gender: p.line.gender || null,
         fabric: p.line.fabric.trim() || null,
@@ -995,7 +1005,6 @@ export function SalesOrderDialog({
     const line = p.line
     const subs = subCategoriesOf(line.categoryId)
     const choices = itemsFor(line)
-    const styleChoices = stylesFor(line)
     const c = compact ? cell : 'form-input'
     const style = p.item?.styleId ? styleById.get(p.item.styleId) : undefined
     // The other colours of this style, each its own item.
@@ -1065,19 +1074,21 @@ export function SalesOrderDialog({
         </SmartSelect>
       ),
       style: (
-        <SmartSelect
+        <input
           className={`${c} font-mono`}
-          value={line.styleId}
-          onChange={(e) => pickStyle(line.key, e.target.value)}
+          value={line.styleCode}
+          maxLength={50}
+          placeholder="Style no."
+          title={line.styleId ? styleById.get(line.styleId)?.name : undefined}
+          onChange={(e) => typeStyle(line.key, e.target.value)}
+          // An item that belongs to a style keeps that style's number: an
+          // unknown code typed over it goes back when the box is left.
+          onBlur={() => {
+            const own = style?.code
+            if (own && line.styleCode.trim().toLowerCase() !== own.toLowerCase()) setLine(line.key, { styleCode: own })
+          }}
           aria-label={`Row ${i + 1} style number`}
-        >
-          <option value="">All styles</option>
-          {styleChoices.map((st) => (
-            <option key={st.id} value={st.id} data-sub={st.name}>
-              {st.code}
-            </option>
-          ))}
-        </SmartSelect>
+        />
       ),
       // An item that is one colour of a style switches to another colour's
       // item; a garment with no colour of its own takes one typed here.
