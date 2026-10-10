@@ -22,6 +22,8 @@ export interface CreditPosition {
   overdue: number
   /** Confirmed orders not yet invoiced: money the customer will owe. */
   openOrders: number
+  /** Money received and not yet applied to an invoice: an advance, which offsets the rest. */
+  onAccount: number
 }
 
 /**
@@ -41,7 +43,7 @@ export async function creditPosition(
   })
   if (!customer) throw new AppError('Customer not found', 404, 'NOT_FOUND')
 
-  const [invoices, orders] = await Promise.all([
+  const [invoices, orders, advance] = await Promise.all([
     db.salesInvoice.findMany({
       where: { customerId, status: { in: ['UNPAID', 'PARTIAL'] } },
       select: { balanceAmount: true, dueDate: true },
@@ -57,6 +59,7 @@ export async function creditPosition(
         invoices: { where: { status: { not: 'CANCELLED' } }, select: { totalAmount: true } },
       },
     }),
+    db.paymentReceipt.aggregate({ where: { customerId, status: 'POSTED' }, _sum: { onAccount: true } }),
   ])
 
   const now = Date.now()
@@ -83,12 +86,13 @@ export async function creditPosition(
     unpaid: round2(unpaid),
     overdue: round2(overdue),
     openOrders: round2(openOrders),
+    onAccount: round2(Number(advance._sum.onAccount ?? 0)),
   }
 }
 
 export interface CreditCheck extends CreditPosition {
   orderValue: number
-  /** Unpaid + open orders + this order. */
+  /** Unpaid + open orders + this order, less any advance on account. */
   exposure: number
   overLimit: boolean
   /** True when approving needs a manager's release: over the limit, or blacklisted. */
@@ -97,7 +101,7 @@ export interface CreditCheck extends CreditPosition {
 
 /** The position with one more order added, and whether that crosses the line. */
 export function checkCredit(position: CreditPosition, orderValue: number): CreditCheck {
-  const exposure = round2(position.unpaid + position.openOrders + orderValue)
+  const exposure = round2(position.unpaid + position.openOrders + orderValue - position.onAccount)
   const overLimit = position.limit != null && exposure > position.limit
   return {
     ...position,
@@ -115,9 +119,10 @@ export function creditWarning(c: CreditCheck): string {
     ? `${c.customerName} is marked blacklisted`
     : `${c.customerName} would go over their credit limit of ${rupees(c.limit ?? 0)}`
   const overdue = c.overdue > 0 ? ` (${rupees(c.overdue)} overdue)` : ''
+  const advance = c.onAccount > 0 ? `, less ${rupees(c.onAccount)} paid in advance` : ''
   return (
     `${why}. Unpaid invoices ${rupees(c.unpaid)}${overdue}, other open orders ${rupees(c.openOrders)}, ` +
-    `this order ${rupees(c.orderValue)}: ${rupees(c.exposure)} in all. ` +
+    `this order ${rupees(c.orderValue)}${advance}: ${rupees(c.exposure)} in all. ` +
     `Approving it needs a reason for releasing it.`
   )
 }

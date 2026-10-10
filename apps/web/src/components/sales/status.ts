@@ -71,3 +71,24 @@ export const INVOICE_STATUS: Record<string, StatusLook> = {
 
 export const invoiceStatus = (status: string): StatusLook =>
   INVOICE_STATUS[status] ?? { label: status, cls: 'badge-neutral' }
+
+/** How money came in, in the words on the old receipt book. */
+export const PAYMENT_MODES: Array<{ value: string; label: string }> = [
+  { value: 'NEFT', label: 'NEFT' },
+  { value: 'RTGS', label: 'RTGS' },
+  { value: 'UPI', label: 'UPI' },
+  { value: 'CHEQUE', label: 'Cheque' },
+  { value: 'PDC', label: 'Post-dated cheque' },
+  { value: 'CASH', label: 'Cash' },
+]
+export const modeLabel = (mode: string) => PAYMENT_MODES.find((m) => m.value === mode)?.label ?? mode
+
+/**
+ * A receipt's status. A cheque not yet credited by the bank reads as such;
+ * a reversed receipt (a bounced cheque, a mistake) settles nothing.
+ */
+export function receiptStatus(r: { status: string; mode: string; isChequeCleared: boolean }): StatusLook {
+  if (r.status === 'REVERSED') return { label: 'Reversed', cls: 'badge-danger' }
+  if ((r.mode === 'CHEQUE' || r.mode === 'PDC') && !r.isChequeCleared) return { label: 'Cheque to clear', cls: 'badge-warning' }
+  return { label: 'Received', cls: 'badge-success' }
+}

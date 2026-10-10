@@ -7,6 +7,27 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 10 Oct 2026 — payments received from customers
+
+**Migration:** `20261010180000_sales_receipts`
+**Branch:** `feat/sales-dispatch`
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `payment_receipts`: `bankAccountId`, `chequeNo`, `clearedAt`, `tdsAmount`
+  and `onAccount` (both default 0), `status` (POSTED / REVERSED, default
+  POSTED), `createdById`, `reversedAt`, `reversedById`, `reversalReason`.
+  The old single `invoiceId` stays, unused by new receipts.
+- New `payment_receipt_allocations` (one row per invoice a receipt settles:
+  cash and TDS) and `payment_receipt_attachments`.
+- `sales_invoices.tdsAmount`, default 0: TDS the customer deducted, which
+  settles the invoice like cash.
+
+Nothing is dropped and no row changes (both tables were empty). Receipts need
+an **RCPT** number series in Settings → Company → Document numbering.
+
 ## 10 Oct 2026 — sales invoices raised from a challan
 
 **Migration:** `20261010150000_sales_invoice_from_challan`

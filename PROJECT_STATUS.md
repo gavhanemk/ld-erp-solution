@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sat 10 Oct 2026 — Sales dispatch and invoices, Phase 2 done (branch `feat/sales-dispatch`)_
+_Last updated: Sat 10 Oct 2026 — Sales Phase 3, payments received (branch `feat/sales-dispatch`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -64,7 +64,23 @@ summary, amount and tax in words, bank details, three copies; no IRN. Unpaid
 invoices now count in the credit check. Migration
 `20261010150000_sales_invoice_from_challan`.
 
-**Next:** Phase 3 — payments received against invoices, and outstanding.
+**Payments received (Phase 3, 10 Oct):** `/sales/payments` with
+"Outstanding" (each customer's dues aged not due / 1–30 / 31–60 / 61–90 /
+90+, less advances, invoices under each row, Receive button, export) and
+"Receipts" (print, apply advance, mark cheque cleared, reverse). One receipt
+settles several invoices (Settle oldest first); the rest stays on account and
+is applied later; TDS the customer deducted settles an invoice like cash.
+Cheques and PDCs settle when recorded and are marked cleared later; a bounced
+cheque or a mistake is reversed with a reason and its invoices reopen. An
+invoice with money against it cannot be cancelled. Advances count against the
+credit limit. "Record receipt" on the invoice list. Receipt print
+(`/print/payment-receipt/[id]`). Sales or Accounts rights both work here.
+Needs an **RCPT** number series. Customer dues from the old system (about
+₹1.74 crore at 31 Mar 2025) are not here — no data migrates. Migration
+`20261010180000_sales_receipts`.
+
+**Next:** Phase 4 — sales returns and credit notes, quotations, the Sales
+dashboard and reports.
 
 ---
 

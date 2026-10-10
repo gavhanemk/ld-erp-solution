@@ -880,7 +880,8 @@ export function SalesOrderDialog({
   const credit = context?.credit
   const creditHeld =
     !!credit &&
-    (credit.isBlacklisted || (credit.limit != null && credit.unpaid + credit.openOrders + totals.total > credit.limit))
+    (credit.isBlacklisted ||
+      (credit.limit != null && credit.unpaid + credit.openOrders + totals.total - (credit.onAccount ?? 0) > credit.limit))
   // The same rule as the server: the Admin, or an approver who did not raise it.
   const mayRelease = me?.role === 'Admin' || (can('sales', 'approve') && !!saved && saved.createdById !== me?.id)
 

@@ -81,7 +81,7 @@ const navItems: NavItem[] = [
       { label: 'Sales Orders', href: '/sales/orders' },
       { label: 'Delivery Challan', href: '/sales/challan' },
       { label: 'Invoices', href: '/sales/invoices' },
-      { label: 'Payments Received', href: '/sales/payments', planned: true },
+      { label: 'Payments Received', href: '/sales/payments' },
     ],
   },
   {

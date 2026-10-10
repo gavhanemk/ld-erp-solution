@@ -37,6 +37,8 @@ export interface CustomerContext {
     unpaid: number
     overdue: number
     openOrders: number
+    /** Paid in advance and not yet applied to an invoice. */
+    onAccount?: number
   }
   placeOfSupply: { code: string; state: string; isIntraState: boolean } | null
   placeOfSupplyProblem: string | null
@@ -97,7 +99,7 @@ export function CustomerPanel({
   onPlaceOfSupply: (code: string) => void
 }) {
   const credit = context?.credit
-  const exposure = credit ? credit.unpaid + credit.openOrders + orderValue : 0
+  const exposure = credit ? credit.unpaid + credit.openOrders + orderValue - (credit.onAccount ?? 0) : 0
   const overBy = credit?.limit != null ? exposure - credit.limit : 0
   const taxMode = taxModeWords(context)
 
@@ -159,7 +161,9 @@ export function CustomerPanel({
                 : formatRupees(credit.unpaid),
             ],
             ['Other open orders', formatRupees(credit.openOrders)],
-            ['Credit days', `${credit.creditDays} days`],
+            (credit.onAccount ?? 0) > 0
+              ? ['Paid in advance', formatRupees(credit.onAccount ?? 0)]
+              : ['Credit days', `${credit.creditDays} days`],
           ].map(([label, value]) => (
             <div key={label} className="bg-card px-3 py-2">
               <p className="text-muted-foreground text-[11px]">{label}</p>

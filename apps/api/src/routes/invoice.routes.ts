@@ -685,8 +685,13 @@ export async function cancelInvoice(tx: Prisma.TransactionClient, id: string, us
   const before = await tx.salesInvoice.findUnique({ where: { id }, include: invoiceInclude })
   if (!before) throw new AppError('Invoice not found', 404, 'NOT_FOUND')
   if (before.status === 'CANCELLED') throw new AppError(`${before.invoiceNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
-  if (Number(before.paidAmount) > 0 || before._count.payments > 0) {
-    throw new AppError(`${before.invoiceNumber} has money received against it. Raise a credit note instead.`, 409, 'HAS_PAYMENTS')
+  const received = await tx.paymentReceiptAllocation.count({ where: { invoiceId: before.id, receipt: { status: 'POSTED' } } })
+  if (Number(before.paidAmount) > 0 || Number(before.tdsAmount) > 0 || received > 0 || before._count.payments > 0) {
+    throw new AppError(
+      `${before.invoiceNumber} has money received against it. Reverse that receipt first, or raise a credit note.`,
+      409,
+      'HAS_PAYMENTS',
+    )
   }
   if (before._count.creditNotes > 0) {
     throw new AppError(`${before.invoiceNumber} has a credit note against it and cannot be cancelled`, 409, 'HAS_CREDIT_NOTES')

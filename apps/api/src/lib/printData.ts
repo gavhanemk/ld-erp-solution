@@ -47,6 +47,7 @@ export interface PrintHeader {
 
 const DEFAULT_TITLES: Record<string, string> = {
   INV: 'TAX INVOICE',
+  RCPT: 'PAYMENT RECEIPT',
   // What the buyer receives back for their PO: our word that we will make
   // and deliver this. Not a bill, and the heading must not read like one.
   SO: 'ORDER CONFIRMATION',

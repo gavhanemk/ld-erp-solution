@@ -6,6 +6,7 @@ import {
   Ban,
   CalendarDays,
   ClipboardList,
+  HandCoins,
   Info,
   Printer,
   ReceiptText,
@@ -257,6 +258,14 @@ export default function SalesInvoicesPage() {
     const items: RowAction[] = [
       { key: 'print', label: 'Print invoice', icon: <Printer size={15} />, href: `/print/sales-invoice/${inv.id}`, newTab: true },
     ]
+    if ((inv.status === 'UNPAID' || inv.status === 'PARTIAL') && (can('sales', 'create') || can('accounts', 'create'))) {
+      items.push({
+        key: 'receive',
+        label: 'Record receipt',
+        icon: <HandCoins size={15} />,
+        href: `/sales/payments?receive=${inv.customer.id}&invoice=${inv.id}`,
+      })
+    }
     if (inv.status !== 'CANCELLED' && Number(inv.paidAmount) === 0 && mayCancel) {
       items.push({ key: 'cancel', label: 'Cancel invoice', icon: <Ban size={15} />, danger: true, onClick: () => setCancelling(inv) })
     }
@@ -737,7 +746,7 @@ export default function SalesInvoicesPage() {
           <p className="text-muted-foreground text-xs">
             {tab === 'waiting'
               ? 'Challans that have gone and are not billed, oldest first. One invoice bills one challan, at the rates on the order.'
-              : 'An invoice is final once saved. A wrong one is cancelled with a reason while nothing has been received against it, and its challan billed again.'}
+              : 'An invoice is final once saved. A wrong one is cancelled with a reason while nothing has been received against it, and its challan billed again. Money in is recorded under Payments Received.'}
           </p>
         </div>
       </div>
