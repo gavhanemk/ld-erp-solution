@@ -33,6 +33,7 @@ interface OrderOption {
   id: string
   soNumber: string
   status: string
+  isJobWork?: boolean
   customer: { name: string }
 }
 type Rate = { rate: number; source: 'BOM' | 'STANDARD'; bomVersion: string | null } | null
@@ -42,10 +43,12 @@ interface LineDraft {
   itemId: string
   sizes: Record<string, string>
   qty: string
+  /** "B" for B-grade pieces: made, but not first quality. Kept apart in stock. */
+  grade: 'A' | 'B'
 }
 
 let lineKey = 0
-const blankLine = (): LineDraft => ({ key: `f${++lineKey}`, itemId: '', sizes: {}, qty: '' })
+const blankLine = (): LineDraft => ({ key: `f${++lineKey}`, itemId: '', sizes: {}, qty: '', grade: 'A' })
 const today = () => new Date().toISOString().slice(0, 10)
 
 /**
@@ -189,12 +192,16 @@ export function FinishedGoodsDialog({
     return run && run.length ? run : null
   }
 
+  // Packed for a job-work order: made from the customer's fabric, so the
+  // customer's garments, counted at no value of ours.
+  const jobWork = !!orders.find((o) => o.id === soId)?.isJobWork
+
   const priced = lines.map((l) => {
     const item = itemById.get(l.itemId)
     const run = runOf(item)
     const qty = run ? sumSizes(l.sizes) : Number(l.qty) || 0
     const rate = l.itemId ? rates[l.itemId] : undefined
-    return { line: l, item, run, qty, rate, value: rate ? qty * rate.rate : 0 }
+    return { line: l, item, run, qty, rate, value: rate && !jobWork ? qty * rate.rate : 0 }
   })
   const filled = priced.filter((p) => p.line.itemId)
   const pieces = filled.reduce((s, p) => s + p.qty, 0)
@@ -206,7 +213,7 @@ export function FinishedGoodsDialog({
       ? 'Add at least one item.'
       : filled.find((p) => p.qty <= 0)
         ? `Put in the pieces for ${filled.find((p) => p.qty <= 0)!.item?.code}.`
-        : filled.find((p) => p.rate === null)
+        : !jobWork && filled.find((p) => p.rate === null)
           ? `${filled.find((p) => p.rate === null)!.item?.code} has no approved BOM cost and no standard rate, so it cannot be valued.`
           : null
 
@@ -224,12 +231,12 @@ export function FinishedGoodsDialog({
       soId: soId || null,
       moId: moId || null,
       notes: notes.trim() || null,
-      lines: filled.flatMap((p): Array<{ itemId: string; sizeId: string | null; qty: number }> =>
+      lines: filled.flatMap((p): Array<{ itemId: string; sizeId: string | null; qty: number; grade: 'A' | 'B' }> =>
         p.run
           ? p.run
-              .map((s) => ({ itemId: p.line.itemId, sizeId: s.id, qty: Number(p.line.sizes[s.id]) || 0 }))
+              .map((s) => ({ itemId: p.line.itemId, sizeId: s.id, qty: Number(p.line.sizes[s.id]) || 0, grade: p.line.grade }))
               .filter((x) => x.qty > 0)
-          : [{ itemId: p.line.itemId, sizeId: null, qty: p.qty }]
+          : [{ itemId: p.line.itemId, sizeId: null, qty: p.qty, grade: p.line.grade }]
       ),
     }
     try {
@@ -355,10 +362,22 @@ export function FinishedGoodsDialog({
                             ))}
                           </SmartSelect>
                         </label>
+                        <label className="w-36 shrink-0">
+                          <span className="form-label">Grade</span>
+                          <SmartSelect
+                            className="form-input"
+                            value={p.line.grade}
+                            onChange={(e) => setLine(p.line.key, { grade: e.target.value === 'B' ? 'B' : 'A' })}
+                            aria-label={`Line ${i + 1} grade`}
+                          >
+                            <option value="A">Good (first quality)</option>
+                            <option value="B">B-grade</option>
+                          </SmartSelect>
+                        </label>
                         <div className="text-xs">
                           <span className="form-label">Value per piece</span>
-                          <span className={`block py-2 tabular-nums ${p.rate === null ? 'warn-text' : 'text-foreground'}`}>
-                            {p.line.itemId ? rateWords(p.rate) : '—'}
+                          <span className={`block py-2 tabular-nums ${!jobWork && p.rate === null ? 'warn-text' : 'text-foreground'}`}>
+                            {!p.line.itemId ? '—' : jobWork ? "Customer's · ₹0" : rateWords(p.rate)}
                           </span>
                         </div>
                         <button

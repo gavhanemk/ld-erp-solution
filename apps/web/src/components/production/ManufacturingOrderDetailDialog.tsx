@@ -112,8 +112,9 @@ export function ManufacturingOrderDetailDialog({
   const [requiredDate, setRequiredDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [loadingPlan, setLoadingPlan] = useState(false)
-  const [busy, setBusy] = useState<'release' | 'raise' | 'close' | null>(null)
+  const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | null>(null)
   const [closing, setClosing] = useState(false)
+  const [completingShort, setCompletingShort] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
@@ -227,6 +228,23 @@ export function ManufacturingOrderDetailDialog({
     }
   }
 
+  /** Finished with fewer pieces than planned: completed, not called off. */
+  const completeShort = async (reason: string) => {
+    if (!mo) return
+    setBusy('short')
+    setError(null)
+    try {
+      const res = await api.post<{ message?: string }>(`/production/orders/${mo.id}/complete-short`, { reason })
+      setCompletingShort(false)
+      await refresh(res.message ?? `${mo.moNumber} completed.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not complete it.')
+      setCompletingShort(false)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const chosen = useMemo(
     () =>
       (plan?.rows ?? [])
@@ -313,6 +331,11 @@ export function ManufacturingOrderDetailDialog({
                   {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
                 </button>
               </>
+            )}
+            {mo && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && mo.totalPackedQty > 0 && mo.totalPackedQty < mo.totalPlannedQty && can('production', 'edit') && (
+              <button className="btn-secondary" onClick={() => setCompletingShort(true)} disabled={busy !== null} title="Some pieces will not be made: finish with what is packed">
+                <CheckCircle2 size={15} /> Complete with {mo.totalPackedQty.toLocaleString('en-IN')}
+              </button>
             )}
             {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
               <button className="btn-ghost text-destructive" onClick={() => setClosing(true)} disabled={busy !== null}>
@@ -602,6 +625,17 @@ export function ManufacturingOrderDetailDialog({
           ) : null}
         </div>
       </div>
+      {completingShort && mo && (
+        <ReasonDialog
+          title={`Complete ${mo.moNumber} with ${mo.totalPackedQty} of ${mo.totalPlannedQty}?`}
+          description={`What was packed stands and the order is marked completed. The other ${mo.totalPlannedQty - mo.totalPackedQty} pieces are free to plan again on the sales order, or to short-close there.`}
+          confirmLabel="Complete it"
+          placeholder="3 pieces damaged at embroidery"
+          busy={busy === 'short'}
+          onCancel={() => setCompletingShort(false)}
+          onConfirm={(reason) => void completeShort(reason)}
+        />
+      )}
       {closing && mo && (
         <ReasonDialog
           title={`Close ${mo.moNumber}?`}

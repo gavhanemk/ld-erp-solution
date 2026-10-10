@@ -41,6 +41,9 @@ const lineSchema = z.object({
   qty: z.number().positive('Quantity must be more than zero'),
   unitPrice: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
+  /** On a job-work quotation: the SAC and GST rate of the job charge (SAC 9988 when empty). */
+  jobHsnCode: z.string().trim().max(20).optional().nullable(),
+  jobGstRate: z.number().min(0).max(28).optional().nullable(),
 })
 
 export const quoteSchema = z
@@ -132,6 +135,8 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
         totalQty: l.qty,
         unitPrice: l.unitPrice,
         discount: l.discount,
+        jobHsnCode: l.jobHsnCode ?? null,
+        jobGstRate: l.jobGstRate ?? null,
       })),
     }),
   )

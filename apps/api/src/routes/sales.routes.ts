@@ -41,6 +41,10 @@ const ORDER_STATUSES: SalesOrderStatus[] = [
   'CANCELLED',
 ]
 
+/** Job work is billed as a service: SAC 9988, at 5% unless the HSN master says otherwise. */
+export const JOB_WORK_SAC = '9988'
+export const JOB_WORK_DEFAULT_GST = 5
+
 /**
  * A sales order used to be created straight from `req.body` with no validation
  * at all, which meant a missing quantity became NaN and a bad customer id
@@ -65,6 +69,15 @@ const salesOrderLineSchema = z.object({
   description: z.string().trim().max(500).optional().nullable(),
   /** No GST on this line, whatever the item's HSN code says. */
   taxExempt: z.boolean().optional(),
+  /**
+   * On a job-work order: the SAC/HSN the job charge is billed under and its
+   * GST rate. Job work is a service, so the garment's own HSN does not apply;
+   * empty means SAC 9988, at the HSN master's rate for it (5% if it has none).
+   */
+  jobHsnCode: z.string().trim().max(20).optional().nullable(),
+  jobGstRate: z.number().min(0).max(28).optional().nullable(),
+  /** What a B-grade piece is billed at; empty bills it at the line's rate. */
+  bGradeRate: z.number().min(0).optional().nullable(),
   /** The size run for this line. Quantities must add up to the line total. */
   sizes: z
     .array(z.object({ sizeId: z.string().min(1), qty: z.number().min(0) }))
@@ -649,8 +662,15 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
   // actually sold for: ready-made garments change rate above a price per
   // piece. An item whose code is not in the HSN master keeps its own rate.
   const hsnIndex = await loadHsnIndex(tx)
+  // A job charge is a service: its own SAC and rate, not the garment's.
+  const jobCode = (l: (typeof data.lines)[number]) => l.jobHsnCode?.trim() || JOB_WORK_SAC
   const gstRates = data.lines.map((l) => {
     if (l.taxExempt) return 0
+    if (data.isJobWork) {
+      if (l.jobGstRate != null) return l.jobGstRate
+      const sac = findHsn(hsnIndex, jobCode(l))
+      return sac ? gstRateFor(sac) : JOB_WORK_DEFAULT_GST
+    }
     const item = itemById.get(l.itemId)!
     const hsn = findHsn(hsnIndex, item.hsnCode)
     if (hsn) {
@@ -733,7 +753,8 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       unitPrice: l.unitPrice,
       discount: l.discount ?? 0,
       gstRate: gstRates[i],
-      hsnCode: item.hsnCode ?? null,
+      hsnCode: data.isJobWork ? jobCode(l) : (item.hsnCode ?? null),
+      bGradeRate: l.bGradeRate ?? null,
       amount: round2(lineTotals[i]),
       pendingQty: l.totalQty,
       sortOrder: i,
@@ -988,6 +1009,24 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
         400,
         'CUSTOMER_CHANGED',
       )
+    }
+    // Own order or job work stays what it was once anything has been built on
+    // it: the customer's fabric received, production planned, goods sent.
+    // A form that leaves the flag out keeps the order's own.
+    data.isJobWork = data.isJobWork ?? before.isJobWork
+    if (data.isJobWork !== before.isJobWork) {
+      const [grns, mos, dcs] = await Promise.all([
+        tx.customerGRN.count({ where: { soId: before.id, cancelledAt: null } }),
+        tx.manufacturingOrder.count({ where: { soId: before.id, status: { not: 'CLOSED' } } }),
+        tx.deliveryChallan.count({ where: { soId: before.id, status: { not: 'CANCELLED' } } }),
+      ])
+      if (grns + mos + dcs > 0) {
+        throw new AppError(
+          `${before.soNumber} already has ${[grns && "the customer's material received", mos && 'production planned', dcs && 'goods sent'].filter(Boolean).join(', ')}, so it cannot change between own order and job work.`,
+          409,
+          'JOB_WORK_LOCKED',
+        )
+      }
     }
 
     const oldLines = new Map(before.lines.map((l) => [l.id, l]))

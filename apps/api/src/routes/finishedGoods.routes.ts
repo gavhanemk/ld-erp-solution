@@ -33,9 +33,11 @@ const lineSchema = z.object({
   itemId: z.string().min(1, 'Pick an item'),
   sizeId: z.string().optional().nullable(),
   qty: z.number().positive('Pieces must be more than zero'),
+  /** "B" for B-grade pieces: made, but not first quality. Counted apart from good ones. */
+  grade: z.enum(['A', 'B']).optional(),
 })
 
-const createSchema = z
+export const createSchema = z
   .object({
     receiptDate: z.coerce.date().optional(),
     warehouseId: z.string().min(1, 'Pick the finished-goods store'),
@@ -48,9 +50,9 @@ const createSchema = z
   .superRefine((r, ctx) => {
     const seen = new Set<string>()
     r.lines.forEach((l, i) => {
-      const key = `${l.itemId}|${l.sizeId ?? ''}`
+      const key = `${l.itemId}|${l.sizeId ?? ''}|${l.grade ?? 'A'}`
       if (seen.has(key)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines', i], message: 'The same item and size appear twice' })
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines', i], message: 'The same item, size and grade appear twice' })
       }
       seen.add(key)
     })
@@ -128,10 +130,11 @@ router.get('/rates', requirePermission(MODULE, 'view'), async (req, res) => {
 })
 
 /**
- * GET /api/finished-goods/stock?itemIds=a,b&warehouseId=
+ * GET /api/finished-goods/stock?itemIds=a,b&warehouseId=&ownerCustomerId=
  *
- * Finished goods on hand, by item, size and store — our own stock only. What
- * the dispatch screens check "packed in stock" against.
+ * Finished goods on hand, by item, size, grade and store — our own stock, or
+ * with ownerCustomerId the garments made from that customer's fabric on a
+ * job-work order. What the dispatch screens check "packed in stock" against.
  */
 router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
   const ids = String(req.query.itemIds ?? '')
@@ -140,11 +143,12 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
     .filter(Boolean)
     .slice(0, 200)
   const warehouseId = typeof req.query.warehouseId === 'string' && req.query.warehouseId ? req.query.warehouseId : null
+  const ownerCustomerId = typeof req.query.ownerCustomerId === 'string' && req.query.ownerCustomerId ? req.query.ownerCustomerId : null
 
   const rows = await prisma.stockLedger.groupBy({
-    by: ['itemId', 'sizeId', 'warehouseId'],
+    by: ['itemId', 'sizeId', 'warehouseId', 'grade'],
     where: {
-      ownership: 'OWNED',
+      ...(ownerCustomerId ? { ownership: 'CUSTOMER_OWNED', ownerCustomerId } : { ownership: 'OWNED' }),
       item: { type: 'FINISHED_GOOD' },
       ...(ids.length ? { itemId: { in: ids } } : {}),
       ...(warehouseId ? { warehouseId } : {}),
@@ -156,6 +160,7 @@ router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
       itemId: r.itemId,
       sizeId: r.sizeId,
       warehouseId: r.warehouseId,
+      grade: r.grade,
       qty: Math.round((Number(r._sum.inQty ?? 0) - Number(r._sum.outQty ?? 0)) * 1000) / 1000,
     }))
     .filter((r) => r.qty > 0)
@@ -230,6 +235,143 @@ router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: receipt })
 })
 
+/** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
+export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infer<typeof createSchema>, userId: string) {
+  const receiptDate = data.receiptDate ?? new Date()
+
+  const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { name: true, isActive: true } })
+  if (!warehouse) throw new AppError('That store does not exist', 400, 'BAD_WAREHOUSE')
+  if (!warehouse.isActive) throw new AppError(`${warehouse.name} is switched off`, 400, 'INACTIVE')
+
+  const items = await tx.item.findMany({
+    where: { id: { in: [...new Set(data.lines.map((l) => l.itemId))] } },
+    select: itemSelect,
+  })
+  const itemById = new Map(items.map((i) => [i.id, i]))
+  const sizeIds = [...new Set(data.lines.map((l) => l.sizeId).filter((x): x is string => !!x))]
+  const sizes = sizeIds.length
+    ? await tx.size.findMany({ where: { id: { in: sizeIds } }, select: { id: true, code: true, sizeGroupId: true } })
+    : []
+  const sizeById = new Map(sizes.map((s) => [s.id, s]))
+
+  // Packed for a manufacturing order: it has to be released and not
+  // finished, and its sales order is the one these are for.
+  if (data.moId) {
+    const mo = await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { moNumber: true, status: true, soId: true } })
+    if (!mo) throw new AppError('That manufacturing order does not exist', 400, 'BAD_MO')
+    if (mo.status === 'DRAFT' || mo.status === 'CLOSED') {
+      throw new AppError(`${mo.moNumber} is ${mo.status === 'DRAFT' ? 'still a draft' : 'closed'}, so nothing is packed for it`, 400, 'MO_NOT_OPEN')
+    }
+    if (data.soId && mo.soId && data.soId !== mo.soId) {
+      throw new AppError(`${mo.moNumber} is for another sales order`, 400, 'WRONG_ORDER')
+    }
+    data.soId = data.soId ?? mo.soId
+  }
+
+  // Packed for an order: it has to be one still being made, and every
+  // garment on the receipt has to be on it. On a job-work order the
+  // garments are made from the customer's fabric, so they are the
+  // customer's stock at no value of ours — counted, tagged as theirs.
+  let jobWorkFor: string | null = null
+  if (data.soId) {
+    const so = await tx.salesOrder.findUnique({
+      where: { id: data.soId },
+      select: { soNumber: true, status: true, isJobWork: true, customerId: true, lines: { select: { itemId: true } } },
+    })
+    if (so?.isJobWork) jobWorkFor = so.customerId
+    if (!so) throw new AppError('That sales order does not exist', 400, 'BAD_ORDER')
+    if (!['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DISPATCHED'].includes(so.status)) {
+      throw new AppError(`${so.soNumber} is ${so.status.toLowerCase().replace(/_/g, ' ')}, so nothing is being packed for it`, 400, 'ORDER_NOT_OPEN')
+    }
+    const onOrder = new Set(so.lines.map((l) => l.itemId))
+    for (const l of data.lines) {
+      if (!onOrder.has(l.itemId)) {
+        throw new AppError(`${itemById.get(l.itemId)?.code ?? 'An item'} is not on ${so.soNumber}`, 400, 'NOT_ON_ORDER')
+      }
+    }
+  }
+
+  data.lines.forEach((l, i) => {
+    const item = itemById.get(l.itemId)
+    if (!item) throw new AppError(`Line ${i + 1}: that item does not exist`, 400, 'BAD_ITEM')
+    if (!item.isActive) throw new AppError(`Line ${i + 1}: ${item.code} is switched off`, 400, 'INACTIVE')
+    if (item.type !== 'FINISHED_GOOD') {
+      throw new AppError(`Line ${i + 1}: ${item.code} is not a finished good`, 400, 'NOT_FINISHED_GOOD')
+    }
+    const run = item.style?.sizeGroupId
+    if (run && !l.sizeId) {
+      throw new AppError(`Line ${i + 1}: ${item.code} is cut in sizes, so say which size`, 400, 'NEEDS_SIZE')
+    }
+    if (l.sizeId) {
+      const size = sizeById.get(l.sizeId)
+      if (!size) throw new AppError(`Line ${i + 1}: that size does not exist`, 400, 'BAD_SIZE')
+      if (!run) throw new AppError(`Line ${i + 1}: ${item.code} has no size run, so it takes no size`, 400, 'BAD_SIZE')
+      if (size.sizeGroupId !== run) {
+        throw new AppError(`Line ${i + 1}: size ${size.code} is not in ${item.code}'s size run`, 400, 'BAD_SIZE')
+      }
+    }
+  })
+
+  const rates = await fgRates(tx, items)
+  for (const item of items) {
+    if (!jobWorkFor && !rates.get(item.id)) {
+      throw new AppError(
+        `${item.code} has no approved BOM cost and no standard rate, so it cannot be valued. Approve its BOM costing, or set a standard rate on the item in Masters.`,
+        400,
+        'NO_RATE',
+      )
+    }
+  }
+
+  // Checked first, so a refused receipt never takes a number.
+  const fgrNumber = await nextDocumentNumber(tx, 'FGR', receiptDate)
+  const created = await tx.finishedGoodsReceipt.create({
+    data: {
+      fgrNumber,
+      receiptDate,
+      warehouseId: data.warehouseId,
+      soId: data.soId ?? null,
+      moId: data.moId ?? null,
+      notes: data.notes ?? null,
+      createdById: userId,
+      lines: {
+        create: data.lines.map((l) => {
+          const rate = rates.get(l.itemId)
+          return {
+            itemId: l.itemId,
+            sizeId: l.sizeId ?? null,
+            qty: l.qty,
+            grade: l.grade ?? 'A',
+            unitRate: jobWorkFor ? 0 : rate!.rate,
+            rateSource: jobWorkFor ? 'JOB_WORK' : rate!.source,
+          }
+        }),
+      },
+    },
+    include: receiptInclude,
+  })
+
+  for (const line of created.lines) {
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: created.warehouseId,
+      sizeId: line.sizeId,
+      grade: line.grade,
+      ...(jobWorkFor ? { ownership: 'CUSTOMER_OWNED' as const, ownerCustomerId: jobWorkFor } : {}),
+      transactionType: 'PRODUCTION',
+      direction: 'IN',
+      qty: Number(line.qty),
+      unitRate: Number(line.unitRate),
+      referenceType: 'FG_RECEIPT',
+      referenceId: created.id,
+      transactionDate: receiptDate,
+      notes: `Finished goods in, ${fgrNumber}`,
+    })
+  }
+  if (created.moId) await syncMoPacked(tx, created.moId)
+  return created
+}
+
 /**
  * POST /api/finished-goods
  *
@@ -238,137 +380,7 @@ router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
  */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSchema.parse(req.body)
-  const receiptDate = data.receiptDate ?? new Date()
-
-  const receipt = await prisma.$transaction(
-    async (tx) => {
-      const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { name: true, isActive: true } })
-      if (!warehouse) throw new AppError('That store does not exist', 400, 'BAD_WAREHOUSE')
-      if (!warehouse.isActive) throw new AppError(`${warehouse.name} is switched off`, 400, 'INACTIVE')
-
-      const items = await tx.item.findMany({
-        where: { id: { in: [...new Set(data.lines.map((l) => l.itemId))] } },
-        select: itemSelect,
-      })
-      const itemById = new Map(items.map((i) => [i.id, i]))
-      const sizeIds = [...new Set(data.lines.map((l) => l.sizeId).filter((x): x is string => !!x))]
-      const sizes = sizeIds.length
-        ? await tx.size.findMany({ where: { id: { in: sizeIds } }, select: { id: true, code: true, sizeGroupId: true } })
-        : []
-      const sizeById = new Map(sizes.map((s) => [s.id, s]))
-
-      // Packed for a manufacturing order: it has to be released and not
-      // finished, and its sales order is the one these are for.
-      if (data.moId) {
-        const mo = await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { moNumber: true, status: true, soId: true } })
-        if (!mo) throw new AppError('That manufacturing order does not exist', 400, 'BAD_MO')
-        if (mo.status === 'DRAFT' || mo.status === 'CLOSED') {
-          throw new AppError(`${mo.moNumber} is ${mo.status === 'DRAFT' ? 'still a draft' : 'closed'}, so nothing is packed for it`, 400, 'MO_NOT_OPEN')
-        }
-        if (data.soId && mo.soId && data.soId !== mo.soId) {
-          throw new AppError(`${mo.moNumber} is for another sales order`, 400, 'WRONG_ORDER')
-        }
-        data.soId = data.soId ?? mo.soId
-      }
-
-      // Packed for an order: it has to be one still being made, and every
-      // garment on the receipt has to be on it.
-      if (data.soId) {
-        const so = await tx.salesOrder.findUnique({
-          where: { id: data.soId },
-          select: { soNumber: true, status: true, lines: { select: { itemId: true } } },
-        })
-        if (!so) throw new AppError('That sales order does not exist', 400, 'BAD_ORDER')
-        if (!['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DISPATCHED'].includes(so.status)) {
-          throw new AppError(`${so.soNumber} is ${so.status.toLowerCase().replace(/_/g, ' ')}, so nothing is being packed for it`, 400, 'ORDER_NOT_OPEN')
-        }
-        const onOrder = new Set(so.lines.map((l) => l.itemId))
-        for (const l of data.lines) {
-          if (!onOrder.has(l.itemId)) {
-            throw new AppError(`${itemById.get(l.itemId)?.code ?? 'An item'} is not on ${so.soNumber}`, 400, 'NOT_ON_ORDER')
-          }
-        }
-      }
-
-      data.lines.forEach((l, i) => {
-        const item = itemById.get(l.itemId)
-        if (!item) throw new AppError(`Line ${i + 1}: that item does not exist`, 400, 'BAD_ITEM')
-        if (!item.isActive) throw new AppError(`Line ${i + 1}: ${item.code} is switched off`, 400, 'INACTIVE')
-        if (item.type !== 'FINISHED_GOOD') {
-          throw new AppError(`Line ${i + 1}: ${item.code} is not a finished good`, 400, 'NOT_FINISHED_GOOD')
-        }
-        const run = item.style?.sizeGroupId
-        if (run && !l.sizeId) {
-          throw new AppError(`Line ${i + 1}: ${item.code} is cut in sizes, so say which size`, 400, 'NEEDS_SIZE')
-        }
-        if (l.sizeId) {
-          const size = sizeById.get(l.sizeId)
-          if (!size) throw new AppError(`Line ${i + 1}: that size does not exist`, 400, 'BAD_SIZE')
-          if (!run) throw new AppError(`Line ${i + 1}: ${item.code} has no size run, so it takes no size`, 400, 'BAD_SIZE')
-          if (size.sizeGroupId !== run) {
-            throw new AppError(`Line ${i + 1}: size ${size.code} is not in ${item.code}'s size run`, 400, 'BAD_SIZE')
-          }
-        }
-      })
-
-      const rates = await fgRates(tx, items)
-      for (const item of items) {
-        if (!rates.get(item.id)) {
-          throw new AppError(
-            `${item.code} has no approved BOM cost and no standard rate, so it cannot be valued. Approve its BOM costing, or set a standard rate on the item in Masters.`,
-            400,
-            'NO_RATE',
-          )
-        }
-      }
-
-      // Checked first, so a refused receipt never takes a number.
-      const fgrNumber = await nextDocumentNumber(tx, 'FGR', receiptDate)
-      const created = await tx.finishedGoodsReceipt.create({
-        data: {
-          fgrNumber,
-          receiptDate,
-          warehouseId: data.warehouseId,
-          soId: data.soId ?? null,
-          moId: data.moId ?? null,
-          notes: data.notes ?? null,
-          createdById: req.user!.id,
-          lines: {
-            create: data.lines.map((l) => {
-              const rate = rates.get(l.itemId)!
-              return {
-                itemId: l.itemId,
-                sizeId: l.sizeId ?? null,
-                qty: l.qty,
-                unitRate: rate.rate,
-                rateSource: rate.source,
-              }
-            }),
-          },
-        },
-        include: receiptInclude,
-      })
-
-      for (const line of created.lines) {
-        await recordMovement(tx, {
-          itemId: line.itemId,
-          warehouseId: created.warehouseId,
-          sizeId: line.sizeId,
-          transactionType: 'PRODUCTION',
-          direction: 'IN',
-          qty: Number(line.qty),
-          unitRate: Number(line.unitRate),
-          referenceType: 'FG_RECEIPT',
-          referenceId: created.id,
-          transactionDate: receiptDate,
-          notes: `Finished goods in, ${fgrNumber}`,
-        })
-      }
-      if (created.moId) await syncMoPacked(tx, created.moId)
-      return created
-    },
-    { timeout: 30_000 },
-  )
+  const receipt = await prisma.$transaction((tx) => createFgReceipt(tx, data, req.user!.id), { timeout: 30_000 })
 
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'FinishedGoodsReceipt', entityId: receipt.id, after: receipt })
   const pieces = receipt.lines.reduce((s, l) => s + Number(l.qty), 0)
@@ -394,14 +406,19 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
       if (!before) throw new AppError('Finished goods receipt not found', 404, 'NOT_FOUND')
       if (before.cancelledAt) throw new AppError(`${before.fgrNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
 
-      for (const line of before.lines) {
+      // What came in is what goes out: the same owner, size and grade.
+      const ins = await tx.stockLedger.findMany({ where: { referenceType: 'FG_RECEIPT', referenceId: before.id, inQty: { gt: 0 } } })
+      for (const row of ins) {
         await recordMovement(tx, {
-          itemId: line.itemId,
-          warehouseId: before.warehouseId,
-          sizeId: line.sizeId,
+          itemId: row.itemId,
+          warehouseId: row.warehouseId,
+          sizeId: row.sizeId,
+          grade: row.grade,
+          ownership: row.ownership,
+          ownerCustomerId: row.ownerCustomerId,
           transactionType: 'ADJUSTMENT',
           direction: 'OUT',
-          qty: Number(line.qty),
+          qty: Number(row.inQty),
           referenceType: 'FG_RECEIPT_CANCEL',
           referenceId: before.id,
           notes: `Cancelled ${before.fgrNumber}: ${reason}`,

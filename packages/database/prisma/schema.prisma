@@ -1294,6 +1294,9 @@ model SalesOrderLine {
   /// What has been planned for the factory against this line.
   moLines      MOLine[]
 
+  /// What a B-grade piece of this line is billed at; empty bills it at the
+  /// line's own rate.
+  bGradeRate  Decimal? @db.Decimal(12, 2)
   @@map("sales_order_lines")
 }
 
@@ -1458,6 +1461,9 @@ model DeliveryChallanLine {
   /// Pieces by size. Replaces `sizeBreakup`, which nothing ever wrote.
   sizes    DeliveryChallanLineSize[]
 
+  /// "A" for first quality, "B" for B-grade: made, but not first quality.
+  /// B-grade pieces are counted apart from good ones and billed at their own rate.
+  grade      String   @default("A")
   @@index([soLineId])
   @@map("delivery_challan_lines")
 }
@@ -1522,6 +1528,9 @@ model FinishedGoodsReceiptLine {
   unitRate   Decimal              @db.Decimal(10, 2)
   rateSource String
 
+  /// "A" for first quality, "B" for B-grade: made, but not first quality.
+  /// B-grade pieces are counted apart from good ones and billed at their own rate.
+  grade      String   @default("A")
   @@map("finished_goods_receipt_lines")
 }
 
@@ -2452,6 +2461,9 @@ model StockLedger {
   notes           String?
   createdAt       DateTime        @default(now())
 
+  /// "A" for first quality, "B" for B-grade finished goods, kept apart from
+  /// good ones. Everything that is not a graded garment is "A".
+  grade           String          @default("A")
   @@index([itemId, warehouseId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
@@ -3674,6 +3686,9 @@ model SalesInvoiceLine {
   /// Credit notes against this line: returns and adjustments.
   creditLines  CreditNoteLine[]
 
+  /// "A" for first quality, "B" for B-grade: made, but not first quality.
+  /// B-grade pieces are counted apart from good ones and billed at their own rate.
+  grade      String   @default("A")
   @@index([invoiceId])
   @@index([soLineId])
   @@map("sales_invoice_lines")

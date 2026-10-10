@@ -68,13 +68,44 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
     : []
   const styleByCode = new Map(typedStyles.map((s) => [s.code.toLowerCase(), s]))
 
-  const planned = await db.mOLine.findMany({
+  const plannedRows = await db.mOLine.findMany({
     where: {
       soLineId: { in: so.lines.map((l) => l.id) },
       mo: { status: { not: 'CLOSED' }, ...(exceptMoId ? { id: { not: exceptMoId } } : {}) },
     },
-    select: { soLineId: true, totalQty: true, sizes: { select: { sizeId: true, qty: true } } },
+    select: {
+      soLineId: true,
+      totalQty: true,
+      sizes: { select: { sizeId: true, qty: true } },
+      moId: true,
+      mo: { select: { status: true, closedAt: true } },
+      soLine: { select: { itemId: true } },
+    },
   })
+  // An order completed short (597 of 600) holds only what it packed: the
+  // pieces it never made are free to plan again.
+  const shortIds = [...new Set(plannedRows.filter((p) => p.mo.status === 'COMPLETED' && p.mo.closedAt).map((p) => p.moId))]
+  const packedRows = shortIds.length
+    ? await db.finishedGoodsReceiptLine.findMany({
+        where: { receipt: { moId: { in: shortIds }, cancelledAt: null } },
+        select: { qty: true, itemId: true, sizeId: true, receipt: { select: { moId: true } } },
+      })
+    : []
+  const packedOf = (moId: string, itemId: string, sizeId: string | null) =>
+    Math.round(
+      packedRows
+        .filter((r) => r.receipt.moId === moId && r.itemId === itemId && (sizeId === null || r.sizeId === sizeId))
+        .reduce((t, r) => t + Number(r.qty), 0),
+    )
+  const planned = plannedRows.map((p) =>
+    shortIds.includes(p.moId) && p.soLine
+      ? {
+          soLineId: p.soLineId,
+          totalQty: Math.min(p.totalQty, packedOf(p.moId, p.soLine.itemId, null)),
+          sizes: p.sizes.map((z) => ({ sizeId: z.sizeId, qty: Math.min(z.qty, packedOf(p.moId, p.soLine!.itemId, z.sizeId)) })),
+        }
+      : { soLineId: p.soLineId, totalQty: p.totalQty, sizes: p.sizes },
+  )
 
   const lines = await Promise.all(
     so.lines.map(async (l) => {
@@ -321,15 +352,16 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
  * receipt cancelled after that reopens it.
  */
 export async function syncMoPacked(tx: Prisma.TransactionClient, moId: string) {
-  const mo = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { status: true, totalPlannedQty: true } })
+  const mo = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { status: true, totalPlannedQty: true, closedAt: true } })
   const agg = await tx.finishedGoodsReceiptLine.aggregate({
     where: { receipt: { moId, cancelledAt: null } },
     _sum: { qty: true },
   })
   const packed = Math.round(Number(agg._sum.qty ?? 0))
   const done = mo.totalPlannedQty > 0 && packed >= mo.totalPlannedQty
+  // Completed short on purpose stays completed, whatever is packed later.
   const status =
-    mo.status === 'CLOSED' || mo.status === 'DRAFT'
+    mo.status === 'CLOSED' || mo.status === 'DRAFT' || (mo.status === 'COMPLETED' && mo.closedAt)
       ? mo.status
       : done
         ? 'COMPLETED'

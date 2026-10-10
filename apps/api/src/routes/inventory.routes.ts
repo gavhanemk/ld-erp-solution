@@ -72,7 +72,7 @@ router.get('/held', requirePermission(MODULE, 'view'), async (req, res) => {
     FROM ld_erp.stock_ledger s
     LEFT JOIN ld_erp.customers c ON c.id = s."ownerCustomerId"
     LEFT JOIN ld_erp.sizes z ON z.id = s."sizeId"
-    WHERE s."warehouseId" = ${warehouseId}
+    WHERE s."warehouseId" = ${warehouseId} AND s."grade" = 'A'
     GROUP BY s."itemId", s."ownership", s."ownerCustomerId", c.name, s."sizeId", z.code, z.sequence
     HAVING SUM(s."inQty" - s."outQty") > 0
     ORDER BY s."itemId", s."ownership", c.name, z.sequence`

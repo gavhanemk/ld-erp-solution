@@ -39,6 +39,8 @@ const lineSchema = z.object({
   qty: z.number().min(0).optional(),
   /** Why more went than the order line still wanted. */
   overNote: z.string().trim().max(300).optional().nullable(),
+  /** "B" for B-grade pieces, sent on a line of their own and billed at the B-grade rate. */
+  grade: z.enum(['A', 'B']).optional(),
 })
 
 const challanSchema = z.object({
@@ -89,21 +91,34 @@ const orderForDispatch = {
 
 type OrderForDispatch = Prisma.SalesOrderGetPayload<{ include: typeof orderForDispatch }>
 
-/** What is on hand of one garment in one size, in one store. */
-const onHand = (db: Prisma.TransactionClient | typeof prisma, itemId: string, warehouseId: string, sizeId: string | null) =>
-  balanceOf(db as Prisma.TransactionClient, { itemId, warehouseId, sizeId }).then((b) => b.qty)
+/**
+ * Whose finished stock an order is sent from: ours, or on a job-work order
+ * the customer's — the garments made from their fabric, booked in as theirs.
+ */
+const ownerFor = (order: { isJobWork: boolean; customerId: string }) =>
+  order.isJobWork ? { ownership: 'CUSTOMER_OWNED' as const, ownerCustomerId: order.customerId } : { ownership: 'OWNED' as const, ownerCustomerId: null }
+
+/** What is on hand of one garment in one size and grade, in one store, for that owner. */
+const onHand = (
+  db: Prisma.TransactionClient | typeof prisma,
+  itemId: string,
+  warehouseId: string,
+  sizeId: string | null,
+  owner: ReturnType<typeof ownerFor> = ownerFor({ isJobWork: false, customerId: '' }),
+  grade: 'A' | 'B' = 'A',
+) => balanceOf(db as Prisma.TransactionClient, { itemId, warehouseId, sizeId, grade, ...owner }).then((b) => b.qty)
 
 /**
  * The store a challan starts from: the finished-goods store when one is named
  * so, else the one holding the most of this order's garments, else the first.
  */
-async function defaultStore(itemIds: string[]) {
+async function defaultStore(itemIds: string[], owner: ReturnType<typeof ownerFor>) {
   const stores = await prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
   const named = stores.find((w) => /finish/i.test(w.name))
   if (named || stores.length <= 1) return { stores, id: named?.id ?? stores[0]?.id ?? null }
   const held = await prisma.stockLedger.groupBy({
     by: ['warehouseId'],
-    where: { itemId: { in: itemIds }, ownership: 'OWNED' },
+    where: { itemId: { in: itemIds }, ownership: owner.ownership, ownerCustomerId: owner.ownerCustomerId },
     _sum: { inQty: true, outQty: true },
   })
   const best = held
@@ -126,7 +141,8 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
   const order = await prisma.salesOrder.findUnique({ where: { id: soId }, include: orderForDispatch })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
 
-  const { stores, id: fallback } = await defaultStore(order.lines.map((l) => l.itemId))
+  const owner = ownerFor(order)
+  const { stores, id: fallback } = await defaultStore(order.lines.map((l) => l.itemId), owner)
   const warehouseId = text(req.query.warehouseId) ?? fallback
 
   const lines = await Promise.all(
@@ -142,7 +158,8 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
               ordered: Number(s.qty),
               sent: Number(s.deliveredQty),
               pending: Math.max(0, Number(s.qty) - Number(s.deliveredQty)),
-              inStock: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId) : 0,
+              inStock: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner) : 0,
+              inStockB: warehouseId ? await onHand(prisma, l.itemId, warehouseId, s.sizeId, owner, 'B') : 0,
             }))
           )
         : null
@@ -156,7 +173,9 @@ router.get('/prepare', requirePermission(MODULE, 'view'), async (req, res) => {
         ordered,
         sent,
         pending: Math.max(0, ordered - sent),
-        inStock: sizes ? sizes.reduce((s, z) => s + z.inStock, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null) : 0,
+        inStock: sizes ? sizes.reduce((s, z) => s + z.inStock, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null, owner) : 0,
+        inStockB: sizes ? sizes.reduce((s, z) => s + z.inStockB, 0) : warehouseId ? await onHand(prisma, l.itemId, warehouseId, null, owner, 'B') : 0,
+        bGradeRate: l.bGradeRate != null ? Number(l.bGradeRate) : null,
         sizes,
       }
     })
@@ -325,8 +344,10 @@ function shapeLines(order: OrderForDispatch, data: ChallanInput) {
   const out = data.lines.map((input, i) => {
     const line = byId.get(input.soLineId)
     if (!line) throw new AppError(`Line ${i + 1} is not on ${order.soNumber}`, 400, 'BAD_LINE')
-    if (seen.has(line.id)) throw new AppError(`${line.item.code} appears twice on the challan`, 400, 'BAD_LINE')
-    seen.add(line.id)
+    // Good and B-grade pieces of one order line go on a line each.
+    const key = `${line.id}|${input.grade ?? 'A'}`
+    if (seen.has(key)) throw new AppError(`${line.item.code}${input.grade === 'B' ? ' (B-grade)' : ''} appears twice on the challan`, 400, 'BAD_LINE')
+    seen.add(key)
 
     const ordered = new Map(line.sizes.map((s) => [s.sizeId, s]))
     let sizes: Array<{ sizeId: string; code: string; qty: number; pending: number }> = []
@@ -359,9 +380,19 @@ function shapeLines(order: OrderForDispatch, data: ChallanInput) {
   if (real.length === 0) throw new AppError('Put the pieces to send against at least one line', 400, 'NOTHING_TO_SEND')
 
   // More than the order still wants: allowed, but only with a word on why.
+  // Good and B-grade pieces of one order line count together against it.
+  const sentFor = (soLineId: string, sizeId?: string) =>
+    real
+      .filter((x) => x.line.id === soLineId)
+      .reduce((s, x) => s + (sizeId ? (x.sizes.find((z) => z.sizeId === sizeId)?.qty ?? 0) : x.qty), 0)
   for (const l of real) {
-    const over = l.line.sizes.length ? l.sizes.filter((s) => s.qty > s.pending) : l.qty > l.pending ? [{ code: '' }] : []
-    if (over.length && !l.input.overNote?.trim()) {
+    const over = l.line.sizes.length
+      ? l.sizes.filter((s) => sentFor(l.line.id, s.sizeId) > s.pending)
+      : sentFor(l.line.id) > l.pending
+        ? [{ code: '' }]
+        : []
+    const noted = real.some((x) => x.line.id === l.line.id && x.input.overNote?.trim())
+    if (over.length && !noted) {
       const which = over.map((s) => s.code).filter(Boolean).join(', ')
       throw new AppError(
         `${l.line.item.code}: more than the order still wants${which ? ` in size ${which}` : ''}. Add a note saying why.`,
@@ -394,6 +425,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
     include: { lines: { include: { sizes: true } } },
   })
   if (!dc.warehouseId) throw new AppError('Say which store the goods leave from', 400, 'NO_WAREHOUSE')
+  const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: dc.soId }, select: { isJobWork: true, customerId: true } })
+  const owner = ownerFor(so)
 
   for (const line of dc.lines) {
     if (!line.itemId || !line.soLineId) continue
@@ -404,6 +437,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
         itemId: line.itemId,
         warehouseId: dc.warehouseId,
         sizeId: part.sizeId,
+        grade: line.grade,
+        ...owner,
         transactionType: 'SALE',
         direction: 'OUT',
         qty: part.qty,
@@ -473,7 +508,8 @@ export async function writeChallan(
   const lines = shaped.map((l) => ({
     soLineId: l.line.id,
     itemId: l.line.itemId,
-    description: `${l.line.item.name}${l.line.item.color ? ` · ${l.line.item.color}` : ''}`,
+    grade: l.input.grade ?? 'A',
+    description: `${l.line.item.name}${l.line.item.color ? ` · ${l.line.item.color}` : ''}${l.input.grade === 'B' ? ' · B-grade' : ''}`,
     qty: l.qty,
     uomId: l.line.item.uomId,
     overNote: l.input.overNote?.trim() || null,
@@ -613,6 +649,7 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
         itemId: o.itemId,
         warehouseId: o.warehouseId,
         sizeId: o.sizeId,
+        grade: o.grade,
         ownership: o.ownership,
         ownerCustomerId: o.ownerCustomerId,
         transactionType: 'RETURN',

@@ -397,6 +397,54 @@ export async function closeMo(tx: Prisma.TransactionClient, id: string, userId: 
 }
 
 /**
+ * Finished with fewer pieces than planned — 597 of 600, the other 3 spoiled.
+ * Not "called off": what was packed stands, the order is Completed, and the
+ * pieces never made are free to plan again on the sales order. Needs at
+ * least one piece packed, and a reason.
+ */
+export async function completeShortMo(tx: Prisma.TransactionClient, id: string, userId: string, reason: string) {
+  const before = await tx.manufacturingOrder.findUnique({ where: { id }, include: moInclude })
+  if (!before) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  if (before.status === 'DRAFT' || before.status === 'CLOSED' || before.status === 'COMPLETED') {
+    throw new AppError(`${before.moNumber} is ${before.status.toLowerCase()}, so it cannot be completed short`, 409, 'NOT_OPEN')
+  }
+  if (before.totalPackedQty <= 0) {
+    throw new AppError(`Nothing is packed on ${before.moNumber} yet. Close it instead if it is called off.`, 409, 'NOTHING_PACKED')
+  }
+  if (before.totalPackedQty >= before.totalPlannedQty) {
+    throw new AppError(`${before.moNumber} is fully packed; it completes by itself.`, 409, 'NOT_SHORT')
+  }
+  const after = await tx.manufacturingOrder.update({
+    where: { id: before.id },
+    data: {
+      status: 'COMPLETED',
+      actualEndDate: new Date(),
+      closedAt: new Date(),
+      closedById: userId,
+      closeReason: `Completed short, ${before.totalPackedQty} of ${before.totalPlannedQty}: ${reason}`,
+    },
+    include: moInclude,
+  })
+  return { before, after }
+}
+
+/**
+ * POST /api/production/orders/:id/complete-short
+ *
+ * Completes it with what was packed; the rest is free to plan again.
+ */
+router.post('/orders/:id/complete-short', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = reasonSchema.parse(req.body)
+  const { before, after } = await prisma.$transaction((tx) => completeShortMo(tx, req.params.id, req.user!.id, reason))
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: after.id, before, after })
+  res.json({
+    success: true,
+    message: `${after.moNumber} completed with ${after.totalPackedQty} of ${after.totalPlannedQty} pieces. The other ${after.totalPlannedQty - after.totalPackedQty} can be planned again on the order.`,
+    data: after,
+  })
+})
+
+/**
  * POST /api/production/orders/:id/close
  *
  * Called off, with a reason. It stays on file as closed; its requisitions stay
