@@ -223,7 +223,7 @@ export default function SalesOrdersPage() {
   const [details, setDetails] = useState<Record<string, OrderDetail | 'loading' | { error: string }>>({})
 
   // The order form: a new order (orderId null), or a draft being changed.
-  const [dialog, setDialog] = useState<{ open: boolean; orderId: string | null; amend: boolean }>({
+  const [dialog, setDialog] = useState<{ open: boolean; orderId: string | null; amend: boolean; fromQuoteId?: string | null }>({
     open: false,
     orderId: null,
     amend: false,
@@ -240,11 +240,15 @@ export default function SalesOrdersPage() {
 
   // Arriving from the dashboard, which links to one order by its number.
   useEffect(() => {
-    const q = new URLSearchParams(window.location.search).get('q')
+    const params = new URLSearchParams(window.location.search)
+    const q = params.get('q')
     if (q) {
       setSearch(q)
       setDebounced(q)
     }
+    // Convert to order, from a quotation.
+    const fromQuote = params.get('fromQuote')
+    if (fromQuote && can('sales', 'create')) setDialog({ open: true, orderId: null, amend: false, fromQuoteId: fromQuote })
   }, [])
 
   useEffect(() => {
@@ -1016,6 +1020,7 @@ export default function SalesOrdersPage() {
       <SalesOrderDialog
         open={dialog.open}
         orderId={dialog.orderId}
+        fromQuoteId={dialog.fromQuoteId ?? null}
         amend={dialog.amend}
         onClose={() => setDialog({ open: false, orderId: null, amend: false })}
         onSaved={(msg) => {

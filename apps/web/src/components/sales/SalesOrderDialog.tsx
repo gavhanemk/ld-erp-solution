@@ -326,6 +326,7 @@ function Mini({ label, className = '', children }: { label: string; className?: 
 export function SalesOrderDialog({
   open,
   orderId,
+  fromQuoteId = null,
   amend = false,
   onClose,
   onSaved,
@@ -333,6 +334,8 @@ export function SalesOrderDialog({
   open: boolean
   /** A draft to change or an order to amend, or null for a new order. */
   orderId: string | null
+  /** A quotation the new order is won from: the form opens filled in from it. */
+  fromQuoteId?: string | null
   /** Amend a confirmed order rather than edit a draft. */
   amend?: boolean
   onClose: () => void
@@ -376,6 +379,8 @@ export function SalesOrderDialog({
   const [otherCharges, setOtherCharges] = useState('')
   const [lines, setLines] = useState<LineDraft[]>([blankLine()])
   const filesRef = useRef<AttachmentsBoxHandle>(null)
+  /** The quotation this order comes from, as it opened. */
+  const [fromQuote, setFromQuote] = useState<{ id: string; quoteNumber: string } | null>(null)
 
   // Once somebody has changed one of these by hand, picking a different
   // customer no longer overwrites it.
@@ -465,6 +470,7 @@ export function SalesOrderDialog({
     setContext(null)
     setLastRates({})
     setAmendReason('')
+    setFromQuote(null)
     setLoadingLists(true)
 
     void (async () => {
@@ -486,6 +492,26 @@ export function SalesOrderDialog({
           })),
           orderId ? api.get<{ data: SavedOrder }>(`/sales/orders/${orderId}`) : Promise.resolve(null),
         ])
+        const quote =
+          !orderId && fromQuoteId
+            ? await api
+                .get<{
+                  data: {
+                    id: string
+                    quoteNumber: string
+                    customerId: string
+                    brandId: string
+                    isJobWork: boolean
+                    customerRef: string | null
+                    salesperson: string | null
+                    discountAmount: string | number
+                    terms: string | null
+                    notes: string | null
+                    lines: Array<{ itemId: string; styleCode: string | null; color: string | null; description: string | null; qty: string | number; unitPrice: string | number; discount: string | number }>
+                  }
+                }>(`/sales/quotations/${fromQuoteId}`)
+                .then((r) => r.data)
+            : null
         if (!alive) return
         const itemMap = new Map(it.rows.map((i) => [i.id, i]))
         const styleMap = new Map(st.rows.map((s) => [s.id, s]))
@@ -567,6 +593,47 @@ export function SalesOrderDialog({
           setBrokerTouched(true)
           setAddressTouched(true)
           setBillingTouched(true)
+        } else if (quote) {
+          // Won from a quotation: its customer, terms, garments and rates. The
+          // sizes are still to split, since a quotation is priced by the piece.
+          setFromQuote({ id: quote.id, quoteNumber: quote.quoteNumber })
+          const cust = customerList.find((x) => x.id === quote.customerId)
+          setCustomerId(quote.customerId)
+          if (cust) {
+            setDeliveryAddress(deliveryAddressOf(cust))
+            setBillingAddress(billingAddressOf(cust))
+            setBrokerId(cust.brokerId ?? '')
+            setBrokerPct(cust.brokeragePercent != null ? String(Number(cust.brokeragePercent)) : '')
+          }
+          setBrandId(quote.brandId)
+          setIsJobWork(quote.isJobWork)
+          setReference(quote.quoteNumber)
+          setSalesperson(quote.salesperson ?? '')
+          setBillDiscount(Number(quote.discountAmount) > 0 ? String(Number(quote.discountAmount)) : '')
+          setTerms(quote.terms ?? '')
+          setNotes(quote.notes ?? '')
+          setLines(
+            quote.lines.map((l) => {
+              const item = itemMap.get(l.itemId)
+              const styleRun = item?.styleId ? styleMap.get(item.styleId)?.sizeGroupId : null
+              return {
+                ...blankLine(),
+                ...filingOf(item, cat.rows),
+                styleId: item?.styleId ?? '',
+                styleCode: l.styleCode ?? '',
+                itemId: l.itemId,
+                qty: styleRun ? '' : String(Number(l.qty)),
+                unitPrice: String(Number(l.unitPrice)),
+                discount: Number(l.discount) > 0 ? String(Number(l.discount)) : '',
+                color: item?.color ? '' : (l.color ?? ''),
+                description: l.description ?? '',
+              }
+            })
+          )
+          setTypeTouched(true)
+          setBrokerTouched(true)
+          setAddressTouched(true)
+          setBillingTouched(true)
         } else {
           // One brand of our own to begin with, the commonest case.
           const own = b.data.find((x) => x.type === 'LD_COTTON_MILLS') ?? b.data[0]
@@ -584,7 +651,7 @@ export function SalesOrderDialog({
     }
     // filingOf reads only its arguments here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, orderId])
+  }, [open, orderId, fromQuoteId])
 
   // Each customer (or place of supply) picked: how they are taxed, their
   // credit, and their last rates.
@@ -920,6 +987,7 @@ export function SalesOrderDialog({
         .filter((c) => c.type && c.value > 0)
         .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value, gstRate: c.gstRate !== '' ? c.rate : null })),
       otherCharges: totals.other,
+      quotationId: fromQuote?.id ?? null,
       confirm,
       creditReleaseReason: creditReleaseReason ?? null,
       // Rows with no item picked are a blank row, not a line.
@@ -1304,7 +1372,9 @@ export function SalesOrderDialog({
                   ? `Amending ${saved.soNumber} · version ${saved.version} is kept in its history`
                   : saved
                     ? `${saved.soNumber} — a draft can be changed until it is confirmed`
-                    : 'New order from a customer'}
+                    : fromQuote
+                      ? `New order from quotation ${fromQuote.quoteNumber} — split the pieces by size, then save`
+                      : 'New order from a customer'}
               </p>
             </div>
           </div>

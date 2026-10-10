@@ -78,10 +78,12 @@ const navItems: NavItem[] = [
   {
     label: 'Sales', icon: ShoppingCart,
     children: [
+      { label: 'Quotations', href: '/sales/quotations' },
       { label: 'Sales Orders', href: '/sales/orders' },
       { label: 'Delivery Challan', href: '/sales/challan' },
       { label: 'Invoices', href: '/sales/invoices' },
       { label: 'Payments Received', href: '/sales/payments' },
+      { label: 'Returns & Credit Notes', href: '/sales/returns' },
     ],
   },
   {

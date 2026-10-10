@@ -7,6 +7,7 @@ import {
   CalendarDays,
   ClipboardList,
   HandCoins,
+  Undo2,
   Info,
   Printer,
   ReceiptText,
@@ -265,6 +266,9 @@ export default function SalesInvoicesPage() {
         icon: <HandCoins size={15} />,
         href: `/sales/payments?receive=${inv.customer.id}&invoice=${inv.id}`,
       })
+    }
+    if (inv.status !== 'CANCELLED' && can('sales', 'create')) {
+      items.push({ key: 'credit', label: 'Return / credit note', icon: <Undo2 size={15} />, href: `/sales/returns?invoice=${inv.id}` })
     }
     if (inv.status !== 'CANCELLED' && Number(inv.paidAmount) === 0 && mayCancel) {
       items.push({ key: 'cancel', label: 'Cancel invoice', icon: <Ban size={15} />, danger: true, onClick: () => setCancelling(inv) })
