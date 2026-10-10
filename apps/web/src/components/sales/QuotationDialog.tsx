@@ -3,10 +3,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertCircle, Calculator, FileText, Hash, Loader2, Package, Plus, Save, Send, StickyNote, Tag, Trash2, User, X } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
+import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { BRAND_LABEL, styleFormFields } from '@/components/masters/styleFormFields'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import type { CustomerOption } from './CustomerPanel'
@@ -21,12 +23,24 @@ interface ItemOption {
   hsn: { gstRate: string | number; priceLimit: string | number | null; rateAbove: string | number | null } | null
 }
 
-interface BomGuide {
-  version: string
+/** A BOM's cost and selling price per piece, as the styles list sends it. */
+interface StyleBom {
+  status: string
   color: string | null
-  cost: number
+  version: string
+  cost: number | null
   price: number | null
-  marginPercent: number | null
+}
+
+interface StyleOption {
+  id: string
+  code: string
+  name: string
+  brandType: keyof typeof BRAND_LABEL
+  category: string | null
+  colors: string[]
+  items: Array<{ id: string; color: string | null }>
+  boms: StyleBom[]
 }
 
 interface LineDraft {
@@ -38,6 +52,8 @@ interface LineDraft {
   qty: string
   unitPrice: string
   discount: string
+  /** The rate is the BOM's price, so it follows the style and colour until typed over. */
+  rateFromBom: boolean
 }
 
 interface SavedQuote {
@@ -58,7 +74,7 @@ interface SavedQuote {
 }
 
 let lineKey = 0
-const blank = (): LineDraft => ({ key: `q${++lineKey}`, itemId: '', styleCode: '', color: '', description: '', qty: '', unitPrice: '', discount: '' })
+const blank = (): LineDraft => ({ key: `q${++lineKey}`, itemId: '', styleCode: '', color: '', description: '', qty: '', unitPrice: '', discount: '', rateFromBom: true })
 const today = () => new Date().toISOString().slice(0, 10)
 const inDays = (n: number) => {
   const d = new Date()
@@ -68,6 +84,27 @@ const inDays = (n: number) => {
 const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '')
 const round2 = (n: number) => Math.round(n * 100) / 100
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const same = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase()
+
+/**
+ * The BOM a line prices from, chosen as the server chooses it: the BOM for
+ * that colour, else the one for all colours, approved ahead of draft.
+ */
+function pickBom(boms: StyleBom[], color: string): StyleBom | null {
+  const sorted = [...boms].sort((a, b) => (a.status === 'APPROVED' ? 0 : 1) - (b.status === 'APPROVED' ? 0 : 1))
+  return (color.trim() ? sorted.find((b) => same(b.color, color)) : undefined) ?? sorted.find((b) => !b.color?.trim()) ?? null
+}
+
+/** What the style dropdown says under each style: its BOM price, or why there is none. */
+function bomNote(st: StyleOption) {
+  const priced = st.boms.filter((b) => b.price != null)
+  if (priced.length) {
+    const prices = [...new Set(priced.map((b) => b.price as number))]
+    return `BOM price ₹${prices.length === 1 ? inr(prices[0]) : `${inr(Math.min(...prices))}–${inr(Math.max(...prices))}`}`
+  }
+  if (st.boms.some((b) => b.cost != null)) return 'BOM costed, no selling price yet'
+  return 'No BOM yet'
+}
 
 function Field({ label, icon: Icon, htmlFor, required, className = '', children }: { label: string; icon?: React.ElementType; htmlFor?: string; required?: boolean; className?: string; children: React.ReactNode }) {
   return (
@@ -92,11 +129,14 @@ function Field({ label, icon: Icon, htmlFor, required, className = '', children 
  * A quotation: the price offered before the customer orders.
  *
  * Laid out like the order form, shorter: who it is for and how long it holds,
- * then the garments with quantity and rate. Beside each rate is the BOM's cost
- * per piece and suggested price for that style and colour, and the margin the
- * typed rate makes over cost — the quotation is where the price is decided.
- * GST is shown as the order will charge it. Saved as a draft, or saved and
- * marked sent once it has gone to the buyer.
+ * then the garments. Each line starts from the style, because that is where
+ * the BOM is: picking the style and colour fills the rate with the selling
+ * price set on the BOM's Pricing step, and the item to bill with the
+ * finished-goods item linked to that style. The rate can be typed over for
+ * this buyer; the margin it leaves over the BOM's cost is shown under it. A
+ * style not in the master yet is added from the dropdown without leaving the
+ * form. GST is shown as the order will charge it. Saved as a draft, or saved
+ * and marked sent once it has gone to the buyer.
  */
 export function QuotationDialog({
   open,
@@ -115,6 +155,8 @@ export function QuotationDialog({
   const [customers, setCustomers] = useState<CustomerOption[]>([])
   const [brands, setBrands] = useState<Array<{ id: string; name: string; type: string }>>([])
   const [items, setItems] = useState<ItemOption[]>([])
+  const [styles, setStyles] = useState<StyleOption[]>([])
+  const [newStyle, setNewStyle] = useState<{ key: string; typed: string } | null>(null)
   const [saved, setSaved] = useState<SavedQuote | null>(null)
   const [customerId, setCustomerId] = useState('')
   const [brandId, setBrandId] = useState('')
@@ -127,7 +169,6 @@ export function QuotationDialog({
   const [terms, setTerms] = useState('')
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<LineDraft[]>([blank()])
-  const [guides, setGuides] = useState<Record<string, BomGuide | null>>({})
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState<'draft' | 'send' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -161,20 +202,21 @@ export function QuotationDialog({
     setTerms('')
     setNotes('')
     setLines([blank()])
-    setGuides({})
     setLoading(true)
     void (async () => {
       try {
-        const [c, b, it, q] = await Promise.all([
+        const [c, b, it, st, q] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
           api.get<{ data: Array<{ id: string; name: string; type: string }> }>('/masters/brands?active=true&limit=200'),
           fetchEveryPage<ItemOption>((p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`),
+          api.get<{ data: StyleOption[] }>('/sales/quotations/styles'),
           quoteId ? api.get<{ data: SavedQuote }>(`/sales/quotations/${quoteId}`) : Promise.resolve(null),
         ])
         if (!alive) return
         setCustomers([...c.rows].sort((x, y) => x.name.localeCompare(y.name)))
         setBrands(b.data)
         setItems(it.rows)
+        setStyles(st.data)
         if (q) {
           const s = q.data
           setSaved(s)
@@ -198,6 +240,7 @@ export function QuotationDialog({
               qty: String(Number(l.qty)),
               unitPrice: String(Number(l.unitPrice)),
               discount: Number(l.discount) > 0 ? String(Number(l.discount)) : '',
+              rateFromBom: false,
             }))
           )
         } else {
@@ -216,30 +259,33 @@ export function QuotationDialog({
 
   const itemById = useMemo(() => new Map(items.map((i) => [i.id, i])), [items])
 
-  // The BOM guide for each line, fetched as its garment, style or colour changes.
-  const guideKeys = lines.filter((l) => l.itemId).map((l) => `${l.itemId}|${l.styleCode.trim()}|${l.color.trim()}`)
-  useEffect(() => {
-    if (!open) return
-    for (const k of guideKeys) {
-      if (k in guides) continue
-      const [itemId, styleCode, color] = k.split('|')
-      setGuides((g) => ({ ...g, [k]: null }))
-      const qs = new URLSearchParams({ itemId })
-      if (styleCode) qs.set('styleCode', styleCode)
-      if (color) qs.set('color', color)
-      api
-        .get<{ data: BomGuide | null }>(`/sales/quotations/bom-price?${qs}`)
-        .then((res) => setGuides((g) => ({ ...g, [k]: res.data })))
-        .catch(() => {})
-    }
-    // guides is read to skip what is already fetched.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, guideKeys.join(',')])
+  const styleByCode = useMemo(() => new Map(styles.map((st) => [st.code.toLowerCase(), st])), [styles])
 
   const setLine = (key: string, patch: Partial<LineDraft>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)))
-  const pickItem = (key: string, itemId: string) => {
-    const it = itemById.get(itemId)
-    setLine(key, { itemId, styleCode: it?.style?.code ?? '', color: it?.color ?? '' })
+
+  /**
+   * A style or colour picked: the item to bill is the one linked to that
+   * style (in that colour, else any colour), else the item another line of
+   * the same style already bills as, else whatever the line had. The rate
+   * becomes the BOM's selling price unless it has been typed over.
+   */
+  const pickStyle = (key: string, styleCode: string, color: string, list = styles) => {
+    setLines((ls) =>
+      ls.map((l) => {
+        if (l.key !== key) return l
+        const st = list.find((x) => x.code === styleCode) ?? null
+        const colour = st && st.colors.length === 1 && !color ? st.colors[0] : color
+        const linked = st ? (st.items.find((i) => same(i.color, colour)) ?? st.items.find((i) => !i.color) ?? (st.items.length === 1 ? st.items[0] : undefined)) : undefined
+        const sibling = ls.find((o) => o.key !== key && o.itemId && same(o.styleCode, styleCode))
+        const bom = st ? pickBom(st.boms, colour) : null
+        const next: LineDraft = { ...l, styleCode, color: colour, itemId: linked?.id ?? sibling?.itemId ?? l.itemId }
+        if (l.rateFromBom || !l.unitPrice.trim()) {
+          next.unitPrice = bom?.price != null ? String(bom.price) : l.rateFromBom ? '' : l.unitPrice
+          next.rateFromBom = true
+        }
+        return next
+      })
+    )
   }
 
   const totals = useMemo(() => {
@@ -248,7 +294,8 @@ export function QuotationDialog({
       const qty = Number(l.qty) || 0
       const rate = Number(l.unitPrice) || 0
       const disc = Math.min(100, Number(l.discount) || 0)
-      return { l, item, qty, rate, disc, amount: round2(qty * rate * (1 - disc / 100)), guide: guides[`${l.itemId}|${l.styleCode.trim()}|${l.color.trim()}`] ?? null }
+      const style = l.styleCode.trim() ? (styleByCode.get(l.styleCode.trim().toLowerCase()) ?? null) : null
+      return { l, item, style, qty, rate, disc, amount: round2(qty * rate * (1 - disc / 100)), bom: style ? pickBom(style.boms, l.color) : null }
     })
     const subtotal = round2(priced.reduce((s, p) => s + p.amount, 0))
     const discount = round2(Math.min(Number(billDiscount) || 0, subtotal))
@@ -264,24 +311,27 @@ export function QuotationDialog({
       } else if (p.item?.taxRate) gst = Number(p.item.taxRate.rate)
       tax += p.amount * factor * ((gst ?? 0) / 100)
       const net = p.rate * (1 - p.disc / 100)
-      const margin = p.guide && net > 0 ? Math.round(((net - p.guide.cost) / net) * 1000) / 10 : null
+      const margin = p.bom?.cost != null && net > 0 ? Math.round(((net - p.bom.cost) / net) * 1000) / 10 : null
       return { ...p, gst, margin }
     })
     return { lines: withGst, subtotal, discount, taxable, tax: round2(tax), total: Math.round(taxable + tax), pieces: priced.reduce((s, p) => s + p.qty, 0) }
-  }, [lines, itemById, billDiscount, guides])
+  }, [lines, itemById, billDiscount, styleByCode])
 
-  const filled = totals.lines.filter((p) => p.l.itemId)
+  const filled = totals.lines.filter((p) => p.l.itemId || p.l.styleCode.trim())
+  const noItem = filled.find((p) => !p.l.itemId)
   const blocker = !customerId
     ? 'Choose the customer.'
     : !brandId
       ? 'Choose a brand.'
       : filled.length === 0
         ? 'Add at least one garment.'
-        : filled.find((p) => p.qty <= 0 || p.l.unitPrice.trim() === '')
-          ? 'Every line needs a quantity and a rate.'
-          : validUntil && validUntil < quoteDate
-            ? 'It cannot expire before it is made.'
-            : null
+        : noItem
+          ? `Choose the item ${noItem.l.styleCode || 'each line'} is billed as — it carries the HSN code and GST.`
+          : filled.find((p) => p.qty <= 0 || p.l.unitPrice.trim() === '')
+            ? 'Every line needs pieces and a rate.'
+            : validUntil && validUntil < quoteDate
+              ? 'It cannot expire before it is made.'
+              : null
 
   const save = async (send: boolean) => {
     if (blocker) return
@@ -411,19 +461,21 @@ export function QuotationDialog({
               </Section>
 
               <Section icon={Package} title="Garments and rates" actions={<span className="text-muted-foreground text-xs tabular-nums">{totals.pieces.toLocaleString('en-IN')} pcs</span>}>
+                <p className="text-muted-foreground mb-2.5 text-xs">
+                  Pick the style and colour, and the rate fills in from the selling price on its BOM (the BOM&apos;s Pricing step). Type over it to quote this buyer a different rate; the margin over the BOM cost shows under it.
+                </p>
                 <div className="border-border overflow-x-auto rounded-lg border">
-                  <table className="w-full min-w-[1120px] table-fixed border-collapse text-sm">
+                  <table className="w-full min-w-[1080px] table-fixed border-collapse text-sm">
                     <thead>
                       <tr className="bg-secondary">
                         {[
                           ['', 'w-8'],
-                          ['Item', 'w-64'],
-                          ['Style no.', 'w-32'],
-                          ['Colour', 'w-28'],
+                          ['Style', 'w-72'],
+                          ['Colour', 'w-32'],
+                          ['Item billed as', 'w-56'],
                           ['Pieces', 'w-24 text-right'],
-                          ['Rate ₹/pc', 'w-28 text-right'],
+                          ['Rate ₹/pc', 'w-40 text-right'],
                           ['Disc %', 'w-20 text-right'],
-                          ['BOM cost · margin', 'w-40 text-right'],
                           ['GST', 'w-14 text-right'],
                           ['Amount', 'w-28 text-right'],
                         ].map(([label, cls], i) => (
@@ -434,69 +486,141 @@ export function QuotationDialog({
                       </tr>
                     </thead>
                     <tbody>
-                      {totals.lines.map((p, i) => (
-                        <tr key={p.l.key} className={`${i % 2 ? 'zebra-row' : 'bg-card'} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
-                          <td>
-                            <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== p.l.key) : [blank()]))} aria-label={`Remove row ${i + 1}`}>
-                              <Trash2 size={13} />
-                            </button>
-                          </td>
-                          <td>
-                            <SmartSelect className={cell} value={p.l.itemId} onChange={(e) => pickItem(p.l.key, e.target.value)} aria-label={`Row ${i + 1} item`}>
-                              <option value="">Item</option>
-                              {items.map((it) => (
-                                <option key={it.id} value={it.id} data-sub={it.code}>
-                                  {it.name}
-                                  {it.color ? ` (${it.color})` : ''}
-                                </option>
-                              ))}
-                            </SmartSelect>
-                            <input className={`${cell} mt-1`} maxLength={500} value={p.l.description} placeholder="Description (optional)" onChange={(e) => setLine(p.l.key, { description: e.target.value })} />
-                          </td>
-                          <td>
-                            <input className={`${cell} font-mono`} maxLength={50} value={p.l.styleCode} placeholder="Style no." onChange={(e) => setLine(p.l.key, { styleCode: e.target.value })} />
-                          </td>
-                          <td>
-                            <input className={cell} maxLength={50} value={p.l.color} placeholder="Colour" disabled={!!p.item?.color} onChange={(e) => setLine(p.l.key, { color: e.target.value })} />
-                          </td>
-                          <td>
-                            <StepInput className={`${cell} text-right tabular-nums`} value={p.l.qty} placeholder="0" onValueChange={(v) => setLine(p.l.key, { qty: v })} aria-label={`Row ${i + 1} pieces`} />
-                          </td>
-                          <td>
-                            <StepInput decimals className={`${cell} text-right tabular-nums`} value={p.l.unitPrice} placeholder="0.00" onValueChange={(v) => setLine(p.l.key, { unitPrice: v })} aria-label={`Row ${i + 1} rate`} />
-                            {p.guide?.price != null && (
-                              <button type="button" className="text-primary mt-0.5 block w-full text-right text-[10px] hover:underline" onClick={() => setLine(p.l.key, { unitPrice: String(p.guide!.price) })} title="Use the BOM's suggested price">
-                                BOM price ₹{inr(p.guide.price)}
+                      {totals.lines.map((p, i) => {
+                        const st = p.style
+                        const bomPrice = p.bom?.price ?? null
+                        const offBom = bomPrice != null && Math.abs(p.rate - bomPrice) >= 0.005
+                        return (
+                          <tr key={p.l.key} className={`${i % 2 ? 'zebra-row' : 'bg-card'} [&>td]:px-2 [&>td]:py-1.5 [&>td]:align-top`}>
+                            <td>
+                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== p.l.key) : [blank()]))} aria-label={`Remove row ${i + 1}`}>
+                                <Trash2 size={13} />
                               </button>
-                            )}
-                          </td>
-                          <td>
-                            <StepInput decimals max={100} className={`${cell} text-right tabular-nums`} value={p.l.discount} placeholder="0" onValueChange={(v) => setLine(p.l.key, { discount: v })} aria-label={`Row ${i + 1} discount`} />
-                          </td>
-                          <td className="text-right text-xs tabular-nums">
-                            {!p.l.itemId ? (
-                              '—'
-                            ) : p.guide ? (
-                              <>
-                                <div className="text-foreground">₹{inr(p.guide.cost)}</div>
-                                {p.margin != null && <div className={p.margin < 0 ? 'text-destructive font-medium' : p.margin < 10 ? 'warn-text' : 'text-primary'}>{p.margin}% margin</div>}
-                              </>
-                            ) : (
-                              <span className="text-muted-foreground" title="No approved, costed BOM for this style and colour">
-                                no BOM cost
-                              </span>
-                            )}
-                          </td>
-                          <td className="text-right text-xs tabular-nums">{p.gst != null ? `${p.gst}%` : p.l.itemId ? <span className="warn-text">none</span> : '—'}</td>
-                          <td className="text-foreground text-right text-xs font-semibold tabular-nums">{p.amount ? inr(p.amount) : '—'}</td>
-                        </tr>
-                      ))}
+                            </td>
+                            <td>
+                              <SmartSelect
+                                className={cell}
+                                value={p.l.styleCode}
+                                onChange={(e) => pickStyle(p.l.key, e.target.value, '')}
+                                onCreate={can('masters', 'create') ? (typed) => setNewStyle({ key: p.l.key, typed }) : undefined}
+                                createNoun="style"
+                                aria-label={`Row ${i + 1} style`}
+                              >
+                                <option value="">Choose a style</option>
+                                {p.l.styleCode && !st && <option value={p.l.styleCode}>{p.l.styleCode} (not in the style master)</option>}
+                                {(['LD_COTTON_MILLS', 'VHAGAR', 'CUSTOM'] as const).map((bt) => {
+                                  const group = styles.filter((x) => x.brandType === bt)
+                                  return group.length ? (
+                                    <optgroup key={bt} label={BRAND_LABEL[bt]}>
+                                      {group.map((x) => (
+                                        <option key={x.id} value={x.code} data-sub={bomNote(x)}>
+                                          {x.code} — {x.name}
+                                        </option>
+                                      ))}
+                                    </optgroup>
+                                  ) : null
+                                })}
+                              </SmartSelect>
+                              <input className={`${cell} mt-1`} maxLength={500} value={p.l.description} placeholder="Description (optional)" onChange={(e) => setLine(p.l.key, { description: e.target.value })} />
+                            </td>
+                            <td>
+                              {st && st.colors.length > 0 ? (
+                                <SmartSelect className={cell} value={p.l.color} onChange={(e) => pickStyle(p.l.key, p.l.styleCode, e.target.value)} aria-label={`Row ${i + 1} colour`}>
+                                  <option value="">Any colour</option>
+                                  {p.l.color && !st.colors.some((c) => same(c, p.l.color)) && <option value={p.l.color}>{p.l.color}</option>}
+                                  {st.colors.map((c) => {
+                                    const b = pickBom(st.boms, c)
+                                    return (
+                                      <option key={c} value={c} data-sub={b?.price != null ? `₹${inr(b.price)}` : undefined}>
+                                        {c}
+                                      </option>
+                                    )
+                                  })}
+                                </SmartSelect>
+                              ) : (
+                                <input className={cell} maxLength={50} value={p.l.color} placeholder="Colour" onChange={(e) => setLine(p.l.key, { color: e.target.value })} />
+                              )}
+                            </td>
+                            <td>
+                              <SmartSelect className={cell} value={p.l.itemId} onChange={(e) => setLine(p.l.key, { itemId: e.target.value })} aria-label={`Row ${i + 1} item billed as`}>
+                                <option value="">Choose the item</option>
+                                {items.map((it) => (
+                                  <option key={it.id} value={it.id} data-sub={it.code}>
+                                    {it.name}
+                                    {it.color ? ` (${it.color})` : ''}
+                                  </option>
+                                ))}
+                              </SmartSelect>
+                            </td>
+                            <td>
+                              <StepInput className={`${cell} text-right tabular-nums`} value={p.l.qty} placeholder="0" onValueChange={(v) => setLine(p.l.key, { qty: v })} aria-label={`Row ${i + 1} pieces`} />
+                            </td>
+                            <td>
+                              <StepInput decimals className={`${cell} text-right tabular-nums`} value={p.l.unitPrice} placeholder="0.00" onValueChange={(v) => setLine(p.l.key, { unitPrice: v, rateFromBom: false })} aria-label={`Row ${i + 1} rate`} />
+                              <div className="mt-0.5 text-right text-[10px] leading-snug">
+                                {!st ? null : !p.bom ? (
+                                  <span className="text-muted-foreground">No BOM for this style yet</span>
+                                ) : bomPrice == null ? (
+                                  <span className="warn-text" title="Set it on the BOM's Pricing step and it fills in here">
+                                    BOM has no selling price yet
+                                  </span>
+                                ) : offBom ? (
+                                  <button type="button" className="text-primary hover:underline" onClick={() => setLine(p.l.key, { unitPrice: String(bomPrice), rateFromBom: true })} title="Go back to the BOM's selling price">
+                                    BOM price ₹{inr(bomPrice)} · use it
+                                  </button>
+                                ) : (
+                                  <span className="text-primary">BOM price{p.bom.status === 'DRAFT' ? ' (draft BOM)' : ''}</span>
+                                )}
+                                {p.margin != null && (
+                                  <div className={p.margin < 0 ? 'text-destructive font-medium' : p.margin < 10 ? 'warn-text' : 'text-muted-foreground'}>
+                                    cost ₹{inr(p.bom?.cost ?? 0)} · {p.margin}% margin
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                            <td>
+                              <StepInput decimals max={100} className={`${cell} text-right tabular-nums`} value={p.l.discount} placeholder="0" onValueChange={(v) => setLine(p.l.key, { discount: v })} aria-label={`Row ${i + 1} discount`} />
+                            </td>
+                            <td className="text-right text-xs tabular-nums">{p.gst != null ? `${p.gst}%` : p.l.itemId ? <span className="warn-text">none</span> : '—'}</td>
+                            <td className="text-foreground text-right text-xs font-semibold tabular-nums">{p.amount ? inr(p.amount) : '—'}</td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
                 <button type="button" className="btn-secondary mt-3 h-8 px-3 text-xs" onClick={() => setLines((ls) => [...ls, blank()])}>
                   <Plus size={14} /> Add item row
                 </button>
+                {/* The full style form, the same as Masters → Styles, over
+                  this quotation. Saved, the style is picked on the line that
+                  asked for it; nothing typed here is lost. */}
+                <MasterFormDialog<{ id: string; code: string }>
+                  open={newStyle !== null}
+                  onClose={() => setNewStyle(null)}
+                  onSaved={() => {}}
+                  onCreated={(row) => {
+                    const key = newStyle?.key
+                    void api
+                      .get<{ data: StyleOption[] }>('/sales/quotations/styles')
+                      .then((res) => {
+                        setStyles(res.data)
+                        if (key) pickStyle(key, row.code, '', res.data)
+                      })
+                      .catch(() => {})
+                  }}
+                  resource="styles"
+                  fields={styleFormFields}
+                  initialValues={{
+                    ...(newStyle?.typed ? { code: newStyle.typed.toUpperCase() } : {}),
+                    brandType: brands.find((x) => x.id === brandId)?.type === 'VHAGAR' ? 'VHAGAR' : 'LD_COTTON_MILLS',
+                    isActive: true,
+                  }}
+                  title="Style"
+                  columns={4}
+                  wide
+                  stacked
+                />
               </Section>
 
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_400px]">

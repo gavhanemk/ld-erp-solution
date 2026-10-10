@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { FileSpreadsheet } from 'lucide-react'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
-import type { FormField } from '@/components/masters/MasterFormDialog'
+import { BRAND_LABEL, styleFormFields } from '@/components/masters/styleFormFields'
 import { ImportStylesDialog } from '@/components/masters/ImportStylesDialog'
 
 interface Style {
@@ -22,12 +22,6 @@ interface Style {
   sizeGroup: { id: string; name: string } | null
   colors: string[]
   isActive: boolean
-}
-
-const BRAND_LABEL: Record<Style['brandType'], string> = {
-  LD_COTTON_MILLS: 'LD Cotton Mills',
-  VHAGAR: 'VHAGAR',
-  CUSTOM: 'Custom',
 }
 
 const columns: Column<Style>[] = [
@@ -101,56 +95,6 @@ const columns: Column<Style>[] = [
 ]
 
 /*
- * Four across, so the whole style fits without scrolling: what it is on the
- * first rows, how it is made on the next, and the size run beside its
- * colours on the last.
- */
-const formFields: FormField[] = [
-  { name: 'code', label: 'Style Code', required: true, placeholder: 'LD-SH-2701', section: 'Style' },
-  {
-    name: 'name',
-    label: 'Style Name',
-    required: true,
-    placeholder: 'Slim Fit Formal Shirt',
-    section: 'Style',
-    span: 2,
-  },
-  {
-    name: 'brandType',
-    label: 'Brand',
-    type: 'select',
-    required: true,
-    section: 'Style',
-    options: Object.entries(BRAND_LABEL).map(([value, label]) => ({ value, label })),
-  },
-  { name: 'category', label: 'Garment Type', section: 'Style', placeholder: 'Shirt' },
-  { name: 'season', label: 'Season', section: 'Style', placeholder: 'SS-26' },
-  { name: 'fabricType', label: 'Fabric', section: 'Style', placeholder: 'Cotton Poplin' },
-  { name: 'gsm', label: 'GSM', type: 'number', section: 'Style', placeholder: '120' },
-  { name: 'collarType', label: 'Collar Type', section: 'Construction', placeholder: 'Cutaway' },
-  { name: 'sleeveType', label: 'Sleeve Type', section: 'Construction', placeholder: 'Full sleeve' },
-  { name: 'fit', label: 'Fit', section: 'Construction', placeholder: 'Slim' },
-  {
-    name: 'sizeGroupId',
-    label: 'Size Run',
-    type: 'select',
-    section: 'Size & Colour',
-    optionsFrom: { resource: 'size-groups' },
-    help: 'The sizes it is cut in',
-  },
-  {
-    name: 'colors',
-    label: 'Colours',
-    type: 'tags',
-    section: 'Size & Colour',
-    span: 3,
-    placeholder: 'White, Sky Blue, Navy',
-    help: 'Separate colours with commas',
-  },
-  { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Size & Colour' },
-]
-
-/*
  * A dropdown for each thing a style is picked out by. Garment, season,
  * fabric, fit and colour are typed on the style, so their choices are the
  * values in use; each counts what it would leave.
@@ -188,7 +132,7 @@ export default function StylesPage() {
         entityName="Style"
         resource="styles"
         columns={columns}
-        formFields={formFields}
+        formFields={styleFormFields}
         formColumns={4}
         filterDefs={filterDefs}
         defaultSort="code"

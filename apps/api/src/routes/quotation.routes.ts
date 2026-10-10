@@ -9,7 +9,6 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { stateName } from '../lib/gstStates'
 import { createSalesOrderSchema, prepareOrder } from './sales.routes'
-import { findBom } from '../services/manufacturing.service'
 
 /**
  * Quotations: a price offered before the customer orders.
@@ -70,24 +69,46 @@ export const quoteSchema = z
 type QuoteInput = z.infer<typeof quoteSchema>
 
 /**
- * The BOM's cost and price per piece for a garment: its style is the item's
- * own, else the style number typed. Null when no approved BOM is costed.
+ * The BOM a quotation prices from, for a style in a colour: the BOM made for
+ * that colour, else the one for all colours; an approved BOM ahead of a draft
+ * at each step. A draft counts because the price is often set while the BOM
+ * is still being worked on, and the quotation goes out before it is approved.
+ * The same order is used on the form (pickBom there), so what is shown is
+ * what is saved.
  */
-async function bomPrice(db: Prisma.TransactionClient | typeof prisma, itemId: string, styleCode?: string | null, color?: string | null) {
-  const item = await db.item.findUnique({ where: { id: itemId }, select: { color: true, styleId: true } })
-  if (!item) return null
+type QuoteBom = { status: string; color: string | null; version: string; costPerPiece: unknown; sellingPrice: unknown; marginPercent: unknown }
+function pickBom<T extends QuoteBom>(boms: T[], color?: string | null): T | null {
+  const wanted = color?.trim().toLowerCase()
+  const rank = (b: T) => (b.status === 'APPROVED' ? 0 : 1)
+  const sorted = [...boms].sort((a, b) => rank(a) - rank(b))
+  return (wanted ? sorted.find((b) => b.color?.trim().toLowerCase() === wanted) : undefined) ?? sorted.find((b) => !b.color?.trim()) ?? null
+}
+
+const QUOTE_BOM = {
+  where: { isActive: true, status: { in: ['APPROVED', 'DRAFT'] as Array<'APPROVED' | 'DRAFT'> }, OR: [{ costPerPiece: { not: null } }, { sellingPrice: { not: null } }] },
+  select: { status: true, color: true, version: true, costPerPiece: true, sellingPrice: true, marginPercent: true },
+  orderBy: [{ approvedAt: 'desc' as const }, { updatedAt: 'desc' as const }],
+}
+
+/**
+ * The BOM's cost and selling price per piece for a quotation line: its style
+ * is the style number on the line, else the item's own style. Null when the
+ * style has no BOM with a cost or a price.
+ */
+async function bomPrice(db: Prisma.TransactionClient | typeof prisma, itemId: string | null, styleCode?: string | null, color?: string | null) {
+  const item = itemId ? await db.item.findUnique({ where: { id: itemId }, select: { color: true, styleId: true } }) : null
   const styleId =
-    item.styleId ??
-    (styleCode?.trim() ? (await db.style.findFirst({ where: { code: { equals: styleCode.trim(), mode: 'insensitive' } }, select: { id: true } }))?.id : null)
+    (styleCode?.trim() ? (await db.style.findFirst({ where: { code: { equals: styleCode.trim(), mode: 'insensitive' } }, select: { id: true } }))?.id : null) ??
+    item?.styleId ??
+    null
   if (!styleId) return null
-  const found = await findBom(db, styleId, item.color ?? color ?? null)
-  if (!found) return null
-  const bom = await db.bOM.findUnique({ where: { id: found.id }, select: { version: true, color: true, costPerPiece: true, sellingPrice: true, marginPercent: true } })
-  if (!bom || bom.costPerPiece == null) return null
+  const bom = pickBom(await db.bOM.findMany({ ...QUOTE_BOM, where: { ...QUOTE_BOM.where, styleId } }), color?.trim() || item?.color || null)
+  if (!bom) return null
   return {
     version: bom.version,
+    status: bom.status,
     color: bom.color,
-    cost: Number(bom.costPerPiece),
+    cost: bom.costPerPiece != null ? Number(bom.costPerPiece) : null,
     price: bom.sellingPrice != null ? Number(bom.sellingPrice) : null,
     marginPercent: bom.marginPercent != null ? Number(bom.marginPercent) : null,
   }
@@ -174,6 +195,50 @@ router.get('/bom-price', requirePermission(MODULE, 'view'), async (req, res) => 
   const itemId = text(req.query.itemId)
   if (!itemId) throw new AppError('Say which item', 400, 'NO_ITEM')
   res.json({ success: true, data: await bomPrice(prisma, itemId, text(req.query.styleCode), text(req.query.color)) })
+})
+
+/**
+ * GET /api/sales/quotations/styles
+ *
+ * What a quotation line starts from: every active style with its colours,
+ * its BOMs' cost and selling price (approved or draft, the form picks the
+ * same way pickBom does), and the finished-goods items linked to it, so
+ * picking a style and colour fills in the rate and the item to bill.
+ */
+router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const styles = await prisma.style.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      brandType: true,
+      category: true,
+      colors: true,
+      items: { where: { isActive: true, type: 'FINISHED_GOOD' }, select: { id: true, color: true } },
+      boms: QUOTE_BOM,
+    },
+    orderBy: { code: 'asc' },
+  })
+  res.json({
+    success: true,
+    data: styles.map((st) => ({
+      id: st.id,
+      code: st.code,
+      name: st.name,
+      brandType: st.brandType,
+      category: st.category,
+      colors: [...new Set([...st.colors, ...st.items.map((i) => i.color).filter((c): c is string => !!c)])],
+      items: st.items,
+      boms: st.boms.map((b) => ({
+        status: b.status,
+        color: b.color,
+        version: b.version,
+        cost: b.costPerPiece != null ? Number(b.costPerPiece) : null,
+        price: b.sellingPrice != null ? Number(b.sellingPrice) : null,
+      })),
+    })),
+  })
 })
 
 /** GET /api/sales/quotations/summary — the cards over the list. */
