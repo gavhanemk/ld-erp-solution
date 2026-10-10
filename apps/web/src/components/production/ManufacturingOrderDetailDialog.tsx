@@ -51,6 +51,10 @@ interface MoDetail {
 
 interface PlanRow {
   key: string
+  /** Item and department: what the "ours / customer's" switch is keyed by. */
+  baseKey: string
+  defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
+  issued: number
   item: { id: string; code: string; name: string; type: string; uom: string | null }
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId: string | null
@@ -66,6 +70,7 @@ interface PlanRow {
 }
 
 interface MaterialPlan {
+  mo: { so: { id: string; soNumber: string; customerId: string; isJobWork: boolean; customer: { name: string } } | null }
   rows: PlanRow[]
   missing: Array<{ style: string; color: string; pieces: number }>
   warehouses: Array<{ id: string; name: string }>
@@ -123,10 +128,14 @@ export function ManufacturingOrderDetailDialog({
     }
   }, [])
 
-  const loadPlan = useCallback(async (id: string) => {
+  // Rows turned to the other owner by the person: "this fabric is ours after all".
+  const [swap, setSwap] = useState<Set<string>>(new Set())
+
+  const loadPlan = useCallback(async (id: string, flipped: Set<string> = new Set()) => {
     setLoadingPlan(true)
     try {
-      const res = await api.get<{ data: MaterialPlan }>(`/production/orders/${id}/materials`)
+      const qs = flipped.size ? `?swap=${encodeURIComponent([...flipped].join(','))}` : ''
+      const res = await api.get<{ data: MaterialPlan }>(`/production/orders/${id}/materials${qs}`)
       setPlan(res.data)
       setAsk(
         Object.fromEntries(
@@ -150,9 +159,20 @@ export function ManufacturingOrderDetailDialog({
     setMo(null)
     setPlan(null)
     setRequiredDate('')
+    setSwap(new Set())
     void load(moId)
     void loadPlan(moId)
   }, [moId, load, loadPlan])
+
+  /** Turns a plan row to the other owner and works the plan out again. */
+  const flip = (r: PlanRow) => {
+    if (!moId) return
+    const next = new Set(swap)
+    if (next.has(r.baseKey)) next.delete(r.baseKey)
+    else next.add(r.baseKey)
+    setSwap(next)
+    void loadPlan(moId, next)
+  }
 
   useEffect(() => {
     if (!moId) return
@@ -173,7 +193,7 @@ export function ManufacturingOrderDetailDialog({
     onChanged(msg)
     if (moId) {
       await load(moId)
-      await loadPlan(moId)
+      await loadPlan(moId, swap)
     }
   }
 
@@ -418,6 +438,7 @@ export function ManufacturingOrderDetailDialog({
                               <th style={{ textAlign: 'right' }}>Needed</th>
                               <th style={{ textAlign: 'right' }}>In stock</th>
                               <th style={{ textAlign: 'right' }}>Asked for</th>
+                              <th style={{ textAlign: 'right' }}>Issued</th>
                               <th style={{ textAlign: 'right' }}>Short</th>
                               {live && mayRaise && (
                                 <>
@@ -447,9 +468,22 @@ export function ManufacturingOrderDetailDialog({
                                     <div className="text-foreground text-sm font-medium">
                                       <span className="font-mono text-xs">{r.item.code}</span> — {r.item.name}
                                     </div>
-                                    <div className="text-muted-foreground text-[11px]">
+                                    <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-[11px]">
                                       {r.styles.join(', ')}
-                                      {r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple ml-1.5">Customer&apos;s</span>}
+                                      {live && mayRaise && plan.mo.so ? (
+                                        // Whose cloth this is: the plan's guess, switchable.
+                                        <button
+                                          type="button"
+                                          className={`${r.ownership === 'CUSTOMER_OWNED' ? 'badge-purple' : 'badge-neutral'} cursor-pointer hover:opacity-80`}
+                                          onClick={() => flip(r)}
+                                          disabled={loadingPlan}
+                                          title={`Switch to ${r.ownership === 'CUSTOMER_OWNED' ? 'our own stock' : `${plan.mo.so.customer.name}'s stock`}`}
+                                        >
+                                          {r.ownership === 'CUSTOMER_OWNED' ? `${plan.mo.so.customer.name}'s` : 'Ours'} ⇄
+                                        </button>
+                                      ) : (
+                                        r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple">Customer&apos;s</span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="text-xs">
@@ -471,6 +505,9 @@ export function ManufacturingOrderDetailDialog({
                                   </td>
                                   <td className="text-right text-xs tabular-nums">{qty(r.inStock)}</td>
                                   <td className="text-right text-xs tabular-nums">{r.requested > 0 ? qty(r.requested) : '—'}</td>
+                                  <td className={`text-right text-xs tabular-nums ${r.issued > 0 && r.issued >= r.required - 1e-9 ? 'text-primary' : ''}`} title={r.required > 0 ? `${Math.round((r.issued / r.required) * 100)}% of what is needed` : undefined}>
+                                    {r.issued > 0 ? qty(r.issued) : '—'}
+                                  </td>
                                   <td className={`text-right text-xs tabular-nums ${r.short > 0 ? 'warn-text font-medium' : 'text-muted-foreground'}`}>{r.short > 0 ? qty(r.short) : '—'}</td>
                                   {live && mayRaise && (
                                     <>
@@ -508,8 +545,9 @@ export function ManufacturingOrderDetailDialog({
                     )}
                     <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-xs">
                       <Info size={13} className="mt-px shrink-0" />
-                      Needed = pieces by size × the BOM per piece, wastage included. Requisitions go one per department and wait for approval in
-                      Inventory; the store then issues what it has and passes the rest to Purchase.
+                      Needed = pieces by size × the BOM per piece, wastage included. On a job-work order the customer&apos;s fabric (and anything else
+                      they have sent us) is drawn from their own stock — click Ours / Customer&apos;s to switch a row. Requisitions go one per department and
+                      wait for approval in Inventory; the store then issues what it has and passes the rest to Purchase.
                     </p>
                     {live && mayRaise && raiseBlocker && <p className="warn-text mt-1 text-xs">{raiseBlocker}</p>}
                     {mo.status === 'DRAFT' && <p className="text-muted-foreground mt-1 text-xs">Release it to ask the store for these.</p>}

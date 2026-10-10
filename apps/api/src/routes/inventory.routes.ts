@@ -15,6 +15,7 @@ import {
   transferStock,
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
+import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
@@ -33,6 +34,7 @@ import {
   issueRequisitionSchema,
   openingStockSchema,
   rejectRequisitionSchema,
+  rejectAdjustmentSchema,
   closeRequisitionSchema,
   reserveRequisitionSchema,
   releaseReservationSchema,
@@ -50,6 +52,32 @@ const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() ? v.trim() : undefined
 
 // ── What is on hand ─────────────────────────────────────────────────────────
+
+/**
+ * GET /api/inventory/held?warehouseId=
+ *
+ * What one store holds, item by item, split by whose it is and by size — the
+ * choices a transfer, a count or a job-work challan offers for each line, so
+ * a customer's cloth is picked as theirs and never taken for ours.
+ */
+router.get('/held', requirePermission(MODULE, 'view'), async (req, res) => {
+  const warehouseId = str(req.query.warehouseId)
+  if (!warehouseId) throw new AppError('Say which store', 400, 'NO_WAREHOUSE')
+  const rows = await prisma.$queryRaw<
+    Array<{ itemId: string; ownership: string; ownerCustomerId: string | null; ownerName: string | null; sizeId: string | null; sizeCode: string | null; sequence: number | null; qty: number }>
+  >`
+    SELECT s."itemId", s."ownership"::text AS "ownership", s."ownerCustomerId", c.name AS "ownerName",
+           s."sizeId", z.code AS "sizeCode", z.sequence AS "sequence",
+           SUM(s."inQty" - s."outQty")::float8 AS "qty"
+    FROM ld_erp.stock_ledger s
+    LEFT JOIN ld_erp.customers c ON c.id = s."ownerCustomerId"
+    LEFT JOIN ld_erp.sizes z ON z.id = s."sizeId"
+    WHERE s."warehouseId" = ${warehouseId}
+    GROUP BY s."itemId", s."ownership", s."ownerCustomerId", c.name, s."sizeId", z.code, z.sequence
+    HAVING SUM(s."inQty" - s."outQty") > 0
+    ORDER BY s."itemId", s."ownership", c.name, z.sequence`
+  res.json({ success: true, data: rows.map((r) => ({ ...r, qty: Math.round(r.qty * 1000) / 1000 })) })
+})
 
 router.get('/stock', requirePermission(MODULE, 'view'), async (req, res) => {
   const [rows, reorder] = await Promise.all([onHand(prisma, {
@@ -465,18 +493,48 @@ const itemSelect = {
   select: { id: true, code: true, name: true, uom: { select: { symbol: true } } },
 }
 
+/** Whose stock a line moved, and its size, for every document that shows its lines. */
+const whoseInclude = {
+  ownerCustomer: { select: { id: true, name: true } },
+  size: { select: { id: true, code: true } },
+}
+
 const transferInclude = {
   fromWarehouse: { select: { id: true, name: true } },
   toWarehouse: { select: { id: true, name: true } },
   movedBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
-  lines: { include: { item: itemSelect } },
+  lines: { include: { item: itemSelect, ...whoseInclude } },
 }
 
 const adjustmentInclude = {
   warehouse: { select: { id: true, name: true } },
   madeBy: { select: { id: true, name: true } },
-  lines: { include: { item: itemSelect } },
+  approvedBy: { select: { id: true, name: true } },
+  lines: { include: { item: itemSelect, ...whoseInclude } },
+}
+
+/**
+ * A line's owner and size, made whole: our own stock carries no customer, and
+ * a customer named must exist. Every stock document that moves a customer's
+ * cloth goes through this, so a typo can never invent an owner.
+ */
+async function whoseStock(
+  tx: Prisma.TransactionClient,
+  l: { ownership?: 'OWNED' | 'CUSTOMER_OWNED'; ownerCustomerId?: string | null; sizeId?: string | null },
+) {
+  const ownership = l.ownership ?? 'OWNED'
+  const ownerCustomerId = ownership === 'CUSTOMER_OWNED' ? (l.ownerCustomerId ?? null) : null
+  if (ownerCustomerId) {
+    const c = await tx.customer.findUnique({ where: { id: ownerCustomerId }, select: { id: true } })
+    if (!c) throw new AppError('The customer this stock belongs to does not exist', 404, 'NOT_FOUND')
+  }
+  const sizeId = l.sizeId || null
+  if (sizeId) {
+    const sz = await tx.size.findUnique({ where: { id: sizeId }, select: { id: true } })
+    if (!sz) throw new AppError('That size does not exist', 404, 'NOT_FOUND')
+  }
+  return { ownership, ownerCustomerId, sizeId } as const
 }
 
 /**
@@ -488,10 +546,16 @@ const adjustmentInclude = {
  * two racks of 400, or one rack counted twice? — so the person is asked to
  * enter the item once, with its total.
  */
-async function refuseRepeatedItems(tx: Prisma.TransactionClient, itemIds: string[]) {
+async function refuseRepeatedItems(
+  tx: Prisma.TransactionClient,
+  keys: Array<string | { itemId: string; ownerCustomerId?: string | null; sizeId?: string | null }>,
+) {
   const seen = new Map<string, number>()
-  for (const [i, itemId] of itemIds.entries()) {
-    const first = seen.get(itemId)
+  for (const [i, k] of keys.entries()) {
+    // The same cloth twice is a repeat; ours and a customer's, or two sizes, are not.
+    const itemId = typeof k === 'string' ? k : k.itemId
+    const key = typeof k === 'string' ? k : [k.itemId, k.ownerCustomerId ?? '', k.sizeId ?? ''].join('|')
+    const first = seen.get(key)
     if (first !== undefined) {
       const item = await tx.item.findUnique({ where: { id: itemId }, select: { name: true } })
       throw new AppError(
@@ -500,7 +564,7 @@ async function refuseRepeatedItems(tx: Prisma.TransactionClient, itemIds: string
         'REPEATED_ITEM',
       )
     }
-    seen.set(itemId, i)
+    seen.set(key, i)
   }
 }
 
@@ -579,92 +643,88 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
   })
 })
 
+/** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
+export async function createAdjustment(tx: Prisma.TransactionClient, data: z.infer<typeof adjustmentSchema>, userId: string | null) {
+  const when = data.adjustmentDate ?? new Date()
+
+  const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
+  if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
+
+  const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
+  for (const line of data.lines) whose.push(await whoseStock(tx, line))
+  await refuseRepeatedItems(tx, data.lines.map((l, i) => ({ itemId: l.itemId, ...whose[i] })))
+
+  const counted = []
+
+  for (const [i, line] of data.lines.entries()) {
+    const key = { itemId: line.itemId, warehouseId: data.warehouseId, ...whose[i] }
+    const before = await lockedBalanceOf(tx, key)
+    const difference = Number((line.countedQty - before.qty).toFixed(3))
+    const customers = whose[i].ownership === 'CUSTOMER_OWNED'
+
+    if (!customers && difference > 0 && before.qty === 0 && line.unitRate === undefined) {
+      const item = await tx.item.findUnique({
+        where: { id: line.itemId },
+        select: { name: true },
+      })
+      throw new AppError(
+        `${item?.name ?? 'That item'} has nothing on hand to take a rate from. Enter a rate so the stock found can be valued.`,
+        400,
+        'NO_RATE',
+      )
+    }
+
+    counted.push({
+      itemId: line.itemId,
+      ...whose[i],
+      bookQty: before.qty,
+      countedQty: line.countedQty,
+      difference,
+      unitRate: customers ? 0 : difference > 0 ? (line.unitRate ?? before.avgRate) : before.avgRate,
+    })
+  }
+
+  const adjustmentNumber = await nextDocumentNumber(tx, 'ADJ', when)
+  const anyDifference = counted.some((l) => l.difference !== 0)
+
+  const created = await tx.stockAdjustment.create({
+    data: {
+      adjustmentNumber,
+      warehouseId: data.warehouseId,
+      adjustmentDate: when,
+      reason: data.reason,
+      madeById: userId,
+      // Waits for a store manager when it would change stock.
+      status: anyDifference ? 'PENDING' : 'APPROVED',
+      // Every line that was counted is kept, including the ones that matched.
+      // "We counted forty items and three were wrong" is the useful sentence
+      // in a stock audit; recording only the three loses the forty.
+      lines: { create: counted },
+    },
+  })
+
+  return tx.stockAdjustment.findUniqueOrThrow({
+    where: { id: created.id },
+    include: adjustmentInclude,
+  })
+}
+
 /**
  * A correction after a physical count.
  *
- * Guarded by the approve permission rather than create. An adjustment is the
- * one movement with no document behind it in the real world — it says the book
- * was wrong — so it should not be within reach of everyone who can receive
- * goods. The reason is mandatory and lands in the ledger against every line.
+ * The store keeper enters what is on the rack; the book figure and the
+ * difference are worked out here and kept on the count. Nothing moves yet:
+ * an adjustment says the book was wrong, so a store manager approves it
+ * (POST /adjustments/:id/approve) before stock changes. A count where every
+ * figure matched the book has nothing to approve and is approved as saved.
+ *
+ * Each line says whose stock it counts. A customer's fabric is counted
+ * against that customer's balance, never ours, and a gain or loss on it
+ * carries no value of ours.
  */
-router.post('/adjustments', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = adjustmentSchema.parse(req.body)
-  const when = data.adjustmentDate ?? new Date()
-
-  const adjustment = await prisma.$transaction(async (tx) => {
-    const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId } })
-    if (!warehouse) throw new AppError('That warehouse does not exist', 404, 'NOT_FOUND')
-
-    await refuseRepeatedItems(tx, data.lines.map((l) => l.itemId))
-
-    const counted = []
-
-    for (const line of data.lines) {
-      const key = { itemId: line.itemId, warehouseId: data.warehouseId }
-      const before = await lockedBalanceOf(tx, key)
-      const difference = Number((line.countedQty - before.qty).toFixed(3))
-
-      if (difference > 0 && before.qty === 0 && line.unitRate === undefined) {
-        const item = await tx.item.findUnique({
-          where: { id: line.itemId },
-          select: { name: true },
-        })
-        throw new AppError(
-          `${item?.name ?? 'That item'} has nothing on hand to take a rate from. Enter a rate so the stock found can be valued.`,
-          400,
-          'NO_RATE',
-        )
-      }
-
-      counted.push({
-        itemId: line.itemId,
-        bookQty: before.qty,
-        countedQty: line.countedQty,
-        difference,
-        unitRate: difference > 0 ? (line.unitRate ?? before.avgRate) : before.avgRate,
-      })
-    }
-
-    const adjustmentNumber = await nextDocumentNumber(tx, 'ADJ', when)
-
-    const created = await tx.stockAdjustment.create({
-      data: {
-        adjustmentNumber,
-        warehouseId: data.warehouseId,
-        adjustmentDate: when,
-        reason: data.reason,
-        madeById: req.user?.id ?? null,
-        // Every line that was counted is kept, including the ones that matched.
-        // "We counted forty items and three were wrong" is the useful sentence
-        // in a stock audit; recording only the three loses the forty.
-        lines: { create: counted },
-      },
-    })
-
-    for (const line of counted) {
-      // A figure that matched the book needs no movement. The line above is
-      // still the record that somebody counted it.
-      if (line.difference === 0) continue
-
-      await recordMovement(tx, {
-        itemId: line.itemId,
-        warehouseId: data.warehouseId,
-        transactionType: 'ADJUSTMENT',
-        direction: line.difference > 0 ? 'IN' : 'OUT',
-        qty: Math.abs(line.difference),
-        unitRate: line.difference > 0 ? line.unitRate : undefined,
-        referenceType: 'STOCK_ADJUSTMENT',
-        referenceId: created.id,
-        transactionDate: when,
-        notes: `${adjustmentNumber}: ${data.reason}`,
-      })
-    }
-
-    return tx.stockAdjustment.findUniqueOrThrow({
-      where: { id: created.id },
-      include: adjustmentInclude,
-    })
-  })
+  const adjustment = await prisma.$transaction((tx) => createAdjustment(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -679,10 +739,25 @@ router.post('/adjustments', requirePermission(MODULE, 'approve'), async (req: Au
   res.status(201).json({
     success: true,
     message: corrected
-      ? `${adjustment.adjustmentNumber} saved. ${corrected} ${corrected === 1 ? 'figure' : 'figures'} corrected.`
-      : `${adjustment.adjustmentNumber} saved. Everything counted matched the book, so no stock moved.`,
+      ? `${adjustment.adjustmentNumber} saved with ${corrected} ${corrected === 1 ? 'difference' : 'differences'}. It goes to a store manager; stock changes once it is approved.`
+      : `${adjustment.adjustmentNumber} saved. Everything counted matched the book, so there is nothing to approve.`,
     data: adjustment,
   })
+})
+
+/** A store manager accepting a count: the differences go into stock now. */
+router.post('/adjustments/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { before, after } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
+  await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'StockAdjustment', entityId: after.id, before, after })
+  res.json({ success: true, message: `${after.adjustmentNumber} approved. Stock is corrected.`, data: after })
+})
+
+/** A store manager turning a count down, with why. Stock is not touched. */
+router.post('/adjustments/:id/reject', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { reason } = rejectAdjustmentSchema.parse(req.body ?? {})
+  const { before, after } = await rejectAdjustment(req.params.id, req.user!.id, reason)
+  await writeAuditLog(req, { module: MODULE, action: 'REJECT', entityType: 'StockAdjustment', entityId: after.id, before, after })
+  res.json({ success: true, message: `${after.adjustmentNumber} refused. Stock was not changed.`, data: after })
 })
 
 router.get('/adjustments', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -691,6 +766,8 @@ router.get('/adjustments', requirePermission(MODULE, 'view'), async (req, res) =
 
   const where: Record<string, unknown> = {}
   if (str(req.query.warehouseId)) where.warehouseId = str(req.query.warehouseId)
+  const status = str(req.query.status)
+  if (status && ['PENDING', 'APPROVED', 'REJECTED'].includes(status)) where.status = status
   if (str(req.query.q)) {
     where.OR = [
       { adjustmentNumber: { contains: str(req.query.q), mode: 'insensitive' } },
@@ -725,70 +802,83 @@ router.get('/adjustments/:id', requirePermission(MODULE, 'view'), async (req, re
   res.json({ success: true, data: row })
 })
 
+/** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
+export async function createTransfer(tx: Prisma.TransactionClient, data: z.infer<typeof transferSchema>, userId: string | null) {
+  const when = data.transferDate ?? new Date()
+
+  const [from, to] = await Promise.all([
+    tx.warehouse.findUnique({ where: { id: data.fromWarehouseId } }),
+    tx.warehouse.findUnique({ where: { id: data.toWarehouseId } }),
+  ])
+  if (!from || !to) throw new AppError('One of those warehouses does not exist', 404, 'NOT_FOUND')
+
+  const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
+  for (const line of data.lines) whose.push(await whoseStock(tx, line))
+
+  const transferNumber = await nextDocumentNumber(tx, 'STN', when)
+
+  const created = await tx.stockTransfer.create({
+    data: {
+      transferNumber,
+      fromWarehouseId: data.fromWarehouseId,
+      toWarehouseId: data.toWarehouseId,
+      transferDate: when,
+      notes: data.notes ?? null,
+      movedById: userId,
+      lines: { create: data.lines.map((l, i) => ({ itemId: l.itemId, qty: l.qty, ...whose[i] })) },
+    },
+    include: { lines: true },
+  })
+
+  for (const line of created.lines) {
+    const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId }
+    // Read what it is carried at before it moves. transferStock prices the
+    // arriving stock at the same figure, so this is the rate the document
+    // should remember.
+    const carried = await balanceOf(tx, {
+      itemId: line.itemId,
+      warehouseId: data.fromWarehouseId,
+      ...key,
+    })
+
+    await transferStock(tx, {
+      itemId: line.itemId,
+      fromWarehouseId: data.fromWarehouseId,
+      toWarehouseId: data.toWarehouseId,
+      qty: Number(line.qty),
+      ...key,
+      referenceType: 'STOCK_TRANSFER',
+      referenceId: created.id,
+      transactionDate: when,
+      notes: `${transferNumber}: ${from.name} → ${to.name}`,
+    })
+
+    await tx.stockTransferLine.update({
+      where: { id: line.id },
+      data: { unitRate: carried.avgRate },
+    })
+  }
+
+  return tx.stockTransfer.findUniqueOrThrow({
+    where: { id: created.id },
+    include: transferInclude,
+  })
+}
+
 /**
  * Moving stock between two of our own stores.
  *
  * Value travels with it: cloth carried across the yard is worth what it was
  * worth on the other side. The rate each line left at is copied onto the
  * document so the note prints the same figure a year later.
+ *
+ * So does its owner: a customer's leftover fabric moved to the job-work
+ * godown is still that customer's when it arrives, and is taken only from
+ * their balance — never from ours of the same cloth.
  */
 router.post('/transfers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = transferSchema.parse(req.body)
-  const when = data.transferDate ?? new Date()
-
-  const transfer = await prisma.$transaction(async (tx) => {
-    const [from, to] = await Promise.all([
-      tx.warehouse.findUnique({ where: { id: data.fromWarehouseId } }),
-      tx.warehouse.findUnique({ where: { id: data.toWarehouseId } }),
-    ])
-    if (!from || !to) throw new AppError('One of those warehouses does not exist', 404, 'NOT_FOUND')
-
-    const transferNumber = await nextDocumentNumber(tx, 'STN', when)
-
-    const created = await tx.stockTransfer.create({
-      data: {
-        transferNumber,
-        fromWarehouseId: data.fromWarehouseId,
-        toWarehouseId: data.toWarehouseId,
-        transferDate: when,
-        notes: data.notes ?? null,
-        movedById: req.user?.id ?? null,
-        lines: { create: data.lines.map((l) => ({ itemId: l.itemId, qty: l.qty })) },
-      },
-      include: { lines: true },
-    })
-
-    for (const line of created.lines) {
-      // Read what it is carried at before it moves. transferStock prices the
-      // arriving stock at the same figure, so this is the rate the document
-      // should remember.
-      const carried = await balanceOf(tx, {
-        itemId: line.itemId,
-        warehouseId: data.fromWarehouseId,
-      })
-
-      await transferStock(tx, {
-        itemId: line.itemId,
-        fromWarehouseId: data.fromWarehouseId,
-        toWarehouseId: data.toWarehouseId,
-        qty: Number(line.qty),
-        referenceType: 'STOCK_TRANSFER',
-        referenceId: created.id,
-        transactionDate: when,
-        notes: `${transferNumber}: ${from.name} → ${to.name}`,
-      })
-
-      await tx.stockTransferLine.update({
-        where: { id: line.id },
-        data: { unitRate: carried.avgRate },
-      })
-    }
-
-    return tx.stockTransfer.findUniqueOrThrow({
-      where: { id: created.id },
-      include: transferInclude,
-    })
-  })
+  const transfer = await prisma.$transaction((tx) => createTransfer(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -878,10 +968,13 @@ router.patch(
       for (const line of before.lines) {
         await transferStock(tx, {
           itemId: line.itemId,
-          // Back the way it came.
+          // Back the way it came, still whoever's it was.
           fromWarehouseId: before.toWarehouseId,
           toWarehouseId: before.fromWarehouseId,
           qty: Number(line.qty),
+          ownership: line.ownership,
+          ownerCustomerId: line.ownerCustomerId,
+          sizeId: line.sizeId,
           referenceType: 'STOCK_TRANSFER_CANCELLED',
           referenceId: before.id,
           transactionDate: new Date(),
@@ -2510,7 +2603,9 @@ const jobWorkInclude = {
   toWarehouse: { select: { id: true, name: true } },
   sentBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
-  lines: { include: { item: itemLineSelect } },
+  so: { select: { id: true, soNumber: true } },
+  mo: { select: { id: true, moNumber: true } },
+  lines: { include: { item: itemLineSelect, ...whoseInclude } },
   returns: {
     include: {
       receivedBy: { select: { id: true, name: true } },
@@ -3214,101 +3309,134 @@ router.patch(
   },
 )
 
+/** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
+export async function createJobWorkChallan(tx: Prisma.TransactionClient, data: z.infer<typeof createJobWorkChallanSchema>, userId: string | null) {
+  const when = data.challanDate ?? new Date()
+
+  const [worker, from, to] = await Promise.all([
+    tx.supplier.findUnique({
+      where: { id: data.jobWorkerId },
+      select: { id: true, name: true, isActive: true },
+    }),
+    tx.warehouse.findUnique({ where: { id: data.fromWarehouseId }, select: { id: true, name: true } }),
+    tx.warehouse.findUnique({
+      where: { id: data.toWarehouseId },
+      select: { id: true, name: true, isActive: true },
+    }),
+  ])
+  if (!worker) throw new AppError('That job worker does not exist', 404, 'NOT_FOUND')
+  if (!worker.isActive) throw new AppError(`${worker.name} is no longer active, so nothing can be sent to them.`, 400, 'SUPPLIER_INACTIVE')
+  if (!from || !to) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+  if (!to.isActive) {
+    throw new AppError(`${to.name} is no longer in use.`, 400, 'WAREHOUSE_INACTIVE')
+  }
+
+  const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
+  for (const line of data.lines) whose.push(await whoseStock(tx, line))
+
+  // The order it is for: a customer's material can only go out for their own order.
+  const so = data.soId
+    ? await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true, soNumber: true, customerId: true } })
+    : null
+  if (data.soId && !so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
+  const mo = data.moId ? await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { id: true, soId: true } }) : null
+  if (data.moId && !mo) throw new AppError('That manufacturing order does not exist', 404, 'NOT_FOUND')
+  const orderCustomer =
+    so?.customerId ?? (mo?.soId ? (await tx.salesOrder.findUnique({ where: { id: mo.soId }, select: { customerId: true } }))?.customerId : null)
+  if (orderCustomer && whose.some((w) => w.ownerCustomerId && w.ownerCustomerId !== orderCustomer)) {
+    throw new AppError("A customer's material can only go out against their own order.", 400, 'WRONG_OWNER')
+  }
+
+  const challanNumber = await nextDocumentNumber(tx, 'JW', when)
+
+  // The HSN is copied onto the line now. A job work challan has to carry it,
+  // and correcting the item master next month must not change what a challan
+  // already sent out says.
+  const items = await tx.item.findMany({
+    where: { id: { in: data.lines.map((l) => l.itemId) } },
+    select: { id: true, hsnCode: true },
+  })
+  if (items.length !== new Set(data.lines.map((l) => l.itemId)).size) {
+    throw new AppError('One of those items does not exist', 404, 'NOT_FOUND')
+  }
+  const hsnOf = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+  const created = await tx.jobWorkChallan.create({
+    data: {
+      challanNumber,
+      jobWorkerId: data.jobWorkerId,
+      process: data.process,
+      fromWarehouseId: data.fromWarehouseId,
+      toWarehouseId: data.toWarehouseId,
+      challanDate: when,
+      expectedBackOn: data.expectedBackOn ?? null,
+      vehicleNo: data.vehicleNo ?? null,
+      transporter: data.transporter ?? null,
+      lrNumber: data.lrNumber ?? null,
+      notes: data.notes ?? null,
+      soId: so?.id ?? mo?.soId ?? null,
+      moId: mo?.id ?? null,
+      sentById: userId,
+      lines: {
+        create: data.lines.map((l, i) => ({
+          itemId: l.itemId,
+          qty: l.qty,
+          hsnCode: hsnOf.get(l.itemId) ?? null,
+          ...whose[i],
+        })),
+      },
+    },
+    include: { lines: true },
+  })
+
+  for (const line of created.lines) {
+    const key = { ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, sizeId: line.sizeId }
+    const carried = await balanceOf(tx, {
+      itemId: line.itemId,
+      warehouseId: data.fromWarehouseId,
+      ...key,
+    })
+
+    await transferStock(tx, {
+      itemId: line.itemId,
+      fromWarehouseId: data.fromWarehouseId,
+      toWarehouseId: data.toWarehouseId,
+      qty: Number(line.qty),
+      ...key,
+      referenceType: 'JOB_WORK_CHALLAN',
+      referenceId: created.id,
+      transactionDate: when,
+      notes: `${challanNumber}: ${data.process} at ${worker.name}`,
+    })
+
+    await tx.jobWorkChallanLine.update({
+      where: { id: line.id },
+      data: { unitRate: carried.avgRate },
+    })
+  }
+
+  return tx.jobWorkChallan.findUniqueOrThrow({
+    where: { id: created.id },
+    include: jobWorkInclude,
+  })
+}
+
 /**
- * Sending our own fabric out to an outside unit.
+ * Sending material out to an outside unit.
  *
  * The stock does not leave the ledger — it moves to a store standing for that
  * unit's floor, because rule 6.5 says fabric at a job worker is still ours and
  * rule 6.4 says stock always lives in a warehouse. Which means the whole
  * existing machinery answers "how much of ours is sitting at Ritesh Enterprises"
  * with no new reporting at all.
+ *
+ * It may be a customer's material too — cut panels from their fabric going
+ * out for embroidery. Each line says whose it is, is taken only from that
+ * owner's balance, and stays theirs at the unit and on the way back.
  */
 router.post('/job-work', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createJobWorkChallanSchema.parse(req.body)
-  const when = data.challanDate ?? new Date()
-
-  const challan = await prisma.$transaction(async (tx) => {
-    const [worker, from, to] = await Promise.all([
-      tx.supplier.findUnique({
-        where: { id: data.jobWorkerId },
-        select: { id: true, name: true, isActive: true },
-      }),
-      tx.warehouse.findUnique({ where: { id: data.fromWarehouseId }, select: { id: true, name: true } }),
-      tx.warehouse.findUnique({
-        where: { id: data.toWarehouseId },
-        select: { id: true, name: true, isActive: true },
-      }),
-    ])
-    if (!worker) throw new AppError('That job worker does not exist', 404, 'NOT_FOUND')
-    if (!from || !to) throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
-    if (!to.isActive) {
-      throw new AppError(`${to.name} is no longer in use.`, 400, 'WAREHOUSE_INACTIVE')
-    }
-
-    const challanNumber = await nextDocumentNumber(tx, 'JW', when)
-
-    // The HSN is copied onto the line now. A job work challan has to carry it,
-    // and correcting the item master next month must not change what a challan
-    // already sent out says.
-    const items = await tx.item.findMany({
-      where: { id: { in: data.lines.map((l) => l.itemId) } },
-      select: { id: true, hsnCode: true },
-    })
-    const hsnOf = new Map(items.map((i) => [i.id, i.hsnCode]))
-
-    const created = await tx.jobWorkChallan.create({
-      data: {
-        challanNumber,
-        jobWorkerId: data.jobWorkerId,
-        process: data.process,
-        fromWarehouseId: data.fromWarehouseId,
-        toWarehouseId: data.toWarehouseId,
-        challanDate: when,
-        expectedBackOn: data.expectedBackOn ?? null,
-        vehicleNo: data.vehicleNo ?? null,
-        transporter: data.transporter ?? null,
-        lrNumber: data.lrNumber ?? null,
-        notes: data.notes ?? null,
-        sentById: req.user?.id ?? null,
-        lines: {
-          create: data.lines.map((l) => ({
-            itemId: l.itemId,
-            qty: l.qty,
-            hsnCode: hsnOf.get(l.itemId) ?? null,
-          })),
-        },
-      },
-      include: { lines: true },
-    })
-
-    for (const line of created.lines) {
-      const carried = await balanceOf(tx, {
-        itemId: line.itemId,
-        warehouseId: data.fromWarehouseId,
-      })
-
-      await transferStock(tx, {
-        itemId: line.itemId,
-        fromWarehouseId: data.fromWarehouseId,
-        toWarehouseId: data.toWarehouseId,
-        qty: Number(line.qty),
-        referenceType: 'JOB_WORK_CHALLAN',
-        referenceId: created.id,
-        transactionDate: when,
-        notes: `${challanNumber}: ${data.process} at ${worker.name}`,
-      })
-
-      await tx.jobWorkChallanLine.update({
-        where: { id: line.id },
-        data: { unitRate: carried.avgRate },
-      })
-    }
-
-    return tx.jobWorkChallan.findUniqueOrThrow({
-      where: { id: created.id },
-      include: jobWorkInclude,
-    })
-  })
+  const challan = await prisma.$transaction((tx) => createJobWorkChallan(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -3320,7 +3448,7 @@ router.post('/job-work', requirePermission(MODULE, 'create'), async (req: AuthRe
 
   res.status(201).json({
     success: true,
-    message: `${challan.challanNumber} saved. ${challan.lines.length} ${challan.lines.length === 1 ? 'item is' : 'items are'} now at ${challan.jobWorker.name} and still ours.`,
+    message: `${challan.challanNumber} saved. ${challan.lines.length} ${challan.lines.length === 1 ? 'item is' : 'items are'} now at ${challan.jobWorker.name}, still ${challan.lines.some((l) => l.ownership === 'CUSTOMER_OWNED') ? "the customer's" : 'ours'}.`,
     data: challan,
   })
 })
@@ -3484,7 +3612,7 @@ router.get('/job-work/:id/print', requirePermission(MODULE, 'view'), async (req,
       toWarehouse: { select: { id: true, name: true } },
       sentBy: { select: { id: true, name: true } },
       cancelledBy: { select: { id: true, name: true } },
-      lines: { include: { item: itemLineSelect } },
+      lines: { include: { item: itemLineSelect, ...whoseInclude } },
     },
   })
   if (!challan) throw new AppError('That challan does not exist', 404, 'NOT_FOUND')
@@ -3529,6 +3657,166 @@ async function stillOut(tx: Prisma.TransactionClient, challanId: string) {
   }))
 }
 
+/** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
+export async function createJobWorkReturn(tx: Prisma.TransactionClient, data: z.infer<typeof createJobWorkReturnSchema>, userId: string | null) {
+  const when = data.returnDate ?? new Date()
+
+  const challan = await tx.jobWorkChallan.findUnique({
+    where: { id: data.challanId },
+    include: { lines: { include: { item: { select: { name: true } } } }, jobWorker: true },
+  })
+  if (!challan) throw new AppError('That challan does not exist', 404, 'NOT_FOUND')
+  if (challan.cancelledAt) {
+    throw new AppError(
+      `${challan.challanNumber} was cancelled, so nothing can come back against it.`,
+      400,
+      'CHALLAN_CANCELLED',
+    )
+  }
+
+  const outstanding = new Map(
+    (await stillOut(tx, challan.id)).map((o) => [o.line.id, o]),
+  )
+
+  // Check every line before writing anything, so a return does not book
+  // three lines in and then refuse the fourth. Two rows against the same
+  // challan line are added up first: each alone may fit, together not.
+  const settling = new Map<string, number>()
+  for (const line of data.lines) settling.set(line.challanLineId, round3((settling.get(line.challanLineId) ?? 0) + line.consumedQty))
+  for (const line of data.lines) {
+    const o = outstanding.get(line.challanLineId)
+    if (!o) {
+      throw new AppError(
+        `One of those lines is not on ${challan.challanNumber}.`,
+        400,
+        'LINE_NOT_ON_CHALLAN',
+      )
+    }
+    // The same thing back: every piece settled is good, damaged or wasted.
+    // "600 sent, 597 back" must say where the other 3 went.
+    if (line.itemId === o.line.itemId) {
+      const accounted = round3(line.receivedQty + (line.damagedQty ?? 0) + (line.wastedQty ?? 0))
+      if (accounted !== round3(line.consumedQty)) {
+        throw new AppError(
+          `${o.line.item.name}: ${line.receivedQty} good + ${line.damagedQty ?? 0} damaged + ${line.wastedQty ?? 0} wasted is ${accounted}, but ${line.consumedQty} is being settled. They have to add up.`,
+          400,
+          'RETURN_NOT_ACCOUNTED',
+        )
+      }
+    }
+    const total = settling.get(line.challanLineId) ?? 0
+    if (total > o.outstanding) {
+      throw new AppError(
+        o.outstanding > 0
+          ? `${o.line.item.name}: only ${o.outstanding} is still out at ${challan.jobWorker.name}, and you are settling ${total}.`
+          : `${o.line.item.name}: everything sent has already come back.`,
+        400,
+        'OVER_RETURN',
+      )
+    }
+  }
+
+  const returnNumber = await nextDocumentNumber(tx, 'JWR', when)
+
+  const created = await tx.jobWorkReturn.create({
+    data: {
+      returnNumber,
+      challanId: challan.id,
+      returnDate: when,
+      vehicleNo: data.vehicleNo ?? null,
+      lrNumber: data.lrNumber ?? null,
+      theirChallanNo: data.theirChallanNo ?? null,
+      notes: data.notes ?? null,
+      receivedById: userId,
+      lines: {
+        create: data.lines.map((l) => ({
+          challanLineId: l.challanLineId,
+          consumedQty: l.consumedQty,
+          itemId: l.itemId,
+          receivedQty: l.receivedQty,
+          wastedQty: l.wastedQty ?? 0,
+          damagedQty: l.damagedQty ?? 0,
+          warehouseId: l.warehouseId,
+          notes: l.notes ?? null,
+        })),
+      },
+    },
+    include: { lines: true },
+  })
+
+  for (const line of created.lines) {
+    const o = outstanding.get(line.challanLineId)!
+    const consumed = Number(line.consumedQty)
+    const received = Number(line.receivedQty)
+    const damaged = Number(line.damagedQty)
+    // Whose it was going out is whose it is coming back: a customer's
+    // panels return as theirs, at no value of ours.
+    const owner = { ownership: o.line.ownership, ownerCustomerId: o.line.ownerCustomerId }
+    const theirs = o.line.ownership === 'CUSTOMER_OWNED'
+
+    // What was used up leaves the unit's floor. The stock service prices
+    // this at the running average, which is what it left our store at.
+    const out = await recordMovement(tx, {
+      itemId: o.line.itemId,
+      warehouseId: challan.toWarehouseId,
+      ...owner,
+      sizeId: o.line.sizeId,
+      transactionType: 'PRODUCTION',
+      direction: 'OUT',
+      qty: consumed,
+      referenceType: 'JOB_WORK_RETURN',
+      referenceId: created.id,
+      transactionDate: when,
+      notes: `${returnNumber} against ${challan.challanNumber}`,
+    })
+
+    if (received <= 0) continue
+
+    // Whatever arrived comes into our store, carrying the value of the
+    // material it was made from. Forty metres at ₹200 returning as three
+    // hundred panels makes each panel worth ₹26.67, and the mill's stock
+    // value does not move because cloth was cut. Damaged pieces take their
+    // share of that value with them — it is what the job worker is charged
+    // for — rather than loading it onto the good ones.
+    const carriedValue = round2(consumed * out.unitRate)
+
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: line.warehouseId,
+      ...owner,
+      sizeId: line.itemId === o.line.itemId ? o.line.sizeId : null,
+      transactionType: 'PRODUCTION',
+      direction: 'IN',
+      qty: received,
+      unitRate: theirs ? 0 : round2(carriedValue / (received + damaged)),
+      referenceType: 'JOB_WORK_RETURN',
+      referenceId: created.id,
+      transactionDate: when,
+      notes: `${returnNumber}: ${challan.process} at ${challan.jobWorker.name}`,
+    })
+  }
+
+  // Closed only when nothing is still out. Counted again after the writes
+  // rather than worked out from what we just did.
+  const after = await stillOut(tx, challan.id)
+  const anyOut = after.some((o) => o.outstanding > 0)
+  const anyBack = after.some((o) => o.consumed > 0)
+
+  await tx.jobWorkChallan.update({
+    where: { id: challan.id },
+    data: { status: anyOut ? (anyBack ? 'PARTLY_BACK' : 'SENT') : 'CLOSED' },
+  })
+
+  return {
+    challan: await tx.jobWorkChallan.findUniqueOrThrow({
+      where: { id: challan.id },
+      include: jobWorkInclude,
+    }),
+    returnNumber,
+    returnId: created.id,
+  }
+}
+
 /**
  * Goods coming back from an outside unit.
  *
@@ -3544,141 +3832,13 @@ router.post(
   requirePermission(MODULE, 'create'),
   async (req: AuthRequest, res) => {
     const data = createJobWorkReturnSchema.parse({ ...req.body, challanId: req.params.id })
-    const when = data.returnDate ?? new Date()
-
-    const result = await prisma.$transaction(async (tx) => {
-      const challan = await tx.jobWorkChallan.findUnique({
-        where: { id: req.params.id },
-        include: { lines: { include: { item: { select: { name: true } } } }, jobWorker: true },
-      })
-      if (!challan) throw new AppError('That challan does not exist', 404, 'NOT_FOUND')
-      if (challan.cancelledAt) {
-        throw new AppError(
-          `${challan.challanNumber} was cancelled, so nothing can come back against it.`,
-          400,
-          'CHALLAN_CANCELLED',
-        )
-      }
-
-      const outstanding = new Map(
-        (await stillOut(tx, challan.id)).map((o) => [o.line.id, o]),
-      )
-
-      // Check every line before writing anything, so a return does not book
-      // three lines in and then refuse the fourth.
-      for (const line of data.lines) {
-        const o = outstanding.get(line.challanLineId)
-        if (!o) {
-          throw new AppError(
-            `One of those lines is not on ${challan.challanNumber}.`,
-            400,
-            'LINE_NOT_ON_CHALLAN',
-          )
-        }
-        if (round3(line.consumedQty) > o.outstanding) {
-          throw new AppError(
-            o.outstanding > 0
-              ? `${o.line.item.name}: only ${o.outstanding} is still out at ${challan.jobWorker.name}, and you are settling ${line.consumedQty}.`
-              : `${o.line.item.name}: everything sent has already come back.`,
-            400,
-            'OVER_RETURN',
-          )
-        }
-      }
-
-      const returnNumber = await nextDocumentNumber(tx, 'JWR', when)
-
-      const created = await tx.jobWorkReturn.create({
-        data: {
-          returnNumber,
-          challanId: challan.id,
-          returnDate: when,
-          vehicleNo: data.vehicleNo ?? null,
-          lrNumber: data.lrNumber ?? null,
-          theirChallanNo: data.theirChallanNo ?? null,
-          notes: data.notes ?? null,
-          receivedById: req.user?.id ?? null,
-          lines: {
-            create: data.lines.map((l) => ({
-              challanLineId: l.challanLineId,
-              consumedQty: l.consumedQty,
-              itemId: l.itemId,
-              receivedQty: l.receivedQty,
-              wastedQty: l.wastedQty ?? 0,
-              warehouseId: l.warehouseId,
-              notes: l.notes ?? null,
-            })),
-          },
-        },
-        include: { lines: true },
-      })
-
-      for (const line of created.lines) {
-        const o = outstanding.get(line.challanLineId)!
-        const consumed = Number(line.consumedQty)
-        const received = Number(line.receivedQty)
-
-        // What was used up leaves the unit's floor. The stock service prices
-        // this at the running average, which is what it left our store at.
-        const out = await recordMovement(tx, {
-          itemId: o.line.itemId,
-          warehouseId: challan.toWarehouseId,
-          transactionType: 'PRODUCTION',
-          direction: 'OUT',
-          qty: consumed,
-          referenceType: 'JOB_WORK_RETURN',
-          referenceId: created.id,
-          transactionDate: when,
-          notes: `${returnNumber} against ${challan.challanNumber}`,
-        })
-
-        if (received <= 0) continue
-
-        // Whatever arrived comes into our store, carrying the value of the
-        // material it was made from. Forty metres at ₹200 returning as three
-        // hundred panels makes each panel worth ₹26.67, and the mill's stock
-        // value does not move because cloth was cut.
-        const carriedValue = round2(consumed * out.unitRate)
-
-        await recordMovement(tx, {
-          itemId: line.itemId,
-          warehouseId: line.warehouseId,
-          transactionType: 'PRODUCTION',
-          direction: 'IN',
-          qty: received,
-          unitRate: round2(carriedValue / received),
-          referenceType: 'JOB_WORK_RETURN',
-          referenceId: created.id,
-          transactionDate: when,
-          notes: `${returnNumber}: ${challan.process} at ${challan.jobWorker.name}`,
-        })
-      }
-
-      // Closed only when nothing is still out. Counted again after the writes
-      // rather than worked out from what we just did.
-      const after = await stillOut(tx, challan.id)
-      const anyOut = after.some((o) => o.outstanding > 0)
-      const anyBack = after.some((o) => o.consumed > 0)
-
-      await tx.jobWorkChallan.update({
-        where: { id: challan.id },
-        data: { status: anyOut ? (anyBack ? 'PARTLY_BACK' : 'SENT') : 'CLOSED' },
-      })
-
-      return {
-        challan: await tx.jobWorkChallan.findUniqueOrThrow({
-          where: { id: challan.id },
-          include: jobWorkInclude,
-        }),
-        returnNumber,
-      }
-    })
+    const result = await prisma.$transaction((tx) => createJobWorkReturn(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
 
     await writeAuditLog(req, {
       module: MODULE,
       action: 'CREATE',
       entityType: 'JobWorkReturn',
-      entityId: result.challan.id,
+      entityId: result.returnId,
       after: result.challan,
     })
 
@@ -3730,6 +3890,9 @@ router.patch(
           fromWarehouseId: before.toWarehouseId,
           toWarehouseId: before.fromWarehouseId,
           qty: Number(line.qty),
+          ownership: line.ownership,
+          ownerCustomerId: line.ownerCustomerId,
+          sizeId: line.sizeId,
           referenceType: 'JOB_WORK_CHALLAN_CANCELLED',
           referenceId: before.id,
           transactionDate: new Date(),

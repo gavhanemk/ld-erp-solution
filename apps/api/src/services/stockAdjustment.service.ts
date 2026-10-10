@@ -1,0 +1,99 @@
+import { prisma } from '@ld-erp/database'
+import type { Prisma } from '@prisma/client'
+import { AppError } from '../middleware/errorHandler'
+import { recordMovement } from './stock.service'
+
+/**
+ * A stock adjustment is a count the store keeper made; it changes stock only
+ * once a store manager approves it. Approving and refusing live here so the
+ * inventory screen and the approvals inbox, two doors into the same decision,
+ * apply the same rules.
+ *
+ * The difference posted is the one worked out when the count was made —
+ * "the book said 35, we counted 33" — not one recomputed at approval, because
+ * the count is a fact about that moment. If stock has since moved so far that
+ * a shortfall can no longer be taken out, the stock service refuses and says
+ * what is there, and the manager can refuse the count and have it redone.
+ */
+
+const include = {
+  warehouse: { select: { id: true, name: true } },
+  lines: {
+    include: {
+      item: { select: { name: true } },
+      ownerCustomer: { select: { name: true } },
+    },
+  },
+}
+
+export async function approveAdjustment(id: string, userId: string, admin = false) {
+  return prisma.$transaction((tx) => approveAdjustmentIn(tx, id, userId, admin), { timeout: 60_000, maxWait: 20_000 })
+}
+
+/** The approval inside the caller's transaction. */
+export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: string, userId: string, admin = false) {
+  await tx.$queryRaw`SELECT id FROM ld_erp.stock_adjustments WHERE id = ${id} FOR UPDATE`
+  const before = await tx.stockAdjustment.findUnique({ where: { id }, include })
+  if (!before) throw new AppError('That stock adjustment does not exist', 404, 'NOT_FOUND')
+  if (before.status !== 'PENDING') {
+    throw new AppError(
+      `${before.adjustmentNumber} is already ${before.status === 'APPROVED' ? 'approved' : 'refused'}.`,
+      409,
+      'ALREADY_DECIDED',
+    )
+  }
+  if (!admin && before.madeById === userId) {
+    throw new AppError(
+      'You counted this, so somebody else has to approve it.',
+      403,
+      'OWN_ADJUSTMENT',
+    )
+  }
+
+  for (const line of before.lines) {
+    const difference = Number(line.difference)
+    if (difference === 0) continue
+    const owner = line.ownership === 'CUSTOMER_OWNED' ? ` (${line.ownerCustomer?.name ?? 'customer'}'s)` : ''
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: before.warehouseId,
+      ownership: line.ownership,
+      ownerCustomerId: line.ownerCustomerId,
+      sizeId: line.sizeId,
+      transactionType: 'ADJUSTMENT',
+      direction: difference > 0 ? 'IN' : 'OUT',
+      qty: Math.abs(difference),
+      // A customer's cloth carries no value of ours, found or lost.
+      unitRate: difference > 0 ? (line.ownership === 'CUSTOMER_OWNED' ? 0 : Number(line.unitRate ?? 0)) : undefined,
+      referenceType: 'STOCK_ADJUSTMENT',
+      referenceId: before.id,
+      transactionDate: before.adjustmentDate,
+      notes: `${before.adjustmentNumber}${owner}: ${before.reason}`,
+    })
+  }
+
+  const after = await tx.stockAdjustment.update({
+    where: { id },
+    data: { status: 'APPROVED', approvedById: userId, approvedAt: new Date() },
+    include,
+  })
+  return { before, after }
+}
+
+export async function rejectAdjustment(id: string, userId: string, reason: string) {
+  const before = await prisma.stockAdjustment.findUnique({ where: { id } })
+  if (!before) throw new AppError('That stock adjustment does not exist', 404, 'NOT_FOUND')
+  const done = await prisma.stockAdjustment.updateMany({
+    where: { id, status: 'PENDING' },
+    data: { status: 'REJECTED', approvedById: userId, approvedAt: new Date(), rejectReason: reason },
+  })
+  if (done.count === 0) {
+    throw new AppError(
+      `${before.adjustmentNumber} is already ${before.status === 'APPROVED' ? 'approved' : 'refused'}.`,
+      409,
+      'ALREADY_DECIDED',
+    )
+  }
+  const after = await prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include })
+  return { before, after }
+}

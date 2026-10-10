@@ -416,7 +416,9 @@ router.post('/orders/:id/close', requirePermission(MODULE, 'edit'), async (req: 
 
 /** GET /api/production/orders/:id/materials — the material plan from the BOM. */
 router.get('/orders/:id/materials', requirePermission(MODULE, 'view'), async (req, res) => {
-  const plan = await materialPlan(prisma, req.params.id)
+  // ?swap=item|department,… turns those rows to the other owner.
+  const swap = new Set(String(req.query.swap ?? '').split(',').filter(Boolean))
+  const plan = await materialPlan(prisma, req.params.id, { swap })
   const departments = await prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
   res.json({ success: true, data: { ...plan, departments } })
 })
@@ -448,6 +450,47 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (mo.status === 'DRAFT') throw new AppError(`Release ${mo.moNumber} before asking the store for its materials`, 409, 'NOT_RELEASED')
   if (mo.status === 'CLOSED' || mo.status === 'COMPLETED') throw new AppError(`${mo.moNumber} is ${mo.status.toLowerCase()}`, 409, 'NOT_OPEN')
+
+  // Checked against the plan, so a double click or a stale screen cannot ask
+  // for the same material twice, nor a customer's cloth be drawn for anyone
+  // but this order's customer. Rows the person switched to the other owner
+  // are switched here too before comparing.
+  const so = mo.soId ? await tx.salesOrder.findUnique({ where: { id: mo.soId }, select: { customerId: true } }) : null
+  for (const l of data.lines) {
+    if (l.ownership === 'CUSTOMER_OWNED' && (!so || l.ownerCustomerId !== so.customerId)) {
+      throw new AppError("A customer's material can only be asked for on their own order", 400, 'WRONG_OWNER')
+    }
+  }
+  const first = await materialPlan(tx, mo.id)
+  const swap = new Set<string>()
+  for (const l of data.lines) {
+    for (const r of first.rows.filter((x) => x.item.id === l.itemId)) {
+      if ((l.ownership ?? 'OWNED') !== r.defaultOwnership) swap.add(r.baseKey)
+    }
+  }
+  const plan = swap.size ? await materialPlan(tx, mo.id, { swap }) : first
+  const asking = new Map<string, number>()
+  for (const l of data.lines) {
+    const k = `${l.itemId}|${l.ownership ?? 'OWNED'}`
+    asking.set(k, (asking.get(k) ?? 0) + l.qty)
+  }
+  for (const [k, qty] of asking) {
+    const [itemId, ownership] = k.split('|')
+    const rows = plan.rows.filter((r) => r.item.id === itemId && r.ownership === ownership)
+    if (!rows.length) {
+      throw new AppError(`One of those materials is not on ${mo.moNumber}'s plan. Refresh the plan and try again.`, 400, 'NOT_IN_PLAN')
+    }
+    const left = Math.round(rows.reduce((s, r) => s + r.toRequest, 0) * 1000) / 1000
+    if (qty > left + 1e-9) {
+      throw new AppError(
+        left > 0
+          ? `${rows[0].item.name}: only ${left} ${rows[0].item.uom ?? ''} is still to ask for on ${mo.moNumber}, and this asks for ${qty}.`
+          : `${rows[0].item.name} has already been asked for in full on ${mo.moNumber}.`,
+        409,
+        'MORE_THAN_PLANNED',
+      )
+    }
+  }
 
   // One requisition per department: fabric to cutting, trims to stitching —
   // whoever the BOM gives the material to is who asks the store for it.

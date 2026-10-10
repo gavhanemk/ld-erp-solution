@@ -334,6 +334,8 @@ model User {
   approvedBOMs         BOM[]                       @relation("BOMApprovedBy")
   pricedBOMs           BOM[]                       @relation("BOMPricedBy")
 
+
+  adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
   @@index([email])
   @@index([roleId])
   stockReservations   StockReservation[] @relation("ReservationBy")
@@ -947,6 +949,10 @@ model Customer {
   materialReturned CustomerMaterialReturn[] @relation("CustomerMaterialReturned")
   materialRequisitionLines MaterialRequisitionLine[] @relation("CustomerMaterialRequisitionLines")
 
+
+  transferLinesOwned   StockTransferLine[]   @relation("TransferLineOwner")
+  adjustmentLinesOwned StockAdjustmentLine[] @relation("AdjustmentLineOwner")
+  jobWorkLinesOwned    JobWorkChallanLine[]  @relation("JobWorkLineOwner")
   @@index([code])
   stockReservations StockReservation[] @relation("ReservedForCustomer")
   @@map("customers")
@@ -1232,6 +1238,9 @@ model SalesOrder {
   quotationId         String?
   quotation           SalesQuotation? @relation("SOFromQuote", fields: [quotationId], references: [id], onDelete: SetNull)
 
+
+  jobWorkChallans         JobWorkChallan[]         @relation("JobWorkChallanOrder")
+  customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturnOrder")
   @@index([soNumber])
   @@index([customerId])
   @@index([status])
@@ -2625,6 +2634,15 @@ model StockTransferLine {
   /// not change what it is worth, and this is the record of that.
   unitRate   Decimal?      @db.Decimal(10, 2)
 
+
+  /// Whose stock moved: ours, or a customer's (their fabric, or garments made
+  /// from it). Customer stock keeps its owner through every move.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("TransferLineOwner", fields: [ownerCustomerId], references: [id])
+  /// A finished garment's size; empty for anything without one.
+  sizeId          String?
+  size            Size?          @relation("TransferLineSize", fields: [sizeId], references: [id])
   @@map("stock_transfer_lines")
 }
 
@@ -2652,6 +2670,14 @@ model StockAdjustment {
 
   lines StockAdjustmentLine[]
 
+
+  /// PENDING until a store manager approves it; stock changes only then.
+  /// Adjustments made before approval existed are APPROVED.
+  status       String    @default("APPROVED")
+  approvedById String?
+  approvedBy   User?     @relation("AdjustmentApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  rejectReason String?
   @@index([adjustmentDate])
   @@map("stock_adjustments")
 }
@@ -2670,6 +2696,15 @@ model StockAdjustmentLine {
   difference   Decimal         @db.Decimal(10, 3)
   unitRate     Decimal?        @db.Decimal(10, 2)
 
+
+  /// Whose stock moved: ours, or a customer's (their fabric, or garments made
+  /// from it). Customer stock keeps its owner through every move.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("AdjustmentLineOwner", fields: [ownerCustomerId], references: [id])
+  /// A finished garment's size; empty for anything without one.
+  sizeId          String?
+  size            Size?          @relation("AdjustmentLineSize", fields: [sizeId], references: [id])
   @@map("stock_adjustment_lines")
 }
 
@@ -2813,6 +2848,10 @@ model CustomerMaterialReturn {
 
   lines CustomerMaterialReturnLine[]
 
+
+  /// The order the leftover is from, so its fabric reconciles per order.
+  soId String?
+  so   SalesOrder? @relation("CustomerMaterialReturnOrder", fields: [soId], references: [id])
   @@index([customerId])
   @@index([returnDate])
   @@map("customer_material_returns")
@@ -2877,6 +2916,12 @@ model JobWorkChallan {
   lines   JobWorkChallanLine[]
   returns JobWorkReturn[]
 
+
+  /// The order this outside work is for, when there is one.
+  soId String?
+  so   SalesOrder?         @relation("JobWorkChallanOrder", fields: [soId], references: [id])
+  moId String?
+  mo   ManufacturingOrder? @relation("JobWorkChallanMO", fields: [moId], references: [id])
   @@index([jobWorkerId])
   @@index([status])
   @@map("job_work_challans")
@@ -2899,6 +2944,15 @@ model JobWorkChallanLine {
 
   returnLines JobWorkReturnLine[]
 
+
+  /// Whose stock moved: ours, or a customer's (their fabric, or garments made
+  /// from it). Customer stock keeps its owner through every move.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("JobWorkLineOwner", fields: [ownerCustomerId], references: [id])
+  /// A finished garment's size; empty for anything without one.
+  sizeId          String?
+  size            Size?          @relation("JobWorkLineSize", fields: [sizeId], references: [id])
   @@map("job_work_challan_lines")
 }
 
@@ -2954,6 +3008,10 @@ model JobWorkReturnLine {
   warehouse     Warehouse          @relation("JobWorkReturnLines", fields: [warehouseId], references: [id])
   notes         String?
 
+
+  /// Pieces spoiled at the job worker: accounted for against what was sent,
+  /// never booked into stock, and chargeable to the job worker.
+  damagedQty    Decimal            @default(0) @db.Decimal(10, 3)
   @@map("job_work_return_lines")
 }
 
@@ -2998,6 +3056,8 @@ model ManufacturingOrder {
   qcRecords            ProductionQC[]
   packingOrders        PackingOrder[]
 
+
+  jobWorkChallans JobWorkChallan[] @relation("JobWorkChallanMO")
   @@index([moNumber])
   @@index([status])
   @@map("manufacturing_orders")
@@ -3549,6 +3609,10 @@ model Size {
   challanSizes DeliveryChallanLineSize[]
   creditSizes  CreditNoteLineSize[]
 
+
+  transferLines   StockTransferLine[]   @relation("TransferLineSize")
+  adjustmentLines StockAdjustmentLine[] @relation("AdjustmentLineSize")
+  jobWorkLines    JobWorkChallanLine[]  @relation("JobWorkLineSize")
   @@unique([sizeGroupId, code])
   @@map("sizes")
 }
