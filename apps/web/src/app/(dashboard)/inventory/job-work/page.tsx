@@ -6,10 +6,10 @@ import Link from 'next/link'
 import {
   Printer, Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, CalendarDays, List,
   LayoutDashboard, PackageCheck, Truck, AlarmClock, ShieldAlert, Recycle, Timer, Send, Factory, Hourglass,
-  LineChart, Target, Users, PieChart as PieIcon, Layers, ArrowRight,
-} from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+  LineChart, Target, Users, PieChart as PieIcon, Layers, ArrowRight, FileMinus } from 'lucide-react'
+import { api, ApiError, can } from '@/lib/api'
 import { SendJobWorkDialog, ReceiveJobWorkDialog } from '@/components/inventory/JobWorkDialogs'
+import { JobWorkDebitNoteDialog } from '@/components/inventory/JobWorkDebitNoteDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { DashCard, Highlights, KpiTile, TONE, inr, qtyFmt, qtyLine } from '@/components/dashboard/DashKit'
 import { Pagination } from '@/components/tables/Pagination'
@@ -76,6 +76,9 @@ interface LineRow {
   backSameQty: number
   madeInto: Array<{ itemName: string; uom: string; qty: number }>
   wastedQty: number
+  /** Spoiled at the unit, and of that not yet charged on a debit note. */
+  damagedQty?: number
+  damagedUncharged?: number
   stillOutQty: number
   returnNumbers: string[]
   lastReturnAt: string | null
@@ -186,6 +189,7 @@ function JobWorkScreen() {
   const [exporting, setExporting] = useState(false)
   const [sending, setSending] = useState(false)
   const [receiving, setReceiving] = useState<string | null>(null)
+  const [charging, setCharging] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
   const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({})
@@ -968,6 +972,9 @@ function JobWorkScreen() {
                       const actions: RowAction[] = [
                         { key: 'print', label: 'View / print', icon: <Printer size={14} />, href: `/print/job-work/${r.challanId}`, newTab: true },
                       ]
+                      // Pieces spoiled at the unit, not yet charged: a debit note to the job worker.
+                      if (challanLines(r.challanId).some((l) => (l.damagedUncharged ?? 0) > 0) && can('purchase', 'create'))
+                        actions.push({ key: 'charge', label: 'Charge damage to the job worker', icon: <FileMinus size={14} />, onClick: () => setCharging(r.challanId) })
                       if (untouched)
                         actions.push({
                           key: 'cancel',
@@ -1297,6 +1304,17 @@ function JobWorkScreen() {
             )}
           </div>
         </>
+      )}
+
+      {charging && (
+        <JobWorkDebitNoteDialog
+          challanId={charging}
+          onClose={() => {
+            setCharging(null)
+            void load()
+          }}
+          onSaved={(msg) => setMessage(msg)}
+        />
       )}
 
       {sending && (

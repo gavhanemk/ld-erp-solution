@@ -16,6 +16,8 @@ import {
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
+import { createPurchaseNoteIn } from './purchase-notes.routes'
+import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
@@ -35,6 +37,8 @@ import {
   openingStockSchema,
   rejectRequisitionSchema,
   rejectAdjustmentSchema,
+  floorReturnSchema,
+  jobWorkDebitNoteSchema,
   closeRequisitionSchema,
   reserveRequisitionSchema,
   releaseReservationSchema,
@@ -1555,7 +1559,7 @@ router.patch(
         const ordered = await tx.purchaseOrderLine.findMany({
           where: {
             mrLineId: { in: backToStock.map((l) => l.lineId) },
-            po: { status: { not: 'CANCELLED' } },
+            po: { status: { not: 'CANCELLED' }, deletedAt: null },
           },
           select: { mrLineId: true, po: { select: { poNumber: true } } },
         })
@@ -1637,7 +1641,7 @@ router.patch(
       const own = new Map(mr.lines.map((l) => [l.id, l]))
       const ordered = await tx.purchaseOrderLine.groupBy({
         by: ['mrLineId'],
-        where: { mrLineId: { in: data.lines.map((l) => l.lineId) }, po: { status: { not: 'CANCELLED' } } },
+        where: { mrLineId: { in: data.lines.map((l) => l.lineId) }, po: { status: { not: 'CANCELLED' }, deletedAt: null } },
         _sum: { qty: true },
       })
       const orderedOf = new Map(ordered.map((o) => [o.mrLineId, Number(o._sum.qty ?? 0)]))
@@ -2609,6 +2613,7 @@ const jobWorkInclude = {
   returns: {
     include: {
       receivedBy: { select: { id: true, name: true } },
+      debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] as Array<'CANCELLED' | 'REJECTED'> } }, select: { id: true, noteNumber: true, status: true } },
       lines: {
         include: { item: itemLineSelect, warehouse: { select: { id: true, name: true } } },
       },
@@ -2630,7 +2635,7 @@ const jobWorkInclude = {
  * and a CUSTOMER_OWNED movement for each. Shared by the form and the import,
  * so a receipt from a spreadsheet is checked and booked exactly as one typed in.
  */
-async function createCustomerGrn(
+export async function createCustomerGrn(
   tx: Prisma.TransactionClient,
   data: ReturnType<typeof createCustomerGrnSchema.parse>,
   userId: string | null,
@@ -2641,6 +2646,7 @@ async function createCustomerGrn(
     tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true, isActive: true } }),
   ])
   if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
+  if (!customer.isActive) throw new AppError(`${customer.name} is switched off. Reactivate them in Masters first.`, 400, 'INACTIVE')
   if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
   if (!warehouse.isActive) {
     throw new AppError(
@@ -2653,7 +2659,7 @@ async function createCustomerGrn(
   if (data.soId) {
     const so = await tx.salesOrder.findUnique({
       where: { id: data.soId },
-      select: { id: true, customerId: true, soNumber: true },
+      select: { id: true, customerId: true, soNumber: true, isJobWork: true, status: true },
     })
     if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
     if (so.customerId !== data.customerId) {
@@ -2662,6 +2668,13 @@ async function createCustomerGrn(
         400,
         'ORDER_NOT_THEIRS',
       )
+    }
+    // The customer's material comes in for a job-work order still being made.
+    if (!so.isJobWork) {
+      throw new AppError(`${so.soNumber} is not a job-work order, so it takes none of the customer's material.`, 400, 'NOT_JOB_WORK')
+    }
+    if (['COMPLETED', 'CANCELLED'].includes(so.status)) {
+      throw new AppError(`${so.soNumber} is ${so.status.toLowerCase()}, so nothing more comes in for it.`, 400, 'ORDER_NOT_OPEN')
     }
   }
 
@@ -3052,6 +3065,104 @@ const RETURN_REASON_LABEL: Record<string, string> = {
   OTHER: 'Other',
 }
 
+/** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
+export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z.infer<typeof createCustomerReturnSchema>, userId: string | null) {
+  const when = data.returnDate ?? new Date()
+
+  const [customer, warehouse] = await Promise.all([
+    tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true } }),
+    tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true } }),
+  ])
+  if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+
+  if (data.grnId) {
+    const grn = await tx.customerGRN.findUnique({
+      where: { id: data.grnId },
+      select: { customerId: true, grnNumber: true, cancelledAt: true },
+    })
+    if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+    if (grn.customerId !== data.customerId) {
+      throw new AppError(`${grn.grnNumber} is a different customer's receipt.`, 400, 'RECEIPT_NOT_THEIRS')
+    }
+    if (grn.cancelledAt) {
+      throw new AppError(`${grn.grnNumber} was cancelled, so nothing came in on it.`, 400, 'RECEIPT_CANCELLED')
+    }
+    // Against a receipt: only what came in on it, and no more than came in
+    // less what has already gone back against it.
+    const [gl, back] = await Promise.all([
+      tx.customerGRNLine.findMany({ where: { grnId: data.grnId }, select: { itemId: true, receivedQty: true, item: { select: { name: true } } } }),
+      tx.customerMaterialReturnLine.findMany({ where: { return: { grnId: data.grnId, cancelledAt: null } }, select: { itemId: true, qty: true } }),
+    ])
+    for (const l of data.lines) {
+      const inLines = gl.filter((g) => g.itemId === l.itemId)
+      if (!inLines.length) throw new AppError(`That item did not come in on ${grn.grnNumber}.`, 400, 'NOT_ON_RECEIPT')
+      const came = inLines.reduce((s, g) => s + Number(g.receivedQty), 0)
+      const gone = back.filter((b) => b.itemId === l.itemId).reduce((s, b) => s + Number(b.qty), 0)
+      if (l.qty > came - gone + 1e-9) {
+        throw new AppError(`${inLines[0].item.name}: ${came} came in on ${grn.grnNumber} and ${gone} has gone back, so ${l.qty} more is too much.`, 400, 'MORE_THAN_RECEIVED')
+      }
+    }
+  }
+  // The order the leftover is from: given, or the receipt's.
+  const soId = data.soId ?? (data.grnId ? (await tx.customerGRN.findUnique({ where: { id: data.grnId }, select: { soId: true } }))?.soId ?? null : null)
+  if (data.soId) {
+    const so = await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { customerId: true, soNumber: true } })
+    if (!so || so.customerId !== data.customerId) throw new AppError("That order is not this customer's", 400, 'ORDER_NOT_THEIRS')
+  }
+
+  const items = await tx.item.findMany({
+    where: { id: { in: data.lines.map((l) => l.itemId) } },
+    select: { id: true, hsnCode: true },
+  })
+  const hsnOf = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+  const returnNumber = await nextDocumentNumber(tx, 'CMR', when)
+  const doc = await tx.customerMaterialReturn.create({
+    data: {
+      returnNumber,
+      customerId: data.customerId,
+      grnId: data.grnId ?? null,
+      soId,
+      warehouseId: data.warehouseId,
+      returnDate: when,
+      reason: data.reason,
+      vehicleNo: data.vehicleNo ?? null,
+      transporter: data.transporter ?? null,
+      lrNumber: data.lrNumber ?? null,
+      notes: data.notes ?? null,
+      createdById: userId,
+      lines: {
+        create: data.lines.map((l) => ({
+          itemId: l.itemId,
+          qty: l.qty,
+          hsnCode: hsnOf.get(l.itemId) ?? null,
+          notes: l.notes ?? null,
+        })),
+      },
+    },
+    include: { lines: true },
+  })
+
+  for (const line of doc.lines) {
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: data.warehouseId,
+      transactionType: 'RETURN',
+      direction: 'OUT',
+      qty: Number(line.qty),
+      ownership: 'CUSTOMER_OWNED',
+      ownerCustomerId: data.customerId,
+      referenceType: 'CUSTOMER_RETURN',
+      referenceId: doc.id,
+      transactionDate: when,
+      notes: `${returnNumber}: back to ${customer.name} (${RETURN_REASON_LABEL[data.reason].toLowerCase()})`,
+    })
+  }
+
+  return { ...doc, customerName: customer.name }
+}
+
 /**
  * Sending a customer's own material back to them unworked.
  *
@@ -3061,80 +3172,8 @@ const RETURN_REASON_LABEL: Record<string, string> = {
  */
 router.post('/customer-return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerReturnSchema.parse(req.body)
-  const when = data.returnDate ?? new Date()
 
-  const created = await prisma.$transaction(async (tx) => {
-    const [customer, warehouse] = await Promise.all([
-      tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true } }),
-      tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true } }),
-    ])
-    if (!customer) throw new AppError('That customer does not exist', 404, 'NOT_FOUND')
-    if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
-
-    if (data.grnId) {
-      const grn = await tx.customerGRN.findUnique({
-        where: { id: data.grnId },
-        select: { customerId: true, grnNumber: true, cancelledAt: true },
-      })
-      if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
-      if (grn.customerId !== data.customerId) {
-        throw new AppError(`${grn.grnNumber} is a different customer's receipt.`, 400, 'RECEIPT_NOT_THEIRS')
-      }
-      if (grn.cancelledAt) {
-        throw new AppError(`${grn.grnNumber} was cancelled, so nothing came in on it.`, 400, 'RECEIPT_CANCELLED')
-      }
-    }
-
-    const items = await tx.item.findMany({
-      where: { id: { in: data.lines.map((l) => l.itemId) } },
-      select: { id: true, hsnCode: true },
-    })
-    const hsnOf = new Map(items.map((i) => [i.id, i.hsnCode]))
-
-    const returnNumber = await nextDocumentNumber(tx, 'CMR', when)
-    const doc = await tx.customerMaterialReturn.create({
-      data: {
-        returnNumber,
-        customerId: data.customerId,
-        grnId: data.grnId ?? null,
-        warehouseId: data.warehouseId,
-        returnDate: when,
-        reason: data.reason,
-        vehicleNo: data.vehicleNo ?? null,
-        transporter: data.transporter ?? null,
-        lrNumber: data.lrNumber ?? null,
-        notes: data.notes ?? null,
-        createdById: req.user?.id ?? null,
-        lines: {
-          create: data.lines.map((l) => ({
-            itemId: l.itemId,
-            qty: l.qty,
-            hsnCode: hsnOf.get(l.itemId) ?? null,
-            notes: l.notes ?? null,
-          })),
-        },
-      },
-      include: { lines: true },
-    })
-
-    for (const line of doc.lines) {
-      await recordMovement(tx, {
-        itemId: line.itemId,
-        warehouseId: data.warehouseId,
-        transactionType: 'RETURN',
-        direction: 'OUT',
-        qty: Number(line.qty),
-        ownership: 'CUSTOMER_OWNED',
-        ownerCustomerId: data.customerId,
-        referenceType: 'CUSTOMER_RETURN',
-        referenceId: doc.id,
-        transactionDate: when,
-        notes: `${returnNumber}: back to ${customer.name} (${RETURN_REASON_LABEL[data.reason].toLowerCase()})`,
-      })
-    }
-
-    return { ...doc, customerName: customer.name }
-  })
+  const created = await prisma.$transaction((tx) => createCustomerReturn(tx, data, req.user?.id ?? null), { timeout: 60_000 })
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -3513,7 +3552,7 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
           returnLines: {
             include: {
               item: { select: { id: true, name: true, uom: { select: { symbol: true } } } },
-              jobWorkReturn: { select: { returnNumber: true, returnDate: true } },
+              jobWorkReturn: { select: { returnNumber: true, returnDate: true, _count: { select: { debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] as Array<'CANCELLED' | 'REJECTED'> } } } } } } },
             },
           },
         },
@@ -3528,6 +3567,9 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
       const sent = Number(l.qty)
       const settled = l.returnLines.reduce((t, r) => t + Number(r.consumedQty), 0)
       const wasted = l.returnLines.reduce((t, r) => t + Number(r.wastedQty), 0)
+      const damaged = l.returnLines.reduce((t, r) => t + Number(r.damagedQty), 0)
+      // Damaged pieces not yet charged to the job worker on a debit note.
+      const damagedUncharged = l.returnLines.filter((r) => Number(r.damagedQty) > 0 && r.jobWorkReturn._count.debitNotes === 0).reduce((t, r) => t + Number(r.damagedQty), 0)
       // What came back as itself, and what came back made into something else.
       const madeBy = new Map<string, { itemName: string; uom: string; qty: number }>()
       for (const r of l.returnLines) {
@@ -3577,6 +3619,8 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
         backSameQty: r3(l.returnLines.filter((r) => r.itemId === l.itemId).reduce((t, r) => t + Number(r.receivedQty), 0)),
         madeInto: [...madeBy.values()].map((m) => ({ ...m, qty: r3(m.qty) })),
         wastedQty: r3(wasted),
+        damagedQty: r3(damaged),
+        damagedUncharged: r3(damagedUncharged),
         // A cancelled challan brought everything back to the store it left.
         stillOutQty: c.status === 'CANCELLED' ? 0 : Math.max(0, r3(sent - settled)),
         returnNumbers: [...new Set(l.returnLines.map((r) => r.jobWorkReturn.returnNumber))],
@@ -3852,6 +3896,131 @@ router.post(
     })
   },
 )
+
+/**
+ * Material back from the floor: what was issued on a requisition and not used.
+ * Goes back into stock as whoever's it was, at the rate it left at, and is
+ * kept on the line as returned so the order's issued figure is what it used.
+ */
+export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string, data: z.infer<typeof floorReturnSchema>, userId: string | null) {
+  await tx.$queryRaw`SELECT id FROM ld_erp.material_requisitions WHERE id = ${mrId} FOR UPDATE`
+  const mr = await tx.materialRequisition.findUnique({
+    where: { id: mrId },
+    include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } }, department: { select: { name: true } } },
+  })
+  if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+  const back: string[] = []
+  for (const r of data.lines) {
+    const line = mr.lines.find((l) => l.id === r.lineId)
+    if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}`, 400, 'BAD_LINE')
+    const open = round3(Number(line.issuedQty) - Number(line.returnedQty))
+    if (r.qty > open + 1e-9) {
+      throw new AppError(
+        open > 0 ? `${line.item.name}: only ${open} was issued and not yet returned, and ${r.qty} is coming back.` : `${line.item.name}: nothing issued on ${mr.mrNumber} is left to return.`,
+        400,
+        'MORE_THAN_ISSUED',
+      )
+    }
+    const wh = await tx.warehouse.findUnique({ where: { id: r.warehouseId }, select: { isActive: true, name: true } })
+    if (!wh?.isActive) throw new AppError('That store is not in use', 400, 'BAD_WAREHOUSE')
+    // At the rate it went out at: what this requisition's issues of it were carried at.
+    const outs = await tx.stockLedger.findMany({
+      where: { referenceType: 'MATERIAL_REQUISITION', referenceId: mr.id, itemId: line.itemId, ownership: line.ownership, ownerCustomerId: line.ownerCustomerId, outQty: { gt: 0 } },
+      select: { outQty: true, unitRate: true },
+    })
+    const q = outs.reduce((s, o) => s + Number(o.outQty), 0)
+    const rate = line.ownership === 'CUSTOMER_OWNED' || q <= 0 ? 0 : outs.reduce((s, o) => s + Number(o.outQty) * Number(o.unitRate ?? 0), 0) / q
+    await recordMovement(tx, {
+      itemId: line.itemId,
+      warehouseId: r.warehouseId,
+      ownership: line.ownership,
+      ownerCustomerId: line.ownerCustomerId,
+      transactionType: 'RETURN',
+      direction: 'IN',
+      qty: r.qty,
+      unitRate: Math.round(rate * 100) / 100,
+      referenceType: 'MR_RETURN',
+      referenceId: mr.id,
+      notes: `Back from ${mr.department.name} on ${mr.mrNumber}${data.reason ? `: ${data.reason}` : ''}`,
+    })
+    await tx.materialRequisitionLine.update({ where: { id: line.id }, data: { returnedQty: { increment: r.qty } } })
+    back.push(`${round3(r.qty)} ${line.item.uom?.symbol ?? ''} ${line.item.name} into ${wh.name}`.replace(/\s+/g, ' '))
+  }
+  void userId
+  return { mrNumber: mr.mrNumber, back }
+}
+
+/** POST /api/inventory/requisitions/:id/return — leftover material back from the floor. */
+router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = floorReturnSchema.parse(req.body)
+  const result = await prisma.$transaction((tx) => returnFromFloor(tx, req.params.id, data, req.user?.id ?? null), { timeout: 60_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MaterialRequisition', entityId: req.params.id, after: result })
+  res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.`, data: result })
+})
+
+/**
+ * A draft debit note charging the job worker for pieces damaged at their unit,
+ * from a job-work receipt's damaged quantities. It moves no stock — the
+ * damaged pieces were never booked in — and waits in Purchase → Debit notes
+ * for its GST to be settled and for posting, like any other.
+ */
+export async function jobWorkDebitNote(tx: Prisma.TransactionClient, returnId: string, data: z.infer<typeof jobWorkDebitNoteSchema>, userId: string) {
+  const jwr = await tx.jobWorkReturn.findUnique({
+    where: { id: returnId },
+    include: {
+      lines: { include: { item: { select: { name: true, hsnCode: true } }, challanLine: { select: { unitRate: true, hsnCode: true } } } },
+      challan: { select: { challanNumber: true, process: true, jobWorkerId: true, jobWorker: { select: { name: true } } } },
+      debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] } }, select: { noteNumber: true } },
+    },
+  })
+  if (!jwr) throw new AppError('That job-work receipt does not exist', 404, 'NOT_FOUND')
+  if (jwr.debitNotes.length) {
+    throw new AppError(`${jwr.returnNumber} is already charged on ${jwr.debitNotes[0].noteNumber}.`, 409, 'ALREADY_CHARGED')
+  }
+  const damaged = jwr.lines.filter((l) => Number(l.damagedQty) > 0)
+  if (!damaged.length) throw new AppError(`Nothing was damaged on ${jwr.returnNumber}, so there is nothing to charge.`, 400, 'NOTHING_DAMAGED')
+  const lines = damaged.map((l) => ({
+    itemId: l.itemId,
+    description: `Damaged at ${jwr.challan.jobWorker.name} (${jwr.challan.process}), ${jwr.returnNumber} against ${jwr.challan.challanNumber}`,
+    hsnCode: l.challanLine.hsnCode ?? l.item.hsnCode ?? null,
+    qty: Number(l.damagedQty),
+    unitPrice: data.rates?.[l.id] ?? Number(l.challanLine.unitRate ?? 0),
+    gstRate: data.gstRate ?? 0,
+  }))
+  if (lines.every((l) => l.unitPrice <= 0)) {
+    throw new AppError("Say what each damaged piece is charged at. A customer's material carries no value of ours, so there is none to take.", 400, 'NO_RATE')
+  }
+  const note = await createPurchaseNoteIn(
+    tx,
+    createNoteSchema.parse({
+      reason: 'DAMAGED_MATERIAL',
+      reasonNote: `${lines.reduce((s, l) => s + l.qty, 0)} damaged at job work`,
+      issuedBy: 'OUR_COMPANY',
+      docType: 'OUR_DEBIT_NOTE',
+      supplierId: jwr.challan.jobWorkerId,
+      withoutBillReason: `Damage at job work, ${jwr.returnNumber} against ${jwr.challan.challanNumber}`,
+      noteDate: new Date(),
+      supplierDocNo: jwr.theirChallanNo ?? undefined,
+      notes: data.notes ?? undefined,
+      lines: lines.filter((l) => l.unitPrice > 0),
+    }),
+    userId,
+  )
+  await tx.purchaseNote.update({ where: { id: note.id }, data: { jobWorkReturnId: jwr.id } })
+  return note
+}
+
+/** POST /api/inventory/job-work/returns/:id/debit-note — charge the damaged pieces to the job worker. */
+router.post('/job-work/returns/:id/debit-note', requirePermission('purchase', 'create'), async (req: AuthRequest, res) => {
+  const data = jobWorkDebitNoteSchema.parse(req.body ?? {})
+  const note = await prisma.$transaction((tx) => jobWorkDebitNote(tx, req.params.id, data, req.user!.id), { timeout: 60_000 })
+  await writeAuditLog(req, { module: 'purchase', action: 'CREATE', entityType: 'PurchaseNote', entityId: note.id, after: note })
+  res.status(201).json({
+    success: true,
+    message: `${note.noteNumber} drafted for ₹${Number(note.totalAmount).toLocaleString('en-IN')}. Settle its GST and post it in Purchase → Debit notes.`,
+    data: note,
+  })
+})
 
 /**
  * Cancelling a challan walks the goods back from the job worker's floor.

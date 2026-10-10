@@ -287,6 +287,7 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
         ownerCustomerId: true,
         requestedQty: true,
         issuedQty: true,
+        returnedQty: true,
         mr: { select: { departmentId: true, closedAt: true } },
       },
     }),
@@ -320,7 +321,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     )
     // A requisition closed part issued counts at what was issued; an open one at what was asked.
     const requested = round3(mine.reduce((s, a) => s + Number(a.mr.closedAt ? a.issuedQty : a.requestedQty), 0))
-    const issued = round3(mine.reduce((s, a) => s + Number(a.issuedQty), 0))
+    // Issued less what came back from the floor unused.
+    const issued = round3(mine.reduce((s, a) => s + Number(a.issuedQty) - Number(a.returnedQty), 0))
     const required = round3(r.required)
     const toRequest = round3(Math.max(0, required - requested))
     return {

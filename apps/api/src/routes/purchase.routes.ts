@@ -742,7 +742,7 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         },
       },
       poLines: {
-        where: { po: { status: { not: 'CANCELLED' } } },
+        where: { po: { status: { not: 'CANCELLED' }, deletedAt: null } },
         select: { qty: true },
       },
       /*
@@ -928,6 +928,57 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
 })
 
 /**
+ * A purchase order line raised from a requisition's shortage has to point at
+ * a line that is still being bought for: approved, open, our own material
+ * (a customer's is never bought), and no more than its buy quantity less what
+ * other orders already carry. More than that is ordered on a line of its own,
+ * not linked — so the requisition never reads as covered by stock nobody
+ * asked for.
+ */
+export async function assertIndentLines(
+  tx: Prisma.TransactionClient,
+  lines: Array<{ mrLineId?: string | null; qty: number; itemId: string }>,
+  exceptPoId?: string,
+) {
+  const linked = lines.filter((l) => l.mrLineId)
+  if (!linked.length) return
+  const ids = [...new Set(linked.map((l) => l.mrLineId!))]
+  const mrLines = await tx.materialRequisitionLine.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      itemId: true,
+      requestedQty: true,
+      purchaseQty: true,
+      ownership: true,
+      item: { select: { name: true } },
+      mr: { select: { mrNumber: true, status: true, closedAt: true } },
+      poLines: { where: { po: { status: { not: 'CANCELLED' }, deletedAt: null, ...(exceptPoId ? { id: { not: exceptPoId } } : {}) } }, select: { qty: true } },
+    },
+  })
+  for (const id of ids) {
+    const m = mrLines.find((x) => x.id === id)
+    if (!m) throw new AppError('One of the requisition lines this order buys for no longer exists. Pick it again from the indents.', 400, 'BAD_INDENT')
+    const asked = linked.filter((l) => l.mrLineId === id)
+    if (asked.some((l) => l.itemId !== m.itemId)) throw new AppError(`${m.mr.mrNumber} asks for ${m.item.name}, not the item on this line.`, 400, 'BAD_INDENT')
+    if (m.mr.status !== 'APPROVED' || m.mr.closedAt) {
+      throw new AppError(`${m.mr.mrNumber} is ${m.mr.closedAt ? 'closed' : 'not approved'}, so nothing is bought against it.`, 400, 'INDENT_NOT_OPEN')
+    }
+    if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${m.item.name} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
+    const toBuy = Number(m.purchaseQty ?? m.requestedQty)
+    const ordered = m.poLines.reduce((s, l) => s + Number(l.qty), 0)
+    const qty = asked.reduce((s, l) => s + l.qty, 0)
+    if (qty > toBuy - ordered + 1e-9) {
+      throw new AppError(
+        `${m.item.name}: ${m.mr.mrNumber} needs ${Math.max(0, toBuy - ordered)} more bought, and this orders ${qty} against it. Order any extra on a line of its own.`,
+        400,
+        'MORE_THAN_INDENT',
+      )
+    }
+  }
+}
+
+/**
  * Which tax rows an order shows: CGST + SGST, IGST, or none at all.
  *
  * The amounts saved on the order come first, because they are what was
@@ -1063,6 +1114,8 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
     if (items.length !== new Set(data.lines.map((l) => l.itemId)).size) {
       throw new AppError('One of those items no longer exists', 400, 'INVALID_ITEM')
     }
+
+    await assertIndentLines(tx, data.lines)
 
     const charges = await resolveCharges(tx, data.charges ?? [])
 
@@ -1282,6 +1335,8 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
               amount: Number(c.amount),
               gstRate: Number(c.gstRate),
             }))
+
+      await assertIndentLines(tx, data.lines, before.id)
 
       const priced = priceOrder(
         data.lines,

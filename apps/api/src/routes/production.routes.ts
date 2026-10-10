@@ -9,6 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
 import { materialPlan, orderForPlanning, PLANNABLE_ORDER_STATUSES } from '../services/manufacturing.service'
+import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
 
 /**
  * Manufacturing orders: what the factory is to make for a sales order.
@@ -166,6 +167,20 @@ const moInclude = {
   fgReceipts: {
     select: { id: true, fgrNumber: true, receiptDate: true, cancelledAt: true, lines: { select: { qty: true } } },
     orderBy: { receiptDate: 'asc' },
+  },
+  cuttingOrders: {
+    select: {
+      id: true,
+      cutOrderNumber: true,
+      cutDate: true,
+      status: true,
+      fabricUsed: true,
+      wastage: true,
+      actualPieces: true,
+      fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+      panelItem: { select: { code: true } },
+    },
+    orderBy: { createdAt: 'asc' },
   },
   createdBy: { select: { id: true, name: true } },
   closedBy: { select: { id: true, name: true } },
@@ -442,6 +457,36 @@ router.post('/orders/:id/complete-short', requirePermission(MODULE, 'edit'), asy
     message: `${after.moNumber} completed with ${after.totalPackedQty} of ${after.totalPlannedQty} pieces. The other ${after.totalPlannedQty - after.totalPackedQty} can be planned again on the order.`,
     data: after,
   })
+})
+
+/**
+ * GET  /api/production/orders/:id/cutting — what the cutting form needs: the
+ *      fabric issued to the order and how much is accounted for, pieces by
+ *      size planned and cut, earlier cuttings, panel items and stores.
+ * POST /api/production/orders/:id/cutting — one cutting: fabric used, waste,
+ *      pieces by size, and optionally the panels into a store.
+ * POST /api/production/cutting/:id/cancel — takes it back, with a reason.
+ */
+router.get('/orders/:id/cutting', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await prisma.$transaction((tx) => cuttingPrep(tx, req.params.id)) })
+})
+
+router.post('/orders/:id/cutting', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = cuttingSchema.parse(req.body)
+  const cut = await prisma.$transaction((tx) => createCutting(tx, req.params.id, data, req.user!.id), { timeout: 60_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'CuttingOrder', entityId: cut.id, after: cut })
+  res.status(201).json({
+    success: true,
+    message: `${cut.cutOrderNumber}: ${cut.actualPieces.toLocaleString('en-IN')} pieces cut, ${Number(cut.fabricUsed)} used and ${Number(cut.wastage)} wasted.${cut.panelItemId ? ' The panels are in the store.' : ''}`,
+    data: cut,
+  })
+})
+
+router.post('/cutting/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = reasonSchema.parse(req.body)
+  const after = await prisma.$transaction((tx) => cancelCutting(tx, req.params.id, reason), { timeout: 60_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CuttingOrder', entityId: after.id, after })
+  res.json({ success: true, message: `${after.cutOrderNumber} cancelled.`, data: after })
 })
 
 /**

@@ -336,6 +336,7 @@ model User {
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
+  cuttingsCreated CuttingOrder[] @relation("CuttingCreatedBy")
   @@index([email])
   @@index([roleId])
   stockReservations   StockReservation[] @relation("ReservationBy")
@@ -690,6 +691,8 @@ model Item {
   returnLines   PurchaseReturnLine[]
   debitLines    DebitNoteLine[]
 
+  cuttingsOfFabric CuttingOrder[] @relation("CuttingFabric")
+  cuttingsAsPanels CuttingOrder[] @relation("CuttingPanels")
   @@unique([styleId, color])
   @@index([code])
   @@index([type])
@@ -1070,6 +1073,7 @@ model Warehouse {
   returnLines      PurchaseReturnLine[]
 
   reservations StockReservation[] @relation("WarehouseReservations")
+  cuttingPanels CuttingOrder[] @relation("CuttingPanelStore")
   @@map("warehouses")
   customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
   customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturns")
@@ -2594,6 +2598,9 @@ model MaterialRequisitionLine {
   /// told to order what they already ordered.
   poLines PurchaseOrderLine[]
 
+  /// What came back from the floor unused (leftover fabric, spare trims).
+  /// Issued stays what was handed over; issued − returned is what was used.
+  returnedQty  Decimal             @default(0) @db.Decimal(10, 3)
   @@index([fulfilment])
   reservations StockReservation[]
   @@map("material_requisition_lines")
@@ -2992,6 +2999,7 @@ model JobWorkReturn {
 
   lines JobWorkReturnLine[]
 
+  debitNotes PurchaseNote[]
   @@index([challanId])
   @@map("job_work_returns")
 }
@@ -3120,6 +3128,18 @@ model CuttingOrder {
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
+  /// The fabric cut, so used + waste + left over can be set against what
+  /// was issued of it to the order.
+  fabricItemId     String?
+  fabricItem       Item?              @relation("CuttingFabric", fields: [fabricItemId], references: [id])
+  /// When the cut panels are put into a store (to go out on a job-work
+  /// challan): the semi-finished item they are, and the store.
+  panelItemId      String?
+  panelItem        Item?              @relation("CuttingPanels", fields: [panelItemId], references: [id])
+  panelWarehouseId String?
+  panelWarehouse   Warehouse?         @relation("CuttingPanelStore", fields: [panelWarehouseId], references: [id])
+  createdById      String?
+  createdBy        User?              @relation("CuttingCreatedBy", fields: [createdById], references: [id])
   @@map("cutting_orders")
 }
 
@@ -4272,6 +4292,9 @@ model PurchaseNote {
   /// which is the mistake the duplicate-bill guard exists for. Postgres treats
   /// NULLs as distinct, so our own commercial claims — which carry no supplier
   /// document number — are unaffected.
+  /// The job-work receipt whose damaged pieces this note charges for.
+  jobWorkReturnId String?
+  jobWorkReturn   JobWorkReturn? @relation(fields: [jobWorkReturnId], references: [id], onDelete: Restrict)
   @@unique([supplierId, supplierDocNo])
   @@index([supplierId])
   @@index([billId])

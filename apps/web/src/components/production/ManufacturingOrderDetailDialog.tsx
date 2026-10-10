@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { CuttingDialog } from './CuttingDialog'
 import { LIVE_MO, moStatus } from './status'
 
 interface MoDetail {
@@ -47,6 +48,18 @@ interface MoDetail {
     _count: { lines: number }
   }>
   fgReceipts: Array<{ id: string; fgrNumber: string; receiptDate: string; cancelledAt: string | null; lines: Array<{ qty: string | number }> }>
+  cuttingOrders?: Array<{
+    id: string
+    cutOrderNumber: string
+    cutDate: string
+    status: string
+    fabricUsed: string | number | null
+    wastage: string | number | null
+    actualPieces: number
+    fabricItem: { code: string; name: string; uom: { symbol: string } | null } | null
+    panelItem: { code: string } | null
+  }>
+  totalCutQty?: number
 }
 
 interface PlanRow {
@@ -115,6 +128,8 @@ export function ManufacturingOrderDetailDialog({
   const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | null>(null)
   const [closing, setClosing] = useState(false)
   const [completingShort, setCompletingShort] = useState(false)
+  const [cutting, setCutting] = useState(false)
+  const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
@@ -602,6 +617,45 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   )}
                 </Section>
+                <Section
+                  icon={Scissors}
+                  title="Cutting"
+                  actions={
+                    mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'create') ? (
+                      <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setCutting(true)} disabled={busy !== null}>
+                        <Scissors size={13} /> Record cutting
+                      </button>
+                    ) : undefined
+                  }
+                >
+                  {!mo.cuttingOrders?.length ? (
+                    <p className="text-muted-foreground text-sm">Nothing cut yet. Record each cutting: fabric used, waste and pieces by size.</p>
+                  ) : (
+                    <div className="divide-border divide-y text-sm">
+                      {mo.cuttingOrders.map((c) => (
+                        <div key={c.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
+                          <span className="min-w-0">
+                            <span className="font-mono text-xs">{c.cutOrderNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(c.cutDate)}</span>
+                            {c.fabricItem && (
+                              <span className="text-muted-foreground block text-[11px]">
+                                {c.fabricItem.name}: {Number(c.fabricUsed ?? 0)} used, {Number(c.wastage ?? 0)} waste {c.fabricItem.uom?.symbol ?? ''}
+                                {c.panelItem ? ` · panels into stock as ${c.panelItem.code}` : ''}
+                              </span>
+                            )}
+                          </span>
+                          <span className="flex items-center gap-2 text-xs tabular-nums">
+                            {c.status === 'CANCELLED' ? 'Cancelled' : `${pcs(c.actualPieces)} pcs`}
+                            {c.status !== 'CANCELLED' && can('production', 'edit') && (
+                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setCancellingCut(c)} aria-label={`Cancel ${c.cutOrderNumber}`}>
+                                <Ban size={13} />
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Section>
                 <Section icon={PackageCheck} title="Packed (Finished Goods In)">
                   {mo.fgReceipts.length === 0 ? (
                     <p className="text-muted-foreground text-sm">Nothing booked in against it yet. Packed garments go in under Inventory → Finished Goods In, against this order.</p>
@@ -625,6 +679,33 @@ export function ManufacturingOrderDetailDialog({
           ) : null}
         </div>
       </div>
+      {cutting && mo && (
+        <CuttingDialog
+          moId={mo.id}
+          onClose={() => setCutting(false)}
+          onSaved={(msg) => {
+            setCutting(false)
+            void refresh(msg)
+          }}
+        />
+      )}
+      {cancellingCut && mo && (
+        <ReasonDialog
+          title={`Cancel ${cancellingCut.cutOrderNumber}?`}
+          description="Its pieces come off the order's cut count, and any panels it put into a store come out again (refused if they have already gone on)."
+          confirmLabel="Cancel the cutting"
+          danger
+          onCancel={() => setCancellingCut(null)}
+          onConfirm={(reason) => {
+            const c = cancellingCut
+            setCancellingCut(null)
+            void api
+              .post<{ message?: string }>(`/production/cutting/${c.id}/cancel`, { reason })
+              .then((res) => refresh(res.message ?? `${c.cutOrderNumber} cancelled.`))
+              .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not cancel it.'))
+          }}
+        />
+      )}
       {completingShort && mo && (
         <ReasonDialog
           title={`Complete ${mo.moNumber} with ${mo.totalPackedQty} of ${mo.totalPlannedQty}?`}

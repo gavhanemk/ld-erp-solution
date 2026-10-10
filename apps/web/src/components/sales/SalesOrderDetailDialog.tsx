@@ -18,13 +18,13 @@ import {
   Factory,
   ShoppingBag,
   Truck,
-  X,
-} from 'lucide-react'
+  X, Scale } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { OrderLinesView, type OrderLineView } from './OrderLinesView'
+import { OrderReconciliation } from './OrderReconciliation'
 import { OPEN_ORDER_STATUSES, salesOrderStatus } from './status'
 import { confirmOrder, dispatchHref, orderCan, postReasonAction, REASON_ACTIONS, type ReasonAction } from './orderActions'
 
@@ -515,6 +515,12 @@ export function SalesOrderDetailDialog({
                         <OrderLinesView lines={o.lines} />
                       </div>
                     </Section>
+
+                    {o.status !== 'DRAFT' && (
+                      <Section icon={Scale} title={o.isJobWork ? "Customer's material and pieces" : 'Pieces'}>
+                        <OrderReconciliation orderId={o.id} isJobWork={o.isJobWork} />
+                      </Section>
+                    )}
 
                     <Section icon={Link2} title="Linked documents">
                       {linked.length === 0 ? (

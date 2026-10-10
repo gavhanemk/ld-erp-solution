@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
+import { orderReconciliation } from '../services/reconciliation.service'
 import { GST_STATES, stateName } from '../lib/gstStates'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import {
@@ -775,6 +776,17 @@ const savedOrderInclude = {
   lines: { include: { sizes: { include: { size: true } } }, orderBy: { sortOrder: 'asc' } },
   charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.SalesOrderInclude
+
+/**
+ * GET /api/sales/orders/:id/reconciliation
+ *
+ * The customer's fabric on the order — received, issued, cut, returned,
+ * counted, held — and its pieces — cut, packed good and B-grade, damaged at
+ * job workers, sent — so the order is closed with everything accounted for.
+ */
+router.get('/orders/:id/reconciliation', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await prisma.$transaction((tx) => orderReconciliation(tx, req.params.id)) })
+})
 
 // POST /api/sales/orders
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {

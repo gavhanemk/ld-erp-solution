@@ -380,6 +380,8 @@ export const createCustomerReturnSchema = z
     customerId: id('the customer it goes back to'),
     /** The receipt it came in on, when it is going back against one. */
     grnId: z.string().optional().nullable(),
+    /** The order the leftover is from, so the order's fabric reconciles. */
+    soId: z.string().optional().nullable(),
     warehouseId: id('the store it leaves from'),
     returnDate: z.coerce.date().optional(),
     reason: z.enum(CUSTOMER_RETURN_REASONS, { errorMap: () => ({ message: 'Say why it is going back' }) }),
@@ -481,6 +483,26 @@ export const createJobWorkChallanSchema = z
       seen.add(key)
     })
   })
+
+/**
+ * Material coming back from the floor unused: leftover fabric after cutting,
+ * spare buttons after stitching. Against the requisition it was issued on, so
+ * issued − returned is what the order actually used.
+ */
+export const floorReturnSchema = z.object({
+  reason: z.string().trim().max(300).optional().nullable(),
+  lines: z
+    .array(z.object({ lineId: z.string().min(1), qty, warehouseId: id('the store it goes back into') }))
+    .min(1, 'Say what came back'),
+})
+
+/** Charging a job worker for pieces damaged at their unit. */
+export const jobWorkDebitNoteSchema = z.object({
+  /** What each damaged piece is charged at, by receipt line; the challan's value when left out. */
+  rates: z.record(z.string(), z.number().min(0).max(9_999_999)).optional(),
+  gstRate: z.number().min(0).max(28).optional(),
+  notes: z.string().trim().max(1000).optional().nullable(),
+})
 
 export const cancelJobWorkChallanSchema = z.object({
   reason: z
