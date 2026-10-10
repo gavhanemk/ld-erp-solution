@@ -12,8 +12,12 @@ next. Read it first after any break.
 Branch `feat/sales-phase4`, stacked on `feat/production-orders`.
 
 - **Quotations** (`/sales/quotations`): draft → sent → won / lost (with why),
-  expired when past valid-until. Priced by the order's own `prepareOrder`;
-  each line shows the BOM cost, BOM price and margin. Convert to order opens
+  expired when past valid-until. Priced by the order's own `prepareOrder`.
+  Each line starts from the **style** (dropdown, with "+ Add new style" opening
+  the Masters → Styles form over the quotation): picking style and colour fills
+  the rate with the BOM's selling price (approved BOM first, else a draft; the
+  colour's BOM, else the all-colours one) and the item to bill with the item
+  linked to that style. The margin over the BOM cost shows under the rate. Convert to order opens
   the order form filled in; saving marks the quotation won. Print. Needs a
   **QT** number series.
 - **Returns & credit notes** (`/sales/returns`, and Return / credit note on an
@@ -22,9 +26,16 @@ Branch `feat/sales-phase4`, stacked on `feat/production-orders`.
   the customer's credit (counted with advances in outstanding and the credit
   check). Nothing returned or credited twice. Cancel takes goods back out.
   GST credit note print. Uses the **CN** series.
-- **Sales dashboard** (`/sales/dashboard`): this month booked, dispatched,
-  invoiced, received; still to send; owed and overdue; six-month chart; top
-  customers; orders due in two weeks; overdue invoices; things to act on.
+- **Sales dashboard** (`/sales/dashboard`), built like the Purchase one:
+  period 7D/30D/90D/1Y with brand and customer filters; highlights; tiles for
+  booked, invoiced, collected (with sparklines and change on the period
+  before), order book, customers owe (ageing bar) and sent on time; a pulse
+  strip; sales over time; bookings by customer; a "Needs attention" list
+  (late, due soon, overdue payments, sent not billed, quotes lapsing, credit
+  hold); quotation-to-cash steps; ageing; when orders are due; quotation win
+  rate; bookings by style (treemap); size mix (radar); best-selling styles and
+  colours; brand and order type; salesperson / broker; customer scorecard.
+  `salesDashboard(db, query)` is exported for rolled-back tests.
 - **Reports** (Reports → Sales): Sales Register, Order Book, Dispatch Register,
   Customer Outstanding (ageing), Brokerage (base still to confirm with the
   accountant), Sales Returns, Outward Supplies by HSN (GSTR-1).

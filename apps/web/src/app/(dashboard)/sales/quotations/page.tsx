@@ -75,6 +75,15 @@ export default function QuotationsPage() {
   const [losing, setLosing] = useState<QuoteRow | null>(null)
   const [acting, setActing] = useState(false)
 
+  // Arriving from the dashboard, which links to one quotation by its number.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search).get('q')
+    if (q) {
+      setSearch(q)
+      setDebounced(q)
+    }
+  }, [])
+
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
     return () => clearTimeout(t)

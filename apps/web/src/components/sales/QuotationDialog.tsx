@@ -95,6 +95,19 @@ function pickBom(boms: StyleBom[], color: string): StyleBom | null {
   return (color.trim() ? sorted.find((b) => same(b.color, color)) : undefined) ?? sorted.find((b) => !b.color?.trim()) ?? null
 }
 
+/**
+ * The colour a newly picked style starts in: its only colour; else, when its
+ * BOMs are made per colour with none for all colours, the colour of the BOM
+ * with a price (or the first BOM), so the rate can fill in straight away.
+ */
+function startColour(st: StyleOption | null) {
+  if (!st) return ''
+  if (st.colors.length === 1) return st.colors[0]
+  if (st.boms.some((b) => !b.color?.trim())) return ''
+  const b = st.boms.find((x) => x.price != null && x.color) ?? st.boms.find((x) => x.color)
+  return b?.color ?? ''
+}
+
 /** What the style dropdown says under each style: its BOM price, or why there is none. */
 function bomNote(st: StyleOption) {
   const priced = st.boms.filter((b) => b.price != null)
@@ -274,7 +287,7 @@ export function QuotationDialog({
       ls.map((l) => {
         if (l.key !== key) return l
         const st = list.find((x) => x.code === styleCode) ?? null
-        const colour = st && st.colors.length === 1 && !color ? st.colors[0] : color
+        const colour = color
         const linked = st ? (st.items.find((i) => same(i.color, colour)) ?? st.items.find((i) => !i.color) ?? (st.items.length === 1 ? st.items[0] : undefined)) : undefined
         const sibling = ls.find((o) => o.key !== key && o.itemId && same(o.styleCode, styleCode))
         const bom = st ? pickBom(st.boms, colour) : null
@@ -501,7 +514,7 @@ export function QuotationDialog({
                               <SmartSelect
                                 className={cell}
                                 value={p.l.styleCode}
-                                onChange={(e) => pickStyle(p.l.key, e.target.value, '')}
+                                onChange={(e) => pickStyle(p.l.key, e.target.value, startColour(styles.find((x) => x.code === e.target.value) ?? null))}
                                 onCreate={can('masters', 'create') ? (typed) => setNewStyle({ key: p.l.key, typed }) : undefined}
                                 createNoun="style"
                                 aria-label={`Row ${i + 1} style`}
@@ -559,10 +572,13 @@ export function QuotationDialog({
                               <StepInput decimals className={`${cell} text-right tabular-nums`} value={p.l.unitPrice} placeholder="0.00" onValueChange={(v) => setLine(p.l.key, { unitPrice: v, rateFromBom: false })} aria-label={`Row ${i + 1} rate`} />
                               <div className="mt-0.5 text-right text-[10px] leading-snug">
                                 {!st ? null : !p.bom ? (
-                                  <span className="text-muted-foreground">No BOM for this style yet</span>
+                                  <span className="text-muted-foreground">
+                                    {st.boms.length ? `BOM is for ${[...new Set(st.boms.map((b) => b.color).filter(Boolean))].join(', ')} — pick the colour` : 'No BOM for this style yet'}
+                                  </span>
                                 ) : bomPrice == null ? (
                                   <span className="warn-text" title="Set it on the BOM's Pricing step and it fills in here">
                                     BOM has no selling price yet
+                                    {p.margin == null && p.bom.cost != null ? ` · cost ₹${inr(p.bom.cost)}` : ''}
                                   </span>
                                 ) : offBom ? (
                                   <button type="button" className="text-primary hover:underline" onClick={() => setLine(p.l.key, { unitPrice: String(bomPrice), rateFromBom: true })} title="Go back to the BOM's selling price">
@@ -605,7 +621,7 @@ export function QuotationDialog({
                       .get<{ data: StyleOption[] }>('/sales/quotations/styles')
                       .then((res) => {
                         setStyles(res.data)
-                        if (key) pickStyle(key, row.code, '', res.data)
+                        if (key) pickStyle(key, row.code, startColour(res.data.find((x) => x.code === row.code) ?? null), res.data)
                       })
                       .catch(() => {})
                   }}
