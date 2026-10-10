@@ -1,6 +1,6 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sat 10 Oct 2026 — Sales dispatch, Phase 2 (branch `feat/sales-dispatch`)_
+_Last updated: Sat 10 Oct 2026 — Sales dispatch and invoices, Phase 2 done (branch `feat/sales-dispatch`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
@@ -51,7 +51,20 @@ plus other charges with no GST. Terms and attachments sit beside the totals.
 Every number box steps with the mouse wheel and arrow keys and never goes
 below nothing. Migration `20261010120000_sales_order_details`.
 
-**Next:** step 4, the invoice raised from a dispatched challan (no IRN).
+**Invoices (step 4, 10 Oct):** `/sales/invoices` with "Waiting to invoice"
+(dispatched challans not billed) and "Invoices" (unpaid, overdue, this month;
+print; cancel with a reason while nothing is received). One invoice bills one
+challan: pieces from the challan, rate, discount and GST rate from the order
+line, the order's bill discount shared out pro rata, and the order's charges
+offered as whatever earlier invoices have not billed. Final when saved, no
+draft; INV number taken after every check. "Dispatch & invoice" on the challan
+form goes straight on to the invoice. A billed challan cannot be cancelled
+until its invoice is. Tax invoice print (`/print/sales-invoice/[id]`) with HSN
+summary, amount and tax in words, bank details, three copies; no IRN. Unpaid
+invoices now count in the credit check. Migration
+`20261010150000_sales_invoice_from_challan`.
+
+**Next:** Phase 3 — payments received against invoices, and outstanding.
 
 ---
 

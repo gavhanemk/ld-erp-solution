@@ -26,6 +26,7 @@ import {
   creditPosition,
   type ConfirmOutcome,
 } from '../services/salesOrder.service'
+import { priceSalesCharges } from '../services/salesCharges'
 
 const router = Router()
 const MODULE = 'sales'
@@ -669,35 +670,8 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       igst += tax
     }
   })
-  // Charges: each from the charge master, taxed at its own rate (the
-  // master's unless the form sent one), split the same way as the goods.
-  const chargeInput = (data.charges ?? []).filter((c) => c.amount > 0)
-  const chargeTypes = chargeInput.length
-    ? await tx.chargeType.findMany({
-        where: { id: { in: chargeInput.map((c) => c.chargeTypeId) } },
-        select: { id: true, name: true, defaultGstRate: true, isActive: true, applyOnSale: true },
-      })
-    : []
-  const chargeTypeById = new Map(chargeTypes.map((c) => [c.id, c]))
-  const charges = chargeInput.map((c, i) => {
-    const type = chargeTypeById.get(c.chargeTypeId)
-    if (!type) throw new AppError('One of the charges does not exist', 400, 'BAD_CHARGE')
-    if (!type.isActive || !type.applyOnSale) {
-      throw new AppError(`${type.name} is not a sales charge. Turn it on for sales under Masters → Charges.`, 400, 'BAD_CHARGE')
-    }
-    const amount = round2(c.amount)
-    const gstRate = c.gstRate ?? Number(type.defaultGstRate)
-    const tax = (amount * gstRate) / 100
-    return {
-      chargeTypeId: type.id,
-      amount,
-      gstRate,
-      cgst: isIntraState ? round2(tax / 2) : 0,
-      sgst: isIntraState ? round2(tax / 2) : 0,
-      igst: isIntraState ? 0 : round2(tax),
-      sortOrder: i,
-    }
-  })
+  // Charges: each from the charge master, taxed at its own rate.
+  const charges = await priceSalesCharges(tx, data.charges, isIntraState)
   const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
   cgst = round2(cgst + charges.reduce((s, c) => s + c.cgst, 0))
   sgst = round2(sgst + charges.reduce((s, c) => s + c.sgst, 0))
@@ -1399,16 +1373,6 @@ router.delete('/order-attachments/:id', requirePermission(MODULE, 'edit'), async
   await removeObject(file.storagePath).catch(() => {})
   await writeAuditLog(req, { module: MODULE, action: 'DELETE', entityType: 'SalesOrderAttachment', entityId: file.id, before: file })
   res.json({ success: true, message: `${file.fileName} removed.` })
-})
-
-// GET /api/sales/invoices
-router.get('/invoices', requirePermission(MODULE, 'view'), async (req, res) => {
-  const invoices = await prisma.salesInvoice.findMany({
-    include: { customer: { select: { name: true } } },
-    orderBy: { createdAt: 'desc' },
-    take: 50,
-  })
-  res.json({ success: true, data: invoices })
 })
 
 // GET /api/sales/outstanding — read by Sales and by Accounts, who chase it.

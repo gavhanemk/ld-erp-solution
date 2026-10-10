@@ -7,6 +7,25 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 10 Oct 2026 — sales invoices raised from a challan
+
+**Migration:** `20261010150000_sales_invoice_from_challan`
+**Branch:** `feat/sales-dispatch`
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `sales_invoices`: `dcId` (the challan it bills, foreign key, SET NULL),
+  `billingAddress`, `shippingAddress`, `transporter`, `vehicleNumber`,
+  `lrNumber`, `eWayBillNumber`, `eWayBillDate`, `otherCharges` (default 0),
+  `terms`, `createdById`, `cancelledAt`, `cancelledById`, `cancelReason`.
+- `sales_invoice_lines.soLineId`: the order line each invoice line bills.
+
+Nothing is dropped and no row changes (the table was empty). On a branch
+without this folder, `prisma migrate dev` will propose dropping these columns.
+Say no.
+
 ## 10 Oct 2026 — sales order details, charges and files
 
 **Migration:** `20261010120000_sales_order_details`

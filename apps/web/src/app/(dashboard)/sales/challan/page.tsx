@@ -11,6 +11,7 @@ import {
   PackageCheck,
   Pencil,
   Printer,
+  ReceiptText,
   RefreshCw,
   Search,
   Truck,
@@ -60,6 +61,8 @@ interface ChallanRow {
   so: { id: string; soNumber: string; isJobWork: boolean; customerPORef: string | null }
   customer: { id: string; name: string; billingCity: string | null; shippingCity: string | null }
   warehouse: { id: string; name: string } | null
+  /** The live invoice billing it, if any. */
+  invoices: Array<{ id: string; invoiceNumber: string }>
   pieces: number
 }
 
@@ -279,10 +282,24 @@ export default function DeliveryChallanPage() {
     if (c.status === 'DRAFT' && mayCreate) {
       items.push({ key: 'dispatch', label: 'Dispatch', icon: <Truck size={15} />, onClick: () => void dispatchDraft(c) })
     }
+    const billed = c.invoices?.[0]
+    if ((c.status === 'DISPATCHED' || c.status === 'DELIVERED') && !billed && mayCreate) {
+      items.push({ key: 'invoice', label: 'Create invoice', icon: <ReceiptText size={15} />, href: `/sales/invoices?create=${c.id}` })
+    }
+    if (billed) {
+      items.push({
+        key: 'invoice-print',
+        label: `Print ${billed.invoiceNumber}`,
+        icon: <ReceiptText size={15} />,
+        href: `/print/sales-invoice/${billed.id}`,
+        newTab: true,
+      })
+    }
     if (c.status === 'DISPATCHED' && mayEdit) {
       items.push({ key: 'delivered', label: 'Mark delivered', icon: <PackageCheck size={15} />, onClick: () => void markDelivered(c) })
     }
-    if ((c.status === 'DRAFT' || c.status === 'DISPATCHED') && mayEdit) {
+    // A billed challan is cancelled only after its invoice is.
+    if ((c.status === 'DRAFT' || c.status === 'DISPATCHED') && !billed && mayEdit) {
       items.push({ key: 'cancel', label: 'Cancel challan', icon: <Ban size={15} />, danger: true, onClick: () => setCancelling(c) })
     }
     return items
@@ -723,6 +740,16 @@ export default function DeliveryChallanPage() {
                               <CheckCircle2 size={11} /> {formatDate(c.deliveredAt)}
                             </div>
                           )}
+                          {c.invoices?.[0] && (
+                            <a
+                              href={`/print/sales-invoice/${c.invoices[0].id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-primary mt-0.5 block font-mono text-[11px] hover:underline"
+                            >
+                              {c.invoices[0].invoiceNumber}
+                            </a>
+                          )}
                         </td>
                         <td className="whitespace-nowrap text-right">
                           <div className="flex justify-end">
@@ -745,7 +772,7 @@ export default function DeliveryChallanPage() {
           <p className="text-muted-foreground text-xs">
             {tab === 'waiting'
               ? 'Confirmed orders with pieces still to send, soonest due first. Dispatch takes the pieces out of the store; a draft takes nothing until it is dispatched.'
-              : 'Cancelling a dispatched challan puts its pieces back in the store and back on the order.'}
+              : 'Bill a dispatched challan with Create invoice. Cancelling a dispatched challan puts its pieces back in the store and back on the order; a billed one needs its invoice cancelled first.'}
           </p>
         </div>
       </div>

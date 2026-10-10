@@ -80,7 +80,7 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Sales Orders', href: '/sales/orders' },
       { label: 'Delivery Challan', href: '/sales/challan' },
-      { label: 'Invoices', href: '/sales/invoices', planned: true },
+      { label: 'Invoices', href: '/sales/invoices' },
       { label: 'Payments Received', href: '/sales/payments', planned: true },
     ],
   },

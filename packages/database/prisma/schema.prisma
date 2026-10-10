@@ -305,6 +305,8 @@ model User {
   reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
   uploadedFiles        PurchaseOrderAttachment[]   @relation("AttachmentUploadedBy")
   uploadedSalesFiles   SalesOrderAttachment[]      @relation("SOAttachmentUploadedBy")
+  salesInvoicesRaised    SalesInvoice[]            @relation("SICreatedBy")
+  salesInvoicesCancelled SalesInvoice[]            @relation("SICancelledBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
@@ -1263,6 +1265,8 @@ model SalesOrderLine {
   sizes SalesOrderLineSize[]
   /// What has been sent against this line, challan by challan.
   challanLines DeliveryChallanLine[]
+  /// What has been billed against this line, invoice by invoice.
+  invoiceLines SalesInvoiceLine[]
 
   @@map("sales_order_lines")
 }
@@ -1323,6 +1327,28 @@ model SalesInvoice {
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
+  /// The challan whose goods this bills. One live invoice per challan; a
+  /// cancelled invoice keeps its link, so the challan can be billed again.
+  dcId              String?
+  dc                DeliveryChallan? @relation(fields: [dcId], references: [id])
+  /// As printed: copied from the order and changeable on the invoice.
+  billingAddress    String?
+  shippingAddress   String?
+  transporter       String?
+  vehicleNumber     String?
+  lrNumber          String?
+  eWayBillNumber    String?
+  eWayBillDate      DateTime?
+  /// Added after tax and carrying none of its own, as on the order.
+  otherCharges      Decimal          @default(0) @db.Decimal(12, 2)
+  terms             String?
+  createdById       String?
+  createdBy         User?            @relation("SICreatedBy", fields: [createdById], references: [id])
+  cancelledAt       DateTime?
+  cancelledById     String?
+  cancelledBy       User?            @relation("SICancelledBy", fields: [cancelledById], references: [id])
+  cancelReason      String?
+
   payments    PaymentReceipt[]
   lines       SalesInvoiceLine[]
   charges     SalesInvoiceCharge[]
@@ -1330,6 +1356,7 @@ model SalesInvoice {
 
   @@index([invoiceNumber])
   @@index([customerId])
+  @@index([dcId])
   @@map("sales_invoices")
 }
 
@@ -1372,6 +1399,8 @@ model DeliveryChallan {
   cancelReason    String?
 
   lines DeliveryChallanLine[]
+  /// The invoice billing these goods (and any cancelled before it).
+  invoices SalesInvoice[]
 
   @@index([soId])
   @@index([customerId])
@@ -3476,8 +3505,12 @@ model SalesInvoiceLine {
   igst         Decimal      @default(0) @db.Decimal(12, 2)
   amount       Decimal      @default(0) @db.Decimal(12, 2)
   sortOrder    Int          @default(0)
+  /// The order line this bills, so what is invoiced reconciles to the order.
+  soLineId     String?
+  soLine       SalesOrderLine? @relation(fields: [soLineId], references: [id])
 
   @@index([invoiceId])
+  @@index([soLineId])
   @@map("sales_invoice_lines")
 }
 

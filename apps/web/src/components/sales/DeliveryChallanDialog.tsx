@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useRouter } from 'next/navigation'
 import {
   AlertCircle,
   FileText,
@@ -10,6 +11,7 @@ import {
   Loader2,
   MapPin,
   Package,
+  ReceiptText,
   Save,
   Truck,
   Warehouse as WarehouseIcon,
@@ -152,6 +154,7 @@ export function DeliveryChallanDialog({
 }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
+  const router = useRouter()
 
   const [prep, setPrep] = useState<Prepared | null>(null)
   const [saved, setSaved] = useState<SavedChallan | null>(null)
@@ -167,7 +170,7 @@ export function DeliveryChallanDialog({
   const [packingNote, setPackingNote] = useState('')
   const [notes, setNotes] = useState('')
   const [send, setSend] = useState<SendDraft>({})
-  const [saving, setSaving] = useState<'draft' | 'dispatch' | null>(null)
+  const [saving, setSaving] = useState<'draft' | 'dispatch' | 'invoice' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -321,9 +324,10 @@ export function DeliveryChallanDialog({
   // Short of stock still saves as a draft; it cannot go until the stock is there.
   const dispatchBlocker = blocker ?? (short ? `Not enough of ${short.l.item.code} in this store to dispatch.` : null)
 
-  const save = async (dispatch: boolean) => {
+  /** Save as a draft, dispatch, or dispatch and go straight on to bill it. */
+  const save = async (dispatch: boolean, invoice = false) => {
     if (!prep || (dispatch ? dispatchBlocker : blocker)) return
-    setSaving(dispatch ? 'dispatch' : 'draft')
+    setSaving(invoice ? 'invoice' : dispatch ? 'dispatch' : 'draft')
     setError(null)
     const body = {
       soId: prep.order.id,
@@ -349,10 +353,12 @@ export function DeliveryChallanDialog({
     }
     try {
       const res = saved
-        ? await api.patch<{ message?: string }>(`/sales/challans/${saved.id}`, body)
-        : await api.post<{ message?: string }>('/sales/challans', body)
+        ? await api.patch<{ message?: string; data: { id: string } }>(`/sales/challans/${saved.id}`, body)
+        : await api.post<{ message?: string; data: { id: string } }>('/sales/challans', body)
       onSaved(res.message ?? (dispatch ? 'Dispatched.' : 'Challan saved as a draft.'))
       onClose()
+      // One flow from the packing table to the bill (the business's answer of 9 Oct).
+      if (invoice) router.push(`/sales/invoices?create=${res.data.id}`)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save the challan.')
     } finally {
@@ -387,10 +393,11 @@ export function DeliveryChallanDialog({
             <button
               type="button"
               className="btn-primary hidden md:inline-flex"
-              onClick={() => void save(true)}
+              onClick={() => void save(true, true)}
               disabled={busy || !!dispatchBlocker}
+              title="Dispatch, then open the invoice for it"
             >
-              {saving === 'dispatch' ? <Loader2 size={15} className="animate-spin" /> : <Truck size={15} />} Dispatch
+              {saving === 'invoice' ? <Loader2 size={15} className="animate-spin" /> : <ReceiptText size={15} />} Dispatch &amp; invoice
             </button>
             <button onClick={onClose} className="btn-ghost p-2" aria-label="Close" disabled={saving !== null}>
               <X size={18} />
@@ -637,8 +644,17 @@ export function DeliveryChallanDialog({
             <span className="sm:hidden">Draft</span>
             <span className="hidden sm:inline">Save as draft</span>
           </button>
-          <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!dispatchBlocker}>
+          <button type="button" className="btn-secondary" onClick={() => void save(true)} disabled={busy || !!dispatchBlocker}>
             {saving === 'dispatch' ? <Loader2 size={15} className="animate-spin" /> : <Truck size={15} />} Dispatch
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => void save(true, true)}
+            disabled={busy || !!dispatchBlocker}
+            title="Dispatch, then open the invoice for it"
+          >
+            {saving === 'invoice' ? <Loader2 size={15} className="animate-spin" /> : <ReceiptText size={15} />} Dispatch &amp; invoice
           </button>
         </div>
       </div>

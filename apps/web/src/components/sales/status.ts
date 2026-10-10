@@ -60,3 +60,14 @@ export const CHALLAN_STATUS: Record<string, StatusLook> = {
 
 export const challanStatus = (status: string): StatusLook =>
   CHALLAN_STATUS[status] ?? { label: status, cls: 'badge-neutral' }
+
+/** A sales invoice's status: what is still owed on it. */
+export const INVOICE_STATUS: Record<string, StatusLook> = {
+  UNPAID: { label: 'Unpaid', cls: 'badge-warning' },
+  PARTIAL: { label: 'Part paid', cls: 'badge-info' },
+  PAID: { label: 'Paid', cls: 'badge-success' },
+  CANCELLED: { label: 'Cancelled', cls: 'badge-neutral' },
+}
+
+export const invoiceStatus = (status: string): StatusLook =>
+  INVOICE_STATUS[status] ?? { label: status, cls: 'badge-neutral' }

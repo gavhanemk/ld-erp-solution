@@ -250,6 +250,8 @@ const challanInclude = {
       sizes: { include: { size: { select: { id: true, code: true, sequence: true } } } },
     },
   },
+  /** The invoice billing it, if any: a challan is billed once. */
+  invoices: { where: { status: { not: 'CANCELLED' } }, select: { id: true, invoiceNumber: true } },
 } satisfies Prisma.DeliveryChallanInclude
 
 /** GET /api/sales/challans — filters: q, status, customerId, soId, from, to, page, limit. */
@@ -591,6 +593,14 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
   if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
   if (before.status === 'CANCELLED') throw new AppError(`${before.dcNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
   if (before.status === 'RETURNED') throw new AppError(`${before.dcNumber} has been returned`, 409, 'RETURNED')
+  // Goods on an invoice cannot quietly come back: the invoice goes first.
+  if (before.invoices.length) {
+    throw new AppError(
+      `${before.dcNumber} is billed on ${before.invoices[0].invoiceNumber}. Cancel that invoice first.`,
+      409,
+      'INVOICED',
+    )
+  }
 
   if (before.status === 'DISPATCHED' || before.status === 'DELIVERED') {
     // Back in at the rate each piece left at, so the store's value is

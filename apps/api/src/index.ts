@@ -16,6 +16,7 @@ import dashboardRoutes from './routes/dashboard.routes'
 import masterRoutes from './routes/master.routes'
 import salesRoutes from './routes/sales.routes'
 import challanRoutes from './routes/challan.routes'
+import invoiceRoutes from './routes/invoice.routes'
 import purchaseRoutes from './routes/purchase.routes'
 import purchaseNoteRoutes from './routes/purchase-notes.routes'
 import purchaseEnquiryRoutes from './routes/purchase-enquiries.routes'
@@ -268,6 +269,7 @@ app.use('/api/dashboard', authMiddleware, dashboardRoutes)
 app.use('/api/masters', authMiddleware, masterRoutes)
 // Delivery challans, ahead of the rest of /api/sales so their paths are theirs.
 app.use('/api/sales/challans', authMiddleware, challanRoutes)
+app.use('/api/sales/invoices', authMiddleware, invoiceRoutes)
 app.use('/api/sales', authMiddleware, salesRoutes)
 app.use('/api/purchase/enquiries', authMiddleware, purchaseEnquiryRoutes)
 app.use('/api/purchase/notes', authMiddleware, purchaseNoteRoutes)
