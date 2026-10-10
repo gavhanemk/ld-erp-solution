@@ -15,7 +15,6 @@ import {
   Printer,
   Ruler,
   Scissors,
-  Send,
   ShoppingBag,
   X,
 } from 'lucide-react'
@@ -25,7 +24,7 @@ import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { OrderLinesView, type OrderLineView } from './OrderLinesView'
 import { OPEN_ORDER_STATUSES, salesOrderStatus } from './status'
-import { orderCan, postReasonAction, REASON_ACTIONS, sendForApproval, type ReasonAction } from './orderActions'
+import { confirmOrder, orderCan, postReasonAction, REASON_ACTIONS, type ReasonAction } from './orderActions'
 
 interface Person {
   id: string
@@ -136,6 +135,8 @@ export function SalesOrderDetailDialog({
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [asking, setAsking] = useState<ReasonAction | null>(null)
+  /** The server's figures when confirming needs a reason to release a credit hold. */
+  const [holdNote, setHoldNote] = useState<string | null>(null)
   const [revision, setRevision] = useState<Revision | 'loading' | null>(null)
 
   const load = useCallback(async (id: string) => {
@@ -188,6 +189,32 @@ export function SalesOrderDetailDialog({
     }
   }
 
+  /*
+   * Confirm the draft. Within the credit limit that is all; over it the server
+   * puts it on hold for a manager and says so, or — for someone who may release
+   * it — answers CREDIT_HOLD, and the reason is asked for.
+   */
+  const confirm = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await confirmOrder(orderId)
+      const msg = res.message ?? 'Order confirmed'
+      setMessage(msg)
+      onChanged(msg)
+      await load(orderId)
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'CREDIT_HOLD') {
+        setHoldNote(err.message)
+        setAsking('release')
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Could not confirm the order.')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const openRevision = async (version: number) => {
     setRevision('loading')
     try {
@@ -216,14 +243,13 @@ export function SalesOrderDetailDialog({
     ? [
         { label: 'Draft', done: true, note: `${formatDate(o.createdAt)}${o.createdBy ? ` · ${o.createdBy.name}` : ''}` },
         {
-          label: 'Sent for approval',
-          done: !!o.sentForApprovalAt,
-          note: o.sentForApprovalAt ? formatDate(o.sentForApprovalAt) : '',
-        },
-        {
           label: 'Confirmed',
           done: !!o.approvedAt,
-          note: o.approvedAt ? `${formatDate(o.approvedAt)}${o.approvedBy ? ` · ${o.approvedBy.name}` : ''}` : '',
+          note: o.approvedAt
+            ? `${formatDate(o.approvedAt)}${o.approvedBy ? ` · ${o.approvedBy.name}` : ''}`
+            : o.sentForApprovalAt && o.status === 'DRAFT'
+              ? `on credit hold since ${formatDate(o.sentForApprovalAt)}`
+              : '',
         },
         {
           label: 'In production',
@@ -248,9 +274,24 @@ export function SalesOrderDetailDialog({
   const history = o
     ? [
         { at: o.createdAt, text: `Raised${o.createdBy ? ` by ${o.createdBy.name}` : ''}`, version: null as number | null },
-        ...(o.sentForApprovalAt ? [{ at: o.sentForApprovalAt, text: 'Sent for approval', version: null }] : []),
+        ...(o.sentForApprovalAt
+          ? [
+              {
+                at: o.sentForApprovalAt,
+                text: 'Put on credit hold: over the credit limit or blacklisted, so a manager has to OK it',
+                version: null,
+              },
+            ]
+          : []),
         ...(o.approvedAt
-          ? [{ at: o.approvedAt, text: `Approved${o.approvedBy ? ` by ${o.approvedBy.name}` : ''}`, version: null }]
+          ? [
+              {
+                at: o.approvedAt,
+                // Approved when a manager OK'd a credit hold; otherwise simply confirmed.
+                text: `${o.sentForApprovalAt ? 'Approved' : 'Confirmed'}${o.approvedBy ? ` by ${o.approvedBy.name}` : ''}`,
+                version: null,
+              },
+            ]
           : []),
         ...(o.creditReleasedAt
           ? [
@@ -370,13 +411,9 @@ export function SalesOrderDetailDialog({
                   <Pencil size={15} /> Edit draft
                 </button>
               )}
-              {o && orderCan.send(o) && (
-                <button
-                  className="btn-primary"
-                  onClick={() => void act(() => sendForApproval(o.id), `${o.soNumber} sent for approval`)}
-                  disabled={busy}
-                >
-                  {busy ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />} Send for approval
+              {o && orderCan.confirm(o) && (
+                <button className="btn-primary" onClick={() => void confirm()} disabled={busy}>
+                  {busy ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Confirm order
                 </button>
               )}
               {o && orderCan.amend(o) && (
@@ -424,7 +461,7 @@ export function SalesOrderDetailDialog({
             ) : (
               <>
                 {/* The road, step by step. */}
-                <ol className="glass-card grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-6">
+                <ol className="glass-card grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-5">
                   {steps.map((s, i) => {
                     const stopped = stoppedAt >= 0 && i === stoppedAt
                     return (
@@ -595,7 +632,7 @@ export function SalesOrderDetailDialog({
       {asking && o && (
         <ReasonDialog
           title={REASON_ACTIONS[asking].title(o.soNumber)}
-          description={REASON_ACTIONS[asking].description}
+          description={asking === 'release' && holdNote ? holdNote : REASON_ACTIONS[asking].description}
           confirmLabel={REASON_ACTIONS[asking].confirmLabel}
           placeholder={REASON_ACTIONS[asking].placeholder}
           danger={asking === 'cancel'}

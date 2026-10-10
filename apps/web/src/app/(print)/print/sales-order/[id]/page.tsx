@@ -184,8 +184,8 @@ export default function PrintSalesOrder() {
         }${order.cancelReason ? ` — ${order.cancelReason}` : ''}. This order is not to be made.`
       : order.status === 'DRAFT'
         ? order.sentForApprovalAt
-          ? 'DRAFT — waiting for approval. Not a confirmation: do not send this to the buyer yet.'
-          : 'DRAFT — not yet sent for approval. Not a confirmation: do not send this to the buyer.'
+          ? 'ON CREDIT HOLD — waiting for a manager. Not a confirmation: do not send this to the buyer yet.'
+          : 'DRAFT — not yet confirmed. Not a confirmation: do not send this to the buyer.'
         : order.shortClosedAt
           ? `SHORT-CLOSED on ${longDate(order.shortClosedAt)}${
               order.shortCloseReason ? ` — ${order.shortCloseReason}` : ''

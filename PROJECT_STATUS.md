@@ -22,15 +22,17 @@ docs/07 §6.
 - **Order form** (`SalesOrderDialog`): own order or job work, customer panel
   with the tax split and a credit strip, one size box per size from the style's
   size run, typed rate with the customer's last rate shown, GST previewed from
-  HSN. Save as draft or Send for approval. Edits a draft until it is sent.
+  HSN. Save as draft or Confirm order. Edits a draft until it is confirmed.
 - **Order detail** (`SalesOrderDetailDialog`): progress strip, lines, linked
   production orders, requisitions, challans and invoices, history.
 - **Amend** (version kept in `sales_order_revisions`), **cancel** (before
   anything is made or sent, no open requisition) and **short-close**
   (approve rights; pending to zero).
-- **Approval** through the dashboard and the assistant, one service: draft and
-  sent only, not by whoever raised it (Admin excepted), and a customer over the
-  credit limit or blacklisted is released with a reason — not blocked.
+- **Confirm, not approve.** Save as draft, then Confirm order — no approval
+  step for an ordinary order (business, 10 Oct). Only a customer over the
+  credit limit or blacklisted puts the order on credit hold: it waits in the
+  dashboard's Pending Approvals for someone with approve rights who did not
+  raise it, or the Admin releases it on the spot with a reason.
 - **Order confirmation print** (`/print/sales-order/[id]`), heading from
   Settings → Documents → Sales Order. Brokerage is never printed.
 - Every sales route checks a sales permission. The store's order pickers read

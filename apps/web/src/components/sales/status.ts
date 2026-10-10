@@ -27,7 +27,7 @@ export const OPEN_ORDER_STATUSES = ['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DIS
 
 /**
  * One order's status as it should read. The stored status says DRAFT both for
- * an order still being typed and for one sent and waiting on a manager, and
+ * an order still being typed and for one on credit hold for a manager, and
  * CANCELLED both for a refused draft and a called-off order; the dates tell
  * them apart.
  */
@@ -36,8 +36,9 @@ export function salesOrderStatus(order: {
   sentForApprovalAt?: string | null
   approvedAt?: string | null
 }): StatusLook {
+  // Only a customer over their credit limit, or blacklisted, waits for anyone.
   if (order.status === 'DRAFT' && order.sentForApprovalAt) {
-    return { label: 'Waiting approval', cls: 'badge-warning' }
+    return { label: 'Credit hold', cls: 'badge-warning' }
   }
   if (order.status === 'CANCELLED' && !order.approvedAt && order.sentForApprovalAt) {
     return { label: 'Rejected', cls: 'badge-danger' }

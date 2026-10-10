@@ -122,6 +122,98 @@ export function creditWarning(c: CreditCheck): string {
   )
 }
 
+interface ConfirmOptions {
+  /** The Admin may release a credit hold on an order they raised themselves. */
+  admin: boolean
+  /** Whether the person confirming holds sales:approve. */
+  canApprove: boolean
+  /** Required to release a credit hold at the moment of confirming. */
+  creditReleaseReason?: string | null
+}
+
+export type ConfirmOutcome =
+  | { outcome: 'CONFIRMED'; released: boolean; credit: CreditCheck }
+  | { outcome: 'HELD'; credit: CreditCheck }
+
+/**
+ * Confirm a draft: the order is final and the customer is promised it.
+ *
+ * Most orders need nobody's approval — this is the standard ERP flow, draft
+ * then confirm, as the business asked on 10 Oct 2026. A manager is brought in
+ * only when there is a reason: the customer is over their credit limit or
+ * blacklisted (the answer of 9 Oct). Then:
+ *
+ *   - someone who may release it (the Admin, or an approver who did not raise
+ *     the order) confirms it with a reason, kept on the order — without the
+ *     reason this answers CREDIT_HOLD with the figures, so the screen can ask;
+ *   - anyone else's order goes on credit hold: `sentForApprovalAt` is set and
+ *     it waits in Pending Approvals, where approveSalesOrder decides it.
+ *
+ * Takes the transaction it runs in, so saving a new order and confirming it
+ * are one act: an order refused here leaves no number behind.
+ */
+export async function confirmOrHold(
+  db: Prisma.TransactionClient,
+  id: string,
+  userId: string,
+  opts: ConfirmOptions,
+): Promise<ConfirmOutcome> {
+  const order = await db.salesOrder.findUnique({ where: { id } })
+  if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+  if (order.status !== 'DRAFT') {
+    throw new AppError(`${order.soNumber} is ${statusWords(order.status)} already`, 409, 'NOT_DRAFT')
+  }
+  if (order.sentForApprovalAt) {
+    throw new AppError(
+      `${order.soNumber} is on credit hold, waiting for a manager in Pending Approvals`,
+      409,
+      'ON_HOLD',
+    )
+  }
+
+  const credit = checkCredit(await creditPosition(db, order.customerId, order.id), Number(order.totalAmount))
+  const now = new Date()
+
+  if (!credit.needsRelease) {
+    await db.salesOrder.update({
+      where: { id },
+      data: { status: 'CONFIRMED', approvedById: userId, approvedAt: now },
+    })
+    return { outcome: 'CONFIRMED', released: false, credit }
+  }
+
+  const mayRelease = opts.admin || (opts.canApprove && order.createdById !== userId)
+  const reason = opts.creditReleaseReason?.trim()
+  if (mayRelease && !reason) throw new AppError(creditWarning(credit), 409, 'CREDIT_HOLD')
+  if (mayRelease) {
+    await db.salesOrder.update({
+      where: { id },
+      data: {
+        status: 'CONFIRMED',
+        approvedById: userId,
+        approvedAt: now,
+        creditReleasedById: userId,
+        creditReleasedAt: now,
+        creditReleaseReason: reason,
+      },
+    })
+    return { outcome: 'CONFIRMED', released: true, credit }
+  }
+
+  await db.salesOrder.update({ where: { id }, data: { sentForApprovalAt: now } })
+  return { outcome: 'HELD', credit }
+}
+
+/** What the person who pressed Confirm is told. */
+export function confirmMessage(soNumber: string, r: ConfirmOutcome): string {
+  if (r.outcome === 'HELD') {
+    return `${soNumber} is on credit hold: ${
+      r.credit.isBlacklisted ? `${r.credit.customerName} is blacklisted` : `${r.credit.customerName} is over their credit limit`
+    }. It has gone to a manager to OK in Pending Approvals.`
+  }
+  return r.released ? `${soNumber} confirmed, credit hold released` : `${soNumber} confirmed`
+}
+
 interface ApproveOptions {
   /** The Admin may approve an order they raised, as on requisitions. */
   admin?: boolean
@@ -130,11 +222,12 @@ interface ApproveOptions {
 }
 
 /**
- * Approve a draft sales order. The one place the rules live, so the dashboard
- * and the assistant cannot drift apart:
+ * Approve an order on credit hold — the only orders that wait for one. The
+ * one place the rules live, so the dashboard and the assistant cannot drift
+ * apart:
  *
- *   - only a draft can be approved — not a cancelled or already-confirmed one —
- *     and only once it has been sent for approval, not while still being typed;
+ *   - only a held draft can be approved — not a cancelled or already-confirmed
+ *     one, nor a draft still being typed (that is confirmed, not approved);
  *   - the person who raised it cannot approve it (the Admin excepted);
  *   - a customer over their credit limit, or blacklisted, is not a hard stop:
  *     the approver releases it with a reason, which is kept on the order.
@@ -151,7 +244,7 @@ export async function approveSalesOrder(id: string, userId: string, opts: Approv
   }
   if (!before.sentForApprovalAt) {
     throw new AppError(
-      `${before.soNumber} has not been sent for approval yet`,
+      `${before.soNumber} is not waiting for anyone: confirm it from the order itself`,
       409,
       'NOT_SENT',
     )

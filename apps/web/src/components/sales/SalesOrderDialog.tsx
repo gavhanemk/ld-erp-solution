@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
+  CheckCircle2,
+  ShieldAlert,
   Calculator,
   FileText,
   Loader2,
@@ -16,11 +18,12 @@ import {
   Trash2,
   X,
 } from 'lucide-react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, can, currentUser } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { SizeQtyGrid, sumSizes, type SizeOption } from './SizeQtyGrid'
 import {
   CustomerPanel,
@@ -86,6 +89,7 @@ interface SavedOrder {
   soNumber: string
   status: string
   version: number
+  createdById: string
   sentForApprovalAt: string | null
   customerId: string
   brandId: string
@@ -137,12 +141,18 @@ function TotalRow({ label, value, quiet = false }: { label: string; value: strin
 }
 
 /**
- * The sales order form: a new order, a draft not yet sent for approval, or an
+ * The sales order form: a new order, a draft not yet confirmed, or an
  * amendment to a confirmed order (`amend`), which keeps the old version.
  *
  * Built on the purchase order form's shell — the full-height card that stops
  * at the sidebar, a header and footer that stay put, sections in between —
  * so somebody who knows one form knows the other.
+ *
+ * Saving is the standard ERP two: Save as draft, or Confirm order. Nobody's
+ * approval is needed — unless the customer is over their credit limit or
+ * blacklisted, when the order goes on credit hold for a manager (or, for the
+ * Admin or an approver confirming someone else's draft, is released with a
+ * reason on the spot).
  *
  * What it does not do, by design:
  *   - the rate is never filled in: it is typed, with the customer's last rate
@@ -207,7 +217,9 @@ export function SalesOrderDialog({
   const [contextLoading, setContextLoading] = useState(false)
   const [lastRates, setLastRates] = useState<LastRates>({})
 
-  const [saving, setSaving] = useState<'draft' | 'send' | 'amend' | null>(null)
+  const [saving, setSaving] = useState<'draft' | 'confirm' | 'amend' | null>(null)
+  /** Set when confirming needs a reason to release a credit hold: what to show. */
+  const [releaseAsk, setReleaseAsk] = useState<string | null>(null)
   /** Why a confirmed order is changing. Kept with the version it replaces. */
   const [amendReason, setAmendReason] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -489,9 +501,32 @@ export function SalesOrderDialog({
 
   const busy = saving !== null || loadingLists
 
-  const save = async (send: boolean) => {
+  /*
+   * Over the credit limit, or blacklisted, with this order on top: worked out
+   * from what the server sent about the customer, so it follows the total as
+   * lines are typed. Only then is a manager involved at all.
+   */
+  const me = currentUser() as { id?: string; role?: string } | null
+  const credit = context?.credit
+  const creditHeld =
+    !!credit &&
+    (credit.isBlacklisted || (credit.limit != null && credit.unpaid + credit.openOrders + totals.total > credit.limit))
+  // The same rule as the server: the Admin, or an approver who did not raise it.
+  const mayRelease =
+    me?.role === 'Admin' || (can('sales', 'approve') && !!saved && saved.createdById !== me?.id)
+
+  const save = async (confirm: boolean, creditReleaseReason?: string) => {
     if (blocker) return
-    setSaving(amend ? 'amend' : send ? 'send' : 'draft')
+    // Releasing a hold needs a reason; ask before anything is sent.
+    if (confirm && !amend && creditHeld && mayRelease && !creditReleaseReason) {
+      setReleaseAsk(
+        credit?.isBlacklisted
+          ? 'This customer is blacklisted. Confirming anyway releases the hold; your reason is kept on the order.'
+          : 'This order takes the customer over their credit limit. Confirming anyway releases the hold; your reason is kept on the order.'
+      )
+      return
+    }
+    setSaving(amend ? 'amend' : confirm ? 'confirm' : 'draft')
     setError(null)
     const body = {
       customerId,
@@ -507,7 +542,8 @@ export function SalesOrderDialog({
       brokeragePercent: brokerId ? Number(brokerPct) || 0 : 0,
       discountAmount: Number(billDiscount) || 0,
       notes: notes.trim() || null,
-      sendForApproval: send,
+      confirm,
+      creditReleaseReason: creditReleaseReason ?? null,
       // Rows with no item picked are a blank row, not a line.
       lines: filled.map((p) => ({
         // On an amendment each saved line keeps its id, so it stays the same
@@ -529,16 +565,23 @@ export function SalesOrderDialog({
         saved && amend
           ? await api.post<{ message?: string }>(`/sales/orders/${saved.id}/amend`, {
               ...body,
-              sendForApproval: undefined,
+              confirm: undefined,
+              creditReleaseReason: undefined,
               reason: amendReason.trim(),
             })
           : saved
             ? await api.patch<{ message?: string }>(`/sales/orders/${saved.id}`, body)
             : await api.post<{ message?: string }>('/sales/orders', body)
-      onSaved(res.message ?? (send ? 'Order saved and sent for approval.' : 'Order saved as a draft.'))
+      onSaved(res.message ?? (confirm ? 'Order confirmed.' : 'Order saved as a draft.'))
       onClose()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save the order.')
+      // The server found the hold this screen did not (the customer's figures
+      // moved since they were fetched): ask for the reason rather than fail.
+      if (err instanceof ApiError && err.code === 'CREDIT_HOLD' && mayRelease) {
+        setReleaseAsk(err.message)
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Could not save the order.')
+      }
     } finally {
       setSaving(null)
     }
@@ -566,11 +609,21 @@ export function SalesOrderDialog({
       {saving === 'amend' ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
       Save amendment
     </button>
+  ) : creditHeld && !mayRelease ? (
+    <button
+      type="button"
+      className="btn-primary"
+      onClick={() => void save(true)}
+      disabled={busy || !!blocker}
+      title="Over the credit limit: a manager has to OK it in Pending Approvals"
+    >
+      {saving === 'confirm' ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
+      Send to manager
+    </button>
   ) : (
     <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!blocker}>
-      {saving === 'send' ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />}
-      <span className="sm:hidden">Send</span>
-      <span className="hidden sm:inline">Send for approval</span>
+      {saving === 'confirm' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
+      Confirm order
     </button>
   )
 
@@ -596,7 +649,7 @@ export function SalesOrderDialog({
                 {saved && amend
                   ? `Amending ${saved.soNumber} · version ${saved.version} is kept in its history`
                   : saved
-                    ? `${saved.soNumber} — a draft can be changed until it is sent for approval`
+                    ? `${saved.soNumber} — a draft can be changed until it is confirmed`
                     : 'New order from a customer · the number is given when you save'}
               </p>
             </div>
@@ -1079,12 +1132,22 @@ export function SalesOrderDialog({
 
         {/* Footer — stays put, so Save never has to be hunted for. */}
         <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
-          {blocker && !loadingLists && (
+          {blocker && !loadingLists ? (
             <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
               <AlertCircle size={13} className="mt-px shrink-0" />
               <span>{blocker}</span>
             </p>
-          )}
+          ) : creditHeld && !amend ? (
+            <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
+              <ShieldAlert size={13} className="mt-px shrink-0" />
+              <span>
+                {credit?.isBlacklisted ? 'This customer is blacklisted' : 'Over the credit limit'}:{' '}
+                {mayRelease
+                  ? 'confirming asks for a reason to release the hold.'
+                  : 'it goes to a manager to OK before it is confirmed.'}
+              </span>
+            </p>
+          ) : null}
           {amend && (
             <input
               className="form-input h-9 min-w-0 basis-full sm:max-w-sm sm:basis-auto"
@@ -1108,6 +1171,20 @@ export function SalesOrderDialog({
           {primary}
         </div>
       </div>
+      {releaseAsk && (
+        <ReasonDialog
+          title="Release the credit hold?"
+          description={releaseAsk}
+          confirmLabel="Release and confirm"
+          placeholder="Payment of ₹2 L promised by Friday"
+          busy={saving !== null}
+          onCancel={() => setReleaseAsk(null)}
+          onConfirm={(reason) => {
+            setReleaseAsk(null)
+            void save(true, reason)
+          }}
+        />
+      )}
     </div>,
     document.body
   )

@@ -605,6 +605,12 @@ What the business answered before Sales was built:
 7. **Quotations are optional.** Regular clients usually go straight to an
    order; a quotation goes to a new client, for a new style, or to a
    regular client when price or terms change.
+8. **No approval step for ordinary orders** (10 Oct 2026). An order is
+   saved as a draft, then confirmed in one click — the standard ERP flow.
+   A manager is brought in only for a credit hold (point 1): the order
+   waits in Pending Approvals until someone with approval rights, other
+   than whoever raised it, OKs it. The Admin can release it on the spot
+   with a reason.
 
 Two were "not sure", so a default was chosen that is easy to change:
 

@@ -11,12 +11,17 @@ interface OrderLike {
   sentForApprovalAt?: string | null
 }
 
-const isUnsentDraft = (o: OrderLike) => o.status === 'DRAFT' && !o.sentForApprovalAt
+/** A draft not on credit hold: still the sales team's to change or confirm. */
+const isOpenDraft = (o: OrderLike) => o.status === 'DRAFT' && !o.sentForApprovalAt
 
 export const orderCan = {
-  /** A draft changes until it is sent; after that a manager is deciding. */
-  edit: (o: OrderLike) => isUnsentDraft(o) && can('sales', 'edit'),
-  send: (o: OrderLike) => isUnsentDraft(o) && can('sales', 'create'),
+  /** A draft changes until it is confirmed — but not while it waits on credit hold. */
+  edit: (o: OrderLike) => isOpenDraft(o) && can('sales', 'edit'),
+  /**
+   * Draft → confirmed in one step, as in any standard ERP. Only a customer over
+   * their credit limit, or blacklisted, brings a manager in (see the server).
+   */
+  confirm: (o: OrderLike) => isOpenDraft(o) && can('sales', 'create'),
   /** Approved and not finished: changed by amending, which keeps the old version. */
   amend: (o: OrderLike) => OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'edit'),
   /**
@@ -29,9 +34,9 @@ export const orderCan = {
   shortClose: (o: OrderLike) => OPEN_ORDER_STATUSES.includes(o.status) && can('sales', 'approve'),
 }
 
-export type ReasonAction = 'cancel' | 'short-close'
+export type ReasonAction = 'cancel' | 'short-close' | 'release'
 
-/** The wording of the two actions that need a reason, for ReasonDialog. */
+/** The wording of the actions that need a reason, for ReasonDialog. */
 export const REASON_ACTIONS: Record<
   ReasonAction,
   { title: (n: string) => string; description: string; confirmLabel: string; placeholder: string }
@@ -43,6 +48,13 @@ export const REASON_ACTIONS: Record<
     confirmLabel: 'Cancel order',
     placeholder: 'Buyer withdrew the PO',
   },
+  release: {
+    title: (n) => `Release ${n} from credit hold?`,
+    description:
+      'The customer is over their credit limit or blacklisted. Confirming anyway releases the hold; your reason is kept on the order.',
+    confirmLabel: 'Release and confirm',
+    placeholder: 'Payment of ₹2 L promised by Friday',
+  },
   'short-close': {
     title: (n) => `Short-close ${n}?`,
     description:
@@ -53,9 +65,18 @@ export const REASON_ACTIONS: Record<
 }
 
 export function postReasonAction(orderId: string, action: ReasonAction, reason: string) {
+  if (action === 'release') return confirmOrder(orderId, reason)
   return api.post<{ message?: string }>(`/sales/orders/${orderId}/${action}`, { reason })
 }
 
-export function sendForApproval(orderId: string) {
-  return api.post<{ message?: string }>(`/sales/orders/${orderId}/send`, {})
+/**
+ * Confirm a draft. Within the credit limit it is confirmed; over it, the server
+ * either puts it on hold for a manager (and says so) or, for someone who may
+ * release it, answers CREDIT_HOLD so the screen can ask why.
+ */
+export function confirmOrder(orderId: string, creditReleaseReason?: string) {
+  return api.post<{ message?: string }>(
+    `/sales/orders/${orderId}/confirm`,
+    creditReleaseReason ? { creditReleaseReason } : {}
+  )
 }

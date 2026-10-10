@@ -5,6 +5,7 @@ import {
   AlertCircle,
   Ban,
   CalendarDays,
+  CheckCircle2,
   Eye,
   FilePenLine,
   ChevronDown,
@@ -18,7 +19,6 @@ import {
   Ruler,
   Scissors,
   Search,
-  Send,
 } from 'lucide-react'
 import { api, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
@@ -44,7 +44,7 @@ import {
   orderCan,
   postReasonAction,
   REASON_ACTIONS,
-  sendForApproval,
+  confirmOrder,
   type ReasonAction,
 } from '@/components/sales/orderActions'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -227,7 +227,9 @@ export default function SalesOrdersPage() {
   })
   // The order open in the detail, and an action waiting on its reason.
   const [viewId, setViewId] = useState<string | null>(null)
-  const [asking, setAsking] = useState<{ action: ReasonAction; order: SalesOrderRow } | null>(null)
+  const [asking, setAsking] = useState<{ action: ReasonAction; order: SalesOrderRow; description?: string } | null>(
+    null
+  )
   const [acting, setActing] = useState(false)
 
   const [customers, setCustomers] = useState<Array<{ id: string; name: string }>>([])
@@ -381,16 +383,25 @@ export default function SalesOrdersPage() {
       )
   }
 
-  const send = async (o: SalesOrderRow) => {
-    if (!window.confirm(`Send ${o.soNumber} for approval? It can no longer be edited once it is approved.`)) return
+  /*
+   * Confirm a draft. Within the credit limit it is simply confirmed; over it the
+   * server puts it on hold for a manager and says so — or, for someone who may
+   * release it, answers CREDIT_HOLD, and the reason is asked for here.
+   */
+  const confirm = async (o: SalesOrderRow) => {
+    if (!window.confirm(`Confirm ${o.soNumber}? Once confirmed it changes only by amending.`)) return
     setError(null)
     setMessage(null)
     try {
-      const res = await sendForApproval(o.id)
-      setMessage(res.message ?? `${o.soNumber} sent for approval.`)
+      const res = await confirmOrder(o.id)
+      setMessage(res.message ?? `${o.soNumber} confirmed.`)
       refresh()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : `Could not send ${o.soNumber}.`)
+      if (err instanceof ApiError && err.code === 'CREDIT_HOLD') {
+        setAsking({ action: 'release', order: o, description: err.message })
+        return
+      }
+      setError(err instanceof ApiError ? err.message : `Could not confirm ${o.soNumber}.`)
     }
   }
 
@@ -442,8 +453,13 @@ export default function SalesOrdersPage() {
         onClick: () => setDialog({ open: true, orderId: o.id, amend: false }),
       })
     }
-    if (orderCan.send(o)) {
-      items.push({ key: 'send', label: 'Send for approval', icon: <Send size={15} />, onClick: () => void send(o) })
+    if (orderCan.confirm(o)) {
+      items.push({
+        key: 'confirm',
+        label: 'Confirm order',
+        icon: <CheckCircle2 size={15} />,
+        onClick: () => void confirm(o),
+      })
     }
     if (orderCan.amend(o)) {
       items.push({
@@ -528,9 +544,9 @@ export default function SalesOrdersPage() {
     },
     {
       key: 'awaiting',
-      label: 'Waiting for approval',
+      label: 'On credit hold',
       value: summary?.awaitingApproval ?? 0,
-      sub: 'sent, not yet decided',
+      sub: 'waiting for a manager to OK',
       tone: (summary?.awaitingApproval ?? 0) > 0 ? 'warn-text' : 'text-muted-foreground',
     },
     {
@@ -965,7 +981,7 @@ export default function SalesOrdersPage() {
         <div className="border-border bg-secondary/40 flex items-start gap-2 border-t px-4 py-2">
           <Info size={14} className="text-primary mt-0.5 shrink-0" />
           <p className="text-muted-foreground text-xs">
-            A draft can be changed until it is sent for approval. Once approved, an order changes only by
+            A draft can be changed until it is confirmed. Once confirmed, an order changes only by
             amending it, and the earlier version is kept. Values are before GST.
           </p>
         </div>
@@ -1003,7 +1019,7 @@ export default function SalesOrdersPage() {
       {asking && (
         <ReasonDialog
           title={REASON_ACTIONS[asking.action].title(asking.order.soNumber)}
-          description={REASON_ACTIONS[asking.action].description}
+          description={asking.description ?? REASON_ACTIONS[asking.action].description}
           confirmLabel={REASON_ACTIONS[asking.action].confirmLabel}
           placeholder={REASON_ACTIONS[asking.action].placeholder}
           danger={asking.action === 'cancel'}

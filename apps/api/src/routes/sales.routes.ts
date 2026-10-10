@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import type { Prisma, SalesOrderStatus } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
-import { AuthRequest, requirePermission, userCan } from '../middleware/auth'
+import { AuthRequest, isAdmin, requirePermission, userCan } from '../middleware/auth'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
@@ -9,7 +9,14 @@ import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
 import { stateName } from '../lib/gstStates'
 import { amountInWords, getPrintHeader } from '../lib/printData'
-import { OPEN_ORDER_STATUSES, checkCredit, creditPosition } from '../services/salesOrder.service'
+import {
+  OPEN_ORDER_STATUSES,
+  checkCredit,
+  confirmMessage,
+  confirmOrHold,
+  creditPosition,
+  type ConfirmOutcome,
+} from '../services/salesOrder.service'
 
 const router = Router()
 const MODULE = 'sales'
@@ -62,8 +69,13 @@ const salesOrderBaseSchema = z.object({
   isJobWork: z.boolean().optional(),
   currency: z.string().length(3).optional(),
   notes: z.string().max(1000).optional().nullable(),
-  /** Save and send for approval in one go, rather than keep it as a draft. */
-  sendForApproval: z.boolean().optional(),
+  /**
+   * Save and confirm in one go, rather than keep it as a draft. A customer over
+   * their credit limit puts it on hold for a manager instead (confirmOrHold).
+   */
+  confirm: z.boolean().optional(),
+  /** Releasing a credit hold while confirming: only the Admin or an approver. */
+  creditReleaseReason: z.string().trim().min(5, 'Say why the credit hold is released, in a few words').max(500).optional().nullable(),
   lines: z.array(salesOrderLineSchema).min(1, 'An order needs at least one line'),
 })
 
@@ -666,22 +678,27 @@ const savedOrderInclude = {
 router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createSalesOrderSchema.parse(req.body)
 
-  const order = await prisma.$transaction(async (tx) => {
+  const { order, confirmed } = await prisma.$transaction(async (tx) => {
     // Checked and priced first, so a refused order never takes a number.
     const { header, lines } = await prepareOrder(tx, data)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
 
-    return tx.salesOrder.create({
+    const created = await tx.salesOrder.create({
       data: {
         ...header,
         soNumber,
         orderDate: data.orderDate ?? new Date(),
-        sentForApprovalAt: data.sendForApproval ? new Date() : null,
         createdById: req.user!.id,
         lines: { create: lines },
       },
-      include: savedOrderInclude,
     })
+    // Saving and confirming are one act: a confirm refused for want of a
+    // release reason takes the new order, and its number, back with it.
+    const confirmed: ConfirmOutcome | null = data.confirm
+      ? await confirmOrHold(tx, created.id, req.user!.id, confirmOptions(req, data.creditReleaseReason))
+      : null
+    const order = await tx.salesOrder.findUniqueOrThrow({ where: { id: created.id }, include: savedOrderInclude })
+    return { order, confirmed }
   })
 
   await writeAuditLog(req, {
@@ -694,7 +711,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
   res.status(201).json({
     success: true,
-    message: `${order.soNumber} ${data.sendForApproval ? 'saved and sent for approval' : 'saved as a draft'}`,
+    message: confirmed ? confirmMessage(order.soNumber, confirmed) : `${order.soNumber} saved as a draft`,
     data: order,
   })
 })
@@ -703,13 +720,13 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
  * PATCH /api/sales/orders/:id
  *
  * Changes a draft — the whole order, header and lines, as the form sends it.
- * Only until it is sent for approval: after that a manager is deciding on it,
- * and once approved it changes only by amending, which keeps the old version.
+ * Only while it is a draft and not on credit hold: once confirmed it changes
+ * only by amending, which keeps the old version.
  */
 router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = createSalesOrderSchema.parse(req.body)
 
-  const { before, after } = await prisma.$transaction(async (tx) => {
+  const { before, after, confirmed } = await prisma.$transaction(async (tx) => {
     const before = await tx.salesOrder.findUnique({
       where: { id: req.params.id },
       include: savedOrderInclude,
@@ -719,7 +736,7 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       throw new AppError(`${before.soNumber} is no longer a draft. Amend it instead.`, 409, 'NOT_DRAFT')
     }
     if (before.sentForApprovalAt) {
-      throw new AppError(`${before.soNumber} has been sent for approval and cannot be changed now`, 409, 'ALREADY_SENT')
+      throw new AppError(`${before.soNumber} is on credit hold, waiting for a manager, and cannot be changed now`, 409, 'ON_HOLD')
     }
 
     const { header, lines } = await prepareOrder(tx, data)
@@ -727,17 +744,19 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
     // The lines are replaced whole. A draft has nothing pointing at its lines
     // yet — no production, no challan — so nothing is cut loose.
     await tx.salesOrderLine.deleteMany({ where: { soId: before.id } })
-    const after = await tx.salesOrder.update({
+    await tx.salesOrder.update({
       where: { id: before.id },
       data: {
         ...header,
         orderDate: data.orderDate ?? before.orderDate,
-        sentForApprovalAt: data.sendForApproval ? new Date() : null,
         lines: { create: lines },
       },
-      include: savedOrderInclude,
     })
-    return { before, after }
+    const confirmed: ConfirmOutcome | null = data.confirm
+      ? await confirmOrHold(tx, before.id, req.user!.id, confirmOptions(req, data.creditReleaseReason))
+      : null
+    const after = await tx.salesOrder.findUniqueOrThrow({ where: { id: before.id }, include: savedOrderInclude })
+    return { before, after, confirmed }
   })
 
   await writeAuditLog(req, {
@@ -751,40 +770,58 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
 
   res.json({
     success: true,
-    message: `${after.soNumber} ${data.sendForApproval ? 'saved and sent for approval' : 'saved'}`,
+    message: confirmed ? confirmMessage(after.soNumber, confirmed) : `${after.soNumber} saved`,
     data: after,
   })
 })
 
-/**
- * POST /api/sales/orders/:id/send
- *
- * A draft saved earlier goes to the approvals list. Until it is sent it is
- * still being typed, and nobody is asked to approve it.
- */
-router.post('/orders/:id/send', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const before = await prisma.salesOrder.findUnique({ where: { id: req.params.id } })
-  if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
-  if (before.status !== 'DRAFT') {
-    throw new AppError(`${before.soNumber} is no longer a draft`, 409, 'NOT_DRAFT')
+/** Who is confirming, for the credit-hold rule. */
+function confirmOptions(req: AuthRequest, creditReleaseReason?: string | null) {
+  return {
+    admin: isAdmin(req.user),
+    canApprove: userCan(req.user, MODULE, 'approve'),
+    creditReleaseReason: creditReleaseReason ?? null,
   }
-  if (before.sentForApprovalAt) {
-    throw new AppError(`${before.soNumber} is already waiting for approval`, 409, 'ALREADY_SENT')
-  }
+}
 
-  const after = await prisma.salesOrder.update({
-    where: { id: before.id },
-    data: { sentForApprovalAt: new Date() },
+const confirmBody = z.object({
+  creditReleaseReason: z
+    .string()
+    .trim()
+    .min(5, 'Say why the credit hold is released, in a few words')
+    .max(500)
+    .optional()
+    .nullable(),
+})
+
+/**
+ * POST /api/sales/orders/:id/confirm
+ *
+ * A saved draft is confirmed: the customer is promised it. Within their credit
+ * limit that is the whole of it. Over the limit or blacklisted it goes on
+ * credit hold for a manager, unless the person confirming may release it and
+ * gives a reason (see confirmOrHold).
+ */
+router.post('/orders/:id/confirm', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { creditReleaseReason } = confirmBody.parse(req.body ?? {})
+
+  const { before, after, outcome } = await prisma.$transaction(async (tx) => {
+    const before = await tx.salesOrder.findUnique({ where: { id: req.params.id } })
+    if (!before) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+    const outcome = await confirmOrHold(tx, before.id, req.user!.id, confirmOptions(req, creditReleaseReason))
+    const after = await tx.salesOrder.findUniqueOrThrow({ where: { id: before.id } })
+    return { before, after, outcome }
   })
+
   await writeAuditLog(req, {
     module: 'sales',
-    action: 'UPDATE',
+    action: outcome.outcome === 'CONFIRMED' ? 'APPROVE' : 'UPDATE',
     entityType: 'SalesOrder',
     entityId: before.id,
     before,
     after,
   })
-  res.json({ success: true, message: `${before.soNumber} sent for approval`, data: after })
+  res.json({ success: true, message: confirmMessage(before.soNumber, outcome), data: after })
 })
 
 /** Money is stored to two decimals; accumulating floats without rounding drifts. */
