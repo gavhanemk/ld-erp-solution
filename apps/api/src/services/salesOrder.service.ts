@@ -43,7 +43,7 @@ export async function creditPosition(
   })
   if (!customer) throw new AppError('Customer not found', 404, 'NOT_FOUND')
 
-  const [invoices, orders, advance] = await Promise.all([
+  const [invoices, orders, advance, credit] = await Promise.all([
     db.salesInvoice.findMany({
       where: { customerId, status: { in: ['UNPAID', 'PARTIAL'] } },
       select: { balanceAmount: true, dueDate: true },
@@ -60,6 +60,7 @@ export async function creditPosition(
       },
     }),
     db.paymentReceipt.aggregate({ where: { customerId, status: 'POSTED' }, _sum: { onAccount: true } }),
+    db.creditNote.aggregate({ where: { customerId, status: 'ISSUED' }, _sum: { onAccount: true } }),
   ])
 
   const now = Date.now()
@@ -86,7 +87,8 @@ export async function creditPosition(
     unpaid: round2(unpaid),
     overdue: round2(overdue),
     openOrders: round2(openOrders),
-    onAccount: round2(Number(advance._sum.onAccount ?? 0)),
+    // Advances received, and credit notes beyond what their invoice owed.
+    onAccount: round2(Number(advance._sum.onAccount ?? 0) + Number(credit._sum.onAccount ?? 0)),
   }
 }
 

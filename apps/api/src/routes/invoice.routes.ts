@@ -526,7 +526,7 @@ const invoiceInclude = {
   charges: { include: { chargeType: { select: { id: true, name: true } } } },
   createdBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
-  _count: { select: { payments: true, creditNotes: true } },
+  _count: { select: { payments: true, creditNotes: { where: { status: { not: 'CANCELLED' } } } } },
 } satisfies Prisma.SalesInvoiceInclude
 
 // GET /api/sales/invoices/:id

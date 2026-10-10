@@ -18,12 +18,13 @@ export interface AllocationInput {
  * reversed rather than read off the invoice, so two people receiving at the
  * same moment cannot both pass the check against a stale figure.
  */
-async function owedOn(tx: Prisma.TransactionClient, invoice: { id: string; totalAmount: Prisma.Decimal }) {
+async function owedOn(tx: Prisma.TransactionClient, invoice: { id: string; totalAmount: Prisma.Decimal; creditedAmount: Prisma.Decimal }) {
   const agg = await tx.paymentReceiptAllocation.aggregate({
     where: { invoiceId: invoice.id, receipt: { status: 'POSTED' } },
     _sum: { amount: true, tdsAmount: true },
   })
-  const settled = Number(agg._sum.amount ?? 0) + Number(agg._sum.tdsAmount ?? 0)
+  // A credit note settles the invoice as far as it reaches, as cash would.
+  const settled = Number(agg._sum.amount ?? 0) + Number(agg._sum.tdsAmount ?? 0) + Number(invoice.creditedAmount)
   return round2(Number(invoice.totalAmount) - settled)
 }
 
@@ -36,7 +37,7 @@ async function owedOn(tx: Prisma.TransactionClient, invoice: { id: string; total
 export async function syncInvoiceFromReceipts(tx: Prisma.TransactionClient, invoiceId: string) {
   const invoice = await tx.salesInvoice.findUniqueOrThrow({
     where: { id: invoiceId },
-    select: { id: true, totalAmount: true, status: true },
+    select: { id: true, totalAmount: true, status: true, creditedAmount: true },
   })
   const agg = await tx.paymentReceiptAllocation.aggregate({
     where: { invoiceId, receipt: { status: 'POSTED' } },
@@ -44,13 +45,14 @@ export async function syncInvoiceFromReceipts(tx: Prisma.TransactionClient, invo
   })
   const paidAmount = round2(Number(agg._sum.amount ?? 0))
   const tdsAmount = round2(Number(agg._sum.tdsAmount ?? 0))
-  const balance = round2(Math.max(0, Number(invoice.totalAmount) - paidAmount - tdsAmount))
+  const credited = Number(invoice.creditedAmount)
+  const balance = round2(Math.max(0, Number(invoice.totalAmount) - paidAmount - tdsAmount - credited))
   const status =
     invoice.status === 'CANCELLED'
       ? 'CANCELLED'
       : balance <= 0
         ? 'PAID'
-        : paidAmount > 0 || tdsAmount > 0
+        : paidAmount > 0 || tdsAmount > 0 || credited > 0
           ? 'PARTIAL'
           : 'UNPAID'
   return tx.salesInvoice.update({
@@ -72,7 +74,7 @@ export async function planAllocations(tx: Prisma.TransactionClient, customerId: 
 
   const invoices = await tx.salesInvoice.findMany({
     where: { id: { in: wanted.map((a) => a.invoiceId) } },
-    select: { id: true, invoiceNumber: true, customerId: true, status: true, totalAmount: true },
+    select: { id: true, invoiceNumber: true, customerId: true, status: true, totalAmount: true, creditedAmount: true },
   })
   const byId = new Map(invoices.map((i) => [i.id, i]))
 

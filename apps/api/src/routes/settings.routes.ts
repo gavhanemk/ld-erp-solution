@@ -572,6 +572,8 @@ const DOC_TYPE_LABELS: Record<string, string> = {
   VCH: 'Voucher',
   FGR: 'Finished goods in',
   RCPT: 'Payment receipt',
+  QT: 'Quotation',
+  CN: 'Credit note',
 }
 
 /**
@@ -918,6 +920,8 @@ const DOC_TYPES = [
   { docType: 'DC', label: 'Delivery Challan', defaultTitle: 'DELIVERY CHALLAN' },
   { docType: 'JW', label: 'Job Work Challan', defaultTitle: 'DELIVERY CHALLAN (JOB WORK)' },
   { docType: 'RCPT', label: 'Payment Receipt', defaultTitle: 'PAYMENT RECEIPT' },
+  { docType: 'QT', label: 'Quotation', defaultTitle: 'QUOTATION' },
+  { docType: 'CN', label: 'Credit Note', defaultTitle: 'CREDIT NOTE' },
 ] as const
 
 const documentTemplateSchema = z.object({

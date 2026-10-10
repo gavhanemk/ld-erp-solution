@@ -199,7 +199,7 @@ router.get('/outstanding', async (req: AuthRequest, res) => {
   must(req, 'view', 'view what customers owe')
   const q = text(req.query.q)
   const onlyOverdue = req.query.overdue === '1'
-  const [invoices, advances] = await Promise.all([
+  const [invoices, receiptAdvances, creditLeft] = await Promise.all([
     prisma.salesInvoice.findMany({
       where: {
         status: { in: ['UNPAID', 'PARTIAL'] },
@@ -225,7 +225,17 @@ router.get('/outstanding', async (req: AuthRequest, res) => {
       where: { status: 'POSTED', onAccount: { gt: 0 }, ...(q ? { customer: { name: { contains: q, mode: 'insensitive' } } } : {}) },
       _sum: { onAccount: true },
     }),
+    prisma.creditNote.groupBy({
+      by: ['customerId'],
+      where: { status: 'ISSUED', onAccount: { gt: 0 }, ...(q ? { customer: { name: { contains: q, mode: 'insensitive' } } } : {}) },
+      _sum: { onAccount: true },
+    }),
   ])
+  // What a customer holds with us: advances not yet applied, and credit notes
+  // beyond what their invoice still owed.
+  const held = new Map<string, number>()
+  for (const a of [...receiptAdvances, ...creditLeft]) held.set(a.customerId, (held.get(a.customerId) ?? 0) + Number(a._sum.onAccount ?? 0))
+  const advances = [...held.entries()].map(([customerId, amount]) => ({ customerId, amount }))
 
   type Row = {
     customer: (typeof invoices)[number]['customer']
@@ -258,7 +268,7 @@ router.get('/outstanding', async (req: AuthRequest, res) => {
   }
   for (const a of advances) {
     const row = rows.get(a.customerId)
-    if (row) row.onAccount = Number(a._sum.onAccount ?? 0)
+    if (row) row.onAccount = a.amount
   }
 
   const data = [...rows.values()]

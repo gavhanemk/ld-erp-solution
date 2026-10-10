@@ -27,6 +27,7 @@ import {
   type ConfirmOutcome,
 } from '../services/salesOrder.service'
 import { priceSalesCharges } from '../services/salesCharges'
+import { winQuote } from '../services/quotation.service'
 
 const router = Router()
 const MODULE = 'sales'
@@ -112,6 +113,8 @@ const salesOrderBaseSchema = z.object({
     .optional(),
   /** Added after tax and carrying none of its own. */
   otherCharges: z.number().min(0).optional(),
+  /** The quotation this order was won from: it is marked won when the order is saved. */
+  quotationId: z.string().optional().nullable(),
   /**
    * Save and confirm in one go, rather than keep it as a draft. A customer over
    * their credit limit puts it on hold for a manager instead (confirmOrHold).
@@ -759,11 +762,13 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
   const { order, confirmed } = await prisma.$transaction(async (tx) => {
     // Checked and priced first, so a refused order never takes a number.
     const { header, lines, charges } = await prepareOrder(tx, data)
+    if (data.quotationId) await winQuote(tx, data.quotationId, data.customerId)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
 
     const created = await tx.salesOrder.create({
       data: {
         ...header,
+        quotationId: data.quotationId || null,
         soNumber,
         orderDate: data.orderDate ?? new Date(),
         createdById: req.user!.id,

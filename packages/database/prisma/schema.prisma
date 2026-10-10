@@ -309,6 +309,9 @@ model User {
   salesInvoicesCancelled SalesInvoice[]            @relation("SICancelledBy")
   receiptsRecorded       PaymentReceipt[]          @relation("ReceiptCreatedBy")
   mosClosed              ManufacturingOrder[]      @relation("MOClosedBy")
+  quotesCreated          SalesQuotation[]          @relation("QuoteCreatedBy")
+  creditNotesRaised      CreditNote[]              @relation("CNCreatedBy")
+  creditNotesCancelled   CreditNote[]              @relation("CNCancelledBy")
   receiptsReversed       PaymentReceipt[]          @relation("ReceiptReversedBy")
   uploadedReceiptFiles   PaymentReceiptAttachment[] @relation("ReceiptAttachmentUploadedBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
@@ -473,6 +476,7 @@ model Brand {
 
   salesOrders         SalesOrder[]
   manufacturingOrders ManufacturingOrder[]
+  quotations          SalesQuotation[] @relation("QuoteBrand")
 
   @@map("brands")
 }
@@ -696,6 +700,7 @@ model Item {
   jobWorkReturnLines  JobWorkReturnLine[]  @relation("JobWorkReturnLines")
   fgReceiptLines      FinishedGoodsReceiptLine[] @relation("FGRLineItem")
   challanLines        DeliveryChallanLine[]      @relation("DCLineItem")
+  quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
 }
 
 model Style {
@@ -946,6 +951,7 @@ model Customer {
   stockReservations StockReservation[] @relation("ReservedForCustomer")
   @@map("customers")
   deliveryChallans  DeliveryChallan[]  @relation("DCCustomer")
+  quotations        SalesQuotation[]   @relation("QuoteCustomer")
 }
 
 /// One of the places a supplier bills from.
@@ -1066,6 +1072,7 @@ model Warehouse {
   jobWorkReturnLines       JobWorkReturnLine[] @relation("JobWorkReturnLines")
   fgReceipts               FinishedGoodsReceipt[] @relation("FGRWarehouse")
   deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
+  creditNotes              CreditNote[]           @relation("CNWarehouse")
 }
 
 model Department {
@@ -1221,6 +1228,9 @@ model SalesOrder {
   manufacturingOrders ManufacturingOrder[]
   /// What the order said before each amendment. The order itself is the latest.
   revisions           SalesOrderRevision[]
+  /// The quotation it was won from, when there was one.
+  quotationId         String?
+  quotation           SalesQuotation? @relation("SOFromQuote", fields: [quotationId], references: [id], onDelete: SetNull)
 
   @@index([soNumber])
   @@index([customerId])
@@ -1326,6 +1336,8 @@ model SalesInvoice {
   paidAmount        Decimal       @default(0) @db.Decimal(12, 2)
   /// TDS the customer deducted against this invoice; settles it like cash.
   tdsAmount         Decimal       @default(0) @db.Decimal(12, 2)
+  /// Credit notes issued against it, up to what it still owed.
+  creditedAmount    Decimal       @default(0) @db.Decimal(12, 2)
   balanceAmount     Decimal       @db.Decimal(12, 2)
   status            InvoiceStatus @default(UNPAID)
   irnNumber         String?
@@ -3535,6 +3547,7 @@ model Size {
   stockLedger  StockLedger[]
   fgrLines     FinishedGoodsReceiptLine[]
   challanSizes DeliveryChallanLineSize[]
+  creditSizes  CreditNoteLineSize[]
 
   @@unique([sizeGroupId, code])
   @@map("sizes")
@@ -3594,6 +3607,8 @@ model SalesInvoiceLine {
   /// The order line this bills, so what is invoiced reconciles to the order.
   soLineId     String?
   soLine       SalesOrderLine? @relation(fields: [soLineId], references: [id])
+  /// Credit notes against this line: returns and adjustments.
+  creditLines  CreditNoteLine[]
 
   @@index([invoiceId])
   @@index([soLineId])
@@ -3773,6 +3788,73 @@ model PurchaseInvoiceCharge {
 // SALES RETURNS
 // ═══════════════════════════════════════════
 
+/// A price offered to a customer before they order: optional for regular
+/// buyers, the first step for new ones or when price or terms change. A won
+/// quotation becomes a sales order, filled in from it.
+model SalesQuotation {
+  id                String    @id @default(cuid())
+  quoteNumber       String    @unique
+  customerId        String
+  customer          Customer  @relation("QuoteCustomer", fields: [customerId], references: [id])
+  brandId           String
+  brand             Brand     @relation("QuoteBrand", fields: [brandId], references: [id])
+  quoteDate         DateTime  @default(now())
+  validUntil        DateTime?
+  /// DRAFT, SENT, WON (a sales order was made from it), LOST.
+  status            String    @default("DRAFT")
+  isJobWork         Boolean   @default(false)
+  customerRef       String?
+  salesperson       String?
+  placeOfSupplyCode String?
+  subtotal          Decimal   @default(0) @db.Decimal(12, 2)
+  discountAmount    Decimal   @default(0) @db.Decimal(12, 2)
+  taxableAmount     Decimal   @default(0) @db.Decimal(12, 2)
+  cgst              Decimal   @default(0) @db.Decimal(12, 2)
+  sgst              Decimal   @default(0) @db.Decimal(12, 2)
+  igst              Decimal   @default(0) @db.Decimal(12, 2)
+  roundOff          Decimal   @default(0) @db.Decimal(6, 2)
+  totalAmount       Decimal   @default(0) @db.Decimal(12, 2)
+  terms             String?
+  notes             String?
+  sentAt            DateTime?
+  decidedAt         DateTime?
+  lostReason        String?
+  createdById       String
+  createdBy         User      @relation("QuoteCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  lines  SalesQuotationLine[]
+  orders SalesOrder[]         @relation("SOFromQuote")
+
+  @@index([customerId])
+  @@index([status])
+  @@map("sales_quotations")
+}
+
+model SalesQuotationLine {
+  id          String         @id @default(cuid())
+  quoteId     String
+  quote       SalesQuotation @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item           @relation("QuoteLineItem", fields: [itemId], references: [id])
+  styleCode   String?
+  color       String?
+  description String?
+  qty         Decimal        @db.Decimal(10, 2)
+  unitPrice   Decimal        @db.Decimal(10, 2)
+  discount    Decimal        @default(0) @db.Decimal(5, 2)
+  gstRate     Decimal        @default(0) @db.Decimal(5, 2)
+  hsnCode     String?
+  amount      Decimal        @default(0) @db.Decimal(12, 2)
+  /// The BOM's cost per piece when quoted, so the margin can be read back.
+  bomCost     Decimal?       @db.Decimal(10, 2)
+  sortOrder   Int            @default(0)
+
+  @@index([quoteId])
+  @@map("sales_quotation_lines")
+}
+
 /// Issued to a customer when goods come back or a bill is reduced. Without it a
 /// return leaves the original invoice standing and overstates GST payable.
 model CreditNote {
@@ -3795,9 +3877,28 @@ model CreditNote {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
+  /// RETURN: goods come back into stock. ADJUSTMENT: an amount only — a rate
+  /// difference, a discount given after the invoice.
+  type              String     @default("RETURN")
+  /// The store returned goods go into.
+  warehouseId       String?
+  warehouse         Warehouse? @relation("CNWarehouse", fields: [warehouseId], references: [id])
+  placeOfSupplyCode String?
+  taxableAmount     Decimal    @default(0) @db.Decimal(12, 2)
+  /// The part of the credit the invoice did not need (it was already paid):
+  /// credit the customer holds, as an advance does.
+  onAccount         Decimal    @default(0) @db.Decimal(12, 2)
+  createdById       String?
+  createdBy         User?      @relation("CNCreatedBy", fields: [createdById], references: [id])
+  cancelledAt       DateTime?
+  cancelledById     String?
+  cancelledBy       User?      @relation("CNCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason      String?
+
   lines CreditNoteLine[]
 
   @@index([customerId])
+  @@index([invoiceId])
   @@map("credit_notes")
 }
 
@@ -3815,8 +3916,30 @@ model CreditNoteLine {
   gstRate      Decimal    @default(0) @db.Decimal(5, 2)
   amount       Decimal    @default(0) @db.Decimal(12, 2)
   sortOrder    Int        @default(0)
+  /// The invoice line credited, so nothing is returned twice.
+  invoiceLineId String?
+  invoiceLine   SalesInvoiceLine? @relation(fields: [invoiceLineId], references: [id], onDelete: SetNull)
+  cgst         Decimal    @default(0) @db.Decimal(12, 2)
+  sgst         Decimal    @default(0) @db.Decimal(12, 2)
+  igst         Decimal    @default(0) @db.Decimal(12, 2)
 
+  sizes CreditNoteLineSize[]
+
+  @@index([invoiceLineId])
   @@map("credit_note_lines")
+}
+
+/// Returned pieces of one credit note line, size by size, as stock holds them.
+model CreditNoteLineSize {
+  id     String         @id @default(cuid())
+  lineId String
+  line   CreditNoteLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+  sizeId String
+  size   Size           @relation(fields: [sizeId], references: [id])
+  qty    Decimal        @db.Decimal(10, 2)
+
+  @@unique([lineId, sizeId])
+  @@map("credit_note_line_sizes")
 }
 
 // ═══════════════════════════════════════════

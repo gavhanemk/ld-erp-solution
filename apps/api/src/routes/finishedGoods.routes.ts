@@ -67,7 +67,7 @@ type Rate = { rate: number; source: 'BOM' | 'STANDARD'; bomVersion: string | nul
  * its style in its colour, else the style's costing for any colour, else the
  * item's standard rate. Null when there is none of the three.
  */
-async function fgRates(
+export async function fgRates(
   db: Prisma.TransactionClient | typeof prisma,
   items: Array<{ id: string; styleId: string | null; color: string | null; standardRate: Prisma.Decimal | null }>,
 ): Promise<Map<string, Rate | null>> {
