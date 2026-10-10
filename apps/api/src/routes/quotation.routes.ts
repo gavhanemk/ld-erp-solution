@@ -86,7 +86,7 @@ function pickBom<T extends QuoteBom>(boms: T[], color?: string | null): T | null
 
 const QUOTE_BOM = {
   where: { isActive: true, status: { in: ['APPROVED', 'DRAFT'] as Array<'APPROVED' | 'DRAFT'> }, OR: [{ costPerPiece: { not: null } }, { sellingPrice: { not: null } }] },
-  select: { status: true, color: true, version: true, costPerPiece: true, sellingPrice: true, marginPercent: true },
+  select: { id: true, status: true, color: true, version: true, costPerPiece: true, sellingPrice: true, marginPercent: true },
   orderBy: [{ approvedAt: 'desc' as const }, { updatedAt: 'desc' as const }],
 }
 
@@ -231,6 +231,7 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       colors: [...new Set([...st.colors, ...st.items.map((i) => i.color).filter((c): c is string => !!c)])],
       items: st.items,
       boms: st.boms.map((b) => ({
+        id: b.id,
         status: b.status,
         color: b.color,
         version: b.version,

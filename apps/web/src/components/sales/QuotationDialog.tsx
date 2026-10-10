@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Calculator, FileText, Hash, Loader2, Package, Plus, Save, Send, StickyNote, Tag, Trash2, User, X } from 'lucide-react'
+import { AlertCircle, Calculator, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Tag, Trash2, User, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
+import { BomFormDialog, type Bom } from '@/components/masters/BomFormDialog'
 import { BRAND_LABEL, styleFormFields } from '@/components/masters/styleFormFields'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
@@ -25,6 +26,7 @@ interface ItemOption {
 
 /** A BOM's cost and selling price per piece, as the styles list sends it. */
 interface StyleBom {
+  id: string
   status: string
   color: string | null
   version: string
@@ -145,8 +147,12 @@ function Field({ label, icon: Icon, htmlFor, required, className = '', children 
  * then the garments. Each line starts from the style, because that is where
  * the BOM is: picking the style and colour fills the rate with the selling
  * price set on the BOM's Pricing step, and the item to bill with the
- * finished-goods item linked to that style. The rate can be typed over for
- * this buyer; the margin it leaves over the BOM's cost is shown under it. A
+ * finished-goods item linked to that style. Where the style has a BOM the
+ * rate is the BOM's and is changed only there: "Change price on BOM" opens the
+ * BOM on its Pricing step over this form, and the saved price comes back into
+ * every line that uses it. A buyer's own deal is the line's discount. Only a
+ * style with no BOM yet takes a typed rate. The margin over cost shows under
+ * the rate. A
  * style not in the master yet is added from the dropdown without leaving the
  * form. GST is shown as the order will charge it. Saved as a draft, or saved
  * and marked sent once it has gone to the buyer.
@@ -170,6 +176,9 @@ export function QuotationDialog({
   const [items, setItems] = useState<ItemOption[]>([])
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [newStyle, setNewStyle] = useState<{ key: string; typed: string } | null>(null)
+  // The BOM opened over the form to change its price, and the one being fetched.
+  const [bomEdit, setBomEdit] = useState<Bom | null>(null)
+  const [bomLoading, setBomLoading] = useState<string | null>(null)
   const [saved, setSaved] = useState<SavedQuote | null>(null)
   const [customerId, setCustomerId] = useState('')
   const [brandId, setBrandId] = useState('')
@@ -189,7 +198,7 @@ export function QuotationDialog({
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !saving) onClose()
+      if (e.key === 'Escape' && !saving && !bomEdit && !newStyle) onClose()
     }
     window.addEventListener('keydown', onKey)
     const previous = document.body.style.overflow
@@ -198,7 +207,7 @@ export function QuotationDialog({
       window.removeEventListener('keydown', onKey)
       document.body.style.overflow = previous
     }
-  }, [open, onClose, saving])
+  }, [open, onClose, saving, bomEdit, newStyle])
 
   useEffect(() => {
     if (!open) return
@@ -301,13 +310,51 @@ export function QuotationDialog({
         const kept = l.itemId && (same(l.styleCode, styleCode) || fits(l.itemId)) ? l.itemId : ''
         const itemId = linked?.id ?? sibling?.itemId ?? (kept || (byType.length === 1 ? byType[0].id : ''))
         const next: LineDraft = { ...l, styleCode, color: colour, itemId }
-        if (l.rateFromBom || !l.unitPrice.trim()) {
-          next.unitPrice = bom?.price != null ? String(bom.price) : l.rateFromBom ? '' : l.unitPrice
-          next.rateFromBom = true
+        // A style with a BOM takes the BOM's price, whatever was there; one
+        // without keeps a typed rate, but not a price left from another BOM.
+        const moved = !same(l.styleCode, styleCode) || !same(l.color, colour)
+        if (bom) {
+          if (moved || l.rateFromBom || !l.unitPrice.trim()) {
+            next.unitPrice = bom.price != null ? String(bom.price) : ''
+            next.rateFromBom = true
+          }
+        } else if (l.rateFromBom) {
+          next.unitPrice = ''
+          next.rateFromBom = false
         }
         return next
       })
     )
+  }
+
+  /** Opens the BOM over the form, on its Pricing step. */
+  const openBom = async (bomId: string) => {
+    setBomLoading(bomId)
+    setError(null)
+    try {
+      setBomEdit((await api.get<{ data: Bom }>(`/masters/bom/${bomId}`)).data)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not open the BOM.')
+    } finally {
+      setBomLoading(null)
+    }
+  }
+
+  /** A BOM saved over the form: its price goes into every line priced from it. */
+  const bomSaved = async (bomId: string) => {
+    try {
+      const fresh = (await api.get<{ data: StyleOption[] }>('/sales/quotations/styles')).data
+      setStyles(fresh)
+      setLines((ls) =>
+        ls.map((l) => {
+          const st = fresh.find((x) => same(x.code, l.styleCode))
+          const b = st ? pickBom(st.boms, l.color) : null
+          return b?.id === bomId ? { ...l, unitPrice: b.price != null ? String(b.price) : '', rateFromBom: true } : l
+        })
+      )
+    } catch {
+      setError('The BOM was saved, but its new price could not be read back. Close and reopen the quotation.')
+    }
   }
 
   const totals = useMemo(() => {
@@ -349,11 +396,13 @@ export function QuotationDialog({
         ? 'Add at least one garment.'
         : noItem
           ? `Choose the item ${noItem.l.styleCode || 'each line'} is billed as — it carries the HSN code and GST.`
-          : filled.find((p) => p.qty <= 0 || p.l.unitPrice.trim() === '')
-            ? 'Every line needs pieces and a rate.'
-            : validUntil && validUntil < quoteDate
-              ? 'It cannot expire before it is made.'
-              : null
+          : filled.find((p) => p.bom && !p.l.unitPrice.trim())
+            ? `${filled.find((p) => p.bom && !p.l.unitPrice.trim())?.l.styleCode} has no selling price on its BOM yet. Use "Set price on BOM" under its rate.`
+            : filled.find((p) => p.qty <= 0 || p.l.unitPrice.trim() === '')
+              ? 'Every line needs pieces and a rate.'
+              : validUntil && validUntil < quoteDate
+                ? 'It cannot expire before it is made.'
+                : null
 
   const save = async (send: boolean) => {
     if (blocker) return
@@ -393,6 +442,8 @@ export function QuotationDialog({
       setSaving(null)
     }
   }
+
+  const canPrice = can('masters', 'approve')
 
   if (!open || !mounted) return null
   const cell = 'form-input h-8 px-2 text-xs'
@@ -484,7 +535,7 @@ export function QuotationDialog({
 
               <Section icon={Package} title="Garments and rates" actions={<span className="text-muted-foreground text-xs tabular-nums">{totals.pieces.toLocaleString('en-IN')} pcs</span>}>
                 <p className="text-muted-foreground mb-2.5 text-xs">
-                  Pick the style and colour, and the rate fills in from the selling price on its BOM (the BOM&apos;s Pricing step). Type over it to quote this buyer a different rate; the margin over the BOM cost shows under it.
+                  Pick the style and colour, and the rate comes from the selling price on its BOM. To change that price, use <b className="text-foreground font-medium">Change price on BOM</b> under the rate. For one buyer&apos;s special deal, give a discount in Disc %.
                 </p>
                 <div className="border-border overflow-x-auto rounded-lg border">
                   <table className="w-full min-w-[1080px] table-fixed border-collapse text-sm">
@@ -590,28 +641,44 @@ export function QuotationDialog({
                               <StepInput className={`${cell} text-right tabular-nums`} value={p.l.qty} placeholder="0" onValueChange={(v) => setLine(p.l.key, { qty: v })} aria-label={`Row ${i + 1} pieces`} />
                             </td>
                             <td>
-                              <StepInput decimals className={`${cell} text-right tabular-nums`} value={p.l.unitPrice} placeholder="0.00" onValueChange={(v) => setLine(p.l.key, { unitPrice: v, rateFromBom: false })} aria-label={`Row ${i + 1} rate`} />
-                              <div className="mt-0.5 text-right text-[10px] leading-snug">
+                              {p.bom ? (
+                                // Priced on the BOM: shown here, changed there.
+                                <div className={`${cell} bg-secondary/60 text-foreground flex items-center justify-end gap-1.5 tabular-nums`} title="This rate comes from the BOM. Change it on the BOM." aria-label={`Row ${i + 1} rate, from the BOM`}>
+                                  <Lock size={11} className="text-muted-foreground shrink-0" />
+                                  {p.l.unitPrice.trim() ? inr(p.rate) : '—'}
+                                </div>
+                              ) : (
+                                <StepInput decimals className={`${cell} text-right tabular-nums`} value={p.l.unitPrice} placeholder="0.00" onValueChange={(v) => setLine(p.l.key, { unitPrice: v, rateFromBom: false })} aria-label={`Row ${i + 1} rate`} />
+                              )}
+                              <div className="mt-0.5 space-y-0.5 text-right text-[10px] leading-snug">
                                 {!st ? null : !p.bom ? (
                                   <span className="text-muted-foreground">
-                                    {st.boms.length ? `BOM is for ${[...new Set(st.boms.map((b) => b.color).filter(Boolean))].join(', ')} — pick the colour` : 'No BOM for this style yet'}
+                                    {st.boms.length ? `BOM is for ${[...new Set(st.boms.map((b) => b.color).filter(Boolean))].join(', ')} — pick the colour` : 'No BOM for this style yet — type the rate'}
                                   </span>
-                                ) : bomPrice == null ? (
-                                  <span className="warn-text" title="Set it on the BOM's Pricing step and it fills in here">
-                                    BOM has no selling price yet
-                                    {p.margin == null && p.bom.cost != null ? ` · cost ₹${inr(p.bom.cost)}` : ''}
-                                  </span>
-                                ) : offBom ? (
-                                  <button type="button" className="text-primary hover:underline" onClick={() => setLine(p.l.key, { unitPrice: String(bomPrice), rateFromBom: true })} title="Go back to the BOM's selling price">
-                                    BOM price ₹{inr(bomPrice)} · use it
-                                  </button>
                                 ) : (
-                                  <span className="text-primary">BOM price{p.bom.status === 'DRAFT' ? ' (draft BOM)' : ''}</span>
-                                )}
-                                {p.margin != null && (
-                                  <div className={p.margin < 0 ? 'text-destructive font-medium' : p.margin < 10 ? 'warn-text' : 'text-muted-foreground'}>
-                                    cost ₹{inr(p.bom?.cost ?? 0)} · {p.margin}% margin
-                                  </div>
+                                  <>
+                                    {bomPrice == null ? (
+                                      <div className="warn-text">No selling price on the BOM yet{p.bom.cost != null ? ` · cost ₹${inr(p.bom.cost)}` : ''}</div>
+                                    ) : offBom ? (
+                                      <button type="button" className="text-primary block w-full text-right hover:underline" onClick={() => setLine(p.l.key, { unitPrice: String(bomPrice), rateFromBom: true })} title="This quotation was saved at an older price. Take the BOM's price now.">
+                                        BOM price now ₹{inr(bomPrice)} · use it
+                                      </button>
+                                    ) : (
+                                      p.margin != null && (
+                                        <div className={p.margin < 0 ? 'text-destructive font-medium' : p.margin < 10 ? 'warn-text' : 'text-muted-foreground'}>
+                                          cost ₹{inr(p.bom.cost ?? 0)} · {p.margin}% margin{p.bom.status === 'DRAFT' ? ' · draft BOM' : ''}
+                                        </div>
+                                      )
+                                    )}
+                                    {canPrice ? (
+                                      <button type="button" className="text-primary inline-flex items-center gap-1 font-medium hover:underline disabled:opacity-50" onClick={() => void openBom(p.bom!.id)} disabled={bomLoading !== null}>
+                                        {bomLoading === p.bom.id ? <Loader2 size={10} className="animate-spin" /> : <Pencil size={10} />}
+                                        {bomPrice == null ? 'Set price on BOM' : 'Change price on BOM'}
+                                      </button>
+                                    ) : (
+                                      <div className="text-muted-foreground">Priced on the BOM by a manager</div>
+                                    )}
+                                  </>
                                 )}
                               </div>
                             </td>
@@ -702,6 +769,21 @@ export function QuotationDialog({
             </>
           )}
         </div>
+
+        {/* The BOM, opened on its Pricing step over this form. Saved, its
+          price comes back into the lines; closed, nothing here is lost. */}
+        {bomEdit &&
+          createPortal(
+            <BomFormDialog
+              open
+              stacked
+              startStep={3}
+              record={bomEdit}
+              onClose={() => setBomEdit(null)}
+              onSaved={() => void bomSaved(bomEdit.id)}
+            />,
+            document.body
+          )}
 
         <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
           {blocker && !loading && (
