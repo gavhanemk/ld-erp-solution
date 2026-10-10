@@ -42,10 +42,15 @@ export interface OrderDetailFull {
   customerPORef: string | null
   customerPODate: string | null
   deliveryAddress: string | null
+  billingAddress: string | null
+  reference: string | null
   salesperson: string | null
   placeOfSupplyCode: string | null
   isJobWork: boolean
   notes: string | null
+  terms: string | null
+  otherCharges: string | number
+  charges: Array<{ id: string; amount: string | number; gstRate: string | number; chargeType: { name: string } }>
   subtotal: string | number
   discountAmount: string | number
   taxableAmount: string | number
@@ -582,6 +587,8 @@ export function SalesOrderDetailDialog({
                           )}
                         </Fact>
                         <Fact label="Deliver to">{o.deliveryAddress || '—'}</Fact>
+                        {o.billingAddress && <Fact label="Bill to">{o.billingAddress}</Fact>}
+                        {o.reference && <Fact label="Reference">{o.reference}</Fact>}
                         <Fact label="Place of supply">
                           {o.placeOfSupplyCode
                             ? `${o.placeOfSupplyCode} · ${intra ? 'CGST + SGST' : 'IGST'}`
@@ -594,6 +601,7 @@ export function SalesOrderDetailDialog({
                         </Fact>
                         <Fact label="Salesperson">{o.salesperson || '—'}</Fact>
                         {o.notes && <Fact label="Notes">{o.notes}</Fact>}
+                        {o.terms && <Fact label="Terms">{o.terms}</Fact>}
                       </dl>
                     </Section>
 
@@ -603,12 +611,14 @@ export function SalesOrderDetailDialog({
                           ['Value', money(o.subtotal)],
                           ...(Number(o.discountAmount) > 0 ? [['Discount', `− ${money(o.discountAmount)}`]] : []),
                           ['Value before GST', money(o.taxableAmount)],
+                          ...(o.charges ?? []).map((c) => [`${c.chargeType.name} @ ${Number(c.gstRate)}%`, money(c.amount)]),
                           ...(intra
                             ? [
                                 ['CGST', money(o.cgst)],
                                 ['SGST', money(o.sgst)],
                               ]
                             : [['IGST', money(o.igst)]]),
+                          ...(Number(o.otherCharges) > 0 ? [['Other charges', money(o.otherCharges)]] : []),
                           ...(Math.abs(Number(o.roundOff)) >= 0.005 ? [['Rounding', money(o.roundOff)]] : []),
                         ].map(([label, value]) => (
                           <div key={label} className="flex items-center justify-between gap-3">

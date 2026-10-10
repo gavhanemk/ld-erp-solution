@@ -7,6 +7,26 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 10 Oct 2026 — sales order details, charges and files
+
+**Migration:** `20261010120000_sales_order_details`
+**Branch:** `feat/sales-dispatch`
+**Status: applied to the shared database on 10 Oct with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `sales_orders`: `billingAddress`, `reference`, `terms`, and `otherCharges`
+  (default 0) — what the old ERP's order carried and ours did not.
+- `sales_order_lines`: `gender`, `fabric`, `printName`, `description`, and
+  `taxExempt` (default false).
+- New `sales_order_charges` (transport, freight, packing — one row per charge
+  type, each with its own GST, like `purchase_order_charges`) and
+  `sales_order_attachments` (files, like `purchase_order_attachments`).
+
+Nothing is dropped and no row changes. On a branch without this folder,
+`prisma migrate dev` will propose dropping all of it. Say no.
+
 ## 9 Oct 2026 — finished goods by size, into stock and out on a challan
 
 **Migration:** `20261009180000_sales_dispatch_and_fg_stock`

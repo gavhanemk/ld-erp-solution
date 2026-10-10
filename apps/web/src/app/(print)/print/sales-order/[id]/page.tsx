@@ -19,6 +19,7 @@ import {
   RULE,
   type SheetColumn,
 } from '@/components/print/StoreSheet'
+import { lineDetails } from '@/components/sales/OrderLinesView'
 
 interface Payload {
   company: Record<string, string | null>
@@ -42,10 +43,15 @@ interface Payload {
     customerPORef: string | null
     customerPODate: string | null
     deliveryAddress: string | null
+    billingAddress: string | null
+    reference: string | null
     salesperson: string | null
     placeOfSupplyCode: string | null
     isJobWork: boolean
     notes: string | null
+    terms: string | null
+    otherCharges: string
+    charges: Array<{ id: string; amount: string; gstRate: string; chargeType: { name: string } }>
     subtotal: string
     discountAmount: string
     taxableAmount: string
@@ -85,6 +91,11 @@ interface Payload {
       gstRate: string
       hsnCode: string | null
       amount: string
+      gender: string | null
+      fabric: string | null
+      printName: string | null
+      description: string | null
+      taxExempt: boolean
       item: {
         code: string
         name: string
@@ -124,7 +135,10 @@ export default function PrintSalesOrder() {
 
   const { company, template, order, taxMode } = data
   const c = order.customer
-  const billing = [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
+  // The order's own bill-to when it was changed for this order, else the customer's.
+  const billing =
+    order.billingAddress || [c.billingAddress, c.billingCity, c.billingState, c.billingPincode].filter(Boolean).join(', ')
+  const termsText = order.terms || template.termsText
   const showHsn = template.showHsn !== false
 
   const columns: SheetColumn[] = [
@@ -156,6 +170,8 @@ export default function PrintSalesOrder() {
               <span style={CODE}>{l.item.code}</span>
               {style ? ` · Style ${style}` : ''}
             </div>
+            {lineDetails(l) && <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>{lineDetails(l)}</div>}
+            {l.description && <div style={{ fontSize: '8.5px', color: INK, marginTop: '1px' }}>{l.description}</div>}
           </>
         ),
         sizes: l.sizes.length ? (
@@ -169,7 +185,7 @@ export default function PrintSalesOrder() {
         qty: <strong>{qty(l.totalQty)}</strong>,
         rate: money(l.unitPrice),
         disc: Number(l.discount) > 0 ? `${Number(l.discount)}%` : '—',
-        gst: `${Number(l.gstRate)}%`,
+        gst: l.taxExempt ? 'Nil' : `${Number(l.gstRate)}%`,
         amount: money(l.amount),
       },
     }
@@ -196,6 +212,7 @@ export default function PrintSalesOrder() {
     ['Value', money(order.subtotal)],
     ...(Number(order.discountAmount) > 0 ? ([['Discount', `− ${money(order.discountAmount)}`]] as Array<[string, string]>) : []),
     ['Taxable value', money(order.taxableAmount)],
+    ...order.charges.map((ch) => [`${ch.chargeType.name} @ ${Number(ch.gstRate)}%`, money(ch.amount)] as [string, string]),
     ...(taxMode === 'CGST_SGST'
       ? ([
           ['CGST', money(order.cgst)],
@@ -204,6 +221,7 @@ export default function PrintSalesOrder() {
       : taxMode === 'IGST'
         ? ([['IGST', money(order.igst)]] as Array<[string, string]>)
         : []),
+    ...(Number(order.otherCharges) > 0 ? ([['Other charges', money(order.otherCharges)]] as Array<[string, string]>) : []),
     ...(Math.abs(Number(order.roundOff)) >= 0.005 ? ([['Rounding', money(order.roundOff)]] as Array<[string, string]>) : []),
   ]
 
@@ -261,6 +279,7 @@ export default function PrintSalesOrder() {
                     : null
                 }
               />
+              <Fact label="Reference" value={order.reference} />
               <Fact label="Brand" value={order.brand.name} />
               <Fact label="Type" value={order.isJobWork ? 'Job work (your fabric)' : null} />
               <Fact label="Salesperson" value={order.salesperson} />
@@ -319,11 +338,11 @@ export default function PrintSalesOrder() {
               </div>
             </div>
           </div>
-          {template.termsText && (
+          {termsText && (
             <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '7px' }}>
               <Eyebrow style={{ color: GREY }}>Terms</Eyebrow>
               <div style={{ fontSize: '9.5px', color: INK, marginTop: '3px', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
-                {template.termsText}
+                {termsText}
               </div>
             </div>
           )}

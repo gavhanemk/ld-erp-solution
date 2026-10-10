@@ -18,11 +18,24 @@ export interface OrderLineView {
   deliveredQty: string | number
   pendingQty: string | number
   hsnCode: string | null
+  gender?: string | null
+  fabric?: string | null
+  printName?: string | null
+  description?: string | null
+  taxExempt?: boolean
   item: { code: string; name: string; color: string | null; style?: { code: string; name: string } | null }
   sizes: Array<{ id: string; qty: string | number; size: { code: string; label: string; sequence: number } }>
 }
 
 const pcs = (n: number | string) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })
+const GENDER: Record<string, string> = { MALE: "Men's", FEMALE: "Women's", UNISEX: 'Unisex' }
+
+/** Gender, fabric and print name in one line, skipping the empty ones. */
+export function lineDetails(l: Pick<OrderLineView, 'gender' | 'fabric' | 'printName'>): string {
+  return [l.gender ? GENDER[l.gender] ?? l.gender : null, l.fabric, l.printName && `Print ${l.printName}`]
+    .filter(Boolean)
+    .join(' · ')
+}
 const money = (v: string | number) =>
   Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -60,12 +73,14 @@ export function OrderLinesView({ lines, showProgress = true }: { lines: OrderLin
                     </>
                   )}
                 </p>
+                {lineDetails(line) && <p className="text-muted-foreground mt-0.5 text-[11px]">{lineDetails(line)}</p>}
+                {line.description && <p className="text-foreground mt-0.5 text-[11px]">{line.description}</p>}
               </div>
               <dl className="grid grid-cols-4 gap-x-4 text-right text-xs">
                 {[
                   ['Rate', `₹${money(line.unitPrice)}`],
                   ['Disc', Number(line.discount) > 0 ? `${Number(line.discount)}%` : '—'],
-                  ['GST', `${Number(line.gstRate)}%`],
+                  ['GST', line.taxExempt ? 'Exempt' : `${Number(line.gstRate)}%`],
                   ['Amount', `₹${money(line.amount)}`],
                 ].map(([label, value]) => (
                   <div key={label}>

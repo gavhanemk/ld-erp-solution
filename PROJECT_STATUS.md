@@ -39,6 +39,18 @@ Stacked on Phase 1 (branch `feat/sales-dispatch`, from `feat/sales-orders`).
 **Migration:** `20261009180000_sales_dispatch_and_fg_stock`, applied to the
 shared database — see MIGRATION-NOTES.md.
 
+**The order form, filled out to match the old ERP (10 Oct):** Basic Details
+in five columns — order no., date, customer, type, brand / broker, brokerage,
+buyer PO no. and date, salesperson / ship-to and delivery date / bill-to and
+reference. A place-of-supply picker beside the customer for an order shipped
+to another state. Each line now has colour (another colour of the style, or
+typed), gender, a size run picked on the line when the style has none, fabric,
+print name, description, tax exempt, and the style's sketch. Charges are
+picked from Masters → Charges with their own GST, as on the purchase bill,
+plus other charges with no GST. Terms and attachments sit beside the totals.
+Every number box steps with the mouse wheel and arrow keys and never goes
+below nothing. Migration `20261010120000_sales_order_details`.
+
 **Next:** step 4, the invoice raised from a dispatched challan (no IRN).
 
 ---

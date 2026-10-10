@@ -1,7 +1,9 @@
 'use client'
 
-import { AlertCircle, Loader2, MapPin } from 'lucide-react'
+import { AlertCircle, Loader2 } from 'lucide-react'
 import { formatRupees } from '@/lib/utils'
+import { GST_STATES } from '@/lib/gstStates'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 
 export interface CustomerOption {
   id: string
@@ -12,10 +14,12 @@ export interface CustomerOption {
   billingAddress: string | null
   billingCity: string | null
   billingState: string | null
+  billingStateCode: string | null
   billingPincode: string | null
   shippingAddress: string | null
   shippingCity: string | null
   shippingState: string | null
+  shippingStateCode: string | null
   shippingPincode: string | null
   creditLimit: string | number | null
   creditDays: number
@@ -43,11 +47,16 @@ export function joinAddress(...parts: Array<string | null | undefined>): string 
   return parts.map((p) => p?.trim()).filter(Boolean).join(', ')
 }
 
+/** The billing address, in one line. */
+export function billingAddressOf(c: CustomerOption): string {
+  return joinAddress(c.billingAddress, c.billingCity, c.billingState, c.billingPincode)
+}
+
 /** Where the goods go: the shipping address, else the billing one. */
 export function deliveryAddressOf(c: CustomerOption): string {
   return c.shippingAddress || c.shippingCity
     ? joinAddress(c.shippingAddress, c.shippingCity, c.shippingState, c.shippingPincode)
-    : joinAddress(c.billingAddress, c.billingCity, c.billingState, c.billingPincode)
+    : billingAddressOf(c)
 }
 
 /** The tax split in words, from the place of supply. */
@@ -56,27 +65,36 @@ export function taxModeWords(ctx: CustomerContext | null): string | null {
   return ctx.placeOfSupply.isIntraState ? 'Within the state · CGST + SGST' : 'Other state · IGST'
 }
 
+const STATES = Object.entries(GST_STATES).sort((a, b) => a[1].localeCompare(b[1]))
+
 /**
- * The picked customer, read back: where they are, how they are taxed, and
+ * The picked customer, read back: their GSTIN, where the goods are taxed, and
  * where they stand against their credit limit with this order on top.
  *
+ * The place of supply starts as the customer's own shipping state. An order
+ * delivered to another state picks that state here, and the tax split follows
+ * it — CGST + SGST inside the mill's state, IGST outside it.
+ *
  * The credit result is worked out here from the figures the API sent and the
- * order's running total, so it moves as lines are typed without asking the
- * server again. Over the limit is a warning, not a block: the order can still
- * be saved, and a manager releases it when approving (the business's answer
- * of 9 Oct 2026).
+ * order's running total, so it moves as lines are typed. Over the limit is a
+ * warning, not a block (the business's answer of 9 Oct 2026).
  */
 export function CustomerPanel({
   customer,
   context,
   loading,
   orderValue,
+  placeOfSupply,
+  onPlaceOfSupply,
 }: {
   customer: CustomerOption
   context: CustomerContext | null
   loading: boolean
   /** This order's total with GST, as it stands on screen. */
   orderValue: number
+  /** A state picked for this order, or '' for the customer's own. */
+  placeOfSupply: string
+  onPlaceOfSupply: (code: string) => void
 }) {
   const credit = context?.credit
   const exposure = credit ? credit.unpaid + credit.openOrders + orderValue : 0
@@ -85,43 +103,53 @@ export function CustomerPanel({
 
   return (
     <div className="border-border bg-secondary/30 space-y-2.5 rounded-lg border p-3">
-      <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1.5">
-        <div className="min-w-0 text-xs">
-          <p className="text-foreground flex items-start gap-1.5">
-            <MapPin size={13} className="text-muted-foreground mt-px shrink-0" />
-            <span className="break-words">
-              {joinAddress(customer.billingAddress, customer.billingCity, customer.billingState) ||
-                'No billing address on the customer'}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <p className="text-muted-foreground text-xs">
+          <span className="text-foreground font-medium">{customer.name}</span>
+          {' · '}
+          {customer.gstin ? (
+            <>
+              GSTIN <span className="font-mono">{customer.gstin}</span>
+            </>
+          ) : (
+            'Not registered for GST'
+          )}
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="so-pos" className="text-muted-foreground text-xs">
+            Place of supply
+          </label>
+          <SmartSelect
+            id="so-pos"
+            className="form-input h-8 w-56 py-0 text-xs"
+            value={placeOfSupply || context?.placeOfSupply?.code || ''}
+            onChange={(e) => onPlaceOfSupply(e.target.value)}
+            title="The state the goods are delivered to. It decides CGST + SGST or IGST."
+          >
+            <option value="">{context?.placeOfSupplyProblem ? 'Pick the state' : 'The customer’s state'}</option>
+            {STATES.map(([code, name]) => (
+              <option key={code} value={code}>
+                {code} · {name}
+              </option>
+            ))}
+          </SmartSelect>
+          {loading ? (
+            <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+              <Loader2 size={13} className="animate-spin" /> Checking...
             </span>
-          </p>
-          <p className="text-muted-foreground mt-0.5 pl-[19px]">
-            {customer.gstin ? (
-              <>
-                GSTIN <span className="font-mono">{customer.gstin}</span>
-              </>
-            ) : (
-              'Not registered for GST'
-            )}
-          </p>
+          ) : taxMode ? (
+            <span className="badge-info whitespace-nowrap">{taxMode}</span>
+          ) : context?.placeOfSupplyProblem ? (
+            <span className="warn-text flex max-w-sm items-start gap-1.5 text-xs">
+              <AlertCircle size={13} className="mt-px shrink-0" />
+              {context.placeOfSupplyProblem}
+            </span>
+          ) : null}
         </div>
-        {loading ? (
-          <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
-            <Loader2 size={13} className="animate-spin" /> Checking...
-          </span>
-        ) : taxMode ? (
-          <span className="badge-info whitespace-nowrap">
-            {taxMode} · {context!.placeOfSupply!.code} {context!.placeOfSupply!.state}
-          </span>
-        ) : context?.placeOfSupplyProblem ? (
-          <span className="warn-text flex max-w-sm items-start gap-1.5 text-xs">
-            <AlertCircle size={13} className="mt-px shrink-0" />
-            {context.placeOfSupplyProblem}
-          </span>
-        ) : null}
       </div>
 
       {credit && (
-        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-border bg-border text-xs sm:grid-cols-5">
+        <div className="border-border bg-border grid grid-cols-2 gap-px overflow-hidden rounded-lg border text-xs sm:grid-cols-5">
           {[
             ['Credit limit', credit.limit != null ? formatRupees(credit.limit) : 'No limit set'],
             [

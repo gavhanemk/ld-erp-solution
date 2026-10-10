@@ -7,8 +7,17 @@ import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
-import { stateName } from '../lib/gstStates'
+import { GST_STATES, stateName } from '../lib/gstStates'
 import { amountInWords, getPrintHeader } from '../lib/printData'
+import {
+  MAX_FILES_PER_DOCUMENT,
+  MAX_FILE_BYTES,
+  removeObject,
+  signedDownloadUrl,
+  signedUploadUrl,
+  statObject,
+  storagePathFor,
+} from '../lib/storage'
 import {
   OPEN_ORDER_STATUSES,
   checkCredit,
@@ -47,6 +56,13 @@ const salesOrderLineSchema = z.object({
   totalQty: z.number().positive('Quantity must be more than zero'),
   unitPrice: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
+  /** As on the size-run master. */
+  gender: z.enum(['MALE', 'FEMALE', 'UNISEX']).optional().nullable(),
+  fabric: z.string().trim().max(80).optional().nullable(),
+  printName: z.string().trim().max(80).optional().nullable(),
+  description: z.string().trim().max(500).optional().nullable(),
+  /** No GST on this line, whatever the item's HSN code says. */
+  taxExempt: z.boolean().optional(),
   /** The size run for this line. Quantities must add up to the line total. */
   sizes: z
     .array(z.object({ sizeId: z.string().min(1), qty: z.number().min(0) }))
@@ -62,6 +78,17 @@ const salesOrderBaseSchema = z.object({
   customerPORef: z.string().max(60).optional().nullable(),
   customerPODate: z.coerce.date().optional().nullable(),
   deliveryAddress: z.string().max(500).optional().nullable(),
+  billingAddress: z.string().max(500).optional().nullable(),
+  reference: z.string().trim().max(80).optional().nullable(),
+  /**
+   * The state the goods go to, when this order is delivered somewhere other
+   * than the customer's own state. Decides CGST + SGST or IGST.
+   */
+  placeOfSupplyCode: z
+    .string()
+    .refine((c) => c in GST_STATES, 'That is not a GST state code')
+    .optional()
+    .nullable(),
   salesperson: z.string().max(120).optional().nullable(),
   brokerId: z.string().optional().nullable(),
   brokeragePercent: z.number().min(0).max(100).optional().nullable(),
@@ -69,6 +96,21 @@ const salesOrderBaseSchema = z.object({
   isJobWork: z.boolean().optional(),
   currency: z.string().length(3).optional(),
   notes: z.string().max(1000).optional().nullable(),
+  terms: z.string().max(2000).optional().nullable(),
+  /** Transport, freight, packing: picked from Masters → Charges, each taxed at its own rate. */
+  charges: z
+    .array(
+      z.object({
+        chargeTypeId: z.string().min(1, 'Pick the charge'),
+        amount: z.number().min(0, 'A charge cannot be negative'),
+        /** The GST on this charge; the charge master's rate when not sent. */
+        gstRate: z.number().min(0).max(100).optional().nullable(),
+      }),
+    )
+    .max(20)
+    .optional(),
+  /** Added after tax and carrying none of its own. */
+  otherCharges: z.number().min(0).optional(),
   /**
    * Save and confirm in one go, rather than keep it as a draft. A customer over
    * their credit limit puts it on hold for a manager instead (confirmOrHold).
@@ -110,7 +152,15 @@ function checkSizeRuns(
   })
 }
 
-export const createSalesOrderSchema = salesOrderBaseSchema.superRefine(checkSizeRuns)
+/** One row per kind of charge: two "Transport" rows on one order are a slip. */
+function checkCharges(order: { charges?: Array<{ chargeTypeId: string }> }, ctx: z.RefinementCtx) {
+  const ids = (order.charges ?? []).map((c) => c.chargeTypeId)
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['charges'], message: 'The same charge appears twice. Put it on one row.' })
+  }
+}
+
+export const createSalesOrderSchema = salesOrderBaseSchema.superRefine(checkSizeRuns).superRefine(checkCharges)
 
 /**
  * An amendment: the whole order again, each line carrying the id it already
@@ -126,6 +176,7 @@ const amendSalesOrderSchema = salesOrderBaseSchema
       .min(1, 'An order needs at least one line'),
   })
   .superRefine(checkSizeRuns)
+  .superRefine(checkCharges)
 
 /** Why an order is cancelled or short-closed. */
 const reasonBody = z.object({
@@ -379,6 +430,8 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
           sizes: { include: { size: true }, orderBy: { size: { sequence: 'asc' } } },
         },
       },
+      charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
+      _count: { select: { attachments: true } },
       deliveryChallans: true,
       invoices: true,
       manufacturingOrders: { select: { id: true, moNumber: true, status: true, totalPackedQty: true } },
@@ -423,6 +476,7 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
           sizes: { include: { size: true }, orderBy: { size: { sequence: 'asc' } } },
         },
       },
+      charges: { include: { chargeType: { select: { name: true } } }, orderBy: { sortOrder: 'asc' } },
     },
   })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
@@ -456,11 +510,14 @@ router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, r
 router.get('/customers/:id/context', requirePermission(MODULE, 'view'), async (req, res) => {
   const value = Number(req.query.value) || 0
   const position = await creditPosition(prisma, req.params.id)
+  // ?state=27: the order goes to another state than the customer's own.
+  const shipTo = text(req.query.state)
+  if (shipTo && !(shipTo in GST_STATES)) throw new AppError(`'${shipTo}' is not a GST state code`, 400, 'BAD_STATE')
 
   let placeOfSupply: { code: string; state: string; isIntraState: boolean } | null = null
   let placeOfSupplyProblem: string | null = null
   try {
-    const pos = await resolvePlaceOfSupply(prisma, req.params.id)
+    const pos = await resolvePlaceOfSupply(prisma, req.params.id, shipTo)
     placeOfSupply = {
       code: pos.placeOfSupplyCode,
       state: stateName(pos.placeOfSupplyCode) ?? '',
@@ -556,16 +613,21 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
         'NOT_FINISHED_GOOD',
       )
     }
+    // The style's own size run when it has one; otherwise any one run the
+    // line picks, but only one — sizes from two runs cannot be one garment.
+    const runs = new Set<string>()
     for (const s of l.sizes ?? []) {
       const size = sizeById.get(s.sizeId)
       if (!size) throw new AppError(`Line ${i + 1}: one of the sizes does not exist`, 400, 'BAD_SIZE')
       if (item.style?.sizeGroupId && size.sizeGroupId !== item.style.sizeGroupId) {
         throw new AppError(`Line ${i + 1}: size ${size.code} is not in ${item.code}'s size run`, 400, 'BAD_SIZE')
       }
+      runs.add(size.sizeGroupId)
     }
+    if (runs.size > 1) throw new AppError(`Line ${i + 1}: the sizes come from two different size runs`, 400, 'BAD_SIZE')
   })
 
-  const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId)
+  const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId, data.placeOfSupplyCode)
 
   // Line discounts first, then a discount on the whole bill. LD prices at
   // invoice level, so taxing before that discount would overstate the GST.
@@ -584,6 +646,7 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
   // piece. An item whose code is not in the HSN master keeps its own rate.
   const hsnIndex = await loadHsnIndex(tx)
   const gstRates = data.lines.map((l) => {
+    if (l.taxExempt) return 0
     const item = itemById.get(l.itemId)!
     const hsn = findHsn(hsnIndex, item.hsnCode)
     if (hsn) {
@@ -606,11 +669,42 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       igst += tax
     }
   })
-  cgst = round2(cgst)
-  sgst = round2(sgst)
-  igst = round2(igst)
+  // Charges: each from the charge master, taxed at its own rate (the
+  // master's unless the form sent one), split the same way as the goods.
+  const chargeInput = (data.charges ?? []).filter((c) => c.amount > 0)
+  const chargeTypes = chargeInput.length
+    ? await tx.chargeType.findMany({
+        where: { id: { in: chargeInput.map((c) => c.chargeTypeId) } },
+        select: { id: true, name: true, defaultGstRate: true, isActive: true, applyOnSale: true },
+      })
+    : []
+  const chargeTypeById = new Map(chargeTypes.map((c) => [c.id, c]))
+  const charges = chargeInput.map((c, i) => {
+    const type = chargeTypeById.get(c.chargeTypeId)
+    if (!type) throw new AppError('One of the charges does not exist', 400, 'BAD_CHARGE')
+    if (!type.isActive || !type.applyOnSale) {
+      throw new AppError(`${type.name} is not a sales charge. Turn it on for sales under Masters → Charges.`, 400, 'BAD_CHARGE')
+    }
+    const amount = round2(c.amount)
+    const gstRate = c.gstRate ?? Number(type.defaultGstRate)
+    const tax = (amount * gstRate) / 100
+    return {
+      chargeTypeId: type.id,
+      amount,
+      gstRate,
+      cgst: isIntraState ? round2(tax / 2) : 0,
+      sgst: isIntraState ? round2(tax / 2) : 0,
+      igst: isIntraState ? 0 : round2(tax),
+      sortOrder: i,
+    }
+  })
+  const chargeTotal = round2(charges.reduce((s, c) => s + c.amount, 0))
+  cgst = round2(cgst + charges.reduce((s, c) => s + c.cgst, 0))
+  sgst = round2(sgst + charges.reduce((s, c) => s + c.sgst, 0))
+  igst = round2(igst + charges.reduce((s, c) => s + c.igst, 0))
+  const otherCharges = round2(data.otherCharges ?? 0)
 
-  const { rounded, roundOff } = applyRoundOff(taxableAmount + cgst + sgst + igst)
+  const { rounded, roundOff } = applyRoundOff(taxableAmount + chargeTotal + cgst + sgst + igst + otherCharges)
 
   // Brokerage falls on the order value, not on the tax.
   const brokeragePercent = data.brokeragePercent ?? (await defaultBrokerage(tx, data.customerId, data.brokerId))
@@ -623,6 +717,8 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
     customerPORef: data.customerPORef ?? null,
     customerPODate: data.customerPODate ?? null,
     deliveryAddress: data.deliveryAddress ?? null,
+    billingAddress: data.billingAddress ?? null,
+    reference: data.reference || null,
     salesperson: data.salesperson ?? null,
     brokerId: data.brokerId ?? null,
     brokeragePercent: brokeragePercent ?? null,
@@ -631,6 +727,8 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
     isJobWork: data.isJobWork ?? false,
     currency: data.currency ?? 'INR',
     notes: data.notes ?? null,
+    terms: data.terms ?? null,
+    otherCharges,
     subtotal,
     discountAmount,
     taxableAmount,
@@ -649,6 +747,11 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       // still reads right if the item is renamed later.
       styleCode: l.styleCode ?? item.style?.code ?? null,
       color: l.color ?? item.color ?? null,
+      gender: l.gender ?? null,
+      fabric: l.fabric || null,
+      printName: l.printName || null,
+      description: l.description || null,
+      taxExempt: l.taxExempt ?? false,
       totalQty: l.totalQty,
       unitPrice: l.unitPrice,
       discount: l.discount ?? 0,
@@ -663,7 +766,7 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
     }
   })
 
-  return { header, lines }
+  return { header, lines, charges }
 }
 
 /** What a saved order is sent back with: enough for the form to reopen it. */
@@ -672,6 +775,7 @@ const savedOrderInclude = {
   brand: { select: { id: true, name: true } },
   broker: { select: { id: true, name: true } },
   lines: { include: { sizes: { include: { size: true } } }, orderBy: { sortOrder: 'asc' } },
+  charges: { include: { chargeType: { select: { id: true, name: true } } }, orderBy: { sortOrder: 'asc' } },
 } satisfies Prisma.SalesOrderInclude
 
 // POST /api/sales/orders
@@ -680,7 +784,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
 
   const { order, confirmed } = await prisma.$transaction(async (tx) => {
     // Checked and priced first, so a refused order never takes a number.
-    const { header, lines } = await prepareOrder(tx, data)
+    const { header, lines, charges } = await prepareOrder(tx, data)
     const soNumber = await nextDocumentNumber(tx, 'SO', data.orderDate ?? new Date())
 
     const created = await tx.salesOrder.create({
@@ -690,6 +794,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         orderDate: data.orderDate ?? new Date(),
         createdById: req.user!.id,
         lines: { create: lines },
+        charges: { create: charges },
       },
     })
     // Saving and confirming are one act: a confirm refused for want of a
@@ -739,17 +844,19 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       throw new AppError(`${before.soNumber} is on credit hold, waiting for a manager, and cannot be changed now`, 409, 'ON_HOLD')
     }
 
-    const { header, lines } = await prepareOrder(tx, data)
+    const { header, lines, charges } = await prepareOrder(tx, data)
 
     // The lines are replaced whole. A draft has nothing pointing at its lines
     // yet — no production, no challan — so nothing is cut loose.
     await tx.salesOrderLine.deleteMany({ where: { soId: before.id } })
+    await tx.salesOrderCharge.deleteMany({ where: { soId: before.id } })
     await tx.salesOrder.update({
       where: { id: before.id },
       data: {
         ...header,
         orderDate: data.orderDate ?? before.orderDate,
         lines: { create: lines },
+        charges: { create: charges },
       },
     })
     const confirmed: ConfirmOutcome | null = data.confirm
@@ -966,7 +1073,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
-    const { header, lines } = await prepareOrder(tx, data)
+    const { header, lines, charges } = await prepareOrder(tx, data)
 
     // The order as it stood, whole, before this change. Plain JSON, so it
     // reads back the same however the tables change later.
@@ -1007,12 +1114,14 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
       }
     }
 
+    await tx.salesOrderCharge.deleteMany({ where: { soId: before.id } })
     const after = await tx.salesOrder.update({
       where: { id: before.id },
       data: {
         ...header,
         orderDate: data.orderDate ?? before.orderDate,
         version: before.version + 1,
+        charges: { create: charges },
       },
       include: savedOrderInclude,
     })
@@ -1199,6 +1308,98 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
 
 // Approving and rejecting a sales order is done through /api/approvals, which
 // holds the rules (draft only, not by whoever raised it, credit hold).
+
+// ── Files kept against an order ─────────────────────────────────────────────
+//
+// The buyer's PO, a sketch, a spec sheet. The same three steps as a purchase
+// order's files: ask for a link, send the file straight to storage, then say
+// it landed so the row is written. The bytes never pass through here.
+
+const orderFileInclude = { uploadedBy: { select: { id: true, name: true } } }
+
+router.get('/orders/:id/attachments', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.salesOrderAttachment.findMany({
+    where: { soId: req.params.id },
+    include: orderFileInclude,
+    orderBy: { createdAt: 'asc' },
+  })
+  res.json({ success: true, data: rows })
+})
+
+/** Step one: a one-use link to send the file to. Nothing is recorded yet. */
+router.post('/orders/:id/attachments/upload-url', requirePermission(MODULE, 'edit'), async (req, res) => {
+  const { fileName } = z
+    .object({
+      fileName: z.string().min(1, 'The file needs a name').max(255),
+      sizeBytes: z
+        .number()
+        .int()
+        .positive('That file is empty')
+        .max(MAX_FILE_BYTES, `Files have to be ${MAX_FILE_BYTES / 1024 / 1024}MB or smaller`),
+    })
+    .parse(req.body)
+
+  const so = await prisma.salesOrder.findUnique({ where: { id: req.params.id }, select: { id: true, soNumber: true } })
+  if (!so) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+  const already = await prisma.salesOrderAttachment.count({ where: { soId: so.id } })
+  if (already >= MAX_FILES_PER_DOCUMENT) {
+    throw new AppError(`${so.soNumber} already has ${MAX_FILES_PER_DOCUMENT} files. Remove one before adding another.`, 409, 'TOO_MANY_FILES')
+  }
+
+  const path = storagePathFor('sales-orders', so.id, fileName)
+  const { uploadUrl } = await signedUploadUrl(path)
+  res.json({ success: true, data: { uploadUrl, storagePath: path, fileName } })
+})
+
+/** Step three: the file is in storage, so record it. */
+router.post('/orders/:id/attachments', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { fileName, storagePath } = z
+    .object({ fileName: z.string().min(1).max(255), storagePath: z.string().min(1) })
+    .parse(req.body)
+
+  const so = await prisma.salesOrder.findUnique({ where: { id: req.params.id }, select: { id: true } })
+  if (!so) throw new AppError('Sales order not found', 404, 'NOT_FOUND')
+  // A path is handed out for one order only; this stops it being replayed on another.
+  if (!storagePath.startsWith(`sales-orders/${so.id}/`)) {
+    throw new AppError('That file does not belong to this order', 400, 'WRONG_DOCUMENT')
+  }
+
+  // The size as storage has it, not as the browser said.
+  const { sizeBytes, mimeType } = await statObject(storagePath)
+  if (sizeBytes > MAX_FILE_BYTES) {
+    await removeObject(storagePath).catch(() => {})
+    throw new AppError(
+      `That file is ${(sizeBytes / 1024 / 1024).toFixed(1)}MB. The limit is ${MAX_FILE_BYTES / 1024 / 1024}MB.`,
+      400,
+      'FILE_TOO_LARGE',
+    )
+  }
+
+  const file = await prisma.salesOrderAttachment.create({
+    data: { soId: so.id, fileName, storagePath, mimeType, sizeBytes, uploadedById: req.user!.id },
+    include: orderFileInclude,
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'SalesOrderAttachment', entityId: file.id, after: file })
+  res.status(201).json({ success: true, data: file })
+})
+
+/** A link that works for a few minutes. The bucket itself stays private. */
+router.get('/order-attachments/:id/link', requirePermission(MODULE, 'view'), async (req, res) => {
+  const file = await prisma.salesOrderAttachment.findUnique({ where: { id: req.params.id } })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+  res.json({ success: true, data: { url: await signedDownloadUrl(file.storagePath), fileName: file.fileName } })
+})
+
+router.delete('/order-attachments/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const file = await prisma.salesOrderAttachment.findUnique({ where: { id: req.params.id }, include: orderFileInclude })
+  if (!file) throw new AppError('That file is no longer here', 404, 'NOT_FOUND')
+  // The row first: a row pointing at a missing file is a broken download; a
+  // file with no row merely wastes space.
+  await prisma.salesOrderAttachment.delete({ where: { id: file.id } })
+  await removeObject(file.storagePath).catch(() => {})
+  await writeAuditLog(req, { module: MODULE, action: 'DELETE', entityType: 'SalesOrderAttachment', entityId: file.id, before: file })
+  res.json({ success: true, message: `${file.fileName} removed.` })
+})
 
 // GET /api/sales/invoices
 router.get('/invoices', requirePermission(MODULE, 'view'), async (req, res) => {

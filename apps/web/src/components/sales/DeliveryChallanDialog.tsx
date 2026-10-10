@@ -20,6 +20,7 @@ import { api, ApiError } from '@/lib/api'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
 
 interface PrepSize {
   sizeId: string
@@ -528,28 +529,26 @@ export function DeliveryChallanDialog({
                               {l.sizes ? (
                                 sizes.map((s) => (
                                   <td key={s.sizeId} className="px-1 py-1">
-                                    <input
+                                    <StepInput
                                       className={`form-input h-8 w-14 px-1 text-center text-xs tabular-nums ${
                                         s.short ? 'border-destructive/60' : s.over ? 'border-primary/60' : ''
                                       }`}
-                                      inputMode="numeric"
                                       value={d.sizes[s.sizeId] ?? ''}
                                       placeholder="0"
                                       aria-label={`${l.item.code} size ${s.code}, send now`}
                                       title={s.short ? `Only ${pcs(s.inStock)} in this store` : s.over ? 'More than the order still wants' : undefined}
-                                      onChange={(e) => setDraft(l.soLineId, { sizes: { ...d.sizes, [s.sizeId]: e.target.value.replace(/[^\d]/g, '') } })}
+                                      onValueChange={(v) => setDraft(l.soLineId, { sizes: { ...d.sizes, [s.sizeId]: v } })}
                                     />
                                   </td>
                                 ))
                               ) : (
                                 <td className="px-1 py-1">
-                                  <input
+                                  <StepInput
                                     className={`form-input h-8 w-20 px-1 text-center text-xs tabular-nums ${lineShort ? 'border-destructive/60' : over ? 'border-primary/60' : ''}`}
-                                    inputMode="numeric"
                                     value={d.qty}
                                     placeholder="0"
                                     aria-label={`${l.item.code}, send now`}
-                                    onChange={(e) => setDraft(l.soLineId, { qty: e.target.value.replace(/[^\d]/g, '') })}
+                                    onValueChange={(v) => setDraft(l.soLineId, { qty: v })}
                                   />
                                 </td>
                               )}
@@ -581,7 +580,7 @@ export function DeliveryChallanDialog({
               <Section icon={Truck} title="Packing and transport">
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-x-4 gap-y-3 md:grid-cols-4">
                   <Field label="Cartons" htmlFor="dc-cartons">
-                    <input id="dc-cartons" className="form-input tabular-nums" inputMode="numeric" value={cartons} placeholder="0" onChange={(e) => setCartons(e.target.value.replace(/[^\d]/g, ''))} />
+                    <StepInput id="dc-cartons" className="form-input tabular-nums" value={cartons} placeholder="0" onValueChange={setCartons} />
                   </Field>
                   <Field label="Transporter" htmlFor="dc-transporter">
                     <input id="dc-transporter" className="form-input" maxLength={120} value={transporter} onChange={(e) => setTransporter(e.target.value)} />

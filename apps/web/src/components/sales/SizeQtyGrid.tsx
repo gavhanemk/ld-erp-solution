@@ -1,5 +1,7 @@
 'use client'
 
+import { StepInput } from '@/components/ui/StepInput'
+
 /**
  * One line's pieces, size by size.
  *
@@ -42,14 +44,12 @@ export function SizeQtyGrid({
           title={s.label}
         >
           <span className="text-muted-foreground text-[10px] font-medium leading-none">{s.code}</span>
-          <input
-            type="text"
-            inputMode="numeric"
+          <StepInput
             className={`form-input px-1 text-center tabular-nums ${layout === 'grid' ? 'h-10 w-full text-sm' : 'h-8 w-14 text-xs'}`}
             value={values[s.id] ?? ''}
             placeholder="0"
             disabled={disabled}
-            onChange={(e) => onChange(s.id, e.target.value.replace(/[^\d]/g, ''))}
+            onValueChange={(v) => onChange(s.id, v)}
             aria-label={`${name}, size ${s.label}`}
           />
         </label>

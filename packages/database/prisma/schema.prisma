@@ -304,6 +304,7 @@ model User {
   createdPayments      SupplierPayment[]           @relation("PaymentCreatedBy")
   reversedPayments     SupplierPayment[]           @relation("PaymentReversedBy")
   uploadedFiles        PurchaseOrderAttachment[]   @relation("AttachmentUploadedBy")
+  uploadedSalesFiles   SalesOrderAttachment[]      @relation("SOAttachmentUploadedBy")
   uploadedEnquiryFiles PurchaseEnquiryAttachment[] @relation("EnquiryAttachmentUploadedBy")
   movedStock           StockTransfer[]             @relation("TransferMovedBy")
   cancelledStock       StockTransfer[]             @relation("TransferCancelledBy")
@@ -1142,6 +1143,11 @@ model SalesOrder {
   orderDate         DateTime         @default(now())
   deliveryDate      DateTime?
   deliveryAddress   String?
+  /// The buyer's billing address as it stood for this order: copied from the
+  /// customer and changeable for this order only, as the old ERP allowed.
+  billingAddress    String?
+  /// Any reference the order is known by besides the buyer's PO.
+  reference         String?
   salesperson       String?
   /// The agent on this sale and what they earn. Brokerage is a real cost with
   /// TDS deducted against it, so it cannot live only in someone's notebook.
@@ -1164,6 +1170,10 @@ model SalesOrder {
   currency          String           @default("INR")
   isJobWork         Boolean          @default(false)
   notes             String?
+  /// Terms and conditions printed on the order confirmation.
+  terms             String?
+  /// Added after tax and carrying none of its own, as on the purchase order.
+  otherCharges      Decimal          @default(0) @db.Decimal(12, 2)
   attachmentUrl     String?
   version           Int              @default(1)
   createdById       String
@@ -1195,6 +1205,10 @@ model SalesOrder {
   shortCloseReason    String?
 
   lines               SalesOrderLine[]
+  /// Transport, freight, packing: each taxed at its own rate.
+  charges             SalesOrderCharge[]
+  /// The buyer's PO, a sketch, a spec sheet.
+  attachments         SalesOrderAttachment[]
   deliveryChallans    DeliveryChallan[]
   invoices            SalesInvoice[]
   manufacturingOrders ManufacturingOrder[]
@@ -1224,6 +1238,14 @@ model SalesOrderLine {
   /// does not send them.
   styleCode    String?
   color        String?
+  /// MALE, FEMALE or UNISEX, as on the size-run master.
+  gender       String?
+  fabric       String?
+  /// The print or design name the buyer orders by.
+  printName    String?
+  description  String?
+  /// No GST on this line: the rate is 0 whatever the HSN code says.
+  taxExempt    Boolean    @default(false)
   totalQty     Decimal    @db.Decimal(10, 2)
   unitPrice    Decimal    @default(0) @db.Decimal(10, 2)
   discount     Decimal    @default(0) @db.Decimal(5, 2)
@@ -3528,6 +3550,7 @@ model ChargeType {
   createdAt       DateTime @default(now())
 
   salesCharges         SalesInvoiceCharge[]
+  salesOrderCharges    SalesOrderCharge[]
   purchaseCharges      PurchaseInvoiceCharge[]
   purchaseOrderCharges PurchaseOrderCharge[]
 
@@ -3573,6 +3596,43 @@ model PurchaseOrderCharge {
   @@unique([poId, chargeTypeId])
   @@index([poId])
   @@map("purchase_order_charges")
+}
+
+/// A charge on a sales order — transport, freight, packing. The same shape as
+/// the purchase order's, so the invoice raised later can carry it line for line.
+model SalesOrderCharge {
+  id           String     @id @default(cuid())
+  soId         String
+  so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
+  chargeTypeId String
+  chargeType   ChargeType @relation(fields: [chargeTypeId], references: [id])
+  amount       Decimal    @db.Decimal(12, 2)
+  gstRate      Decimal    @default(0) @db.Decimal(5, 2)
+  cgst         Decimal    @default(0) @db.Decimal(12, 2)
+  sgst         Decimal    @default(0) @db.Decimal(12, 2)
+  igst         Decimal    @default(0) @db.Decimal(12, 2)
+  sortOrder    Int        @default(0)
+
+  @@unique([soId, chargeTypeId])
+  @@index([soId])
+  @@map("sales_order_charges")
+}
+
+/// A file kept against a sales order, as on the purchase order.
+model SalesOrderAttachment {
+  id           String     @id @default(cuid())
+  soId         String
+  so           SalesOrder @relation(fields: [soId], references: [id], onDelete: Cascade)
+  fileName     String
+  storagePath  String     @unique
+  mimeType     String?
+  sizeBytes    Int
+  uploadedById String
+  uploadedBy   User       @relation("SOAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime   @default(now())
+
+  @@index([soId])
+  @@map("sales_order_attachments")
 }
 
 model PurchaseInvoiceCharge {
