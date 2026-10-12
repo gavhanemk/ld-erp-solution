@@ -2,13 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X } from 'lucide-react'
+import { AlertCircle, Ban, CheckCircle2, ClipboardList, Factory, Info, Layers, Loader2, PackageCheck, Pencil, Send, X, Scissors } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { CuttingDialog } from './CuttingDialog'
+import { SetRoutingDialog } from './SetRoutingDialog'
+import { MoProductionPanel } from './floor/MoProductionPanel'
+import { PROGRESS, type Flow } from './floor/types'
 import { LIVE_MO, moStatus } from './status'
 
 interface MoDetail {
@@ -31,11 +35,17 @@ interface MoDetail {
     id: string
     color: string
     totalQty: number
-    style: { code: string; name: string }
+    style: { id: string; code: string; name: string }
     soLine: { item: { code: string; name: string } } | null
     bom: { id: string; version: string; color: string | null; status: string } | null
     sizes: Array<{ id: string; qty: number; size: { code: string; sequence: number } }>
   }>
+  routing: { id: string; code: string; name: string; version: number } | null
+  steps: Array<{ id: string; sequence: number; name: string; kind: string; execution: string; isQcStep: boolean; skippedAt: string | null; department: { name: string } }>
+  progress: string | null
+  heldAt: string | null
+  totalStitchedQty?: number
+  totalFinishedQty?: number
   materialRequisitions: Array<{
     id: string
     mrNumber: string
@@ -47,10 +57,30 @@ interface MoDetail {
     _count: { lines: number }
   }>
   fgReceipts: Array<{ id: string; fgrNumber: string; receiptDate: string; cancelledAt: string | null; lines: Array<{ qty: string | number }> }>
+  cuttingOrders?: Array<{
+    id: string
+    cutOrderNumber: string
+    cutDate: string
+    status: string
+    fabricUsed: string | number | null
+    wastage: string | number | null
+    actualPieces: number
+    lotNo?: string | null
+    cutterName?: string | null
+    moLine?: { color: string; style: { code: string } } | null
+    _count?: { bundles: number }
+    fabricItem: { code: string; name: string; uom: { symbol: string } | null } | null
+    panelItem: { code: string } | null
+  }>
+  totalCutQty?: number
 }
 
 interface PlanRow {
   key: string
+  /** Item and department: what the "ours / customer's" switch is keyed by. */
+  baseKey: string
+  defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
+  issued: number
   item: { id: string; code: string; name: string; type: string; uom: string | null }
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId: string | null
@@ -66,6 +96,7 @@ interface PlanRow {
 }
 
 interface MaterialPlan {
+  mo: { so: { id: string; soNumber: string; customerId: string; isJobWork: boolean; customer: { name: string } } | null }
   rows: PlanRow[]
   missing: Array<{ style: string; color: string; pieces: number }>
   warehouses: Array<{ id: string; name: string }>
@@ -107,26 +138,50 @@ export function ManufacturingOrderDetailDialog({
   const [requiredDate, setRequiredDate] = useState('')
   const [loading, setLoading] = useState(false)
   const [loadingPlan, setLoadingPlan] = useState(false)
-  const [busy, setBusy] = useState<'release' | 'raise' | 'close' | null>(null)
+  const [busy, setBusy] = useState<'release' | 'raise' | 'close' | 'short' | null>(null)
   const [closing, setClosing] = useState(false)
+  const [completingShort, setCompletingShort] = useState(false)
+  const [cutting, setCutting] = useState(false)
+  const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
+  const [settingRoute, setSettingRoute] = useState(false)
+  const [flow, setFlow] = useState<Flow | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
-  const load = useCallback(async (id: string) => {
-    setLoading(true)
+  /** The floor picture, for an order with a route. */
+  const loadFlow = useCallback(async (id: string) => {
     try {
-      setMo((await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data)
+      setFlow((await api.get<{ data: Flow }>(`/production/orders/${id}/flow`)).data)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not open that manufacturing order.')
-    } finally {
-      setLoading(false)
+      setError(err instanceof ApiError ? err.message : 'Could not load the production route.')
     }
   }, [])
 
-  const loadPlan = useCallback(async (id: string) => {
+  const load = useCallback(
+    async (id: string) => {
+      setLoading(true)
+      try {
+        const data = (await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data
+        setMo(data)
+        if (data.steps?.length) await loadFlow(id)
+        else setFlow(null)
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not open that manufacturing order.')
+      } finally {
+        setLoading(false)
+      }
+    },
+    [loadFlow],
+  )
+
+  // Rows turned to the other owner by the person: "this fabric is ours after all".
+  const [swap, setSwap] = useState<Set<string>>(new Set())
+
+  const loadPlan = useCallback(async (id: string, flipped: Set<string> = new Set()) => {
     setLoadingPlan(true)
     try {
-      const res = await api.get<{ data: MaterialPlan }>(`/production/orders/${id}/materials`)
+      const qs = flipped.size ? `?swap=${encodeURIComponent([...flipped].join(','))}` : ''
+      const res = await api.get<{ data: MaterialPlan }>(`/production/orders/${id}/materials${qs}`)
       setPlan(res.data)
       setAsk(
         Object.fromEntries(
@@ -148,11 +203,23 @@ export function ManufacturingOrderDetailDialog({
     setError(null)
     setMessage(null)
     setMo(null)
+    setFlow(null)
     setPlan(null)
     setRequiredDate('')
+    setSwap(new Set())
     void load(moId)
     void loadPlan(moId)
   }, [moId, load, loadPlan])
+
+  /** Turns a plan row to the other owner and works the plan out again. */
+  const flip = (r: PlanRow) => {
+    if (!moId) return
+    const next = new Set(swap)
+    if (next.has(r.baseKey)) next.delete(r.baseKey)
+    else next.add(r.baseKey)
+    setSwap(next)
+    void loadPlan(moId, next)
+  }
 
   useEffect(() => {
     if (!moId) return
@@ -170,10 +237,11 @@ export function ManufacturingOrderDetailDialog({
 
   const refresh = async (msg: string) => {
     setMessage(msg)
+    setError(null)
     onChanged(msg)
     if (moId) {
       await load(moId)
-      await loadPlan(moId)
+      await loadPlan(moId, swap)
     }
   }
 
@@ -202,6 +270,23 @@ export function ManufacturingOrderDetailDialog({
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not close it.')
       setClosing(false)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Finished with fewer pieces than planned: completed, not called off. */
+  const completeShort = async (reason: string) => {
+    if (!mo) return
+    setBusy('short')
+    setError(null)
+    try {
+      const res = await api.post<{ message?: string }>(`/production/orders/${mo.id}/complete-short`, { reason })
+      setCompletingShort(false)
+      await refresh(res.message ?? `${mo.moNumber} completed.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not complete it.')
+      setCompletingShort(false)
     } finally {
       setBusy(null)
     }
@@ -274,6 +359,10 @@ export function ManufacturingOrderDetailDialog({
                   {mo?.moNumber ?? 'Manufacturing order'}
                 </h2>
                 {s && <span className={s.cls}>{s.label}</span>}
+                {mo?.steps?.length && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' ? (
+                  <span className={(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).cls}>{(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).label}</span>
+                ) : null}
+                {mo?.heldAt && <span className="badge-warning">On hold</span>}
                 {mo?.so?.isJobWork && <span className="badge-purple">Job work</span>}
               </div>
               {mo && (
@@ -293,6 +382,11 @@ export function ManufacturingOrderDetailDialog({
                   {busy === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Release
                 </button>
               </>
+            )}
+            {mo && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && mo.totalPackedQty > 0 && mo.totalPackedQty < mo.totalPlannedQty && can('production', 'edit') && (
+              <button className="btn-secondary" onClick={() => setCompletingShort(true)} disabled={busy !== null} title="Some pieces will not be made: finish with what is packed">
+                <CheckCircle2 size={15} /> Complete with {mo.totalPackedQty.toLocaleString('en-IN')}
+              </button>
             )}
             {mo && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'edit') && (
               <button className="btn-ghost text-destructive" onClick={() => setClosing(true)} disabled={busy !== null}>
@@ -328,9 +422,10 @@ export function ManufacturingOrderDetailDialog({
                   {mo.closeReason ? ` — ${mo.closeReason}` : ''}
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
                 {[
                   ['Planned', `${pcs(mo.totalPlannedQty)} pcs`],
+                  ['Cut', `${pcs(mo.totalCutQty ?? 0)} pcs${mo.steps?.length && mo.totalFinishedQty ? ` · ${pcs(mo.totalFinishedQty)} through` : ''}`],
                   ['Packed', `${pcs(mo.totalPackedQty)} pcs · ${share}%`],
                   ['Planned dates', `${mo.plannedStartDate ? formatDate(mo.plannedStartDate) : '—'} → ${mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}`],
                   ['Order delivery', mo.so?.deliveryDate ? formatDate(mo.so.deliveryDate) : '—'],
@@ -418,6 +513,7 @@ export function ManufacturingOrderDetailDialog({
                               <th style={{ textAlign: 'right' }}>Needed</th>
                               <th style={{ textAlign: 'right' }}>In stock</th>
                               <th style={{ textAlign: 'right' }}>Asked for</th>
+                              <th style={{ textAlign: 'right' }}>Issued</th>
                               <th style={{ textAlign: 'right' }}>Short</th>
                               {live && mayRaise && (
                                 <>
@@ -447,9 +543,22 @@ export function ManufacturingOrderDetailDialog({
                                     <div className="text-foreground text-sm font-medium">
                                       <span className="font-mono text-xs">{r.item.code}</span> — {r.item.name}
                                     </div>
-                                    <div className="text-muted-foreground text-[11px]">
+                                    <div className="text-muted-foreground flex flex-wrap items-center gap-1.5 text-[11px]">
                                       {r.styles.join(', ')}
-                                      {r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple ml-1.5">Customer&apos;s</span>}
+                                      {live && mayRaise && plan.mo.so ? (
+                                        // Whose cloth this is: the plan's guess, switchable.
+                                        <button
+                                          type="button"
+                                          className={`${r.ownership === 'CUSTOMER_OWNED' ? 'badge-purple' : 'badge-neutral'} cursor-pointer hover:opacity-80`}
+                                          onClick={() => flip(r)}
+                                          disabled={loadingPlan}
+                                          title={`Switch to ${r.ownership === 'CUSTOMER_OWNED' ? 'our own stock' : `${plan.mo.so.customer.name}'s stock`}`}
+                                        >
+                                          {r.ownership === 'CUSTOMER_OWNED' ? `${plan.mo.so.customer.name}'s` : 'Ours'} ⇄
+                                        </button>
+                                      ) : (
+                                        r.ownership === 'CUSTOMER_OWNED' && <span className="badge-purple">Customer&apos;s</span>
+                                      )}
                                     </div>
                                   </td>
                                   <td className="text-xs">
@@ -471,6 +580,9 @@ export function ManufacturingOrderDetailDialog({
                                   </td>
                                   <td className="text-right text-xs tabular-nums">{qty(r.inStock)}</td>
                                   <td className="text-right text-xs tabular-nums">{r.requested > 0 ? qty(r.requested) : '—'}</td>
+                                  <td className={`text-right text-xs tabular-nums ${r.issued > 0 && r.issued >= r.required - 1e-9 ? 'text-primary' : ''}`} title={r.required > 0 ? `${Math.round((r.issued / r.required) * 100)}% of what is needed` : undefined}>
+                                    {r.issued > 0 ? qty(r.issued) : '—'}
+                                  </td>
                                   <td className={`text-right text-xs tabular-nums ${r.short > 0 ? 'warn-text font-medium' : 'text-muted-foreground'}`}>{r.short > 0 ? qty(r.short) : '—'}</td>
                                   {live && mayRaise && (
                                     <>
@@ -508,8 +620,9 @@ export function ManufacturingOrderDetailDialog({
                     )}
                     <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-xs">
                       <Info size={13} className="mt-px shrink-0" />
-                      Needed = pieces by size × the BOM per piece, wastage included. Requisitions go one per department and wait for approval in
-                      Inventory; the store then issues what it has and passes the rest to Purchase.
+                      Needed = pieces by size × the BOM per piece, wastage included. On a job-work order the customer&apos;s fabric (and anything else
+                      they have sent us) is drawn from their own stock — click Ours / Customer&apos;s to switch a row. Requisitions go one per department and
+                      wait for approval in Inventory; the store then issues what it has and passes the rest to Purchase.
                     </p>
                     {live && mayRaise && raiseBlocker && <p className="warn-text mt-1 text-xs">{raiseBlocker}</p>}
                     {mo.status === 'DRAFT' && <p className="text-muted-foreground mt-1 text-xs">Release it to ask the store for these.</p>}
@@ -541,6 +654,47 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   )}
                 </Section>
+                {!mo.steps?.length && (mo.so?.isJobWork || !!mo.cuttingOrders?.length) && (
+                <Section
+                  icon={Scissors}
+                  title="Cutting"
+                  actions={
+                    mo.status !== 'DRAFT' && mo.status !== 'CLOSED' && mo.status !== 'COMPLETED' && can('production', 'create') ? (
+                      <button type="button" className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setCutting(true)} disabled={busy !== null}>
+                        <Scissors size={13} /> Record cutting
+                      </button>
+                    ) : undefined
+                  }
+                >
+                  {!mo.cuttingOrders?.length ? (
+                    <p className="text-muted-foreground text-sm">Nothing cut yet. Record each cutting: fabric used, waste and pieces by size.</p>
+                  ) : (
+                    <div className="divide-border divide-y text-sm">
+                      {mo.cuttingOrders.map((c) => (
+                        <div key={c.id} className={`flex flex-wrap items-center justify-between gap-3 py-1.5 ${c.status === 'CANCELLED' ? 'opacity-60' : ''}`}>
+                          <span className="min-w-0">
+                            <span className="font-mono text-xs">{c.cutOrderNumber}</span> <span className="text-muted-foreground text-xs">{formatDate(c.cutDate)}</span>
+                            {c.fabricItem && (
+                              <span className="text-muted-foreground block text-[11px]">
+                                {c.fabricItem.name}: {Number(c.fabricUsed ?? 0)} used, {Number(c.wastage ?? 0)} waste {c.fabricItem.uom?.symbol ?? ''}
+                                {c.panelItem ? ` · panels into stock as ${c.panelItem.code}` : ''}
+                              </span>
+                            )}
+                          </span>
+                          <span className="flex items-center gap-2 text-xs tabular-nums">
+                            {c.status === 'CANCELLED' ? 'Cancelled' : `${pcs(c.actualPieces)} pcs`}
+                            {c.status !== 'CANCELLED' && can('production', 'edit') && (
+                              <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive p-1" onClick={() => setCancellingCut(c)} aria-label={`Cancel ${c.cutOrderNumber}`}>
+                                <Ban size={13} />
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </Section>
+                )}
                 <Section icon={PackageCheck} title="Packed (Finished Goods In)">
                   {mo.fgReceipts.length === 0 ? (
                     <p className="text-muted-foreground text-sm">Nothing booked in against it yet. Packed garments go in under Inventory → Finished Goods In, against this order.</p>
@@ -560,10 +714,68 @@ export function ManufacturingOrderDetailDialog({
                   )}
                 </Section>
               </div>
+
+              <MoProductionPanel
+                mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
+                flow={flow}
+                materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
+                onLoadStages={() => setSettingRoute(true)}
+                onChanged={(msg) => void refresh(msg)}
+              />
             </>
           ) : null}
         </div>
       </div>
+      {settingRoute && mo && (
+        <SetRoutingDialog
+          moId={mo.id}
+          moNumber={mo.moNumber}
+          styleIds={[...new Set(mo.lines.map((l) => l.style.id))]}
+          onClose={() => setSettingRoute(false)}
+          onSaved={(msg) => {
+            setSettingRoute(false)
+            void refresh(msg)
+          }}
+        />
+      )}
+      {cutting && mo && (
+        <CuttingDialog
+          moId={mo.id}
+          onClose={() => setCutting(false)}
+          onSaved={(msg) => {
+            setCutting(false)
+            void refresh(msg)
+          }}
+        />
+      )}
+      {cancellingCut && mo && (
+        <ReasonDialog
+          title={`Cancel ${cancellingCut.cutOrderNumber}?`}
+          description="Its pieces come off the order's cut count, and any panels it put into a store come out again (refused if they have already gone on)."
+          confirmLabel="Cancel the cutting"
+          danger
+          onCancel={() => setCancellingCut(null)}
+          onConfirm={(reason) => {
+            const c = cancellingCut
+            setCancellingCut(null)
+            void api
+              .post<{ message?: string }>(`/production/cutting/${c.id}/cancel`, { reason })
+              .then((res) => refresh(res.message ?? `${c.cutOrderNumber} cancelled.`))
+              .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not cancel it.'))
+          }}
+        />
+      )}
+      {completingShort && mo && (
+        <ReasonDialog
+          title={`Complete ${mo.moNumber} with ${mo.totalPackedQty} of ${mo.totalPlannedQty}?`}
+          description={`What was packed stands and the order is marked completed. The other ${mo.totalPlannedQty - mo.totalPackedQty} pieces are free to plan again on the sales order, or to short-close there.`}
+          confirmLabel="Complete it"
+          placeholder="3 pieces damaged at embroidery"
+          busy={busy === 'short'}
+          onCancel={() => setCompletingShort(false)}
+          onConfirm={(reason) => void completeShort(reason)}
+        />
+      )}
       {closing && mo && (
         <ReasonDialog
           title={`Close ${mo.moNumber}?`}

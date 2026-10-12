@@ -8,7 +8,13 @@ import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
 /**
- * Sending our fabric out to an outside unit, and taking it back.
+ * Sending material out to an outside unit, and taking it back.
+ *
+ * The material may be ours, or a customer's — cut panels from their fabric
+ * going out for embroidery. Each line says whose it is; a customer's stays
+ * theirs at the unit and comes back as theirs. Coming back, every piece
+ * settled is good, damaged at the unit, or wasted, and the three must add up
+ * to what is being settled.
  *
  * Two dialogs rather than one screen doing both, because they happen weeks
  * apart and to different people: the store sends the cloth, and whoever is on
@@ -36,11 +42,33 @@ interface ItemOption extends Option {
   category?: Category | null
 }
 
-interface StockRow {
+/** One balance the store it leaves from holds: an item, whose it is, its size. */
+interface Held {
   itemId: string
-  warehouseId: string
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomerId: string | null
+  ownerName: string | null
+  sizeId: string | null
+  sizeCode: string | null
   qty: number
+}
+
+const OURS = 'OWNED||'
+const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId'>) => `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}`
+const parseWhose = (k: string) => {
+  const [ownership, ownerCustomerId, sizeId] = k.split('|')
+  return {
+    ownership: (ownership || 'OWNED') as 'OWNED' | 'CUSTOMER_OWNED',
+    ownerCustomerId: ownerCustomerId || null,
+    sizeId: sizeId || null,
+  }
+}
+
+interface OrderOption {
+  id: string
+  soNumber: string
+  customerId: string
+  customer?: { name: string } | null
 }
 
 const num = (v: string) => Number(v) || 0
@@ -58,9 +86,11 @@ interface OutLine {
   subCategoryId: string
   itemId: string
   qty: string
+  /** Whose stock and which size: "OWNED||" for our own, unsized. */
+  whose: string
 }
 
-const emptyOut = (): OutLine => ({ categoryId: '', subCategoryId: '', itemId: '', qty: '' })
+const emptyOut = (): OutLine => ({ categoryId: '', subCategoryId: '', itemId: '', qty: '', whose: OURS })
 
 /** A required field's label, with the red star the other forms use. */
 const Req = ({ children }: { children: React.ReactNode }) => (
@@ -80,7 +110,9 @@ export function SendJobWorkDialog({
   const [workers, setWorkers] = useState<Option[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
   const [warehouses, setWarehouses] = useState<Option[]>([])
-  const [stock, setStock] = useState<StockRow[]>([])
+  const [held, setHeld] = useState<Held[]>([])
+  const [orders, setOrders] = useState<OrderOption[]>([])
+  const [soId, setSoId] = useState('')
   const [loadingLists, setLoadingLists] = useState(true)
 
   const [jobWorkerId, setJobWorkerId] = useState('')
@@ -100,19 +132,19 @@ export function SendJobWorkDialog({
     let cancelled = false
     void (async () => {
       try {
-        const [s, i, w, st] = await Promise.all([
+        const [s, i, w, o] = await Promise.all([
           // Active only: a switched-off unit, item or store is not offered for anything new.
           masterResource<Option>('suppliers').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
           masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
           masterResource<Option>('warehouses').list({ limit: 100, active: true }),
-          // What is on each rack, so the line can say what the store has to send.
-          api.get<{ data: StockRow[] }>('/inventory/stock').catch(() => ({ data: [] as StockRow[] })),
+          // Open sales orders, for the optional "for order" link. Without Sales rights, none.
+          api.get<{ data: OrderOption[] }>('/sales/orders/options?open=1').catch(() => ({ data: [] as OrderOption[] })),
         ])
         if (cancelled) return
         setWorkers(s.data)
         setItems(i.data)
         setWarehouses(w.data)
-        setStock(st.data)
+        setOrders(o.data)
       } catch {
         if (!cancelled) setError('Could not load units, items and stores.')
       } finally {
@@ -123,6 +155,34 @@ export function SendJobWorkDialog({
       cancelled = true
     }
   }, [])
+
+  // What the store it leaves from holds, by item, owner and size.
+  useEffect(() => {
+    if (!fromWarehouseId) {
+      setHeld([])
+      return
+    }
+    let cancelled = false
+    api
+      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${fromWarehouseId}`)
+      .then((res) => {
+        if (cancelled) return
+        setHeld(res.data)
+        setLines((ls) =>
+          ls.map((l) => {
+            const choices = res.data.filter((h) => h.itemId === l.itemId)
+            if (!l.itemId || choices.some((h) => heldKey(h) === l.whose)) return l
+            return { ...l, whose: choices.length === 1 ? heldKey(choices[0]) : OURS }
+          })
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setHeld([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [fromWarehouseId])
 
   const setLine = (index: number, patch: Partial<OutLine>) =>
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)))
@@ -156,11 +216,8 @@ export function SendJobWorkDialog({
       return (!l.categoryId || p.main === l.categoryId) && (!l.subCategoryId || p.sub === l.subCategoryId)
     })
 
-  /** Our own stock of an item in the store it leaves from. Customers' material is not ours to send. */
-  const onHand = (itemId: string) =>
-    stock
-      .filter((r) => r.itemId === itemId && r.warehouseId === fromWarehouseId && r.ownership === 'OWNED')
-      .reduce((t, r) => t + Number(r.qty), 0)
+  /** What the store it leaves from holds of an item, for the owner and size the line chose. */
+  const onHand = (l: OutLine) => held.find((h) => h.itemId === l.itemId && heldKey(h) === l.whose)?.qty ?? 0
 
   const fromName = warehouses.find((w) => w.id === fromWarehouseId)?.name
 
@@ -172,11 +229,15 @@ export function SendJobWorkDialog({
     if (!toWarehouseId) return setError("Which store stands for the unit's floor?")
     if (fromWarehouseId === toWarehouseId) return setError('It has to go to a different store from the one it leaves.')
     if (filled.length === 0) return setError('Add at least one item with a quantity.')
-    const over = filled.find((l) => num(l.qty) > onHand(l.itemId) + 1e-9)
+    const over = filled.find((l) => num(l.qty) > onHand(l) + 1e-9)
     if (over) {
       const it = items.find((x) => x.id === over.itemId)
-      return setError(`${fromName} has only ${fmt(onHand(over.itemId))} ${it?.uom?.symbol ?? ''} of ${it?.name ?? 'that item'}.`)
+      return setError(`${fromName} has only ${fmt(onHand(over))} ${it?.uom?.symbol ?? ''} of ${it?.name ?? 'that item'} for that owner.`)
     }
+    // A customer's material goes out only for their own order.
+    const order = orders.find((o) => o.id === soId)
+    const wrong = order && filled.find((l) => parseWhose(l.whose).ownerCustomerId && parseWhose(l.whose).ownerCustomerId !== order.customerId)
+    if (wrong) return setError(`${order!.soNumber} is ${order!.customer?.name ?? 'another customer'}'s order; another customer's material cannot go out against it.`)
 
     setSaving(true)
     try {
@@ -189,7 +250,8 @@ export function SendJobWorkDialog({
         vehicleNo: vehicleNo || null,
         lrNumber: lrNumber || null,
         notes: notes || null,
-        lines: filled.map((l) => ({ itemId: l.itemId, qty: num(l.qty) })),
+        soId: soId || null,
+        lines: filled.map((l) => ({ itemId: l.itemId, qty: num(l.qty), ...parseWhose(l.whose) })),
       })
       onSaved(res.message ?? `${res.data.challanNumber} saved.`)
     } catch (err) {
@@ -223,7 +285,7 @@ export function SendJobWorkDialog({
     <FormFrame
       icon={Send}
       title="Send out for job work"
-      subtitle="The goods stay ours. They move to the store standing for that unit's floor, so the stock screen still shows them — just somewhere else."
+      subtitle="The goods stay whoever's they are — ours, or the customer's. They move to the store standing for that unit's floor, so the stock screen still shows them, just somewhere else."
       width="max-w-6xl"
       primary={sendButton}
       footer={
@@ -290,6 +352,17 @@ export function SendJobWorkDialog({
             <input className="form-input" value={lrNumber} onChange={(e) => setLrNumber(e.target.value)} />
           </label>
           <label className="block min-w-0">
+            <span className="form-label">For order</span>
+            <SmartSelect className="form-input" value={soId} onChange={(e) => setSoId(e.target.value)} disabled={loadingLists} aria-label="For sales order">
+              <option value="">No order</option>
+              {orders.map((o) => (
+                <option key={o.id} value={o.id} data-sub={o.customer?.name}>
+                  {o.soNumber}
+                </option>
+              ))}
+            </SmartSelect>
+          </label>
+          <label className="block min-w-0 sm:col-span-2 lg:col-span-4">
             <span className="form-label">Note</span>
             <input
               className="form-input placeholder:text-muted-foreground/60"
@@ -316,6 +389,7 @@ export function SendJobWorkDialog({
               <tr>
                 <th style={{ width: 36 }}>#</th>
                 <th>Category · Sub-category · Item</th>
+                <th>Whose stock</th>
                 <th style={{ textAlign: 'right' }}>{fromName ? `In ${fromName}` : 'In the store'}</th>
                 <th style={{ textAlign: 'right' }}>Quantity to send</th>
                 <th style={{ width: 40 }} />
@@ -327,7 +401,8 @@ export function SendJobWorkDialog({
                 const uom = item?.uom?.symbol ?? ''
                 const subs = line.categoryId ? subCategoriesOf(line.categoryId) : []
                 const choices = itemsFor(line)
-                const have = line.itemId && fromWarehouseId ? onHand(line.itemId) : null
+                const have = line.itemId && fromWarehouseId ? onHand(line) : null
+                const owners = held.filter((h) => h.itemId === line.itemId)
                 const over = have !== null && num(line.qty) > have + 1e-9
                 return (
                   <tr key={i} className="align-top">
@@ -379,7 +454,12 @@ export function SendJobWorkDialog({
                           const picked = items.find((x) => x.id === e.target.value)
                           // Picking an item fills in its category and sub-category.
                           const place = picked ? placeOf(picked) : null
-                          setLine(i, { itemId: e.target.value, ...(place ? { categoryId: place.main, subCategoryId: place.sub } : {}) })
+                          const offered = held.filter((h) => h.itemId === e.target.value)
+                          setLine(i, {
+                            itemId: e.target.value,
+                            whose: offered.length === 1 ? heldKey(offered[0]) : OURS,
+                            ...(place ? { categoryId: place.main, subCategoryId: place.sub } : {}),
+                          })
                         }}
                         disabled={loadingLists}
                         aria-label={`Item on line ${i + 1}`}
@@ -389,6 +469,23 @@ export function SendJobWorkDialog({
                           <option key={it.id} value={it.id}>
                             {it.code ? `${it.code} · ` : ''}
                             {it.name}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </td>
+                    <td className="min-w-[200px] pt-1.5">
+                      <SmartSelect
+                        className="form-input h-9"
+                        value={line.whose}
+                        onChange={(e) => setLine(i, { whose: e.target.value })}
+                        disabled={!line.itemId}
+                        aria-label={`Whose stock on line ${i + 1}`}
+                      >
+                        {!owners.some((h) => heldKey(h) === OURS) && <option value={OURS}>Ours</option>}
+                        {owners.map((h) => (
+                          <option key={heldKey(h)} value={heldKey(h)}>
+                            {h.ownership === 'CUSTOMER_OWNED' ? `${h.ownerName ?? 'Customer'}'s` : 'Ours'}
+                            {h.sizeCode ? ` · size ${h.sizeCode}` : ''}
                           </option>
                         ))}
                       </SmartSelect>
@@ -449,8 +546,16 @@ interface ReturnEntry {
   consumed: string
   itemId: string
   received: string
+  damaged: string
   wasted: string
   warehouseId: string
+}
+
+/** Good + damaged + wasted against what is being settled, when the same thing came back. */
+const balanceOf = (e: ReturnEntry | undefined, sentItemId: string) => {
+  if (!e || e.itemId !== sentItemId || num(e.consumed) <= 0) return null
+  const accounted = Math.round((num(e.received) + num(e.damaged) + num(e.wasted)) * 1000) / 1000
+  return { accounted, ok: Math.abs(accounted - num(e.consumed)) < 1e-9 }
 }
 
 export function ReceiveJobWorkDialog({
@@ -499,6 +604,7 @@ export function ReceiveJobWorkDialog({
                 consumed: l.outstanding > 0 ? String(l.outstanding) : '',
                 itemId: l.item.id,
                 received: l.outstanding > 0 ? String(l.outstanding) : '',
+                damaged: '',
                 wasted: '',
                 warehouseId: challan.fromWarehouse.id,
               },
@@ -528,6 +634,13 @@ export function ReceiveJobWorkDialog({
     if (lines.some(({ e }) => !e.warehouseId)) return setError('Every line needs a store to go into.')
     const over = lines.find(({ line, e }) => num(e.consumed) > line.outstanding + 1e-9)
     if (over) return setError(`Only ${fmt(over.line.outstanding)} ${over.line.item.uom?.symbol ?? ''} of ${over.line.item.name} is still out.`)
+    const unbalanced = lines.find(({ line, e }) => balanceOf(e, line.item.id)?.ok === false)
+    if (unbalanced) {
+      const e = unbalanced.e
+      return setError(
+        `${unbalanced.line.item.name}: ${fmt(num(e.received))} good + ${fmt(num(e.damaged))} damaged + ${fmt(num(e.wasted))} wasted has to come to the ${fmt(num(e.consumed))} being settled.`,
+      )
+    }
 
     setSaving(true)
     try {
@@ -539,6 +652,7 @@ export function ReceiveJobWorkDialog({
           consumedQty: num(e.consumed),
           itemId: e.itemId,
           receivedQty: num(e.received),
+          damagedQty: num(e.damaged),
           wastedQty: num(e.wasted),
           warehouseId: e.warehouseId,
         })),
@@ -577,7 +691,7 @@ export function ReceiveJobWorkDialog({
     <FormFrame
       icon={Undo2}
       title={`Take back ${challan.challanNumber}`}
-      subtitle={`${challan.process} at ${challan.jobWorker.name}. If the unit made something of it, change the item that came back — the value of what went in follows it.`}
+      subtitle={`${challan.process} at ${challan.jobWorker.name}. Good + damaged + wasted must add up to what is being settled; damaged pieces can be charged to the unit on a debit note. If the unit made something of it, change the item that came back.`}
       width="max-w-6xl"
       primary={takeButton}
       footer={
@@ -624,7 +738,8 @@ export function ReceiveJobWorkDialog({
                 <th style={{ textAlign: 'right' }}>Still out</th>
                 <th style={{ textAlign: 'right' }}>Settling</th>
                 <th>Came back as</th>
-                <th style={{ textAlign: 'right' }}>Quantity back</th>
+                <th style={{ textAlign: 'right' }}>Good back</th>
+                <th style={{ textAlign: 'right' }}>Damaged</th>
                 <th style={{ textAlign: 'right' }}>Wasted</th>
                 <th>Into store</th>
               </tr>
@@ -679,7 +794,15 @@ export function ReceiveJobWorkDialog({
                       </SmartSelect>
                     </td>
                     <td className="min-w-[120px]">
-                      {qtyInput(e?.received ?? '', (v) => setEntry(l.id, { received: v }), `Quantity back for ${l.item.name}`, backUom, done)}
+                      {qtyInput(e?.received ?? '', (v) => setEntry(l.id, { received: v }), `Good quantity back for ${l.item.name}`, backUom, done, balanceOf(e, l.item.id)?.ok === false)}
+                      {balanceOf(e, l.item.id)?.ok === false && (
+                        <p className="mt-1 text-right text-[11px] text-red-500">
+                          adds up to {fmt(balanceOf(e, l.item.id)!.accounted)}, not {fmt(num(e!.consumed))}
+                        </p>
+                      )}
+                    </td>
+                    <td className="min-w-[110px]">
+                      {qtyInput(e?.damaged ?? '', (v) => setEntry(l.id, { damaged: v }), `Damaged at the unit for ${l.item.name}`, backUom, done)}
                     </td>
                     <td className="min-w-[110px]">
                       {qtyInput(e?.wasted ?? '', (v) => setEntry(l.id, { wasted: v }), `Wasted for ${l.item.name}`, sentUom, done)}

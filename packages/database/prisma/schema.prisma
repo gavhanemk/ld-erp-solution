@@ -334,6 +334,9 @@ model User {
   approvedBOMs         BOM[]                       @relation("BOMApprovedBy")
   pricedBOMs           BOM[]                       @relation("BOMPricedBy")
 
+
+  adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
+  cuttingsCreated CuttingOrder[] @relation("CuttingCreatedBy")
   @@index([email])
   @@index([roleId])
   stockReservations   StockReservation[] @relation("ReservationBy")
@@ -351,6 +354,13 @@ model User {
   challansMade         DeliveryChallan[]      @relation("DCCreatedBy")
   challansDispatched   DeliveryChallan[]      @relation("DCDispatchedBy")
   challansCancelled    DeliveryChallan[]      @relation("DCCancelledBy")
+  mosHeld              ManufacturingOrder[]   @relation("MOHeldBy")
+  moStepsSkipped       MOStep[]               @relation("MOStepSkippedBy")
+  wipEventsMade        WipEvent[]             @relation("WipEventCreatedBy")
+  transfersMade        ProcessTransfer[]      @relation("TransferCreatedBy")
+  transfersCancelled   ProcessTransfer[]      @relation("TransferCancelledBy")
+  jobWorkOrdersMade    JobWorkOrder[]         @relation("JobWorkOrderCreatedBy")
+  jobCardsMade         JobCard[]              @relation("JobCardCreatedBy")
 }
 
 model Role {
@@ -688,6 +698,8 @@ model Item {
   returnLines   PurchaseReturnLine[]
   debitLines    DebitNoteLine[]
 
+  cuttingsOfFabric CuttingOrder[] @relation("CuttingFabric")
+  cuttingsAsPanels CuttingOrder[] @relation("CuttingPanels")
   @@unique([styleId, color])
   @@index([code])
   @@index([type])
@@ -947,6 +959,10 @@ model Customer {
   materialReturned CustomerMaterialReturn[] @relation("CustomerMaterialReturned")
   materialRequisitionLines MaterialRequisitionLine[] @relation("CustomerMaterialRequisitionLines")
 
+
+  transferLinesOwned   StockTransferLine[]   @relation("TransferLineOwner")
+  adjustmentLinesOwned StockAdjustmentLine[] @relation("AdjustmentLineOwner")
+  jobWorkLinesOwned    JobWorkChallanLine[]  @relation("JobWorkLineOwner")
   @@index([code])
   stockReservations StockReservation[] @relation("ReservedForCustomer")
   @@map("customers")
@@ -1038,6 +1054,9 @@ model Supplier {
   @@index([code])
   @@map("suppliers")
   jobWorkChallans JobWorkChallan[] @relation("JobWorkChallans")
+  wipEvents        WipEvent[]        @relation("WipEventVendor")
+  processTransfers ProcessTransfer[] @relation("TransferVendor")
+  jobWorkOrders    JobWorkOrder[]    @relation("JobWorkOrderVendor")
 }
 
 model Warehouse {
@@ -1064,6 +1083,7 @@ model Warehouse {
   returnLines      PurchaseReturnLine[]
 
   reservations StockReservation[] @relation("WarehouseReservations")
+  cuttingPanels CuttingOrder[] @relation("CuttingPanelStore")
   @@map("warehouses")
   customerMaterialReceipts CustomerGRN[]    @relation("CustomerMaterialReceipts")
   customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturns")
@@ -1094,6 +1114,7 @@ model Department {
   routingSteps      RoutingStep[]
   bomLines          BOMLine[]
   bomCostLines      BOMCostLine[]
+  moSteps           MOStep[]
 
   @@map("departments")
 }
@@ -1111,8 +1132,17 @@ model Operation {
   sortOrder    Int        @default(0)
   isActive     Boolean    @default(true)
 
+  /// What the process does to the garment, which decides how it is recorded:
+  /// cutting makes the pieces, a check passes or fails them.
+  kind             ProcessKind   @default(OTHER)
+  /// Where it is usually done; a routing step can say otherwise.
+  defaultExecution StepExecution @default(IN_HOUSE)
+  /// Standing instructions for the floor, copied onto each routing step.
+  instructions     String?
+
   routingSteps      RoutingStep[]
   productionEntries ProductionEntry[]
+  moSteps           MOStep[]
 
   @@map("operations")
 }
@@ -1232,6 +1262,9 @@ model SalesOrder {
   quotationId         String?
   quotation           SalesQuotation? @relation("SOFromQuote", fields: [quotationId], references: [id], onDelete: SetNull)
 
+
+  jobWorkChallans         JobWorkChallan[]         @relation("JobWorkChallanOrder")
+  customerMaterialReturns CustomerMaterialReturn[] @relation("CustomerMaterialReturnOrder")
   @@index([soNumber])
   @@index([customerId])
   @@index([status])
@@ -1285,6 +1318,9 @@ model SalesOrderLine {
   /// What has been planned for the factory against this line.
   moLines      MOLine[]
 
+  /// What a B-grade piece of this line is billed at; empty bills it at the
+  /// line's own rate.
+  bGradeRate  Decimal? @db.Decimal(12, 2)
   @@map("sales_order_lines")
 }
 
@@ -1449,6 +1485,9 @@ model DeliveryChallanLine {
   /// Pieces by size. Replaces `sizeBreakup`, which nothing ever wrote.
   sizes    DeliveryChallanLineSize[]
 
+  /// "A" for first quality, "B" for B-grade: made, but not first quality.
+  /// B-grade pieces are counted apart from good ones and billed at their own rate.
+  grade      String   @default("A")
   @@index([soLineId])
   @@map("delivery_challan_lines")
 }
@@ -1494,6 +1533,8 @@ model FinishedGoodsReceipt {
   cancelReason  String?
 
   lines FinishedGoodsReceiptLine[]
+  /// On an order with a route: the pieces it took off the last stage.
+  wipEvents WipEvent[] @relation("FGRWipEvents")
 
   @@index([soId])
   @@map("finished_goods_receipts")
@@ -1513,6 +1554,9 @@ model FinishedGoodsReceiptLine {
   unitRate   Decimal              @db.Decimal(10, 2)
   rateSource String
 
+  /// "A" for first quality, "B" for B-grade: made, but not first quality.
+  /// B-grade pieces are counted apart from good ones and billed at their own rate.
+  grade      String   @default("A")
   @@map("finished_goods_receipt_lines")
 }
 
@@ -2443,6 +2487,9 @@ model StockLedger {
   notes           String?
   createdAt       DateTime        @default(now())
 
+  /// "A" for first quality, "B" for B-grade finished goods, kept apart from
+  /// good ones. Everything that is not a graded garment is "A".
+  grade           String          @default("A")
   @@index([itemId, warehouseId])
   @@index([transactionDate])
   @@index([ownership, ownerCustomerId])
@@ -2573,6 +2620,9 @@ model MaterialRequisitionLine {
   /// told to order what they already ordered.
   poLines PurchaseOrderLine[]
 
+  /// What came back from the floor unused (leftover fabric, spare trims).
+  /// Issued stays what was handed over; issued − returned is what was used.
+  returnedQty  Decimal             @default(0) @db.Decimal(10, 3)
   @@index([fulfilment])
   reservations StockReservation[]
   @@map("material_requisition_lines")
@@ -2625,6 +2675,15 @@ model StockTransferLine {
   /// not change what it is worth, and this is the record of that.
   unitRate   Decimal?      @db.Decimal(10, 2)
 
+
+  /// Whose stock moved: ours, or a customer's (their fabric, or garments made
+  /// from it). Customer stock keeps its owner through every move.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("TransferLineOwner", fields: [ownerCustomerId], references: [id])
+  /// A finished garment's size; empty for anything without one.
+  sizeId          String?
+  size            Size?          @relation("TransferLineSize", fields: [sizeId], references: [id])
   @@map("stock_transfer_lines")
 }
 
@@ -2652,6 +2711,14 @@ model StockAdjustment {
 
   lines StockAdjustmentLine[]
 
+
+  /// PENDING until a store manager approves it; stock changes only then.
+  /// Adjustments made before approval existed are APPROVED.
+  status       String    @default("APPROVED")
+  approvedById String?
+  approvedBy   User?     @relation("AdjustmentApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  rejectReason String?
   @@index([adjustmentDate])
   @@map("stock_adjustments")
 }
@@ -2670,6 +2737,15 @@ model StockAdjustmentLine {
   difference   Decimal         @db.Decimal(10, 3)
   unitRate     Decimal?        @db.Decimal(10, 2)
 
+
+  /// Whose stock moved: ours, or a customer's (their fabric, or garments made
+  /// from it). Customer stock keeps its owner through every move.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("AdjustmentLineOwner", fields: [ownerCustomerId], references: [id])
+  /// A finished garment's size; empty for anything without one.
+  sizeId          String?
+  size            Size?          @relation("AdjustmentLineSize", fields: [sizeId], references: [id])
   @@map("stock_adjustment_lines")
 }
 
@@ -2813,6 +2889,10 @@ model CustomerMaterialReturn {
 
   lines CustomerMaterialReturnLine[]
 
+
+  /// The order the leftover is from, so its fabric reconciles per order.
+  soId String?
+  so   SalesOrder? @relation("CustomerMaterialReturnOrder", fields: [soId], references: [id])
   @@index([customerId])
   @@index([returnDate])
   @@map("customer_material_returns")
@@ -2877,6 +2957,12 @@ model JobWorkChallan {
   lines   JobWorkChallanLine[]
   returns JobWorkReturn[]
 
+
+  /// The order this outside work is for, when there is one.
+  soId String?
+  so   SalesOrder?         @relation("JobWorkChallanOrder", fields: [soId], references: [id])
+  moId String?
+  mo   ManufacturingOrder? @relation("JobWorkChallanMO", fields: [moId], references: [id])
   @@index([jobWorkerId])
   @@index([status])
   @@map("job_work_challans")
@@ -2899,6 +2985,15 @@ model JobWorkChallanLine {
 
   returnLines JobWorkReturnLine[]
 
+
+  /// Whose stock moved: ours, or a customer's (their fabric, or garments made
+  /// from it). Customer stock keeps its owner through every move.
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("JobWorkLineOwner", fields: [ownerCustomerId], references: [id])
+  /// A finished garment's size; empty for anything without one.
+  sizeId          String?
+  size            Size?          @relation("JobWorkLineSize", fields: [sizeId], references: [id])
   @@map("job_work_challan_lines")
 }
 
@@ -2926,6 +3021,7 @@ model JobWorkReturn {
 
   lines JobWorkReturnLine[]
 
+  debitNotes PurchaseNote[]
   @@index([challanId])
   @@map("job_work_returns")
 }
@@ -2954,6 +3050,10 @@ model JobWorkReturnLine {
   warehouse     Warehouse          @relation("JobWorkReturnLines", fields: [warehouseId], references: [id])
   notes         String?
 
+
+  /// Pieces spoiled at the job worker: accounted for against what was sent,
+  /// never booked into stock, and chargeable to the job worker.
+  damagedQty    Decimal            @default(0) @db.Decimal(10, 3)
   @@map("job_work_return_lines")
 }
 
@@ -2998,6 +3098,33 @@ model ManufacturingOrder {
   qcRecords            ProductionQC[]
   packingOrders        PackingOrder[]
 
+
+  jobWorkChallans JobWorkChallan[] @relation("JobWorkChallanMO")
+
+  /// The routing its steps were copied from, and that routing's version then.
+  /// The steps themselves are the order's own (steps), so a later edit of the
+  /// routing never changes work already planned. Orders made before routes
+  /// existed have none and are tracked as before.
+  routingId      String?
+  routing        Routing?  @relation(fields: [routingId], references: [id])
+  routingVersion Int?
+  /// Where the work stands across the whole route, worked out from the floor's
+  /// entries after each one: NOT_STARTED, IN_PROGRESS, QC_PENDING, REWORK,
+  /// DISCREPANCY or DONE. A cache of the entries, never typed.
+  progress       String?
+  /// Stopped for now — a buyer query, a fabric problem. Nothing moves on the
+  /// floor until it is resumed; the status underneath is kept.
+  heldAt         DateTime?
+  heldById       String?
+  heldBy         User?     @relation("MOHeldBy", fields: [heldById], references: [id])
+  holdReason     String?
+
+  steps          MOStep[]
+  bundles        ProductionBundle[]
+  wipEvents      WipEvent[]
+  transfers      ProcessTransfer[]
+  jobWorkOrders  JobWorkOrder[]
+  jobCards       JobCard[]
   @@index([moNumber])
   @@index([status])
   @@map("manufacturing_orders")
@@ -3022,6 +3149,11 @@ model MOLine {
   bom         BOM?            @relation(fields: [bomId], references: [id], onDelete: SetNull)
 
   sizes MOLineSize[]
+  /// Cuttings of this line's colour, and the bundles they made.
+  cuttingOrders CuttingOrder[]      @relation("CuttingMOLine")
+  bundles       ProductionBundle[]
+  /// Its job card: the line as the floor works it.
+  jobCard       JobCard?
 
   @@index([soLineId])
   @@map("mo_lines")
@@ -3048,6 +3180,36 @@ model CuttingOrder {
   createdAt        DateTime           @default(now())
   updatedAt        DateTime           @updatedAt
 
+  /// The fabric cut, so used + waste + left over can be set against what
+  /// was issued of it to the order.
+  fabricItemId     String?
+  fabricItem       Item?              @relation("CuttingFabric", fields: [fabricItemId], references: [id])
+  /// When the cut panels are put into a store (to go out on a job-work
+  /// challan): the semi-finished item they are, and the store.
+  panelItemId      String?
+  panelItem        Item?              @relation("CuttingPanels", fields: [panelItemId], references: [id])
+  panelWarehouseId String?
+  panelWarehouse   Warehouse?         @relation("CuttingPanelStore", fields: [panelWarehouseId], references: [id])
+  createdById      String?
+  createdBy        User?              @relation("CuttingCreatedBy", fields: [createdById], references: [id])
+
+  /// The order line cut — one style in one colour. Cuttings recorded before
+  /// this pooled every line's sizes together and have none.
+  moLineId       String?
+  moLine         MOLine?            @relation("CuttingMOLine", fields: [moLineId], references: [id])
+  /// The fabric lot or shade cut, as marked on the rolls.
+  lotNo          String?
+  /// The marker's size ratio, e.g. "M1 L2 XL2 2XL1".
+  ratio          String?
+  /// Who cut it: the cutting master, as named on the floor.
+  cutterName     String?
+  /// Pieces to a bundle when the cut pieces were bundled.
+  bundleSize     Int?
+  /// What this lay was planned to give, by size ({ sizeId: pieces }).
+  plannedBreakup Json?
+
+  bundles   ProductionBundle[]
+  wipEvents WipEvent[]         @relation("CuttingEvents")
   @@map("cutting_orders")
 }
 
@@ -3131,6 +3293,408 @@ model Carton {
   totalPieces    Int
 
   @@map("cartons")
+}
+
+// ═══════════════════════════════════════════
+// PRODUCTION FLOW — routes, bundles, transfers
+// ═══════════════════════════════════════════
+
+/// What a process does to the garment, which decides how its work is
+/// recorded: cutting makes the pieces, a check passes or fails them, and the
+/// last step hands them to finished goods.
+enum ProcessKind {
+  CUTTING
+  STITCHING
+  FINISHING
+  QC
+  PACKING
+  OTHER
+}
+
+/// Done on our own floor, or given to an outside unit.
+enum StepExecution {
+  IN_HOUSE
+  OUTSOURCED
+}
+
+/// Who may leave a step out of an order's route. OPTIONAL: anyone recording
+/// production, with a reason. WITH_APPROVAL: a production manager, with a
+/// reason. NEVER: it cannot be left out.
+enum StepSkip {
+  OPTIONAL
+  WITH_APPROVAL
+  NEVER
+}
+
+/// Where pieces stand at a step. Every piece of a bundle is in exactly one of
+/// these at any moment, so the total across them is always what was cut.
+enum WipBucket {
+  /// Sent to this step and not yet counted in.
+  TRANSIT
+  /// In hand at this step, not yet done — at an outside unit when vendorId is set.
+  WIP
+  /// Done here (passed, for a check), waiting to go on.
+  DONE
+  /// Being put right, by this step's people or an earlier step's.
+  REWORK
+  /// Spoiled here, waiting for a decision.
+  DAMAGED
+  /// Failed a check here, waiting for a decision.
+  REJECTED
+  /// Sent here but not arrived, waiting to be settled.
+  SHORT
+  /// Second quality, set aside to be packed as B-grade.
+  B_GRADE
+  /// Written off.
+  SCRAPPED
+  /// Packed into finished goods as first quality.
+  PACKED
+  /// Packed into finished goods as B-grade.
+  PACKED_B
+}
+
+enum WipEventType {
+  CUT
+  DISPATCH
+  RECEIVE
+  SHORT
+  EXCESS
+  SETTLE
+  PROCESS
+  DECIDE
+  REWORK_DONE
+  VENDOR_RETURN
+  PACK
+  SPLIT
+  REVERSAL
+}
+
+enum TransferStatus {
+  DISPATCHED
+  PARTLY_RECEIVED
+  RECEIVED
+  DISCREPANCY
+  CANCELLED
+}
+
+enum JobWorkOrderStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+}
+
+/// One step of an order's own route, copied from its routing when the order
+/// was made. The order is tracked against these, never against the routing
+/// master, so the master can change without moving work already planned.
+/// Name and kind are copied too, for the same reason.
+model MOStep {
+  id            String             @id @default(cuid())
+  moId          String
+  mo            ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
+  sequence      Int
+  operationId   String
+  operation     Operation          @relation(fields: [operationId], references: [id])
+  name          String
+  kind          ProcessKind
+  departmentId  String
+  department    Department         @relation(fields: [departmentId], references: [id])
+  execution     StepExecution      @default(IN_HOUSE)
+  /// The unit it normally goes to: one of our lines, or an outside unit.
+  workstationId String?
+  workstation   Workstation?       @relation("MOStepUnit", fields: [workstationId], references: [id])
+  isQcStep      Boolean            @default(false)
+  skip          StepSkip           @default(WITH_APPROVAL)
+  /// What an outside unit is paid per piece, when it is done outside.
+  ratePerPiece  Decimal?           @db.Decimal(10, 2)
+  instructions  String?
+  /// Left out of this order's route: no more pieces are sent to it. Pieces
+  /// already there finish as normal.
+  skippedAt     DateTime?
+  skippedById   String?
+  skippedBy     User?              @relation("MOStepSkippedBy", fields: [skippedById], references: [id])
+  skipReason    String?
+  createdAt     DateTime           @default(now())
+
+  wipEntries    WipEntry[]
+  wipEvents     WipEvent[]
+  transfersFrom ProcessTransfer[]  @relation("TransferFromStep")
+  transfersTo   ProcessTransfer[]  @relation("TransferToStep")
+  jobWorkOrders JobWorkOrder[]
+
+  @@unique([moId, sequence])
+  @@map("mo_steps")
+}
+
+/// A bundle of cut pieces of one size, tied with its sticker. It is what moves
+/// from desk to desk and what is counted at each one.
+model ProductionBundle {
+  id             String             @id @default(cuid())
+  /// Printed on the sticker and scanned or typed at each desk: the order's
+  /// number and the bundle's own, e.g. MO-2627-0001-B007.
+  code           String             @unique
+  bundleNo       Int
+  moId           String
+  mo             ManufacturingOrder @relation(fields: [moId], references: [id], onDelete: Cascade)
+  moLineId       String
+  moLine         MOLine             @relation(fields: [moLineId], references: [id], onDelete: Cascade)
+  cuttingOrderId String
+  cuttingOrder   CuttingOrder       @relation(fields: [cuttingOrderId], references: [id], onDelete: Cascade)
+  sizeId         String?
+  size           Size?              @relation("BundleSize", fields: [sizeId], references: [id])
+  /// Pieces tied into it when it was made.
+  qty            Int
+  /// The bundle it was split from, when it was split.
+  parentId       String?
+  parent         ProductionBundle?  @relation("BundleSplit", fields: [parentId], references: [id])
+  children       ProductionBundle[] @relation("BundleSplit")
+  createdAt      DateTime           @default(now())
+
+  wipEntries     WipEntry[]
+  transferLines  ProcessTransferLine[]
+
+  @@unique([moId, bundleNo])
+  @@index([cuttingOrderId])
+  @@map("production_bundles")
+}
+
+/// Something that happened on the floor: a cutting, a transfer sent or
+/// counted in, work done at a step, a decision on damaged pieces. Its entries
+/// say how many pieces of which bundle moved from where to where.
+///
+/// Nothing is ever edited. A mistake is undone by a REVERSAL event whose
+/// entries are this one's turned round, and only while the pieces are still
+/// where it put them.
+model WipEvent {
+  id             String                @id @default(cuid())
+  moId           String
+  mo             ManufacturingOrder    @relation(fields: [moId], references: [id])
+  stepId         String?
+  step           MOStep?               @relation(fields: [stepId], references: [id])
+  type           WipEventType
+  eventDate      DateTime              @default(now())
+  /// Who did it or handed it over, as named on the floor: operators and
+  /// supervisors are not all users of this system.
+  personName     String?
+  vendorId       String?
+  vendor         Supplier?             @relation("WipEventVendor", fields: [vendorId], references: [id])
+  transferId     String?
+  transfer       ProcessTransfer?      @relation(fields: [transferId], references: [id])
+  jobWorkOrderId String?
+  jobWorkOrder   JobWorkOrder?         @relation(fields: [jobWorkOrderId], references: [id])
+  cuttingOrderId String?
+  cuttingOrder   CuttingOrder?         @relation("CuttingEvents", fields: [cuttingOrderId], references: [id])
+  fgReceiptId    String?
+  fgReceipt      FinishedGoodsReceipt? @relation("FGRWipEvents", fields: [fgReceiptId], references: [id])
+  /// Rework given to another step's people to put right.
+  reworkStepId   String?
+  reason         String?
+  notes          String?
+  /// A return from an outside unit: their challan, the pieces charged for at
+  /// what rate, and their bill when it has come.
+  theirChallanNo String?
+  chargeQty      Int?
+  chargeRate     Decimal?              @db.Decimal(10, 2)
+  billNo         String?
+  billDate       DateTime?
+  /// Undone: when, and the event that undid it.
+  reversedAt     DateTime?
+  reversalOfId   String?               @unique
+  reversalOf     WipEvent?             @relation("WipReversal", fields: [reversalOfId], references: [id])
+  reversedBy     WipEvent?             @relation("WipReversal")
+  /// The same save sent twice (a double click, a retry) carries the same key
+  /// and is stored once.
+  clientKey      String?               @unique
+  createdById    String
+  createdBy      User                  @relation("WipEventCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime              @default(now())
+
+  entries        WipEntry[]
+
+  @@index([moId, createdAt])
+  @@index([stepId])
+  @@index([jobWorkOrderId])
+  @@map("wip_events")
+}
+
+/// Pieces of one bundle into (+) or out of (−) one place at one step. The
+/// entries of an event add up to nothing — pieces move, they do not appear —
+/// except a cutting's, which makes them. So the sum over a bundle is always
+/// what was cut, and a balance is never typed, only added up.
+model WipEntry {
+  id           String           @id @default(cuid())
+  eventId      String
+  event        WipEvent         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  /// Copied from the event, so every figure is one GROUP BY.
+  eventType    WipEventType
+  moId         String
+  stepId       String
+  step         MOStep           @relation(fields: [stepId], references: [id])
+  bundleId     String
+  bundle       ProductionBundle @relation(fields: [bundleId], references: [id])
+  moLineId     String
+  sizeId       String?
+  /// The outside unit holding them, for work in hand at a vendor.
+  vendorId     String?
+  bucket       WipBucket
+  qty          Int
+  /// For rework: the step whose people are putting it right.
+  reworkStepId String?
+  createdAt    DateTime         @default(now())
+
+  @@index([moId, stepId, bucket])
+  @@index([bundleId])
+  @@index([eventId])
+  @@index([vendorId, bucket])
+  @@map("wip_entries")
+}
+
+/// The transfer card: bundles handed from one step to the next.
+///
+/// Sending and counting in are separate on purpose. The sender's count is
+/// kept as it was; the receiver's is recorded beside it, and a difference is
+/// held as short (or excess) until somebody settles it — never written over.
+model ProcessTransfer {
+  id             String             @id @default(cuid())
+  /// MO-2627-0001-T3 on our own floor. To an outside unit it is a job-work
+  /// challan and takes the next number of that series, because GST wants
+  /// those numbered as one series.
+  transferNumber String             @unique
+  moId           String
+  mo             ManufacturingOrder @relation(fields: [moId], references: [id])
+  fromStepId     String
+  fromStep       MOStep             @relation("TransferFromStep", fields: [fromStepId], references: [id])
+  toStepId       String
+  toStep         MOStep             @relation("TransferToStep", fields: [toStepId], references: [id])
+  /// Set when it goes to an outside unit, under a job work order.
+  vendorId       String?
+  vendor         Supplier?          @relation("TransferVendor", fields: [vendorId], references: [id])
+  jobWorkOrderId String?
+  jobWorkOrder   JobWorkOrder?      @relation(fields: [jobWorkOrderId], references: [id])
+  /// The job card it moves work of.
+  jobCardId      String?
+  jobCard        JobCard?           @relation(fields: [jobCardId], references: [id])
+  /// Sent back to the unit to put right what came back wrong.
+  isRework       Boolean            @default(false)
+  dispatchDate   DateTime           @default(now())
+  /// Names as signed on the card.
+  issuedBy       String?
+  receivedBy     String?
+  receivedAt     DateTime?
+  vehicleNo      String?
+  notes          String?
+  status         TransferStatus     @default(DISPATCHED)
+  createdById    String
+  createdBy      User               @relation("TransferCreatedBy", fields: [createdById], references: [id])
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelledBy    User?              @relation("TransferCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason   String?
+  clientKey      String?            @unique
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  lines          ProcessTransferLine[]
+  wipEvents      WipEvent[]
+
+  @@index([moId])
+  @@index([toStepId, status])
+  @@index([jobCardId])
+  @@map("process_transfers")
+}
+
+model ProcessTransferLine {
+  id            String           @id @default(cuid())
+  transferId    String
+  transfer      ProcessTransfer  @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  bundleId      String
+  bundle        ProductionBundle @relation(fields: [bundleId], references: [id])
+  sizeId        String?
+  /// What the sender counted out. Never changed afterwards.
+  dispatchedQty Int
+  /// What the receiver counted in, over one or more counts.
+  receivedQty   Int              @default(0)
+  /// Declared missing when the count was closed, and how much of that has
+  /// since been settled — found, never sent, or written off.
+  shortQty      Int              @default(0)
+  settledQty    Int              @default(0)
+  /// Counted in over what was sent: the sender had miscounted.
+  excessQty     Int              @default(0)
+
+  @@unique([transferId, bundleId])
+  @@map("process_transfer_lines")
+}
+
+/// Work on one step of one order given to an outside unit: what it is, at
+/// what rate, and by when. The bundles go out on its challans
+/// (ProcessTransfer) and come back on its returns (WipEvent VENDOR_RETURN); what
+/// the unit still holds is worked out from those, never typed.
+model JobWorkOrder {
+  id            String             @id @default(cuid())
+  /// MO-2627-0001-JW1.
+  orderNumber   String             @unique
+  moId          String
+  mo            ManufacturingOrder @relation(fields: [moId], references: [id])
+  stepId        String
+  step          MOStep             @relation(fields: [stepId], references: [id])
+  vendorId      String
+  vendor        Supplier           @relation("JobWorkOrderVendor", fields: [vendorId], references: [id])
+  workstationId String?
+  workstation   Workstation?       @relation("JobWorkOrderUnit", fields: [workstationId], references: [id])
+  /// Agreed per piece for the work.
+  rate          Decimal            @db.Decimal(10, 2)
+  /// Pieces given to this unit, when agreed up front.
+  plannedQty    Int?
+  expectedBy    DateTime?
+  status        JobWorkOrderStatus @default(OPEN)
+  notes         String?
+  createdById   String
+  createdBy     User               @relation("JobWorkOrderCreatedBy", fields: [createdById], references: [id])
+  closedAt      DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  transfers     ProcessTransfer[]
+  wipEvents     WipEvent[]
+
+  @@index([vendorId, status])
+  @@index([moId])
+  @@map("job_work_orders")
+}
+
+/// One line of a manufacturing order — a style in one colour or design — as
+/// the floor works it: what the cutting and stitching sheets print at the top,
+/// and what every transfer and sheet of that line is filed under. Made when
+/// the order is released. Its quantities are the line's; where its pieces
+/// are is read off the floor's entries, never typed here.
+model JobCard {
+  id            String             @id @default(cuid())
+  /// MO-2627-0001-JC1.
+  jobCardNumber String             @unique
+  moId          String
+  mo            ManufacturingOrder @relation(fields: [moId], references: [id])
+  moLineId      String             @unique
+  moLine        MOLine             @relation(fields: [moLineId], references: [id], onDelete: Cascade)
+  /// As the floor's sheets name them: the buyer's order no. and project ID.
+  orderNo       String?
+  projectId     String?
+  description   String?
+  fabricQuality String?
+  designNo      String?
+  lotNo         String?
+  /// Fabric for the line, the average per garment, and the marker ratio.
+  meters        Decimal?           @db.Decimal(12, 3)
+  average       Decimal?           @db.Decimal(10, 4)
+  ratio         String?
+  notes         String?
+  createdById   String
+  createdBy     User               @relation("JobCardCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  transfers     ProcessTransfer[]
+
+  @@index([moId])
+  @@map("job_cards")
 }
 
 // ═══════════════════════════════════════════
@@ -3471,19 +4035,33 @@ model Workstation {
 
   productionEntries ProductionEntry[]
   routingSteps      RoutingStep[]
+  moSteps           MOStep[]          @relation("MOStepUnit")
+  jobWorkOrders     JobWorkOrder[]    @relation("JobWorkOrderUnit")
 
   @@index([code])
   @@map("workstations")
 }
 
-/// The ordered path a style takes through the factory. No two styles take the
-/// same one: a plain shirt skips washing, an embroidered one adds two steps.
+/// The ordered path a garment takes through the factory. No two styles need
+/// take the same one: a plain shirt skips washing, an embroidered one adds two
+/// steps.
+///
+/// A routing is for one style, for every style of a garment category (all
+/// formal shirts), or — with neither — for any style. An order takes the most
+/// particular one that fits, and keeps a copy of its steps (MOStep), so
+/// editing a routing later never changes an order already on the floor.
 model Routing {
   id        String   @id @default(cuid())
   code      String   @unique
   name      String
-  styleId   String
-  style     Style    @relation(fields: [styleId], references: [id])
+  styleId   String?
+  style     Style?   @relation(fields: [styleId], references: [id], onDelete: Restrict)
+  /// A style category (Style.category) this routing serves, when it is not
+  /// for one style.
+  category  String?
+  /// Goes up by one each time the steps change, so an order can say which
+  /// version of the routing it was given.
+  version   Int      @default(1)
   /// Locked routings cannot be edited while orders are running against them.
   isLocked  Boolean  @default(false)
   isActive  Boolean  @default(true)
@@ -3493,6 +4071,7 @@ model Routing {
 
   steps RoutingStep[]
   boms  BOM[]
+  mos   ManufacturingOrder[]
 
   @@index([styleId])
   @@map("routings")
@@ -3513,6 +4092,11 @@ model RoutingStep {
   smv           Decimal?     @db.Decimal(5, 3)
   ratePerPiece  Decimal?     @db.Decimal(10, 2)
   isQcStep      Boolean      @default(false)
+  /// Done on our floor, or given to an outside unit on a job work order.
+  execution     StepExecution @default(IN_HOUSE)
+  /// Who may leave this step out of an order's route.
+  skip          StepSkip      @default(WITH_APPROVAL)
+  instructions  String?
 
   @@unique([routingId, sequence])
   @@map("routing_steps")
@@ -3549,6 +4133,11 @@ model Size {
   challanSizes DeliveryChallanLineSize[]
   creditSizes  CreditNoteLineSize[]
 
+
+  transferLines   StockTransferLine[]   @relation("TransferLineSize")
+  adjustmentLines StockAdjustmentLine[] @relation("AdjustmentLineSize")
+  jobWorkLines    JobWorkChallanLine[]  @relation("JobWorkLineSize")
+  bundles         ProductionBundle[]    @relation("BundleSize")
   @@unique([sizeGroupId, code])
   @@map("sizes")
 }
@@ -3610,6 +4199,9 @@ model SalesInvoiceLine {
   /// Credit notes against this line: returns and adjustments.
   creditLines  CreditNoteLine[]
 
+  /// "A" for first quality, "B" for B-grade: made, but not first quality.
+  /// B-grade pieces are counted apart from good ones and billed at their own rate.
+  grade      String   @default("A")
   @@index([invoiceId])
   @@index([soLineId])
   @@map("sales_invoice_lines")
@@ -4193,6 +4785,9 @@ model PurchaseNote {
   /// which is the mistake the duplicate-bill guard exists for. Postgres treats
   /// NULLs as distinct, so our own commercial claims — which carry no supplier
   /// document number — are unaffected.
+  /// The job-work receipt whose damaged pieces this note charges for.
+  jobWorkReturnId String?
+  jobWorkReturn   JobWorkReturn? @relation(fields: [jobWorkReturnId], references: [id], onDelete: Restrict)
   @@unique([supplierId, supplierDocNo])
   @@index([supplierId])
   @@index([billId])

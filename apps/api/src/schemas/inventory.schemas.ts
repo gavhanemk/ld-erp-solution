@@ -36,6 +36,22 @@ const inRate = z
 const id = (what: string) => z.string().min(1, `Pick ${what}`)
 
 /**
+ * Whose stock a line moves, and its size. Our own unless a customer is named:
+ * a customer's fabric (or garments made from it) keeps its owner through
+ * every transfer, count and job-work challan, and never mixes with ours.
+ */
+export const stockOwnerFields = {
+  ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).optional(),
+  ownerCustomerId: z.string().optional().nullable(),
+  sizeId: z.string().optional().nullable(),
+}
+
+/** A customer's stock has to say which customer. */
+export const ownerNamed = (l: { ownership?: string; ownerCustomerId?: string | null }) =>
+  l.ownership !== 'CUSTOMER_OWNED' || !!l.ownerCustomerId
+const ownerNamedMessage = { message: "Say whose stock this is: pick the customer it belongs to", path: ['ownerCustomerId'] }
+
+/**
  * Opening stock — what was on hand the day the mill started using this system.
  *
  * It needs a rate because an opening balance with no value would put the whole
@@ -120,17 +136,25 @@ export const adjustmentSchema = z.object({
     .max(500),
   lines: z
     .array(
-      z.object({
-        itemId: id('an item'),
-        countedQty: z
-          .number({ invalid_type_error: 'Counted quantity has to be a number' })
-          .min(0, 'A counted quantity cannot be negative')
-          .max(9_999_999, 'That quantity looks like a typo'),
-        /** Only used when the count is higher and there is nothing on hand to price it from. */
-        unitRate: inRate.optional(),
-      }),
+      z
+        .object({
+          itemId: id('an item'),
+          countedQty: z
+            .number({ invalid_type_error: 'Counted quantity has to be a number' })
+            .min(0, 'A counted quantity cannot be negative')
+            .max(9_999_999, 'That quantity looks like a typo'),
+          /** Only used when the count is higher and there is nothing on hand to price it from. */
+          unitRate: inRate.optional(),
+          ...stockOwnerFields,
+        })
+        .refine(ownerNamed, ownerNamedMessage),
     )
     .min(1, 'Add at least one item'),
+})
+
+/** A store manager turning a count down: the reason goes back to whoever counted. */
+export const rejectAdjustmentSchema = z.object({
+  reason: z.string().trim().min(5, 'Say why the count is not accepted — one line is enough').max(500),
 })
 
 export const transferSchema = z.object({
@@ -139,7 +163,7 @@ export const transferSchema = z.object({
   transferDate: z.coerce.date().optional(),
   notes: z.string().max(1000).optional().nullable(),
   lines: z
-    .array(z.object({ itemId: id('an item'), qty }))
+    .array(z.object({ itemId: id('an item'), qty, ...stockOwnerFields }).refine(ownerNamed, ownerNamedMessage))
     .min(1, 'Add at least one item'),
 })
 
@@ -356,6 +380,8 @@ export const createCustomerReturnSchema = z
     customerId: id('the customer it goes back to'),
     /** The receipt it came in on, when it is going back against one. */
     grnId: z.string().optional().nullable(),
+    /** The order the leftover is from, so the order's fabric reconciles. */
+    soId: z.string().optional().nullable(),
     warehouseId: id('the store it leaves from'),
     returnDate: z.coerce.date().optional(),
     reason: z.enum(CUSTOMER_RETURN_REASONS, { errorMap: () => ({ message: 'Say why it is going back' }) }),
@@ -420,11 +446,21 @@ export const createJobWorkChallanSchema = z
     transporter: z.string().max(120).optional().nullable(),
     lrNumber: z.string().max(50).optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
+    /** The order this outside work is for, when there is one. */
+    soId: z.string().optional().nullable(),
+    moId: z.string().optional().nullable(),
     lines: z
-      .array(z.object({ itemId: id('an item'), qty }))
+      .array(z.object({ itemId: id('an item'), qty, ...stockOwnerFields }).refine(ownerNamed, ownerNamedMessage))
       .min(1, 'Add at least one item'),
   })
   .superRefine((data, ctx) => {
+    if (data.expectedBackOn && data.challanDate && data.expectedBackOn < data.challanDate) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['expectedBackOn'],
+        message: 'It cannot be due back before it goes out.',
+      })
+    }
     if (data.fromWarehouseId === data.toWarehouseId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -435,16 +471,38 @@ export const createJobWorkChallanSchema = z
 
     const seen = new Set<string>()
     data.lines.forEach((line, i) => {
-      if (seen.has(line.itemId)) {
+      // The same cloth twice is a repeat; ours and a customer's, or two sizes, are not.
+      const key = [line.itemId, line.ownership === 'CUSTOMER_OWNED' ? line.ownerCustomerId : '', line.sizeId ?? ''].join('|')
+      if (seen.has(key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['lines', i, 'itemId'],
           message: 'This item is already on the challan. Put the whole quantity on one line.',
         })
       }
-      seen.add(line.itemId)
+      seen.add(key)
     })
   })
+
+/**
+ * Material coming back from the floor unused: leftover fabric after cutting,
+ * spare buttons after stitching. Against the requisition it was issued on, so
+ * issued − returned is what the order actually used.
+ */
+export const floorReturnSchema = z.object({
+  reason: z.string().trim().max(300).optional().nullable(),
+  lines: z
+    .array(z.object({ lineId: z.string().min(1), qty, warehouseId: id('the store it goes back into') }))
+    .min(1, 'Say what came back'),
+})
+
+/** Charging a job worker for pieces damaged at their unit. */
+export const jobWorkDebitNoteSchema = z.object({
+  /** What each damaged piece is charged at, by receipt line; the challan's value when left out. */
+  rates: z.record(z.string(), z.number().min(0).max(9_999_999)).optional(),
+  gstRate: z.number().min(0).max(28).optional(),
+  notes: z.string().trim().max(1000).optional().nullable(),
+})
 
 export const cancelJobWorkChallanSchema = z.object({
   reason: z
@@ -485,6 +543,12 @@ export const createJobWorkReturnSchema = z
           wastedQty: z
             .number({ invalid_type_error: 'Waste has to be a number' })
             .min(0, 'Waste cannot be negative')
+            .max(9_999_999, 'That quantity looks like a typo')
+            .optional(),
+          /** Spoiled at the job worker: accounted for, not booked into stock, chargeable to them. */
+          damagedQty: z
+            .number({ invalid_type_error: 'Damaged has to be a number' })
+            .min(0, 'Damaged cannot be negative')
             .max(9_999_999, 'That quantity looks like a typo')
             .optional(),
           warehouseId: id('the store it came back into'),

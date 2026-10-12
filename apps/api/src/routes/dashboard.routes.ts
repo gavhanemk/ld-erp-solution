@@ -316,7 +316,7 @@ router.get('/production-today', async (_req, res) => {
 router.get('/pending-approvals', async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10))
 
-  const [purchaseOrders, salesOrders, requisitions] = await Promise.all([
+  const [purchaseOrders, salesOrders, requisitions, adjustments] = await Promise.all([
     prisma.purchaseOrder.findMany({
       where: { status: 'DRAFT', approvedAt: null, deletedAt: null },
       take: limit,
@@ -336,6 +336,13 @@ router.get('/pending-approvals', async (req, res) => {
       take: limit,
       orderBy: { createdAt: 'desc' },
       include: { department: { select: { name: true } } },
+    }),
+    prisma.stockAdjustment.findMany({
+      // A stock count with differences, waiting for a store manager.
+      where: { status: 'PENDING' },
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: { warehouse: { select: { name: true } }, _count: { select: { lines: { where: { difference: { not: 0 } } } } } },
     }),
   ])
 
@@ -377,6 +384,16 @@ router.get('/pending-approvals', async (req, res) => {
       // So the dashboard does not offer Approve to the person who raised it,
       // which the server would only refuse.
       raisedById: mr.raisedById,
+    })),
+    ...adjustments.map((a) => ({
+      id: a.id,
+      type: 'ADJ' as const,
+      number: a.adjustmentNumber,
+      description: `Stock count, ${a.warehouse.name} · ${a._count.lines} ${a._count.lines === 1 ? 'difference' : 'differences'}`,
+      amount: null,
+      date: a.createdAt,
+      urgent: isUrgent(a.createdAt),
+      raisedById: a.madeById,
     })),
   ]
     .sort((a, b) => b.date.getTime() - a.date.getTime())

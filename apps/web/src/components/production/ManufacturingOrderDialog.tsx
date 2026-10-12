@@ -50,12 +50,14 @@ interface SavedMo {
   moNumber: string
   status: string
   soId: string | null
+  routingId: string | null
   plannedStartDate: string | null
   plannedEndDate: string | null
   notes: string | null
   lines: Array<{ soLineId: string | null; totalQty: number; sizes: Array<{ sizeId: string; qty: number }> }>
 }
 
+/** A routing the order could take, with why not when it does not fit. */
 type Draft = Record<string, { sizes: Record<string, string>; qty: string }>
 
 const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '')
@@ -118,6 +120,7 @@ export function ManufacturingOrderDialog({
   const [start, setStart] = useState('')
   const [finish, setFinish] = useState('')
   const [notes, setNotes] = useState('')
+  const [routingId, setRoutingId] = useState('')
   const [loading, setLoading] = useState(false)
   const [loadingPlan, setLoadingPlan] = useState(false)
   const [saving, setSaving] = useState<'draft' | 'release' | null>(null)
@@ -149,6 +152,7 @@ export function ManufacturingOrderDialog({
     setFinish('')
     setNotes('')
     setSoId('')
+    setRoutingId('')
     setLoading(true)
     void (async () => {
       try {
@@ -164,6 +168,7 @@ export function ManufacturingOrderDialog({
           setStart(day(mo.data.plannedStartDate))
           setFinish(day(mo.data.plannedEndDate))
           setNotes(mo.data.notes ?? '')
+          setRoutingId(mo.data.routingId ?? '')
         } else if (presetOrder) {
           setSoId(presetOrder)
         }
@@ -231,6 +236,7 @@ export function ManufacturingOrderDialog({
   const total = rows.reduce((t, r) => t + r.make, 0)
   const blocked = rows.find((r) => r.make > 0 && !r.l.style)
 
+
   const fillLeft = () => {
     if (!plan) return
     const next: Draft = {}
@@ -255,15 +261,18 @@ export function ManufacturingOrderDialog({
           : finish && start && finish < start
             ? 'It cannot finish before it starts.'
             : null
+  // The stages are loaded on the order once its materials have been issued, not here.
+  const releaseBlocker = blocker
 
   const save = async (release: boolean) => {
-    if (blocker || !plan) return
+    if ((release ? releaseBlocker : blocker) || !plan) return
     setSaving(release ? 'release' : 'draft')
     setError(null)
     const body = {
       plannedStartDate: start || null,
       plannedEndDate: finish || null,
       notes: notes.trim() || null,
+      routingId: routingId || null,
       lines: rows
         .filter((r) => r.make > 0)
         .map((r) => ({
@@ -319,7 +328,7 @@ export function ManufacturingOrderDialog({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(true)} disabled={busy || !!blocker || !plan}>
+            <button type="button" className="btn-primary hidden md:inline-flex" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
               {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
             </button>
             <button onClick={onClose} className="btn-ghost p-2" aria-label="Close" disabled={saving !== null}>
@@ -501,15 +510,16 @@ export function ManufacturingOrderDialog({
                   </div>
                 )}
               </Section>
+
             </>
           )}
         </div>
 
         <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2.5 sm:gap-3 sm:px-5 sm:py-3.5">
-          {blocker && !loading && (
+          {(blocker ?? (plan ? releaseBlocker : null)) && !loading && (
             <p className="warn-text mr-auto flex max-w-xl basis-full items-start gap-1.5 text-xs sm:basis-auto">
               <AlertCircle size={13} className="mt-px shrink-0" />
-              <span>{blocker}</span>
+              <span>{blocker ?? releaseBlocker}</span>
             </p>
           )}
           <button type="button" onClick={onClose} className="btn-secondary hidden sm:inline-flex" disabled={saving !== null}>
@@ -520,7 +530,7 @@ export function ManufacturingOrderDialog({
             <span className="sm:hidden">Draft</span>
             <span className="hidden sm:inline">Save as draft</span>
           </button>
-          <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!blocker || !plan}>
+          <button type="button" className="btn-primary" onClick={() => void save(true)} disabled={busy || !!releaseBlocker || !plan} title={releaseBlocker ?? undefined}>
             {saving === 'release' ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Save &amp; release
           </button>
         </div>

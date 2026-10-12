@@ -1,67 +1,75 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { Plus, Pencil, Ban, RefreshCw, Search, AlertCircle, Lock, Unlock } from 'lucide-react'
-import { api, ApiError, type Paginated } from '@/lib/api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { AlertCircle, ArrowRight, Ban, Lock, Pencil, Plus, RefreshCw, Search, Unlock } from 'lucide-react'
+import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
+import { Pagination } from '@/components/tables/Pagination'
+import { SmartSelect } from '@/components/ui/SmartSelect'
 import { useAppSettings } from '@/lib/appSettings'
 
 /**
- * Routings.
- *
- * This is the piece Absolute holds that our ERP never had: 167 of them in their
- * live account, one per style, because a plain shirt and an embroidered one do
- * not take the same path through the floor.
+ * Routings: where it is decided which processes a garment goes through, and
+ * in what order — for one style, for every style of a category, or for any
+ * style. A manufacturing order loads the stages of the routing that fits its
+ * style once its materials are issued, and keeps its own copy; editing a
+ * routing makes a new version for orders to come and never moves work
+ * already running.
  */
 export default function RoutingsPage() {
   const { rowsPerPage } = useAppSettings()
-
   const [rows, setRows] = useState<Routing[]>([])
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
+  const [applies, setApplies] = useState('')
   const [activeOnly, setActiveOnly] = useState(true)
-  const [dialog, setDialog] = useState<{ open: boolean; record: Routing | null }>({
-    open: false,
-    record: null,
-  })
+  const [dialog, setDialog] = useState<{ open: boolean; record: Routing | null }>({ open: false, record: null })
   const [busy, setBusy] = useState(false)
+  const latest = useRef(0)
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
     return () => clearTimeout(t)
   }, [search])
+  useEffect(() => setPage(1), [debounced, applies, activeOnly])
 
   const load = useCallback(async () => {
+    const ticket = ++latest.current
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ limit: String(rowsPerPage) })
+      const qs = new URLSearchParams({ limit: String(rowsPerPage), page: String(page) })
       if (debounced) qs.set('q', debounced)
       if (activeOnly) qs.set('active', 'true')
+      if (applies) qs.set('applies', applies)
       const res = await api.get<Paginated<Routing>>(`/masters/routings?${qs}`)
+      if (ticket !== latest.current) return
       setRows(res.data)
       setTotal(res.pagination.total)
     } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?',
-      )
+      if (ticket !== latest.current) return
+      setError(err instanceof ApiError ? err.message : 'Could not reach the server. Is the API running?')
       setRows([])
     } finally {
-      setLoading(false)
+      if (ticket === latest.current) setLoading(false)
     }
-  }, [debounced, activeOnly, rowsPerPage])
+  }, [debounced, activeOnly, applies, rowsPerPage, page])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  const toggleLock = async (r: Routing) => {
+  const act = async (fn: () => Promise<{ message?: string }>, fallback: string) => {
     setBusy(true)
+    setError(null)
     try {
-      await api.patch(`/masters/routings/${r.id}`, { isLocked: !r.isLocked })
+      const res = await fn()
+      setMessage(res.message ?? fallback)
       await load()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save.')
@@ -69,173 +77,154 @@ export default function RoutingsPage() {
       setBusy(false)
     }
   }
-
-  const retire = async (r: Routing) => {
-    if (!confirm(`Stop offering "${r.name}" on new orders? Orders already using it keep it.`)) return
-    setBusy(true)
-    try {
-      await api.delete(`/masters/routings/${r.id}`)
-      await load()
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save.')
-    } finally {
-      setBusy(false)
-    }
-  }
+  const mayEdit = can('masters', 'edit')
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <div className="page-header">
         <div>
-          <h1 className="page-title">Routings</h1>
-          <p className="page-subtitle">
-            The order of operations each style passes through on the floor
-          </p>
+          <h1 className="page-title text-xl sm:text-2xl">Routings</h1>
+          <p className="page-subtitle hidden sm:block">Decide here which processes a style goes through, and in what order</p>
         </div>
         <div className="flex items-center gap-2">
-          <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
+          <button className="btn-ghost" onClick={() => void load()} disabled={loading} aria-label="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
-          <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
-            <Plus size={15} /> New Routing
-          </button>
+          {can('masters', 'create') && (
+            <button className="btn-primary" onClick={() => setDialog({ open: true, record: null })}>
+              <Plus size={15} /> <span className="hidden sm:inline">New routing</span>
+            </button>
+          )}
         </div>
       </div>
 
       {error && (
-        <div className="flex items-start gap-3 p-3 rounded-lg border border-red-500/40 bg-red-500/5">
-          <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-          <p className="text-sm text-red-400">{error}</p>
+        <div className="border-destructive/40 bg-destructive/5 flex items-start gap-3 rounded-lg border p-3">
+          <AlertCircle size={16} className="text-destructive mt-0.5 shrink-0" />
+          <p className="text-destructive text-sm">{error}</p>
+        </div>
+      )}
+      {message && (
+        <div className="border-primary/40 bg-primary/5 rounded-lg border p-3">
+          <p className="text-primary text-sm">{message}</p>
         </div>
       )}
 
-      <div className="glass-card p-0 overflow-hidden">
-        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-border">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary border border-border flex-1 min-w-[220px] max-w-sm">
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3">
+          <div className="bg-field border-field-edge flex min-w-[200px] max-w-sm flex-1 items-center gap-2 rounded-lg border px-3 py-1.5">
             <Search size={14} className="text-muted-foreground" />
             <input
-              className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
-              placeholder="Search routing or style..."
+              className="text-foreground placeholder:text-muted-foreground flex-1 border-0 bg-transparent text-sm outline-none"
+              placeholder="Search routing, style or category…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               aria-label="Search routings"
             />
           </div>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              className="accent-teal-500"
-              checked={activeOnly}
-              onChange={(e) => setActiveOnly(e.target.checked)}
-            />
-            Active only
+          <SmartSelect className="form-input h-8 w-44 py-0 text-xs" value={applies} onChange={(e) => setApplies(e.target.value)} aria-label="For">
+            <option value="">All routings</option>
+            <option value="STYLE">For one style</option>
+            <option value="CATEGORY">For a category</option>
+            <option value="ANY">For any style</option>
+          </SmartSelect>
+          <label className="text-muted-foreground flex cursor-pointer select-none items-center gap-2 text-xs">
+            <input type="checkbox" className="accent-primary" checked={activeOnly} onChange={(e) => setActiveOnly(e.target.checked)} />
+            In use only
           </label>
-          <span className="text-xs text-muted-foreground ml-auto">{total} routings</span>
+          <span className="text-muted-foreground ml-auto text-xs">{total} routings</span>
         </div>
 
         {loading && rows.length === 0 ? (
-          <p className="px-4 py-8 text-sm text-muted-foreground">Loading...</p>
-        ) : rows.length === 0 ? (
-          <div className="px-4 py-10 text-center">
-            <p className="text-sm text-muted-foreground">
-              No routings yet. Create one per style — cutting through to packing.
-            </p>
+          <div className="space-y-2 p-4">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="skeleton h-16 w-full rounded-lg" />
+            ))}
           </div>
+        ) : rows.length === 0 ? (
+          <p className="text-muted-foreground px-4 py-10 text-center text-sm">No routings here. Make one: cutting first, then each process in order, to the last check.</p>
         ) : (
-          <div className="divide-y divide-border/60">
+          <div className="divide-border/60 divide-y">
             {rows.map((r) => (
-              <div key={r.id} className="px-4 py-4">
-                <div className="flex items-start justify-between gap-4">
+              <div key={r.id} className="px-4 py-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono text-xs text-teal-400">{r.code}</span>
-                      <span className="font-medium text-foreground">{r.name}</span>
-                      {r.isLocked && (
-                        <span className="badge-warning">
-                          <Lock size={10} /> Locked
-                        </span>
-                      )}
-                      {!r.isActive && <span className="badge-neutral">Retired</span>}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {r.style ? `${r.style.code} — ${r.style.name}` : 'No style'}
+                    <p className="text-foreground text-sm font-semibold">
+                      {r.name}
+                      {r.isLocked && <span className="text-muted-foreground font-normal"> (locked)</span>}
+                      {!r.isActive && <span className="text-muted-foreground font-normal"> (not in use)</span>}
+                    </p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {r.style ? `For style ${r.style.code} — ${r.style.name}` : r.category ? `For every ${r.category} style` : 'For any style'}
                       {' · '}
-                      {r.steps?.length ?? 0} steps
+                      {r.steps?.length ?? 0} processes
+                      {r._count?.mos ? ` · used on ${r._count.mos} ${r._count.mos === 1 ? 'order' : 'orders'}` : ''}
+                      {' · '}
+                      <span className="font-mono">{r.code}</span>, version {r.version}
                     </p>
                   </div>
-
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      className="btn-ghost p-1.5"
-                      onClick={() => void toggleLock(r)}
-                      disabled={busy}
-                      title={r.isLocked ? 'Unlock so the steps can be changed' : 'Lock while orders run against it'}
-                      aria-label={r.isLocked ? `Unlock ${r.name}` : `Lock ${r.name}`}
-                    >
-                      {r.isLocked ? <Unlock size={15} /> : <Lock size={15} />}
-                    </button>
-                    <button
-                      className="btn-ghost p-1.5"
-                      onClick={() => setDialog({ open: true, record: r })}
-                      title="Edit"
-                      aria-label={`Edit ${r.name}`}
-                    >
-                      <Pencil size={15} />
-                    </button>
-                    <button
-                      className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                      onClick={() => void retire(r)}
-                      disabled={busy}
-                      title="Stop offering this routing"
-                      aria-label={`Retire ${r.name}`}
-                    >
-                      <Ban size={15} />
-                    </button>
-                  </div>
-                </div>
-
-                {r.steps && r.steps.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5 mt-3">
-                    {r.steps
-                      .slice()
-                      .sort((a, b) => a.sequence - b.sequence)
-                      .map((s) => (
-                        <span
-                          key={s.id ?? s.sequence}
-                          className={`text-[11px] px-2 py-1 rounded border ${
-                            s.isQcStep
-                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-400'
-                              : 'border-border bg-secondary text-muted-foreground'
-                          }`}
-                          title={
-                            s.workstation
-                              ? `${s.operation?.name} at ${s.workstation.name}`
-                              : s.operation?.name
-                          }
+                  {mayEdit && (
+                    <div className="flex shrink-0 flex-wrap items-center gap-1">
+                      <button className="btn-secondary h-7 px-2.5 text-xs" onClick={() => setDialog({ open: true, record: r })} aria-label={`Edit ${r.name}`}>
+                        <Pencil size={13} /> Edit
+                      </button>
+                      <button
+                        className="btn-ghost h-7 px-2.5 text-xs"
+                        onClick={() => void act(() => api.patch(`/masters/routings/${r.id}`, { isLocked: !r.isLocked }), r.isLocked ? 'Unlocked.' : 'Locked.')}
+                        disabled={busy}
+                        title={r.isLocked ? 'Unlock, so its processes can be changed' : 'Lock, so nobody changes its processes'}
+                      >
+                        {r.isLocked ? <Unlock size={13} /> : <Lock size={13} />} {r.isLocked ? 'Unlock' : 'Lock'}
+                      </button>
+                      {r.isActive && (
+                        <button
+                          className="btn-ghost text-muted-foreground hover:text-destructive h-7 px-2.5 text-xs"
+                          onClick={() => {
+                            if (confirm(`Stop offering "${r.name}" on new orders? Orders that already have its stages keep them.`)) {
+                              void act(() => api.delete(`/masters/routings/${r.id}`), 'No longer offered.')
+                            }
+                          }}
+                          disabled={busy}
                         >
-                          <span className="font-mono opacity-60">{s.sequence}</span>{' '}
-                          {s.operation?.name ?? 'Step'}
-                          {s.workstation?.type === 'JOB_WORK' && ' ↗'}
-                        </span>
+                          <Ban size={13} /> Stop using
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {r.steps && r.steps.length > 0 && (
+                  <ol className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1.5 text-xs">
+                    {[...r.steps]
+                      .sort((a, b) => a.sequence - b.sequence)
+                      .map((s, i) => (
+                        <li key={s.id ?? s.sequence} className="flex items-center gap-1">
+                          {i > 0 && <ArrowRight size={12} className="text-muted-foreground shrink-0" aria-hidden />}
+                          <span className="border-border text-foreground whitespace-nowrap rounded-md border px-2 py-0.5" title={s.instructions ?? undefined}>
+                            <span className="text-muted-foreground tabular-nums">{s.sequence}.</span> {s.operation?.name ?? 'Process'}
+                            {s.isQcStep && <span className="text-primary"> (check)</span>}
+                            {s.execution === 'OUTSOURCED' && <span className="text-muted-foreground"> (outside unit)</span>}
+                            {s.skip === 'OPTIONAL' && <span className="text-muted-foreground"> (optional)</span>}
+                          </span>
+                        </li>
                       ))}
-                  </div>
+                  </ol>
                 )}
               </div>
             ))}
           </div>
         )}
+        <Pagination page={page} pages={Math.ceil(total / rowsPerPage) || 1} onPageChange={setPage} busy={loading} />
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        An arrow marks a step sent to an outside unit. Lock a routing once orders are running
-        against it, so the path cannot change underneath work already in progress.
+      <p className="text-muted-foreground text-xs">
+        A manufacturing order loads the stages of the routing for its style once its materials are issued, and can change them for itself. Changing a routing here
+        makes a new version for orders to come; orders already running keep theirs.
       </p>
 
-      <RoutingFormDialog
-        open={dialog.open}
-        record={dialog.record}
-        onClose={() => setDialog({ open: false, record: null })}
-        onSaved={() => void load()}
+      <RoutingFormDialog open={dialog.open} record={dialog.record} onClose={() => setDialog({ open: false, record: null })} onSaved={(m) => {
+          setMessage(m)
+          void load()
+        }}
       />
     </div>
   )

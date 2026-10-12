@@ -68,13 +68,44 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
     : []
   const styleByCode = new Map(typedStyles.map((s) => [s.code.toLowerCase(), s]))
 
-  const planned = await db.mOLine.findMany({
+  const plannedRows = await db.mOLine.findMany({
     where: {
       soLineId: { in: so.lines.map((l) => l.id) },
       mo: { status: { not: 'CLOSED' }, ...(exceptMoId ? { id: { not: exceptMoId } } : {}) },
     },
-    select: { soLineId: true, totalQty: true, sizes: { select: { sizeId: true, qty: true } } },
+    select: {
+      soLineId: true,
+      totalQty: true,
+      sizes: { select: { sizeId: true, qty: true } },
+      moId: true,
+      mo: { select: { status: true, closedAt: true } },
+      soLine: { select: { itemId: true } },
+    },
   })
+  // An order completed short (597 of 600) holds only what it packed: the
+  // pieces it never made are free to plan again.
+  const shortIds = [...new Set(plannedRows.filter((p) => p.mo.status === 'COMPLETED' && p.mo.closedAt).map((p) => p.moId))]
+  const packedRows = shortIds.length
+    ? await db.finishedGoodsReceiptLine.findMany({
+        where: { receipt: { moId: { in: shortIds }, cancelledAt: null } },
+        select: { qty: true, itemId: true, sizeId: true, receipt: { select: { moId: true } } },
+      })
+    : []
+  const packedOf = (moId: string, itemId: string, sizeId: string | null) =>
+    Math.round(
+      packedRows
+        .filter((r) => r.receipt.moId === moId && r.itemId === itemId && (sizeId === null || r.sizeId === sizeId))
+        .reduce((t, r) => t + Number(r.qty), 0),
+    )
+  const planned = plannedRows.map((p) =>
+    shortIds.includes(p.moId) && p.soLine
+      ? {
+          soLineId: p.soLineId,
+          totalQty: Math.min(p.totalQty, packedOf(p.moId, p.soLine.itemId, null)),
+          sizes: p.sizes.map((z) => ({ sizeId: z.sizeId, qty: Math.min(z.qty, packedOf(p.moId, p.soLine!.itemId, z.sizeId)) })),
+        }
+      : { soLineId: p.soLineId, totalQty: p.totalQty, sizes: p.sizes },
+  )
 
   const lines = await Promise.all(
     so.lines.map(async (l) => {
@@ -118,16 +149,23 @@ export async function orderForPlanning(db: Db, soId: string, exceptMoId?: string
  * in. Grouped by material, by whose it is — a customer-supplied line draws on
  * the customer's own stock — and by the department the BOM gives it to, which
  * is who asks the store for it. Beside each: what is in stock, store by
- * store, and what this order has already asked for.
+ * store, what this order has already asked for, and what has been issued.
+ *
+ * Whose it is: on a job-work order the customer sends the cloth, so a
+ * material is the customer's when the BOM says so, when this customer has
+ * sent us that material before (a customer GRN), or when it is fabric (filed
+ * under a Fabric category). Thread, interlining, trims and packing are ours
+ * unless the customer sent them. `swap` turns a row the other way — the
+ * plan's "ours / customer's" switch — keyed by item and department.
  */
-export async function materialPlan(db: Db, moId: string) {
+export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<string> } = {}) {
   const mo = await db.manufacturingOrder.findUnique({
     where: { id: moId },
     select: {
       id: true,
       moNumber: true,
       status: true,
-      so: { select: { id: true, soNumber: true, customerId: true, customer: { select: { name: true } } } },
+      so: { select: { id: true, soNumber: true, customerId: true, isJobWork: true, customer: { select: { name: true } } } },
       lines: {
         select: {
           id: true,
@@ -146,7 +184,16 @@ export async function materialPlan(db: Db, moId: string) {
                   effectiveQty: true,
                   customerSupplied: true,
                   department: { select: { id: true, name: true } },
-                  componentItem: { select: { id: true, code: true, name: true, type: true, uom: { select: { symbol: true } } } },
+                  componentItem: {
+                    select: {
+                      id: true,
+                      code: true,
+                      name: true,
+                      type: true,
+                      uom: { select: { symbol: true } },
+                      category: { select: { name: true, parent: { select: { name: true } } } },
+                    },
+                  },
                   sizes: { select: { sizeId: true, effectiveQty: true } },
                 },
               },
@@ -158,8 +205,25 @@ export async function materialPlan(db: Db, moId: string) {
   })
   if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
 
+  // What this customer has sent us before: on a job-work order, theirs to use.
+  const supplied = new Set<string>(
+    mo.so?.isJobWork
+      ? (
+          await db.customerGRNLine.findMany({
+            where: { grn: { customerId: mo.so.customerId, cancelledAt: null } },
+            select: { itemId: true },
+            distinct: ['itemId'],
+          })
+        ).map((l) => l.itemId)
+      : [],
+  )
+
   type Row = {
     key: string
+    /** Item and department: what the "ours / customer's" switch is keyed by. */
+    baseKey: string
+    /** Whose the plan would say without the switch. */
+    defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
     item: { id: string; code: string; name: string; type: string; uom: string | null }
     ownership: 'OWNED' | 'CUSTOMER_OWNED'
     ownerCustomerId: string | null
@@ -180,12 +244,18 @@ export async function materialPlan(db: Db, moId: string) {
       const required = line.sizes.length
         ? line.sizes.reduce((s, sz) => s + sz.qty * (bySize.get(sz.sizeId) ?? Number(b.effectiveQty)), 0)
         : line.totalQty * Number(b.effectiveQty)
-      const theirs = b.customerSupplied && !!mo.so
+      const baseKey = `${b.componentItem.id}|${b.department?.id ?? ''}`
+      const cat = b.componentItem.category
+      const isFabric = /fabric/i.test(cat?.name ?? '') || /fabric/i.test(cat?.parent?.name ?? '')
+      const byDefault = !!mo.so && (b.customerSupplied || (mo.so.isJobWork && (supplied.has(b.componentItem.id) || isFabric)))
+      const theirs = !!mo.so && (opts.swap?.has(baseKey) ? !byDefault : byDefault)
       const ownership = theirs ? 'CUSTOMER_OWNED' : 'OWNED'
       const ownerCustomerId = theirs ? mo.so!.customerId : null
       const key = `${b.componentItem.id}|${ownership}|${ownerCustomerId ?? ''}|${b.department?.id ?? ''}`
       const row = rows.get(key) ?? {
         key,
+        baseKey,
+        defaultOwnership: (byDefault ? 'CUSTOMER_OWNED' : 'OWNED') as Row['defaultOwnership'],
         item: { id: b.componentItem.id, code: b.componentItem.code, name: b.componentItem.name, type: b.componentItem.type, uom: b.componentItem.uom?.symbol ?? null },
         ownership,
         ownerCustomerId,
@@ -217,11 +287,22 @@ export async function materialPlan(db: Db, moId: string) {
         ownerCustomerId: true,
         requestedQty: true,
         issuedQty: true,
+        returnedQty: true,
         mr: { select: { departmentId: true, closedAt: true } },
       },
     }),
   ])
   const storeName = new Map(warehouses.map((w) => [w.id, w.name]))
+
+  // Rows of the same material and owner: a requisition counts against its own
+  // department's row, but where the material has one row only it counts
+  // whichever department asked, so changing the department on the plan never
+  // makes the same cloth look un-asked-for.
+  const rowsOf = new Map<string, number>()
+  for (const r of rows.values()) {
+    const k = `${r.item.id}|${r.ownership}|${r.ownerCustomerId ?? ''}`
+    rowsOf.set(k, (rowsOf.get(k) ?? 0) + 1)
+  }
 
   const data = [...rows.values()].map((r) => {
     const stores = stock
@@ -230,22 +311,25 @@ export async function materialPlan(db: Db, moId: string) {
       .filter((s) => s.qty > 0 && storeName.has(s.id))
       .sort((a, b) => b.qty - a.qty)
     const inStock = round3(stores.reduce((s, x) => s + x.qty, 0))
-    // A requisition closed part issued counts at what was issued; an open one at what was asked.
-    const requested = round3(
-      asked
-        .filter(
-          (a) =>
-            a.itemId === r.item.id &&
-            a.ownership === r.ownership &&
-            (a.ownerCustomerId ?? null) === r.ownerCustomerId &&
-            a.mr.departmentId === (r.department?.id ?? a.mr.departmentId),
-        )
-        .reduce((s, a) => s + Number(a.mr.closedAt ? a.issuedQty : a.requestedQty), 0),
+    const single = rowsOf.get(`${r.item.id}|${r.ownership}|${r.ownerCustomerId ?? ''}`) === 1
+    const mine = asked.filter(
+      (a) =>
+        a.itemId === r.item.id &&
+        a.ownership === r.ownership &&
+        (a.ownerCustomerId ?? null) === r.ownerCustomerId &&
+        (single || a.mr.departmentId === (r.department?.id ?? null)),
     )
+    // A requisition closed part issued counts at what was issued; an open one at what was asked.
+    const requested = round3(mine.reduce((s, a) => s + Number(a.mr.closedAt ? a.issuedQty : a.requestedQty), 0))
+    // Issued less what came back from the floor unused.
+    const issued = round3(mine.reduce((s, a) => s + Number(a.issuedQty) - Number(a.returnedQty), 0))
     const required = round3(r.required)
     const toRequest = round3(Math.max(0, required - requested))
     return {
       key: r.key,
+      baseKey: r.baseKey,
+      defaultOwnership: r.defaultOwnership,
+      issued,
       item: r.item,
       ownership: r.ownership,
       ownerCustomerId: r.ownerCustomerId,
@@ -270,15 +354,16 @@ export async function materialPlan(db: Db, moId: string) {
  * receipt cancelled after that reopens it.
  */
 export async function syncMoPacked(tx: Prisma.TransactionClient, moId: string) {
-  const mo = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { status: true, totalPlannedQty: true } })
+  const mo = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: moId }, select: { status: true, totalPlannedQty: true, closedAt: true } })
   const agg = await tx.finishedGoodsReceiptLine.aggregate({
     where: { receipt: { moId, cancelledAt: null } },
     _sum: { qty: true },
   })
   const packed = Math.round(Number(agg._sum.qty ?? 0))
   const done = mo.totalPlannedQty > 0 && packed >= mo.totalPlannedQty
+  // Completed short on purpose stays completed, whatever is packed later.
   const status =
-    mo.status === 'CLOSED' || mo.status === 'DRAFT'
+    mo.status === 'CLOSED' || mo.status === 'DRAFT' || (mo.status === 'COMPLETED' && mo.closedAt)
       ? mo.status
       : done
         ? 'COMPLETED'

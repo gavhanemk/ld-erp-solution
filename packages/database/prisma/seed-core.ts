@@ -367,6 +367,11 @@ export async function seedCore(prisma: PrismaClient) {
     { docType: 'JWR', prefix: 'JWR' },
     // A customer's own material going back to them unworked.
     { docType: 'CMR', prefix: 'CMR' },
+    // Packed garments into the finished-goods store, quotations to buyers, and
+    // the buyer's payment in. Each was numbered from a series nothing set up.
+    { docType: 'FGR', prefix: 'FGR' },
+    { docType: 'QT', prefix: 'QT' },
+    { docType: 'RCPT', prefix: 'RCPT' },
   ]
 
   for (const s of series) {

@@ -5,12 +5,13 @@ import { AppError } from '../middleware/errorHandler'
 import { isAdmin, requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { decidePending } from '../services/requisition.service'
+import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import { approveSalesOrder, rejectSalesOrder } from '../services/salesOrder.service'
-import { rejectRequisitionSchema } from '../schemas/inventory.schemas'
+import { rejectAdjustmentSchema, rejectRequisitionSchema } from '../schemas/inventory.schemas'
 
 const router = Router()
 
-const documentType = z.enum(['PO', 'SO', 'MR'])
+const documentType = z.enum(['PO', 'SO', 'MR', 'ADJ'])
 type DocumentType = z.infer<typeof documentType>
 
 /** Which permission module governs each document type. */
@@ -18,6 +19,7 @@ const MODULE_FOR: Record<DocumentType, string> = {
   PO: 'purchase',
   SO: 'sales',
   MR: 'inventory',
+  ADJ: 'inventory',
 }
 
 const rejectBody = z.object({
@@ -129,6 +131,12 @@ async function approve(
     return { entityType: 'SalesOrder', number: before.soNumber, before, after }
   }
 
+  if (type === 'ADJ') {
+    // A stock count: approving posts its differences into stock.
+    const { before, after } = await approveAdjustment(id, userId, admin)
+    return { entityType: 'StockAdjustment', number: before.adjustmentNumber, before, after }
+  }
+
   const before = await prisma.materialRequisition.findUnique({ where: { id } })
   if (!before) throw new AppError('Material requisition not found', 404, 'NOT_FOUND')
   if (before.status !== 'PENDING') {
@@ -172,6 +180,12 @@ async function reject(type: DocumentType, id: string, reason: string, userId: st
     // A confirmed order is cancelled or short-closed, not rejected.
     const { before, after } = await rejectSalesOrder(id, userId, reason)
     return { entityType: 'SalesOrder', number: before.soNumber, before, after }
+  }
+
+  if (type === 'ADJ') {
+    rejectAdjustmentSchema.parse({ reason })
+    const { before, after } = await rejectAdjustment(id, userId, reason)
+    return { entityType: 'StockAdjustment', number: before.adjustmentNumber, before, after }
   }
 
   const before = await prisma.materialRequisition.findUnique({ where: { id } })

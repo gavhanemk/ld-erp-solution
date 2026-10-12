@@ -9,6 +9,7 @@ import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { MO_STATUS, moStatus } from '@/components/production/status'
+import { PROGRESS } from '@/components/production/floor/types'
 import { ManufacturingOrderDialog } from '@/components/production/ManufacturingOrderDialog'
 import { ManufacturingOrderDetailDialog } from '@/components/production/ManufacturingOrderDetailDialog'
 
@@ -29,9 +30,30 @@ interface MoRow {
   closeReason: string | null
   totalPlannedQty: number
   totalPackedQty: number
+  totalCutQty: number
+  /** Where the work stands across its route, for an order with one. */
+  progress: string | null
+  routing: string | null
+  routed: boolean
+  held: boolean
+  holdReason: string | null
 }
 
 const pcs = (n: number) => n.toLocaleString('en-IN')
+
+/** The floor's state under the order's own, for an order on the floor with a route. */
+function FloorState({ mo }: { mo: MoRow }) {
+  if (mo.held) {
+    return (
+      <span className="badge-warning" title={mo.holdReason ?? undefined}>
+        On hold
+      </span>
+    )
+  }
+  if (!mo.routed || ['DRAFT', 'CLOSED'].includes(mo.status)) return null
+  const p = PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED
+  return <span className={p.cls}>{p.label}</span>
+}
 
 /**
  * Manufacturing orders: what the factory is making, and for which order.
@@ -220,6 +242,7 @@ export default function ManufacturingOrdersPage() {
                             {mo.moNumber}
                           </button>
                           <span className={s.cls}>{s.label}</span>
+                          <FloorState mo={mo} />
                         </div>
                         <p className="text-foreground mt-1 font-medium leading-snug">{mo.customer ?? '—'}</p>
                         <p className="text-muted-foreground text-[11px]">
@@ -231,7 +254,7 @@ export default function ManufacturingOrdersPage() {
                     </div>
                     <div className="mt-2 flex items-center justify-between gap-2 text-xs">
                       <span className="text-muted-foreground">
-                        Packed {share}% · finish {mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}
+                        Cut {pcs(mo.totalCutQty)} · packed {share}% · finish {mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}
                       </span>
                       <ActionMenu label={`Actions for ${mo.moNumber}`} items={rowActions(mo)} />
                     </div>
@@ -292,6 +315,7 @@ export default function ManufacturingOrdersPage() {
                             </div>
                             <span className="text-muted-foreground text-[11px] tabular-nums">
                               {pcs(mo.totalPackedQty)} of {pcs(mo.totalPlannedQty)}
+                              {mo.totalCutQty ? ` · ${pcs(mo.totalCutQty)} cut` : ''}
                             </span>
                           </div>
                         </td>
@@ -313,9 +337,12 @@ export default function ManufacturingOrdersPage() {
                           {late && <div className="text-[11px]">late</div>}
                         </td>
                         <td>
-                          <span className={s.cls} title={mo.closeReason ?? undefined}>
-                            {s.label}
-                          </span>
+                          <div className="flex flex-col items-start gap-1">
+                            <span className={s.cls} title={mo.closeReason ?? undefined}>
+                              {s.label}
+                            </span>
+                            <FloorState mo={mo} />
+                          </div>
                         </td>
                         <td className="whitespace-nowrap text-right">
                           <div className="flex justify-end">

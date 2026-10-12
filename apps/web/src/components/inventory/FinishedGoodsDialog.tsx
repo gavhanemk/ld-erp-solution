@@ -33,6 +33,7 @@ interface OrderOption {
   id: string
   soNumber: string
   status: string
+  isJobWork?: boolean
   customer: { name: string }
 }
 type Rate = { rate: number; source: 'BOM' | 'STANDARD'; bomVersion: string | null } | null
@@ -42,10 +43,12 @@ interface LineDraft {
   itemId: string
   sizes: Record<string, string>
   qty: string
+  /** "B" for B-grade pieces: made, but not first quality. Kept apart in stock. */
+  grade: 'A' | 'B'
 }
 
 let lineKey = 0
-const blankLine = (): LineDraft => ({ key: `f${++lineKey}`, itemId: '', sizes: {}, qty: '' })
+const blankLine = (): LineDraft => ({ key: `f${++lineKey}`, itemId: '', sizes: {}, qty: '', grade: 'A' })
 const today = () => new Date().toISOString().slice(0, 10)
 
 /**
@@ -58,10 +61,13 @@ export function FinishedGoodsDialog({
   open,
   onClose,
   onSaved,
+  presetMoId = null,
 }: {
   open: boolean
   onClose: () => void
   onSaved: (message: string) => void
+  /** Opened from a manufacturing order: it is picked, and what its last step has passed comes in filled. */
+  presetMoId?: string | null
 }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
@@ -152,6 +158,7 @@ export function FinishedGoodsDialog({
         // The finished-goods store, when one is named so; otherwise the only one.
         const fg = wh.data.find((w) => /finish/i.test(w.name)) ?? (wh.data.length === 1 ? wh.data[0] : null)
         setWarehouseId(fg?.id ?? '')
+        if (presetMoId) await fillFromOrder(presetMoId, () => alive)
       } catch (err) {
         if (alive) setError(err instanceof ApiError ? err.message : 'Could not load the items, sizes and stores.')
       } finally {
@@ -161,7 +168,68 @@ export function FinishedGoodsDialog({
     return () => {
       alive = false
     }
-  }, [open])
+    // fillFromOrder is a plain function of this render; re-running on it would refetch for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, presetMoId])
+
+  /*
+   * From a manufacturing order with a route: the order and the manufacturing
+   * order picked, and a line per garment with what its last step has passed,
+   * size by size — and a B-grade line for what was set aside as B-grade. The
+   * server takes exactly these off the floor, so nothing is typed twice.
+   */
+  async function fillFromOrder(id: string, alive: () => boolean) {
+    type MoBrief = {
+      id: string
+      moNumber: string
+      soId: string | null
+      totalPlannedQty: number
+      totalPackedQty: number
+      steps: Array<{ id: string }>
+      lines: Array<{ id: string; soLine: { item: { id: string } } | null }>
+    }
+    type FlowBrief = {
+      steps: Array<{ id: string; last: boolean }>
+      bundles: Array<{ line: { id: string } | null; size: { id: string } | null; places: Array<{ stepId: string; bucket: string; vendorId: string | null; qty: number }> }>
+    }
+    const mo = (await api.get<{ data: MoBrief }>(`/production/orders/${id}`)).data
+    if (!alive()) return
+    setSoId(mo.soId ?? '')
+    setMos([{ id: mo.id, moNumber: mo.moNumber, totalPlannedQty: mo.totalPlannedQty, totalPackedQty: mo.totalPackedQty }])
+    setMoId(mo.id)
+    if (!mo.steps.length) return
+    const flow = (await api.get<{ data: FlowBrief }>(`/production/orders/${id}/flow`)).data
+    if (!alive()) return
+    const last = new Set(flow.steps.filter((s) => s.last).map((s) => s.id))
+    const itemOfLine = new Map(mo.lines.map((l) => [l.id, l.soLine?.item.id ?? '']))
+    const ready = new Map<string, { sizes: Record<string, number>; total: number }>()
+    const add = (key: string, sizeId: string | null, n: number) => {
+      const r = ready.get(key) ?? { sizes: {}, total: 0 }
+      if (sizeId) r.sizes[sizeId] = (r.sizes[sizeId] ?? 0) + n
+      r.total += n
+      ready.set(key, r)
+    }
+    for (const b of flow.bundles) {
+      const itemId = b.line ? itemOfLine.get(b.line.id) : ''
+      if (!itemId) continue
+      for (const p of b.places) {
+        if (p.vendorId || p.qty <= 0) continue
+        if (p.bucket === 'DONE' && last.has(p.stepId)) add(`${itemId}|A`, b.size?.id ?? null, p.qty)
+        if (p.bucket === 'B_GRADE') add(`${itemId}|B`, b.size?.id ?? null, p.qty)
+      }
+    }
+    const filled = [...ready.entries()].map(([key, r]) => {
+      const [itemId, grade] = key.split('|')
+      return {
+        ...blankLine(),
+        itemId,
+        grade: grade as 'A' | 'B',
+        sizes: Object.fromEntries(Object.entries(r.sizes).map(([s, n]) => [s, String(n)])),
+        qty: String(r.total),
+      }
+    })
+    if (filled.length) setLines(filled.sort((a, b) => a.itemId.localeCompare(b.itemId) || a.grade.localeCompare(b.grade)))
+  }
 
   // The value each picked item goes in at, asked of the server as items are picked.
   const pickedIds = useMemo(() => [...new Set(lines.map((l) => l.itemId).filter(Boolean))].sort().join(','), [lines])
@@ -189,12 +257,16 @@ export function FinishedGoodsDialog({
     return run && run.length ? run : null
   }
 
+  // Packed for a job-work order: made from the customer's fabric, so the
+  // customer's garments, counted at no value of ours.
+  const jobWork = !!orders.find((o) => o.id === soId)?.isJobWork
+
   const priced = lines.map((l) => {
     const item = itemById.get(l.itemId)
     const run = runOf(item)
     const qty = run ? sumSizes(l.sizes) : Number(l.qty) || 0
     const rate = l.itemId ? rates[l.itemId] : undefined
-    return { line: l, item, run, qty, rate, value: rate ? qty * rate.rate : 0 }
+    return { line: l, item, run, qty, rate, value: rate && !jobWork ? qty * rate.rate : 0 }
   })
   const filled = priced.filter((p) => p.line.itemId)
   const pieces = filled.reduce((s, p) => s + p.qty, 0)
@@ -206,7 +278,7 @@ export function FinishedGoodsDialog({
       ? 'Add at least one item.'
       : filled.find((p) => p.qty <= 0)
         ? `Put in the pieces for ${filled.find((p) => p.qty <= 0)!.item?.code}.`
-        : filled.find((p) => p.rate === null)
+        : !jobWork && filled.find((p) => p.rate === null)
           ? `${filled.find((p) => p.rate === null)!.item?.code} has no approved BOM cost and no standard rate, so it cannot be valued.`
           : null
 
@@ -224,12 +296,12 @@ export function FinishedGoodsDialog({
       soId: soId || null,
       moId: moId || null,
       notes: notes.trim() || null,
-      lines: filled.flatMap((p): Array<{ itemId: string; sizeId: string | null; qty: number }> =>
+      lines: filled.flatMap((p): Array<{ itemId: string; sizeId: string | null; qty: number; grade: 'A' | 'B' }> =>
         p.run
           ? p.run
-              .map((s) => ({ itemId: p.line.itemId, sizeId: s.id, qty: Number(p.line.sizes[s.id]) || 0 }))
+              .map((s) => ({ itemId: p.line.itemId, sizeId: s.id, qty: Number(p.line.sizes[s.id]) || 0, grade: p.line.grade }))
               .filter((x) => x.qty > 0)
-          : [{ itemId: p.line.itemId, sizeId: null, qty: p.qty }]
+          : [{ itemId: p.line.itemId, sizeId: null, qty: p.qty, grade: p.line.grade }]
       ),
     }
     try {
@@ -355,10 +427,22 @@ export function FinishedGoodsDialog({
                             ))}
                           </SmartSelect>
                         </label>
+                        <label className="w-36 shrink-0">
+                          <span className="form-label">Grade</span>
+                          <SmartSelect
+                            className="form-input"
+                            value={p.line.grade}
+                            onChange={(e) => setLine(p.line.key, { grade: e.target.value === 'B' ? 'B' : 'A' })}
+                            aria-label={`Line ${i + 1} grade`}
+                          >
+                            <option value="A">Good (first quality)</option>
+                            <option value="B">B-grade</option>
+                          </SmartSelect>
+                        </label>
                         <div className="text-xs">
                           <span className="form-label">Value per piece</span>
-                          <span className={`block py-2 tabular-nums ${p.rate === null ? 'warn-text' : 'text-foreground'}`}>
-                            {p.line.itemId ? rateWords(p.rate) : '—'}
+                          <span className={`block py-2 tabular-nums ${!jobWork && p.rate === null ? 'warn-text' : 'text-foreground'}`}>
+                            {!p.line.itemId ? '—' : jobWork ? "Customer's · ₹0" : rateWords(p.rate)}
                           </span>
                         </div>
                         <button

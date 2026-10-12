@@ -41,6 +41,9 @@ const lineSchema = z.object({
   qty: z.number().positive('Quantity must be more than zero'),
   unitPrice: z.number().min(0, 'Rate cannot be negative'),
   discount: z.number().min(0).max(100).optional(),
+  /** On a job-work quotation: the SAC and GST rate of the job charge (SAC 9988 when empty). */
+  jobHsnCode: z.string().trim().max(20).optional().nullable(),
+  jobGstRate: z.number().min(0).max(28).optional().nullable(),
 })
 
 export const quoteSchema = z
@@ -86,7 +89,7 @@ function pickBom<T extends QuoteBom>(boms: T[], color?: string | null): T | null
 
 const QUOTE_BOM = {
   where: { isActive: true, status: { in: ['APPROVED', 'DRAFT'] as Array<'APPROVED' | 'DRAFT'> }, OR: [{ costPerPiece: { not: null } }, { sellingPrice: { not: null } }] },
-  select: { status: true, color: true, version: true, costPerPiece: true, sellingPrice: true, marginPercent: true },
+  select: { id: true, status: true, color: true, version: true, costPerPiece: true, sellingPrice: true, marginPercent: true },
   orderBy: [{ approvedAt: 'desc' as const }, { updatedAt: 'desc' as const }],
 }
 
@@ -132,6 +135,8 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
         totalQty: l.qty,
         unitPrice: l.unitPrice,
         discount: l.discount,
+        jobHsnCode: l.jobHsnCode ?? null,
+        jobGstRate: l.jobGstRate ?? null,
       })),
     }),
   )
@@ -231,6 +236,7 @@ router.get('/styles', requirePermission(MODULE, 'view'), async (_req, res) => {
       colors: [...new Set([...st.colors, ...st.items.map((i) => i.color).filter((c): c is string => !!c)])],
       items: st.items,
       boms: st.boms.map((b) => ({
+        id: b.id,
         status: b.status,
         color: b.color,
         version: b.version,

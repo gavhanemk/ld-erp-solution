@@ -7,6 +7,59 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 12 Oct 2026 — production: routings, the floor's ledger, job cards
+
+**Migrations:**
+`20261012120000_production_routing_flow`,
+`20261012130000_number_series_fg_quote_receipt`,
+`20261012150000_job_cards`,
+`20261012160000_transfer_from_step_required`
+**Branch:** `feat/production-routing-flow` (stacked on `feat/job-work-flow-gaps`)
+**Status: applied to the shared database on 12 Oct with `prisma migrate deploy`.**
+Nobody needs to apply them.
+
+### What changed
+
+- New enums `ProcessKind`, `StepExecution`, `StepSkip`, `WipBucket`,
+  `WipEventType`, `TransferStatus`, `JobWorkOrderStatus`.
+- `operations`: `kind`, `defaultExecution`, `instructions`. `routings`:
+  `category`, `version` (default 1), and `styleId` now optional — a routing
+  can be for a category or any style. `routing_steps`: `execution`, `skip`,
+  `instructions`.
+- `manufacturing_orders`: `routingId`, `routingVersion`, `progress`, `heldAt`,
+  `heldById`, `holdReason`. `cutting_orders`: `moLineId`, `lotNo`, `ratio`,
+  `cutterName`, `bundleSize`, `plannedBreakup`.
+- New tables `mo_steps`, `production_bundles`, `wip_events`, `wip_entries`,
+  `process_transfers`, `process_transfer_lines`, `job_work_orders`,
+  `job_cards`. `process_transfers.jobCardId` (SET NULL).
+- Number series **FGR**, **QT** and **RCPT** inserted for any company that had
+  none — nothing else could create them.
+- `20261012150000` made one job card for each line of every order already on
+  the floor. It also made `process_transfers.fromStepId` and
+  `process_transfer_lines.bundleId` optional; `20261012160000` made them
+  required again — no row was ever written without them.
+
+Nothing is dropped. On a branch without these folders, `prisma migrate dev`
+will propose dropping all of it. Say no.
+
+## 11 Oct 2026 — cutting against the fabric, floor returns, job-worker damage
+
+**Migration:** `20261011180000_cutting_floor_return_jw_debit`
+**Branch:** `feat/job-work-flow-gaps`
+**Status: applied to the shared database with `prisma migrate deploy`.**
+Nobody needs to apply it.
+
+### What changed
+
+- `material_requisition_lines.returnedQty`, default 0: what came back from the
+  floor.
+- `cutting_orders.createdById`, and foreign keys on its fabric, panel item and
+  panel store.
+- `purchase_notes.jobWorkReturnId`: a debit note on a job worker for what it
+  damaged.
+
+Nothing is dropped and no row changes.
+
 ## 11 Oct 2026 — sales quotations and credit notes
 
 **Migration:** `20261011090000_sales_quotes_and_credit_notes`
