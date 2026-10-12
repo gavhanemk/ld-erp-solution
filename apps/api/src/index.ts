@@ -14,6 +14,7 @@ dotenv.config()
 import authRoutes from './routes/auth.routes'
 import dashboardRoutes from './routes/dashboard.routes'
 import masterRoutes from './routes/master.routes'
+import styleTrackingRoutes from './routes/styleTracking.routes'
 import salesRoutes from './routes/sales.routes'
 import challanRoutes from './routes/challan.routes'
 import invoiceRoutes from './routes/invoice.routes'
@@ -270,6 +271,8 @@ app.use('/api/webhooks', webhookRoutes)
 
 // Protected Routes
 app.use('/api/dashboard', authMiddleware, dashboardRoutes)
+// Ahead of the masters router, whose own paths it would otherwise fall through.
+app.use('/api/masters/style-tracking', authMiddleware, styleTrackingRoutes)
 app.use('/api/masters', authMiddleware, masterRoutes)
 // Delivery challans, ahead of the rest of /api/sales so their paths are theirs.
 app.use('/api/sales/challans', authMiddleware, challanRoutes)

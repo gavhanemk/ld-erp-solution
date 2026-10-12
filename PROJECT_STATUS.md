@@ -1,9 +1,70 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Sun 11 Oct 2026 — Sales Phase 4: quotations, returns, dashboard, reports — Sales complete (branch `feat/sales-phase4`)_
+_Last updated: Mon 12 Oct 2026 — Routings by style: start and stop each step (branch `feat/masters-routing-style-tracker`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
+
+---
+
+## Routings by style: start and stop each step (Mon 12 Oct)
+
+Branch `feat/masters-routing-style-tracker`. Asked for on 12 Oct: tie routing
+to the style, show where each style has got to, and record when each step
+starts and stops. Decided with the business:
+- tracking is per **style**, since every style is unique and one order can hold several;
+- Start and Stop are **pressed by hand**;
+- units completed come from the floor's records, never typed.
+
+**Masters → Routings** now opens on the **Styles** tab:
+- **What each row shows:** the routing the style follows and a coloured state.
+  - Grey: not started, or no routing.
+  - Teal and pulsing: in progress.
+  - Amber: waiting for the next step to start.
+  - Green: done.
+- **Also on each row:** the step under way, and how many steps are done.
+- **Filters:** in progress, not started, done, no routing, each with a count.
+
+The old list is the **All routings** tab, where shared routings are edited, locked and stopped.
+
+**A style's page** (`/masters/routings/style/[id]`):
+- **Header:** the style, its colours and size run, and the routing it follows, with Edit routing.
+  - Without a routing of its own, it offers **Make its routing**, which opens the form for that style, copying a shared routing's steps if it follows one.
+- **Figures:** steps done, in progress, units planned, and units through the last step.
+- **One card per step**, each showing:
+  - process, department, line or outside unit, check, rate and instructions;
+  - **Start** and **Stop**, with the date, time and person;
+  - how long it took, or has been running;
+  - **units completed**, read from the floor's ledger across the style's order lines;
+  - a note.
+- **Orders for this style**, and steps no longer on the routing kept as history.
+
+**Rules** (`services/styleTrack.service.ts`):
+- **Starting:** a step can start once the step before it has started, skipping steps left out. Steps overlap on the floor.
+- **Once each:** one start and one stop per step.
+- **Leaving a step out:** only before it starts, and under the routing's own rule for that step. Cutting never; "manager only" needs `production:approve`.
+- **Undo:** `production:edit`, with a reason kept in the audit log. It undoes the last thing done to a step, and refuses a start that a later step has followed.
+- **Permissions:** Start, Stop and notes are `production:create`; reading needs `masters:view`.
+- **Which routing a style follows:**
+  - its own routing; if it has more than one, the one changed most recently, which the page says;
+  - otherwise its category's routing;
+  - otherwise one for any style.
+- **Kept by process, not by routing step:** saving a routing writes its steps afresh, so a step's ID doesn't survive an edit.
+
+**The routing form, cleaned up:**
+- **Rows:** one line per step (process, where it's done, unit, rate), dragged by the handle or moved with arrows.
+- **Side panel:** the selected step's leave-out rule, check, SMV and instructions.
+- **"For":** a three-way switch.
+- **Switched-off processes:** a step using a process since switched off in the Process Master now shows "(no longer in use)" instead of a blank. Before, RT-SH-PLAIN, which uses Cutting QC and Line QC, could not be saved at all.
+
+**Database:** migration `20261012200000_style_step_runs`, one new table. Applied
+to the shared database on 12 Oct after a rolled-back dry run. See `MIGRATION-NOTES.md`.
+
+**Tested:**
+- Type-check, the API build and `next build` pass.
+- `tools/check-style-tracking.ts`: 26 checks against the shared database in a rolled-back transaction (start order, overlap, stop, undo order, leaving out, notes, list states, units matching the floor's own figures).
+- Every screen rendered in both themes, using real answers dumped from the shared database.
+- **Not yet clicked through against the live API.**
 
 ---
 

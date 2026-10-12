@@ -333,6 +333,9 @@ model User {
   uploadedNoteFiles    PurchaseNoteAttachment[]    @relation("NoteAttachmentUploadedBy")
   approvedBOMs         BOM[]                       @relation("BOMApprovedBy")
   pricedBOMs           BOM[]                       @relation("BOMPricedBy")
+  styleStepsStarted    StyleStepRun[]              @relation("StyleStepStartedBy")
+  styleStepsStopped    StyleStepRun[]              @relation("StyleStepStoppedBy")
+  styleStepsSkipped    StyleStepRun[]              @relation("StyleStepSkippedBy")
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
@@ -743,6 +746,7 @@ model Style {
   routings Routing[]
   items    Item[]
   poLines  PurchaseOrderLine[]
+  stepRuns StyleStepRun[]
 
   @@index([code])
   mrLines MaterialRequisitionLine[] @relation("MRLineStyle")
@@ -1143,6 +1147,7 @@ model Operation {
   routingSteps      RoutingStep[]
   productionEntries ProductionEntry[]
   moSteps           MOStep[]
+  styleStepRuns     StyleStepRun[]
 
   @@map("operations")
 }
@@ -4069,9 +4074,10 @@ model Routing {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  steps RoutingStep[]
-  boms  BOM[]
-  mos   ManufacturingOrder[]
+  steps    RoutingStep[]
+  boms     BOM[]
+  mos      ManufacturingOrder[]
+  stepRuns StyleStepRun[]
 
   @@index([styleId])
   @@map("routings")
@@ -4100,6 +4106,49 @@ model RoutingStep {
 
   @@unique([routingId, sequence])
   @@map("routing_steps")
+}
+
+/// When one style's work at one step of its routing started and stopped, as
+/// pressed by hand on the style's page under Masters → Routings. Separate from
+/// the floor's own counts, which come from the piece ledger and are never typed.
+///
+/// Kept by process, not by routing step: a routing's steps are written afresh
+/// on every save, so a link to a step would be lost on the next edit, while
+/// "Cutting started on 14 Oct" stays true whatever the routing becomes.
+/// `occurrence` tells apart a process that appears twice on one route.
+model StyleStepRun {
+  id             String    @id @default(cuid())
+  styleId        String
+  style          Style     @relation(fields: [styleId], references: [id], onDelete: Cascade)
+  operationId    String
+  operation      Operation @relation(fields: [operationId], references: [id])
+  occurrence     Int       @default(1)
+  /// The routing and its version when the step was first touched, for the record.
+  routingId      String?
+  routing        Routing?  @relation(fields: [routingId], references: [id], onDelete: SetNull)
+  routingVersion Int?
+  /// The step's name and place then, so the history still reads if the routing
+  /// later drops or moves the step.
+  stepName       String
+  sequence       Int
+  startedAt      DateTime?
+  startedById    String?
+  startedBy      User?     @relation("StyleStepStartedBy", fields: [startedById], references: [id], onDelete: SetNull)
+  stoppedAt      DateTime?
+  stoppedById    String?
+  stoppedBy      User?     @relation("StyleStepStoppedBy", fields: [stoppedById], references: [id], onDelete: SetNull)
+  /// Left out of this style's run, with why. Only before it has started.
+  skippedAt      DateTime?
+  skippedById    String?
+  skippedBy      User?     @relation("StyleStepSkippedBy", fields: [skippedById], references: [id], onDelete: SetNull)
+  skipReason     String?
+  note           String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([styleId, operationId, occurrence])
+  @@index([styleId])
+  @@map("style_step_runs")
 }
 
 /// A named size run, e.g. "Men's Shirt S–XXL". Replaces free-text size arrays.
