@@ -371,7 +371,7 @@ export async function homeDashboard(opts: { days: number; access: HomeAccess }) 
             count: unbilled.length,
             value: sum(unbilled, (r) => r.unbilled),
             tone: 'amber',
-            href: '/reports/grn-against-bill',
+            href: '/reports/goods-receipt-register',
           },
         )
 
