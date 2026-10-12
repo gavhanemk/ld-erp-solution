@@ -49,7 +49,8 @@ const lineSchema = z.object({
 export const quoteSchema = z
   .object({
     customerId: z.string().min(1, 'Pick a customer'),
-    brandId: z.string().min(1, 'Pick a brand'),
+    /** Not asked on the form: worked out from the styles, as on an order. */
+    brandId: z.string().min(1).optional().nullable(),
     quoteDate: z.coerce.date().optional(),
     validUntil: z.coerce.date().optional().nullable(),
     isJobWork: z.boolean().optional(),
@@ -145,7 +146,7 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
   return {
     header: {
       customerId: data.customerId,
-      brandId: data.brandId,
+      brandId: header.brandId,
       isJobWork: data.isJobWork ?? false,
       customerRef: data.customerRef || null,
       salesperson: data.salesperson || null,

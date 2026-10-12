@@ -209,6 +209,40 @@ async function main() {
     .catch((e: { code?: string }) => e.code)
   check('no shipment date before the order date', early === 'BAD_DATE', String(early))
 
+  // The brand, which the form no longer asks for: from the garments' styles.
+  const brands = await prisma.brand.findMany({ where: { isActive: true }, select: { id: true, name: true, type: true } })
+  const own = brands.find((b) => b.type === 'LD_COTTON_MILLS')
+  const vhagar = brands.find((b) => b.type === 'VHAGAR')
+  const brandFor = (o: { isJobWork?: boolean; brandId?: string; lines: Array<{ itemId: string; styleCode?: string }> }) =>
+    prisma
+      .$transaction((tx) =>
+        prepareOrder(
+          tx,
+          createSalesOrderSchema.parse({
+            customerId: customer.id,
+            brandId: o.brandId,
+            isJobWork: !!o.isJobWork,
+            lines: o.lines.map((l) => ({ itemId: l.itemId, styleCode: l.styleCode ?? null, totalQty: 10, unitPrice: 100 })),
+          }),
+          { piecesOnly: true },
+        ),
+      )
+      .then((r) => r.header.brandId)
+  // Styles typed on the lines, so the check does not hang on which items have styles.
+  const [vStyles, lStyles] = await Promise.all([
+    prisma.style.findMany({ where: { brandType: 'VHAGAR' }, select: { code: true }, take: 1 }),
+    prisma.style.findMany({ where: { brandType: 'LD_COTTON_MILLS' }, select: { code: true }, take: 1 }),
+  ])
+  const l = lStyles[0]?.code
+  if (l) check(`no brand sent, our style (${l}): ${own?.name}`, (await brandFor({ lines: [{ itemId: A.id, styleCode: l }] })) === own?.id)
+  if (vhagar && vStyles.length && l) {
+    const v = vStyles[0].code
+    check(`every garment a VHAGAR style (${v}): ${vhagar.name}`, (await brandFor({ lines: [{ itemId: A.id, styleCode: v }, { itemId: B.id, styleCode: v }] })) === vhagar.id)
+    check("a VHAGAR style beside one of ours: the mill's own", (await brandFor({ lines: [{ itemId: A.id, styleCode: v }, { itemId: B.id, styleCode: l }] })) === own?.id)
+    check('job work in a VHAGAR style: the mill\'s own', (await brandFor({ isJobWork: true, lines: [{ itemId: A.id, styleCode: v }] })) === own?.id)
+  } else console.log('SKIP no VHAGAR brand or style to try')
+  if (vhagar) check('a brand sent is kept', (await brandFor({ brandId: vhagar.id, lines: [{ itemId: A.id }] })) === vhagar.id)
+
   console.log(`\n${pass} passed, ${fail} failed`)
 }
 

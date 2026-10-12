@@ -21,7 +21,6 @@ import {
   ShieldAlert,
   ShoppingBag,
   StickyNote,
-  Tag,
   Trash2,
   User,
   UserRound,
@@ -91,12 +90,6 @@ interface HsnOption {
   code: string
   gstRate: string | number
   isActive?: boolean
-}
-
-interface BrandOption {
-  id: string
-  name: string
-  type: string
 }
 
 interface BrokerOption {
@@ -325,7 +318,7 @@ function Mini({ label, className = '', children }: { label: string; className?: 
  *
  * Laid out like the purchase order form and carrying what the mill's old
  * system did. Basic Details in five columns: order no., date, customer, type
- * and brand; then broker, brokerage, the buyer's PO and the salesperson; then
+ * and broker; then brokerage, the buyer's PO and the salesperson; then
  * where it goes and when; then the bill-to address and a reference. The
  * customer is read back under them, with the place of supply.
  *
@@ -367,7 +360,6 @@ export function SalesOrderDialog({
 
   // ── The lists the form picks from ─────────────────────────────────────
   const [customers, setCustomers] = useState<CustomerOption[]>([])
-  const [brands, setBrands] = useState<BrandOption[]>([])
   const [brokers, setBrokers] = useState<BrokerOption[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
   const [categories, setCategories] = useState<CategoryOption[]>([])
@@ -381,7 +373,6 @@ export function SalesOrderDialog({
   const [saved, setSaved] = useState<SavedOrder | null>(null)
   const [isJobWork, setIsJobWork] = useState(false)
   const [customerId, setCustomerId] = useState('')
-  const [brandId, setBrandId] = useState('')
   const [orderDate, setOrderDate] = useState(today())
   const [deliveryDate, setDeliveryDate] = useState('')
   const [poRef, setPoRef] = useState('')
@@ -468,7 +459,6 @@ export function SalesOrderDialog({
     setSaved(null)
     setIsJobWork(false)
     setCustomerId('')
-    setBrandId('')
     setOrderDate(today())
     setDeliveryDate('')
     setPoRef('')
@@ -498,9 +488,8 @@ export function SalesOrderDialog({
 
     void (async () => {
       try {
-        const [c, b, br, it, cat, st, sg, ct, hsn, order] = await Promise.all([
+        const [c, br, it, cat, st, sg, ct, hsn, order] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
-          api.get<{ data: BrandOption[] }>('/masters/brands?active=true&limit=200'),
           fetchEveryPage<BrokerOption>((p) => `/masters/brokers?active=true&limit=200&page=${p}`),
           fetchEveryPage<ItemOption>(
             (p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`
@@ -525,7 +514,6 @@ export function SalesOrderDialog({
                     id: string
                     quoteNumber: string
                     customerId: string
-                    brandId: string
                     isJobWork: boolean
                     customerRef: string | null
                     salesperson: string | null
@@ -543,7 +531,6 @@ export function SalesOrderDialog({
         const groupOfSize = new Map(sg.rows.flatMap((g) => g.sizes.map((s) => [s.id, g.id] as const)))
         const customerList = [...c.rows].sort((x, y) => x.name.localeCompare(y.name))
         setCustomers(customerList)
-        setBrands(b.data)
         setBrokers([...br.rows].sort((x, y) => x.name.localeCompare(y.name)))
         setItems(it.rows)
         setCategories([...cat.rows].sort((x, y) => x.name.localeCompare(y.name)))
@@ -560,7 +547,6 @@ export function SalesOrderDialog({
           setSaved(o)
           setIsJobWork(o.isJobWork)
           setCustomerId(o.customerId)
-          setBrandId(o.brandId)
           setOrderDate(day(o.orderDate))
           setDeliveryDate(day(o.deliveryDate))
           setPoRef(o.customerPORef ?? '')
@@ -640,7 +626,6 @@ export function SalesOrderDialog({
             setBrokerId(cust.brokerId ?? '')
             setBrokerPct(cust.brokeragePercent != null ? String(Number(cust.brokeragePercent)) : '')
           }
-          setBrandId(quote.brandId)
           setIsJobWork(quote.isJobWork)
           setReference(quote.quoteNumber)
           setSalesperson(quote.salesperson ?? '')
@@ -669,10 +654,6 @@ export function SalesOrderDialog({
           setBrokerTouched(true)
           setAddressTouched(true)
           setBillingTouched(true)
-        } else {
-          // One brand of our own to begin with, the commonest case.
-          const own = b.data.find((x) => x.type === 'LD_COTTON_MILLS') ?? b.data[0]
-          if (own) setBrandId(own.id)
         }
       } catch (err) {
         if (alive) setError(err instanceof ApiError ? err.message : 'Could not load the customers, items and sizes.')
@@ -924,29 +905,27 @@ export function SalesOrderDialog({
   const chargeNoType = totals.chargeRows.find((c) => !c.type && c.value > 0)
   const blocker = !customerId
     ? 'Choose a customer to save this order.'
-    : !brandId
-      ? 'Choose a brand.'
-      : context?.placeOfSupplyProblem
-        ? context.placeOfSupplyProblem
-        : filled.length === 0
-          ? 'Add at least one item.'
-          : unfinished.length
-            ? `Still to fill in: ${unfinished
-                .slice(0, 3)
-                .map(
-                  (p) =>
-                    `${p.item?.code ?? 'an item'} (${[p.qty <= 0 && 'pieces', p.line.unitPrice.trim() === '' && 'rate']
-                      .filter(Boolean)
-                      .join(' and ')})`
-                )
-                .join(', ')}${unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ''}.`
-            : noGst.length
-              ? `${noGst[0].item?.code} has no HSN code or GST rate. Set one on the item in Masters, or tick Tax exempt.`
-              : chargeNoType
-                ? 'Pick which charge the amount in the totals is for.'
-                : amend && amendReason.trim().length < 5
-                  ? 'Say why the order is changing, in a few words, to save the amendment.'
-                  : null
+    : context?.placeOfSupplyProblem
+      ? context.placeOfSupplyProblem
+      : filled.length === 0
+        ? 'Add at least one item.'
+        : unfinished.length
+          ? `Still to fill in: ${unfinished
+              .slice(0, 3)
+              .map(
+                (p) =>
+                  `${p.item?.code ?? 'an item'} (${[p.qty <= 0 && 'pieces', p.line.unitPrice.trim() === '' && 'rate']
+                    .filter(Boolean)
+                    .join(' and ')})`
+              )
+              .join(', ')}${unfinished.length > 3 ? ` and ${unfinished.length - 3} more` : ''}.`
+          : noGst.length
+            ? `${noGst[0].item?.code} has no HSN code or GST rate. Set one on the item in Masters, or tick Tax exempt.`
+            : chargeNoType
+              ? 'Pick which charge the amount in the totals is for.'
+              : amend && amendReason.trim().length < 5
+                ? 'Say why the order is changing, in a few words, to save the amendment.'
+                : null
 
   const busy = saving !== null || loadingLists
 
@@ -979,7 +958,6 @@ export function SalesOrderDialog({
     setError(null)
     const body = {
       customerId,
-      brandId,
       isJobWork,
       orderDate,
       deliveryDate: deliveryDate || null,
@@ -1512,16 +1490,6 @@ export function SalesOrderDialog({
                       <option value="job">Job work (customer&apos;s fabric)</option>
                     </SmartSelect>
                   </Field>
-                  <Field label="Brand" icon={Tag} htmlFor="so-brand" required>
-                    <SmartSelect id="so-brand" className="form-input pl-9" value={brandId} onChange={(e) => setBrandId(e.target.value)}>
-                      <option value="">Choose a brand</option>
-                      {brands.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </Field>
 
                   <Field label="Broker" icon={Handshake} htmlFor="so-broker">
                     <SmartSelect id="so-broker" className="form-input pl-9" value={brokerId} onChange={(e) => pickBroker(e.target.value)}>
@@ -1561,7 +1529,7 @@ export function SalesOrderDialog({
                   <Field label="Buyer PO date" htmlFor="so-po-date">
                     <input id="so-po-date" type="date" className="form-input" value={poDate} onChange={(e) => setPoDate(e.target.value)} />
                   </Field>
-                  <Field label="Salesperson" icon={UserRound} htmlFor="so-salesperson">
+                  <Field label="Salesperson" icon={UserRound} htmlFor="so-salesperson" className="lg:col-span-2">
                     <input
                       id="so-salesperson"
                       className="form-input pl-9"
