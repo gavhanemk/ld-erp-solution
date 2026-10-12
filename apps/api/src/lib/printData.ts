@@ -81,6 +81,12 @@ const DEFAULT_TITLES: Record<string, string> = {
   MR: 'MATERIAL ISSUE SLIP',
   STN: 'STOCK TRANSFER NOTE',
   COUNT: 'STOCK COUNT SHEET',
+  // The floor's own papers: the card that travels with the bundles from one
+  // department to the next, and the cutting room's record of a lay.
+  PTC: 'PROCESS TRANSFER CARD',
+  CUT: 'CUTTING SHEET',
+  JC: 'JOB CARD',
+  SHEET: 'PROCESS SHEET',
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {

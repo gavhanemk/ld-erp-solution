@@ -3,13 +3,16 @@ import type { MOStatus, Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
-import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { createRequisitionSchema } from '../schemas/inventory.schemas'
 import { createRequisition } from './inventory.routes'
+import { ensureJobCards } from '../services/jobCard.service'
 import { materialPlan, orderForPlanning, PLANNABLE_ORDER_STATUSES } from '../services/manufacturing.service'
 import { cancelCutting, createCutting, cuttingPrep, cuttingSchema } from '../services/cutting.service'
+import { applyRouting, routingProblem, stylesOfMo } from '../services/route.service'
+import floorRoutes from './productionFloor.routes'
 
 /**
  * Manufacturing orders: what the factory is to make for a sales order.
@@ -48,6 +51,8 @@ const moFields = {
   plannedStartDate: z.coerce.date().optional().nullable(),
   plannedEndDate: z.coerce.date().optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
+  /** The routing whose steps the order takes. Needed before it is released. */
+  routingId: z.string().optional().nullable(),
   lines: z.array(moLineSchema).min(1, 'Put at least one line on it'),
 }
 
@@ -128,6 +133,8 @@ async function release(tx: Prisma.TransactionClient, moId: string) {
     select: { soId: true },
   })
   if (mo.soId) await tx.salesOrder.updateMany({ where: { id: mo.soId, status: 'CONFIRMED' }, data: { status: 'IN_PRODUCTION' } })
+  // One job card per colour, for the floor's sheets.
+  await ensureJobCards(tx, moId)
 }
 
 const moInclude = {
@@ -177,11 +184,25 @@ const moInclude = {
       fabricUsed: true,
       wastage: true,
       actualPieces: true,
+      lotNo: true,
+      ratio: true,
+      cutterName: true,
+      noOfLayers: true,
+      bundleSize: true,
+      sizeBreakup: true,
+      moLine: { select: { color: true, style: { select: { code: true } } } },
       fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
       panelItem: { select: { code: true } },
+      _count: { select: { bundles: true } },
     },
     orderBy: { createdAt: 'asc' },
   },
+  routing: { select: { id: true, code: true, name: true, version: true } },
+  steps: {
+    orderBy: { sequence: 'asc' },
+    select: { id: true, sequence: true, name: true, kind: true, execution: true, isQcStep: true, skippedAt: true, department: { select: { name: true } } },
+  },
+  heldBy: { select: { name: true } },
   createdBy: { select: { id: true, name: true } },
   closedBy: { select: { id: true, name: true } },
 } satisfies Prisma.ManufacturingOrderInclude
@@ -221,7 +242,8 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
         brand: { select: { id: true, name: true, type: true } },
         so: { select: { id: true, soNumber: true, deliveryDate: true, customer: { select: { name: true } } } },
         lines: { select: { color: true, bomId: true, style: { select: { code: true } } } },
-        _count: { select: { materialRequisitions: true } },
+        routing: { select: { code: true } },
+        _count: { select: { materialRequisitions: true, steps: true } },
       },
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
@@ -255,6 +277,12 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
       totalStitchedQty: mo.totalStitchedQty,
       totalFinishedQty: mo.totalFinishedQty,
       totalPackedQty: mo.totalPackedQty,
+      // Where the work stands across its route, and whether it has one.
+      progress: mo.progress,
+      routing: mo.routing?.code ?? null,
+      routed: mo._count.steps > 0,
+      held: !!mo.heldAt,
+      holdReason: mo.holdReason,
     })),
     pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   })
@@ -325,6 +353,8 @@ export async function createMo(tx: Prisma.TransactionClient, data: z.infer<typeo
       lines: { create },
     },
   })
+  // Its own copy of the routing's steps, checked against the styles it makes.
+  if (data.routingId) await applyRouting(tx, mo.id, data.routingId)
   if (data.release) await release(tx, mo.id)
   return tx.manufacturingOrder.findUniqueOrThrow({ where: { id: mo.id }, include: moInclude })
 }
@@ -362,6 +392,18 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
           lines: { create },
         },
       })
+      // A different routing is copied afresh; the same one is checked against
+      // the lines as they now are; none takes the route off.
+      if (data.routingId === null) {
+        await tx.mOStep.deleteMany({ where: { moId: before.id } })
+        await tx.manufacturingOrder.update({ where: { id: before.id }, data: { routingId: null, routingVersion: null } })
+      } else if (data.routingId && data.routingId !== before.routingId) {
+        await applyRouting(tx, before.id, data.routingId)
+      } else if (before.routingId) {
+        const routing = await tx.routing.findUniqueOrThrow({ where: { id: before.routingId }, select: { code: true, styleId: true, category: true, style: { select: { code: true } } } })
+        const problem = routingProblem(routing, await stylesOfMo(tx, before.id))
+        if (problem) throw new AppError(`${routing.code} no longer suits these lines. ${problem}`, 400, 'ROUTING_DOES_NOT_FIT')
+      }
       const after = await tx.manufacturingOrder.findUniqueOrThrow({ where: { id: before.id }, include: moInclude })
       return { before, after }
     },
@@ -398,9 +440,25 @@ export async function closeMo(tx: Prisma.TransactionClient, id: string, userId: 
   const before = await tx.manufacturingOrder.findUnique({ where: { id }, include: moInclude })
   if (!before) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
   if (before.status === 'CLOSED') throw new AppError(`${before.moNumber} is already closed`, 409, 'ALREADY_CLOSED')
+  // What is still asked of the store for it is no longer wanted: those
+  // requisitions close and whatever was held for them goes back. Anything
+  // already handed over stays issued.
+  const open = await tx.materialRequisition.findMany({
+    where: { moId: before.id, closedAt: null, issuedAt: null, status: { not: 'REJECTED' } },
+    select: { id: true },
+  })
+  if (open.length) {
+    const ids = open.map((m) => m.id)
+    const why = `${before.moNumber} closed: ${reason}`
+    await tx.materialRequisition.updateMany({ where: { id: { in: ids } }, data: { closedAt: new Date(), closedById: userId, closeReason: why } })
+    await tx.stockReservation.updateMany({
+      where: { mrId: { in: ids }, status: 'ACTIVE' },
+      data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: userId, releaseReason: why },
+    })
+  }
   const after = await tx.manufacturingOrder.update({
     where: { id: before.id },
-    data: { status: 'CLOSED', closedAt: new Date(), closedById: userId, closeReason: reason },
+    data: { status: 'CLOSED', closedAt: new Date(), closedById: userId, closeReason: reason, heldAt: null, heldById: null, holdReason: null },
     include: moInclude,
   })
   // The order goes back to Confirmed when nothing else is being made for it.
@@ -473,18 +531,21 @@ router.get('/orders/:id/cutting', requirePermission(MODULE, 'view'), async (req,
 
 router.post('/orders/:id/cutting', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = cuttingSchema.parse(req.body)
-  const cut = await prisma.$transaction((tx) => createCutting(tx, req.params.id, data, req.user!.id), { timeout: 60_000 })
+  const cut = await prisma.$transaction((tx) => createCutting(tx, req.params.id, data, req.user!.id, { mayApprove: userCan(req.user, MODULE, 'approve') }), {
+    timeout: 60_000,
+  })
+  const bundles = await prisma.productionBundle.count({ where: { cuttingOrderId: cut.id } })
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'CuttingOrder', entityId: cut.id, after: cut })
   res.status(201).json({
     success: true,
-    message: `${cut.cutOrderNumber}: ${cut.actualPieces.toLocaleString('en-IN')} pieces cut, ${Number(cut.fabricUsed)} used and ${Number(cut.wastage)} wasted.${cut.panelItemId ? ' The panels are in the store.' : ''}`,
-    data: cut,
+    message: `${cut.cutOrderNumber}: ${cut.actualPieces.toLocaleString('en-IN')} pieces cut, ${Number(cut.fabricUsed)} used and ${Number(cut.wastage)} wasted.${bundles ? ` Tied into ${bundles} ${bundles === 1 ? 'bundle' : 'bundles'}, ready to send on — print the stickers.` : ''}${cut.panelItemId ? ' The panels are in the store.' : ''}`,
+    data: { ...cut, bundles },
   })
 })
 
 router.post('/cutting/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { reason } = reasonSchema.parse(req.body)
-  const after = await prisma.$transaction((tx) => cancelCutting(tx, req.params.id, reason), { timeout: 60_000 })
+  const after = await prisma.$transaction((tx) => cancelCutting(tx, req.params.id, reason, req.user!.id), { timeout: 60_000 })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CuttingOrder', entityId: after.id, after })
   res.json({ success: true, message: `${after.cutOrderNumber} cancelled.`, data: after })
 })
@@ -499,10 +560,10 @@ router.post('/orders/:id/close', requirePermission(MODULE, 'edit'), async (req: 
   const { reason } = reasonSchema.parse(req.body)
   const { before, after } = await prisma.$transaction((tx) => closeMo(tx, req.params.id, req.user!.id, reason))
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: after.id, before, after })
-  const open = after.materialRequisitions.filter((m) => !m.closedAt && m.status !== 'REJECTED').map((m) => m.mrNumber)
+  const closed = before.materialRequisitions.filter((m) => !m.closedAt && !m.issuedAt && m.status !== 'REJECTED').map((m) => m.mrNumber)
   res.json({
     success: true,
-    message: `${after.moNumber} closed.${open.length ? ` ${open.join(', ')} ${open.length === 1 ? 'is' : 'are'} still open in Inventory.` : ''}`,
+    message: `${after.moNumber} closed.${closed.length ? ` ${closed.join(', ')} ${closed.length === 1 ? 'is' : 'are'} closed with it, and any stock held for ${closed.length === 1 ? 'it' : 'them'} is free again.` : ''}`,
     data: after,
   })
 })
@@ -663,16 +724,48 @@ router.get('/entries', requirePermission(MODULE, 'view'), async (req, res) => {
 })
 
 // GET /api/production/cutting
+// GET /api/production/cutting — the cutting documents, newest first: q, status, moId, page, limit.
 router.get('/cutting', requirePermission(MODULE, 'view'), async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  const and: Prisma.CuttingOrderWhereInput[] = []
+  const q = text(req.query.q)
+  if (q) {
+    and.push({
+      OR: [
+        { cutOrderNumber: { contains: q, mode: 'insensitive' } },
+        { lotNo: { contains: q, mode: 'insensitive' } },
+        { cutterName: { contains: q, mode: 'insensitive' } },
+        { mo: { moNumber: { contains: q, mode: 'insensitive' } } },
+        { moLine: { style: { code: { contains: q, mode: 'insensitive' } } } },
+      ],
+    })
+  }
+  const status = text(req.query.status)
+  if (status === 'CANCELLED') and.push({ status: 'CANCELLED' })
+  else if (status === 'LIVE') and.push({ status: { not: 'CANCELLED' } })
+  const moId = text(req.query.moId)
+  if (moId) and.push({ moId })
+  const where: Prisma.CuttingOrderWhereInput = and.length ? { AND: and } : {}
 
-  const cutting = await prisma.cuttingOrder.findMany({
-    orderBy: { cutDate: 'desc' },
-    take: limit,
-    include: { mo: { select: { moNumber: true } } },
-  })
+  const [cutting, total] = await Promise.all([
+    prisma.cuttingOrder.findMany({
+      where,
+      orderBy: [{ cutDate: 'desc' }, { createdAt: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+      include: {
+        mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customer: { select: { name: true } } } } } },
+        moLine: { select: { color: true, style: { select: { code: true } } } },
+        fabricItem: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+        createdBy: { select: { name: true } },
+        _count: { select: { bundles: true } },
+      },
+    }),
+    prisma.cuttingOrder.count({ where }),
+  ])
 
-  res.json({ success: true, data: cutting })
+  res.json({ success: true, data: cutting, pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 } })
 })
 
 // GET /api/production/qc
@@ -687,5 +780,8 @@ router.get('/qc', requirePermission(MODULE, 'view'), async (req, res) => {
 
   res.json({ success: true, data: records })
 })
+
+// The floor: routes, transfer cards, work at each step, job work, desk queues.
+router.use(floorRoutes)
 
 export default router

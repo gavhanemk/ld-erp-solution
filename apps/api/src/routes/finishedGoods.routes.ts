@@ -8,6 +8,7 @@ import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { recordMovement } from '../services/stock.service'
 import { syncMoPacked } from '../services/manufacturing.service'
+import { packForReceipt, unpackForReceipt } from '../services/floor.service'
 
 /**
  * Finished goods in: packed garments going into the finished-goods store.
@@ -266,6 +267,16 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
       throw new AppError(`${mo.moNumber} is for another sales order`, 400, 'WRONG_ORDER')
     }
     data.soId = data.soId ?? mo.soId
+  } else if (data.soId) {
+    // An order made step by step packs only what its last step has passed, so
+    // the receipt has to say which manufacturing order the pieces came off.
+    const routed = await tx.manufacturingOrder.findFirst({
+      where: { soId: data.soId, status: { notIn: ['DRAFT', 'CLOSED'] }, steps: { some: {} } },
+      select: { moNumber: true },
+    })
+    if (routed) {
+      throw new AppError(`${routed.moNumber} makes this order step by step: pick it as the manufacturing order these were packed for.`, 400, 'PICK_MO')
+    }
   }
 
   // Packed for an order: it has to be one still being made, and every
@@ -368,6 +379,18 @@ export async function createFgReceipt(tx: Prisma.TransactionClient, data: z.infe
       notes: `Finished goods in, ${fgrNumber}`,
     })
   }
+  // On an order with a route, the pieces come off its last step: first
+  // quality only once that step has passed them, B-grade only from pieces set
+  // aside as B-grade. Refused, with the count, if the floor is not there yet.
+  if (created.moId && (await tx.mOStep.count({ where: { moId: created.moId } }))) {
+    await packForReceipt(tx, {
+      moId: created.moId,
+      fgReceiptId: created.id,
+      lines: created.lines.map((l) => ({ itemId: l.itemId, sizeId: l.sizeId, qty: Number(l.qty), grade: l.grade })),
+      userId,
+      date: receiptDate,
+    })
+  }
   if (created.moId) await syncMoPacked(tx, created.moId)
   return created
 }
@@ -429,6 +452,8 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         data: { cancelledAt: new Date(), cancelledById: req.user!.id, cancelReason: reason },
         include: receiptInclude,
       })
+      // On an order with a route, the pieces go back to the step they were packed from.
+      await unpackForReceipt(tx, before.id, `Cancelled ${before.fgrNumber}: ${reason}`, req.user!.id)
       // Its pieces come off the manufacturing order's packed again.
       if (after.moId) await syncMoPacked(tx, after.moId)
       return { before, after }

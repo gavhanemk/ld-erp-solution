@@ -3705,6 +3705,9 @@ async function stillOut(tx: Prisma.TransactionClient, challanId: string) {
 export async function createJobWorkReturn(tx: Prisma.TransactionClient, data: z.infer<typeof createJobWorkReturnSchema>, userId: string | null) {
   const when = data.returnDate ?? new Date()
 
+  // One return against a challan at a time: two saved together would each see
+  // the same balance still out and settle more than was sent.
+  await tx.$queryRaw`SELECT id FROM ld_erp.job_work_challans WHERE id = ${data.challanId} FOR UPDATE`
   const challan = await tx.jobWorkChallan.findUnique({
     where: { id: data.challanId },
     include: { lines: { include: { item: { select: { name: true } } } }, jobWorker: true },
@@ -4035,6 +4038,7 @@ router.patch(
     const { reason } = cancelJobWorkChallanSchema.parse(req.body ?? {})
 
     const after = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM ld_erp.job_work_challans WHERE id = ${req.params.id} FOR UPDATE`
       const before = await tx.jobWorkChallan.findUnique({
         where: { id: req.params.id },
         include: { lines: true },

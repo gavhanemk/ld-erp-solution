@@ -61,10 +61,13 @@ export function FinishedGoodsDialog({
   open,
   onClose,
   onSaved,
+  presetMoId = null,
 }: {
   open: boolean
   onClose: () => void
   onSaved: (message: string) => void
+  /** Opened from a manufacturing order: it is picked, and what its last step has passed comes in filled. */
+  presetMoId?: string | null
 }) {
   const [mounted, setMounted] = useState(false)
   useEffect(() => setMounted(true), [])
@@ -155,6 +158,7 @@ export function FinishedGoodsDialog({
         // The finished-goods store, when one is named so; otherwise the only one.
         const fg = wh.data.find((w) => /finish/i.test(w.name)) ?? (wh.data.length === 1 ? wh.data[0] : null)
         setWarehouseId(fg?.id ?? '')
+        if (presetMoId) await fillFromOrder(presetMoId, () => alive)
       } catch (err) {
         if (alive) setError(err instanceof ApiError ? err.message : 'Could not load the items, sizes and stores.')
       } finally {
@@ -164,7 +168,68 @@ export function FinishedGoodsDialog({
     return () => {
       alive = false
     }
-  }, [open])
+    // fillFromOrder is a plain function of this render; re-running on it would refetch for nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, presetMoId])
+
+  /*
+   * From a manufacturing order with a route: the order and the manufacturing
+   * order picked, and a line per garment with what its last step has passed,
+   * size by size — and a B-grade line for what was set aside as B-grade. The
+   * server takes exactly these off the floor, so nothing is typed twice.
+   */
+  async function fillFromOrder(id: string, alive: () => boolean) {
+    type MoBrief = {
+      id: string
+      moNumber: string
+      soId: string | null
+      totalPlannedQty: number
+      totalPackedQty: number
+      steps: Array<{ id: string }>
+      lines: Array<{ id: string; soLine: { item: { id: string } } | null }>
+    }
+    type FlowBrief = {
+      steps: Array<{ id: string; last: boolean }>
+      bundles: Array<{ line: { id: string } | null; size: { id: string } | null; places: Array<{ stepId: string; bucket: string; vendorId: string | null; qty: number }> }>
+    }
+    const mo = (await api.get<{ data: MoBrief }>(`/production/orders/${id}`)).data
+    if (!alive()) return
+    setSoId(mo.soId ?? '')
+    setMos([{ id: mo.id, moNumber: mo.moNumber, totalPlannedQty: mo.totalPlannedQty, totalPackedQty: mo.totalPackedQty }])
+    setMoId(mo.id)
+    if (!mo.steps.length) return
+    const flow = (await api.get<{ data: FlowBrief }>(`/production/orders/${id}/flow`)).data
+    if (!alive()) return
+    const last = new Set(flow.steps.filter((s) => s.last).map((s) => s.id))
+    const itemOfLine = new Map(mo.lines.map((l) => [l.id, l.soLine?.item.id ?? '']))
+    const ready = new Map<string, { sizes: Record<string, number>; total: number }>()
+    const add = (key: string, sizeId: string | null, n: number) => {
+      const r = ready.get(key) ?? { sizes: {}, total: 0 }
+      if (sizeId) r.sizes[sizeId] = (r.sizes[sizeId] ?? 0) + n
+      r.total += n
+      ready.set(key, r)
+    }
+    for (const b of flow.bundles) {
+      const itemId = b.line ? itemOfLine.get(b.line.id) : ''
+      if (!itemId) continue
+      for (const p of b.places) {
+        if (p.vendorId || p.qty <= 0) continue
+        if (p.bucket === 'DONE' && last.has(p.stepId)) add(`${itemId}|A`, b.size?.id ?? null, p.qty)
+        if (p.bucket === 'B_GRADE') add(`${itemId}|B`, b.size?.id ?? null, p.qty)
+      }
+    }
+    const filled = [...ready.entries()].map(([key, r]) => {
+      const [itemId, grade] = key.split('|')
+      return {
+        ...blankLine(),
+        itemId,
+        grade: grade as 'A' | 'B',
+        sizes: Object.fromEntries(Object.entries(r.sizes).map(([s, n]) => [s, String(n)])),
+        qty: String(r.total),
+      }
+    })
+    if (filled.length) setLines(filled.sort((a, b) => a.itemId.localeCompare(b.itemId) || a.grade.localeCompare(b.grade)))
+  }
 
   // The value each picked item goes in at, asked of the server as items are picked.
   const pickedIds = useMemo(() => [...new Set(lines.map((l) => l.itemId).filter(Boolean))].sort().join(','), [lines])

@@ -10,6 +10,9 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CuttingDialog } from './CuttingDialog'
+import { SetRoutingDialog } from './SetRoutingDialog'
+import { MoProductionPanel } from './floor/MoProductionPanel'
+import { PROGRESS, type Flow } from './floor/types'
 import { LIVE_MO, moStatus } from './status'
 
 interface MoDetail {
@@ -32,11 +35,17 @@ interface MoDetail {
     id: string
     color: string
     totalQty: number
-    style: { code: string; name: string }
+    style: { id: string; code: string; name: string }
     soLine: { item: { code: string; name: string } } | null
     bom: { id: string; version: string; color: string | null; status: string } | null
     sizes: Array<{ id: string; qty: number; size: { code: string; sequence: number } }>
   }>
+  routing: { id: string; code: string; name: string; version: number } | null
+  steps: Array<{ id: string; sequence: number; name: string; kind: string; execution: string; isQcStep: boolean; skippedAt: string | null; department: { name: string } }>
+  progress: string | null
+  heldAt: string | null
+  totalStitchedQty?: number
+  totalFinishedQty?: number
   materialRequisitions: Array<{
     id: string
     mrNumber: string
@@ -56,6 +65,10 @@ interface MoDetail {
     fabricUsed: string | number | null
     wastage: string | number | null
     actualPieces: number
+    lotNo?: string | null
+    cutterName?: string | null
+    moLine?: { color: string; style: { code: string } } | null
+    _count?: { bundles: number }
     fabricItem: { code: string; name: string; uom: { symbol: string } | null } | null
     panelItem: { code: string } | null
   }>
@@ -130,19 +143,36 @@ export function ManufacturingOrderDetailDialog({
   const [completingShort, setCompletingShort] = useState(false)
   const [cutting, setCutting] = useState(false)
   const [cancellingCut, setCancellingCut] = useState<{ id: string; cutOrderNumber: string } | null>(null)
+  const [settingRoute, setSettingRoute] = useState(false)
+  const [flow, setFlow] = useState<Flow | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
-  const load = useCallback(async (id: string) => {
-    setLoading(true)
+  /** The floor picture, for an order with a route. */
+  const loadFlow = useCallback(async (id: string) => {
     try {
-      setMo((await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data)
+      setFlow((await api.get<{ data: Flow }>(`/production/orders/${id}/flow`)).data)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not open that manufacturing order.')
-    } finally {
-      setLoading(false)
+      setError(err instanceof ApiError ? err.message : 'Could not load the production route.')
     }
   }, [])
+
+  const load = useCallback(
+    async (id: string) => {
+      setLoading(true)
+      try {
+        const data = (await api.get<{ data: MoDetail }>(`/production/orders/${id}`)).data
+        setMo(data)
+        if (data.steps?.length) await loadFlow(id)
+        else setFlow(null)
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'Could not open that manufacturing order.')
+      } finally {
+        setLoading(false)
+      }
+    },
+    [loadFlow],
+  )
 
   // Rows turned to the other owner by the person: "this fabric is ours after all".
   const [swap, setSwap] = useState<Set<string>>(new Set())
@@ -173,6 +203,7 @@ export function ManufacturingOrderDetailDialog({
     setError(null)
     setMessage(null)
     setMo(null)
+    setFlow(null)
     setPlan(null)
     setRequiredDate('')
     setSwap(new Set())
@@ -206,6 +237,7 @@ export function ManufacturingOrderDetailDialog({
 
   const refresh = async (msg: string) => {
     setMessage(msg)
+    setError(null)
     onChanged(msg)
     if (moId) {
       await load(moId)
@@ -327,6 +359,10 @@ export function ManufacturingOrderDetailDialog({
                   {mo?.moNumber ?? 'Manufacturing order'}
                 </h2>
                 {s && <span className={s.cls}>{s.label}</span>}
+                {mo?.steps?.length && mo.status !== 'DRAFT' && mo.status !== 'CLOSED' ? (
+                  <span className={(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).cls}>{(PROGRESS[mo.progress ?? 'NOT_STARTED'] ?? PROGRESS.NOT_STARTED).label}</span>
+                ) : null}
+                {mo?.heldAt && <span className="badge-warning">On hold</span>}
                 {mo?.so?.isJobWork && <span className="badge-purple">Job work</span>}
               </div>
               {mo && (
@@ -386,9 +422,10 @@ export function ManufacturingOrderDetailDialog({
                   {mo.closeReason ? ` — ${mo.closeReason}` : ''}
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
                 {[
                   ['Planned', `${pcs(mo.totalPlannedQty)} pcs`],
+                  ['Cut', `${pcs(mo.totalCutQty ?? 0)} pcs${mo.steps?.length && mo.totalFinishedQty ? ` · ${pcs(mo.totalFinishedQty)} through` : ''}`],
                   ['Packed', `${pcs(mo.totalPackedQty)} pcs · ${share}%`],
                   ['Planned dates', `${mo.plannedStartDate ? formatDate(mo.plannedStartDate) : '—'} → ${mo.plannedEndDate ? formatDate(mo.plannedEndDate) : '—'}`],
                   ['Order delivery', mo.so?.deliveryDate ? formatDate(mo.so.deliveryDate) : '—'],
@@ -617,6 +654,7 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   )}
                 </Section>
+                {!mo.steps?.length && (mo.so?.isJobWork || !!mo.cuttingOrders?.length) && (
                 <Section
                   icon={Scissors}
                   title="Cutting"
@@ -656,6 +694,7 @@ export function ManufacturingOrderDetailDialog({
                     </div>
                   )}
                 </Section>
+                )}
                 <Section icon={PackageCheck} title="Packed (Finished Goods In)">
                   {mo.fgReceipts.length === 0 ? (
                     <p className="text-muted-foreground text-sm">Nothing booked in against it yet. Packed garments go in under Inventory → Finished Goods In, against this order.</p>
@@ -675,10 +714,30 @@ export function ManufacturingOrderDetailDialog({
                   )}
                 </Section>
               </div>
+
+              <MoProductionPanel
+                mo={{ id: mo.id, moNumber: mo.moNumber, status: mo.status, heldAt: mo.heldAt, progress: mo.progress, steps: mo.steps ?? [] }}
+                flow={flow}
+                materialsIssued={mo.materialRequisitions.some((m) => !!m.issuedAt) || !!plan?.rows.some((r) => r.issued > 0)}
+                onLoadStages={() => setSettingRoute(true)}
+                onChanged={(msg) => void refresh(msg)}
+              />
             </>
           ) : null}
         </div>
       </div>
+      {settingRoute && mo && (
+        <SetRoutingDialog
+          moId={mo.id}
+          moNumber={mo.moNumber}
+          styleIds={[...new Set(mo.lines.map((l) => l.style.id))]}
+          onClose={() => setSettingRoute(false)}
+          onSaved={(msg) => {
+            setSettingRoute(false)
+            void refresh(msg)
+          }}
+        />
+      )}
       {cutting && mo && (
         <CuttingDialog
           moId={mo.id}

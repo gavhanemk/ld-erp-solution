@@ -593,6 +593,9 @@ router.patch('/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest,
 router.post('/:id/dispatch', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const { before, after } = await prisma.$transaction(
     async (tx) => {
+      // Locked first: a double click or a second tab must find it already gone,
+      // not send the same goods out twice.
+      await tx.$queryRaw`SELECT id FROM ld_erp.delivery_challans WHERE id = ${req.params.id} FOR UPDATE`
       const before = await tx.deliveryChallan.findUnique({ where: { id: req.params.id }, include: challanInclude })
       if (!before) throw new AppError('Delivery challan not found', 404, 'NOT_FOUND')
       if (before.status !== 'DRAFT') throw new AppError(`${before.dcNumber} has already gone`, 409, 'NOT_DRAFT')
