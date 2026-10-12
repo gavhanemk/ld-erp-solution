@@ -51,7 +51,7 @@ interface Payload {
     notes: string | null
     terms: string | null
     otherCharges: string
-    charges: Array<{ id: string; amount: string; gstRate: string; chargeType: { name: string } }>
+    charges: Array<{ id: string; amount: string; gstRate: string; cgst: string; sgst: string; igst: string; chargeType: { name: string } }>
     subtotal: string
     discountAmount: string
     taxableAmount: string
@@ -193,6 +193,29 @@ export default function PrintSalesOrder() {
 
   const pieces = order.lines.reduce((s, l) => s + Number(l.totalQty), 0)
 
+  // GST at each rate: the goods (after the order discount, spread across the
+  // lines as it was when priced) and the charges.
+  const subtotal = Number(order.subtotal)
+  const factor = subtotal > 0 ? Number(order.taxableAmount) / subtotal : 1
+  const byRate = new Map<number, { taxable: number; tax: number }>()
+  const addRate = (rate: number, base: number, tax: number) => {
+    const r = byRate.get(rate) ?? { taxable: 0, tax: 0 }
+    r.taxable += base
+    r.tax += tax
+    byRate.set(rate, r)
+  }
+  for (const l of order.lines) {
+    const rate = l.taxExempt ? 0 : Number(l.gstRate)
+    const base = Number(l.amount) * factor
+    addRate(rate, base, (base * rate) / 100)
+  }
+  for (const ch of order.charges) addRate(Number(ch.gstRate), Number(ch.amount), Number(ch.cgst) + Number(ch.sgst) + Number(ch.igst))
+  const gstSummary = [...byRate.entries()]
+    .map(([rate, r]) => ({ rate, taxable: r.taxable, tax: r.tax }))
+    .filter((r) => r.taxable > 0)
+    .sort((a, b) => a.rate - b.rate)
+  const cell: React.CSSProperties = { padding: '2px 6px', fontSize: '9px', borderBottom: `1px solid ${RULE}` }
+
   const banner =
     order.status === 'CANCELLED'
       ? `${order.approvedAt ? 'CANCELLED' : 'NOT CONFIRMED — REJECTED'} on ${longDate(order.cancelledAt)}${
@@ -212,7 +235,13 @@ export default function PrintSalesOrder() {
     ['Value', money(order.subtotal)],
     ...(Number(order.discountAmount) > 0 ? ([['Discount', `− ${money(order.discountAmount)}`]] as Array<[string, string]>) : []),
     ['Taxable value', money(order.taxableAmount)],
-    ...order.charges.map((ch) => [`${ch.chargeType.name} @ ${Number(ch.gstRate)}%`, money(ch.amount)] as [string, string]),
+    ...order.charges.map(
+      (ch) =>
+        [
+          `${ch.chargeType.name} (GST ${Number(ch.gstRate)}% ${money(Number(ch.cgst) + Number(ch.sgst) + Number(ch.igst))})`,
+          money(ch.amount),
+        ] as [string, string],
+    ),
     ...(taxMode === 'CGST_SGST'
       ? ([
           ['CGST', money(order.cgst)],
@@ -253,7 +282,7 @@ export default function PrintSalesOrder() {
           title: 'Delivery',
           body: (
             <>
-              <Fact label="Deliver by" value={longDate(order.deliveryDate)} />
+              <Fact label="Ship by" value={longDate(order.deliveryDate)} />
               <Fact label="Deliver to" value={order.deliveryAddress} />
               <Fact
                 label="Place of supply"
@@ -298,6 +327,45 @@ export default function PrintSalesOrder() {
                 <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>
                   <Eyebrow style={{ color: GREY }}>Amount in words</Eyebrow>
                   <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>{data.totalInWords}</div>
+                </div>
+              )}
+              {taxMode !== 'NONE' && gstSummary.length > 0 && (
+                <div style={{ border: `1px solid ${RULE}` }}>
+                  <div style={{ padding: '5px 10px 3px' }}>
+                    <Eyebrow style={{ color: GREY }}>GST summary</Eyebrow>
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', ...NUM }}>
+                    <thead>
+                      <tr style={{ color: GREY, textAlign: 'right' }}>
+                        <th style={{ ...cell, textAlign: 'left', fontWeight: 600 }}>Rate</th>
+                        <th style={{ ...cell, fontWeight: 600 }}>Taxable</th>
+                        {taxMode === 'CGST_SGST' ? (
+                          <>
+                            <th style={{ ...cell, fontWeight: 600 }}>CGST</th>
+                            <th style={{ ...cell, fontWeight: 600 }}>SGST</th>
+                          </>
+                        ) : (
+                          <th style={{ ...cell, fontWeight: 600 }}>IGST</th>
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gstSummary.map((r) => (
+                        <tr key={r.rate} style={{ color: INK, textAlign: 'right' }}>
+                          <td style={{ ...cell, textAlign: 'left' }}>{r.rate > 0 ? `${r.rate}%` : 'Nil'}</td>
+                          <td style={cell}>{money(r.taxable)}</td>
+                          {taxMode === 'CGST_SGST' ? (
+                            <>
+                              <td style={cell}>{money(r.tax / 2)}</td>
+                              <td style={cell}>{money(r.tax / 2)}</td>
+                            </>
+                          ) : (
+                            <td style={cell}>{money(r.tax)}</td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
               <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px' }}>

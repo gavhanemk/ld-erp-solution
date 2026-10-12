@@ -36,7 +36,8 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { SizeQtyGrid, sumSizes, type SizeOption } from './SizeQtyGrid'
+import { SizeQtyGrid, type SizeOption } from './SizeQtyGrid'
+import { JOB_WORK_SAC, orderTotals, sacRateIn } from './orderTotals'
 import {
   CustomerPanel,
   billingAddressOf,
@@ -81,7 +82,15 @@ interface SizeGroupOption {
   id: string
   name: string
   gender: string | null
+  isActive?: boolean
   sizes: Array<SizeOption & { sequence: number }>
+}
+
+/** A code in the HSN / SAC master, for the rate a job charge's SAC carries. */
+interface HsnOption {
+  code: string
+  gstRate: string | number
+  isActive?: boolean
 }
 
 interface BrandOption {
@@ -140,10 +149,6 @@ interface LineDraft {
   /** What a B-grade piece is billed at; empty bills it at the line's rate. */
   bGradeRate: string
 }
-
-/** Job work is a service: SAC 9988, at 5% unless typed otherwise (or set in the HSN master). */
-const JOB_WORK_SAC = '9988'
-const JOB_WORK_GST = 5
 
 interface ChargeDraft {
   key: string
@@ -235,6 +240,7 @@ const blankCharge = (): ChargeDraft => ({ key: `c${++lineKey}`, chargeTypeId: ''
 const today = () => new Date().toISOString().slice(0, 10)
 const day = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : '')
 const round2 = (n: number) => Math.round(n * 100) / 100
+
 const inr = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const num = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
 
@@ -368,6 +374,7 @@ export function SalesOrderDialog({
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [sizeGroups, setSizeGroups] = useState<SizeGroupOption[]>([])
   const [chargeTypes, setChargeTypes] = useState<ChargeTypeOption[]>([])
+  const [hsnIndex, setHsnIndex] = useState<Map<string, HsnOption>>(new Map())
   const [loadingLists, setLoadingLists] = useState(false)
 
   // ── The order ──────────────────────────────────────────────────────────
@@ -438,7 +445,8 @@ export function SalesOrderDialog({
     [sizeGroups]
   )
   /** Size runs that have sizes in them, to pick from on a line. */
-  const runChoices = useMemo(() => sizeGroups.filter((g) => g.sizes.length > 0), [sizeGroups])
+  const sizeCodeById = useMemo(() => new Map(sizeGroups.flatMap((g) => g.sizes.map((z) => [z.id, z.code] as const))), [sizeGroups])
+  const runChoices = useMemo(() => sizeGroups.filter((g) => g.sizes.length > 0 && g.isActive !== false), [sizeGroups])
   const chargeTypeById = useMemo(() => new Map(chargeTypes.map((c) => [c.id, c])), [chargeTypes])
 
   /** Where an item is filed: its category, or a sub-category and the parent above it. */
@@ -490,7 +498,7 @@ export function SalesOrderDialog({
 
     void (async () => {
       try {
-        const [c, b, br, it, cat, st, sg, ct, order] = await Promise.all([
+        const [c, b, br, it, cat, st, sg, ct, hsn, order] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
           api.get<{ data: BrandOption[] }>('/masters/brands?active=true&limit=200'),
           fetchEveryPage<BrokerOption>((p) => `/masters/brokers?active=true&limit=200&page=${p}`),
@@ -505,6 +513,8 @@ export function SalesOrderDialog({
           fetchEveryPage<ChargeTypeOption>((p) => `/masters/charge-types?limit=200&page=${p}`).catch(() => ({
             rows: [] as ChargeTypeOption[],
           })),
+          // For the rate of a job charge's SAC; without it the usual rate shows.
+          fetchEveryPage<HsnOption>((p) => `/masters/hsn-codes?limit=200&page=${p}`).catch(() => ({ rows: [] as HsnOption[] })),
           orderId ? api.get<{ data: SavedOrder }>(`/sales/orders/${orderId}`) : Promise.resolve(null),
         ])
         const quote =
@@ -539,6 +549,8 @@ export function SalesOrderDialog({
         setCategories([...cat.rows].sort((x, y) => x.name.localeCompare(y.name)))
         setStyles([...st.rows].sort((x, y) => x.code.localeCompare(y.code)))
         setSizeGroups(sg.rows)
+        const hsnMap = new Map(hsn.rows.filter((h) => h.isActive !== false).map((h) => [h.code.replace(/\s+/g, ''), h]))
+        setHsnIndex(hsnMap)
         setChargeTypes(
           ct.rows.filter((x) => x.isActive && x.applyOnSale).sort((x, y) => x.name.localeCompare(y.name))
         )
@@ -600,7 +612,12 @@ export function SalesOrderDialog({
                     description: l.description ?? '',
                     taxExempt: l.taxExempt,
                     jobHsn: o.isJobWork ? (l.hsnCode ?? '') : '',
-                    jobGst: o.isJobWork && l.gstRate != null ? String(Number(l.gstRate)) : '',
+                    // An override only when it is not simply what the SAC carries,
+                    // so reopening a draft does not freeze the rate.
+                    jobGst:
+                      o.isJobWork && !l.taxExempt && l.gstRate != null && Number(l.gstRate) !== sacRateIn(hsnMap, l.hsnCode)
+                        ? String(Number(l.gstRate))
+                        : '',
                     bGradeRate: l.bGradeRate != null ? String(Number(l.bGradeRate)) : '',
                   }
                 })
@@ -847,84 +864,58 @@ export function SalesOrderDialog({
   }
 
   // ── Figures, as the server will work them out ─────────────────────────
+  // The same steps and the same rounding as prepareOrder and the charges'
+  // pricing, so the total shown is the total saved.
   const totals = useMemo(() => {
     const priced = lines.map((l) => {
       const item = itemById.get(l.itemId)
       const { run, fixed, groupId } = runOf(l, item)
-      const qty = run ? sumSizes(l.sizes) : Number(l.qty) || 0
+      // Only the run's own sizes count: a size since taken off the style's run
+      // is neither counted nor sent.
+      const qty = run ? run.reduce((s, z) => s + (Number(l.sizes[z.id]) || 0), 0) : Number(l.qty) || 0
+      const dropped = run ? Object.entries(l.sizes).filter(([id, v]) => (Number(v) || 0) > 0 && !run.some((z) => z.id === id)) : []
       const rate = Number(l.unitPrice) || 0
       const disc = Math.min(100, Math.max(0, Number(l.discount) || 0))
-      return { line: l, item, run, fixed, groupId, qty, rate, disc, amount: round2(qty * rate * (1 - disc / 100)) }
+      return { line: l, item, run, fixed, groupId, qty, rate, disc, dropped }
     })
-    const subtotal = round2(priced.reduce((s, p) => s + p.amount, 0))
-    const discount = round2(Math.min(Number(billDiscount) || 0, subtotal))
-    const taxable = round2(subtotal - discount)
-    const factor = subtotal > 0 ? taxable / subtotal : 1
-
-    let goodsTax = 0
-    const withGst = priced.map((p) => {
-      // Garments carry one rate up to a price per piece and another above it.
-      let gst: number | null = null
-      if (p.line.taxExempt) {
-        gst = 0
-      } else if (isJobWork) {
-        // A job charge is a service, taxed at its own SAC's rate.
-        gst = p.line.jobGst !== '' ? Number(p.line.jobGst) || 0 : JOB_WORK_GST
-      } else if (p.item?.hsn) {
-        const perPiece = p.rate * (1 - p.disc / 100) * factor
-        const { gstRate, priceLimit, rateAbove } = p.item.hsn
-        gst =
-          priceLimit != null && rateAbove != null && perPiece > Number(priceLimit) ? Number(rateAbove) : Number(gstRate)
-      } else if (p.item?.taxRate) {
-        gst = Number(p.item.taxRate.rate)
-      }
-      goodsTax += p.amount * factor * ((gst ?? 0) / 100)
-      return { ...p, gst }
-    })
-
-    // Each charge at its own rate: the one typed, else the charge master's.
     const chargeRows = charges.map((c) => {
       const type = chargeTypeById.get(c.chargeTypeId)
-      const amount = Number(c.amount) || 0
-      const gstRate = c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)
-      return { ...c, type, value: amount, rate: gstRate, tax: (amount * gstRate) / 100 }
+      const rate = c.gstRate !== '' ? Number(c.gstRate) || 0 : Number(type?.defaultGstRate ?? 0)
+      return { ...c, type, value: Number(c.amount) || 0, rate }
     })
-    const chargeTotal = round2(chargeRows.reduce((s, c) => s + (c.type ? c.value : 0), 0))
-    const chargeTax = chargeRows.reduce((s, c) => s + (c.type ? c.tax : 0), 0)
-
-    const tax = goodsTax + chargeTax
-    const intra = context?.placeOfSupply?.isIntraState
-    const half = round2(tax / 2)
-    const cgst = intra ? half : 0
-    const sgst = intra ? half : 0
-    const igst = intra === false ? round2(tax) : 0
-    const taxTotal = intra === undefined ? round2(tax) : cgst + sgst + igst
-    const other = round2(Number(otherCharges) || 0)
-    const beforeRounding = taxable + chargeTotal + taxTotal + other
-    const total = Math.round(beforeRounding)
-    const pieces = priced.reduce((s, p) => s + p.qty, 0)
-    const brokerage = round2((taxable * (Number(brokerPct) || 0)) / 100)
-
+    const priceable = chargeRows.filter((c) => c.type && c.value > 0)
+    const t = orderTotals({
+      lines: priced.map((p) => ({
+        qty: p.qty,
+        rate: p.rate,
+        disc: p.disc,
+        taxExempt: p.line.taxExempt,
+        jobGst: p.line.jobGst,
+        jobHsn: p.line.jobHsn,
+        hsn: p.item?.hsn ?? null,
+        itemRate: p.item?.taxRate ? Number(p.item.taxRate.rate) : null,
+      })),
+      isJobWork,
+      hsnIndex,
+      billDiscount: Number(billDiscount) || 0,
+      charges: priceable.map((c) => ({ amount: c.value, gstRate: c.rate })),
+      intra: context?.placeOfSupply?.isIntraState,
+      otherCharges: Number(otherCharges) || 0,
+      brokerPct: Number(brokerPct) || 0,
+    })
     return {
-      lines: withGst,
-      subtotal,
-      discount,
-      taxable,
-      chargeRows,
-      chargeTotal,
-      cgst,
-      sgst,
-      igst,
-      taxTotal,
-      other,
-      roundOff: round2(total - beforeRounding),
-      total,
-      pieces,
-      brokerage,
+      ...t,
+      lines: priced.map((p, i) => ({ ...p, gst: t.lines[i].gst, amount: t.lines[i].amount })),
+      // Each charge row with the GST it carries, for the row's own line.
+      chargeRows: chargeRows.map((c) => {
+        const k = priceable.indexOf(c)
+        return { ...c, tax: k >= 0 ? t.charges[k].tax : 0 }
+      }),
+      pieces: priced.reduce((s, p) => s + p.qty, 0),
     }
     // runOf reads the maps listed here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, itemById, styleById, sizesOfGroup, billDiscount, brokerPct, context, charges, chargeTypeById, otherCharges])
+  }, [lines, itemById, styleById, sizesOfGroup, billDiscount, brokerPct, context, charges, chargeTypeById, otherCharges, hsnIndex, isJobWork])
 
   // ── What still stops a save ────────────────────────────────────────────
   const filled = totals.lines.filter((p) => p.line.itemId)
@@ -1285,7 +1276,12 @@ export function SalesOrderDialog({
           aria-label={`Row ${i + 1} size run`}
         >
           <option value="">No sizes (pieces only)</option>
-          {runChoices.map((g) => (
+          {[
+            ...runChoices,
+            ...(line.sizeGroupId && !runChoices.some((g) => g.id === line.sizeGroupId) && groupById.get(line.sizeGroupId)
+              ? [groupById.get(line.sizeGroupId)!]
+              : []),
+          ].map((g) => (
             <option key={g.id} value={g.id} data-sub={g.sizes.map((s) => s.code).join(' ')}>
               {g.name}
             </option>
@@ -1340,7 +1336,7 @@ export function SalesOrderDialog({
           max={28}
           className={`${cell} text-right tabular-nums`}
           value={line.jobGst}
-          placeholder={String(JOB_WORK_GST)}
+          placeholder={String(sacRateIn(hsnIndex, line.jobHsn))}
           onValueChange={(v) => setLine(line.key, { jobGst: v })}
           aria-label={`Row ${i + 1} GST % on the job charge`}
         />
@@ -1589,7 +1585,7 @@ export function SalesOrderDialog({
                       }}
                     />
                   </Field>
-                  <Field label="Delivery date" htmlFor="so-delivery">
+                  <Field label="Shipment / delivery date" htmlFor="so-delivery">
                     <input
                       id="so-delivery"
                       type="date"
@@ -1782,6 +1778,13 @@ export function SalesOrderDialog({
                                           </span>
                                         </>
                                       )}
+                                      {p.dropped.length > 0 && (
+                                        <span className="warn-text basis-full text-[11px]">
+                                          Size{p.dropped.length > 1 ? 's' : ''}{' '}
+                                          {p.dropped.map(([id, v]) => `${sizeCodeById.get(id) ?? '?'} (${Number(v)} pcs)`).join(', ')} no longer in
+                                          this style&apos;s size run: not counted. Move the pieces to a size in the run.
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
                                       <Mini label="Fabric" className="w-44">
@@ -1959,10 +1962,12 @@ export function SalesOrderDialog({
 
                 <Section icon={Calculator} title="Totals">
                   <div className="space-y-1.5 text-sm">
-                    <TotalRow label={`Value of ${totals.pieces.toLocaleString('en-IN')} pcs`} value={inr(totals.subtotal)} />
+                    <TotalRow label="Total pieces" value={totals.pieces.toLocaleString('en-IN')} />
+                    <TotalRow label="Gross value (pieces × rate)" value={inr(totals.gross)} />
+                    {totals.lineDiscount > 0 && <TotalRow label="Less discount on the lines" value={`− ${inr(totals.lineDiscount)}`} quiet />}
                     <div className="flex items-center justify-between gap-3">
                       <label htmlFor="so-bill-discount" className="text-muted-foreground">
-                        Discount on the whole order (₹)
+                        Less discount on the whole order (₹)
                       </label>
                       <StepInput
                         id="so-bill-discount"
@@ -1973,7 +1978,7 @@ export function SalesOrderDialog({
                         onValueChange={setBillDiscount}
                       />
                     </div>
-                    <TotalRow label="Gross total" value={inr(totals.taxable)} />
+                    <TotalRow label="Taxable value of the goods" value={inr(totals.taxable)} />
 
                     {/* Charges picked from the charge master, as on the purchase
                       bill: the charge, its amount, and its GST. */}
@@ -1990,7 +1995,7 @@ export function SalesOrderDialog({
                         {totals.chargeRows.map((c, i) => {
                           const taken = new Set(charges.filter((x) => x.key !== c.key).map((x) => x.chargeTypeId))
                           return (
-                            <div key={c.key} className="flex items-center gap-1.5">
+                            <div key={c.key} className="flex flex-wrap items-center gap-1.5">
                               <SmartSelect
                                 className="form-input h-8 min-w-0 flex-1 text-xs"
                                 value={c.chargeTypeId}
@@ -2032,6 +2037,11 @@ export function SalesOrderDialog({
                               >
                                 <Trash2 size={12} />
                               </button>
+                              {c.type && c.value > 0 && (
+                                <span className="text-muted-foreground basis-full pr-7 text-right text-[11px] tabular-nums">
+                                  GST {c.rate}% on it: {inr(c.tax)}
+                                </span>
+                              )}
                             </div>
                           )
                         })}
@@ -2047,6 +2057,7 @@ export function SalesOrderDialog({
                       </div>
                     )}
 
+                    {totals.chargeTotal > 0 && <TotalRow label="Taxable value with the charges" value={inr(totals.taxable + totals.chargeTotal)} />}
                     {context?.placeOfSupply ? (
                       context.placeOfSupply.isIntraState ? (
                         <>
@@ -2058,6 +2069,18 @@ export function SalesOrderDialog({
                       )
                     ) : (
                       <TotalRow label="GST" value={inr(totals.taxTotal)} />
+                    )}
+                    {totals.gstByRate.some((r) => r.rate > 0) && (
+                      <div className="border-border text-muted-foreground space-y-0.5 rounded-md border border-dashed px-2.5 py-1.5 text-[11px] tabular-nums">
+                        {totals.gstByRate.map((r) => (
+                          <div key={r.rate} className="flex justify-between gap-3">
+                            <span>
+                              GST {r.rate}% on {inr(r.taxable)}
+                            </span>
+                            <span>{r.rate > 0 ? inr(r.tax) : 'Nil'}</span>
+                          </div>
+                        ))}
+                      </div>
                     )}
                     <div className="flex items-center justify-between gap-3">
                       <label htmlFor="so-other" className="text-muted-foreground">
@@ -2081,7 +2104,7 @@ export function SalesOrderDialog({
                     </div>
                     {brokerId && Number(brokerPct) > 0 && (
                       <p className="text-muted-foreground pt-1 text-xs">
-                        Brokerage {Number(brokerPct)}% · {formatRupees(totals.brokerage)} on the gross total. Internal:
+                        Brokerage {Number(brokerPct)}% · {formatRupees(totals.brokerage)} on the taxable value of the goods. Internal:
                         not printed.
                       </p>
                     )}

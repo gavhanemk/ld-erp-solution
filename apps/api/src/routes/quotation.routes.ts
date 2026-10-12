@@ -139,6 +139,7 @@ async function priceQuote(tx: Prisma.TransactionClient, data: QuoteInput) {
         jobGstRate: l.jobGstRate ?? null,
       })),
     }),
+    { piecesOnly: true },
   )
   const costs = await Promise.all(data.lines.map((l) => bomPrice(tx, l.itemId, l.styleCode, l.color)))
   return {

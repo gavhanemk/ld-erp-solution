@@ -584,7 +584,12 @@ type OrderInput = z.infer<typeof createSalesOrderSchema>
  * never be priced two ways. Returns the header's fields and the lines ready
  * to create; the number is the caller's business.
  */
-export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInput) {
+export async function prepareOrder(
+  tx: Prisma.TransactionClient,
+  data: OrderInput,
+  /** A quotation is priced by the piece; an order is split into sizes. */
+  opts: { piecesOnly?: boolean } = {},
+) {
   const [customer, brand] = await Promise.all([
     tx.customer.findUnique({ where: { id: data.customerId }, select: { name: true, isActive: true } }),
     tx.brand.findUnique({ where: { id: data.brandId }, select: { name: true, isActive: true } }),
@@ -596,6 +601,11 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
   }
   if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
   if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
+  // An order cannot be shipped before it is placed.
+  const dayOf = (d: Date) => d.toISOString().slice(0, 10)
+  if (data.deliveryDate && dayOf(data.deliveryDate) < dayOf(data.orderDate ?? new Date())) {
+    throw new AppError('The shipment / delivery date is before the order date.', 400, 'BAD_DATE')
+  }
 
   const items = await tx.item.findMany({
     where: { id: { in: [...new Set(data.lines.map((l) => l.itemId))] } },
@@ -643,6 +653,11 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       runs.add(size.sizeGroupId)
     }
     if (runs.size > 1) throw new AppError(`Line ${i + 1}: the sizes come from two different size runs`, 400, 'BAD_SIZE')
+    // A garment made in sizes is ordered in sizes: the size-wise figures are
+    // what cutting, stock and dispatch all work from.
+    if (!opts.piecesOnly && item.style?.sizeGroupId && !(l.sizes ?? []).some((s) => s.qty > 0)) {
+      throw new AppError(`Line ${i + 1}: ${item.code} is made in sizes. Enter its pieces size by size.`, 400, 'NEEDS_SIZES')
+    }
   })
 
   const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId, data.placeOfSupplyCode)
