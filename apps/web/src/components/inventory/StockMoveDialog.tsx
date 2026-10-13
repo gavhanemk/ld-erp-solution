@@ -140,7 +140,8 @@ export function StockMoveDialog({
 }: {
   mode: MoveMode
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `data` is the saved document, as the server returned it. */
+  onSaved: (message: string, data?: unknown) => void
 }) {
   const copy = COPY[mode]
 
@@ -276,7 +277,7 @@ export function StockMoveDialog({
 
     setSaving(true)
     try {
-      let res: { message?: string }
+      let res: { message?: string; data?: unknown }
 
       if (mode === 'opening') {
         res = await api.post('/inventory/opening', {
@@ -316,7 +317,7 @@ export function StockMoveDialog({
         })
       }
 
-      onSaved(res.message ?? 'Saved.')
+      onSaved(res.message ?? 'Saved.', res.data)
     } catch (err) {
       setError(apiErrorMessage(err))
     } finally {

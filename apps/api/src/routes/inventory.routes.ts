@@ -16,6 +16,7 @@ import {
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
+import { packageRule } from '../services/package.service'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
@@ -808,14 +809,38 @@ router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: Aut
   })
 })
 
+/**
+ * After a stock-in is approved, which of its items are kept in packages — so
+ * their stickers are next — and which are not, so the screen can say why no
+ * sticker is waiting instead of leaving somebody to look for one.
+ */
+async function stickersFor(lines: Array<{ itemId: string; difference: Prisma.Decimal | number }>) {
+  const items = await prisma.item.findMany({
+    where: { id: { in: lines.map((l) => l.itemId) } },
+    select: { id: true, code: true, name: true, categoryId: true, category: { select: { name: true, parent: { select: { name: true } } } } },
+  })
+  const tracked: Array<{ itemId: string; code: string; name: string; qty: number }> = []
+  const untracked: Array<{ itemId: string; code: string; name: string; category: string }> = []
+  for (const it of items) {
+    const rule = await packageRule(prisma, it.categoryId)
+    const qty = Number(lines.find((l) => l.itemId === it.id)?.difference ?? 0)
+    if (rule.tracked) tracked.push({ itemId: it.id, code: it.code, name: it.name, qty })
+    // The main category is where "Track by package" is usually switched on.
+    else untracked.push({ itemId: it.id, code: it.code, name: it.name, category: it.category.parent?.name ?? it.category.name })
+  }
+  return { tracked, untracked }
+}
+
 /** A store manager accepting a count: the differences go into stock now. */
 router.post('/adjustments/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const { before, after } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
   await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'StockAdjustment', entityId: after.id, before, after })
+  const stockIn = after.kind === 'STOCK_IN'
   res.json({
     success: true,
-    message: `${after.adjustmentNumber} approved. ${after.kind === 'STOCK_IN' ? 'It is added to stock.' : 'Stock is corrected.'}`,
+    message: `${after.adjustmentNumber} approved. ${stockIn ? 'It is added to stock.' : 'Stock is corrected.'}`,
     data: after,
+    ...(stockIn ? { stickers: await stickersFor(after.lines) } : {}),
   })
 })
 

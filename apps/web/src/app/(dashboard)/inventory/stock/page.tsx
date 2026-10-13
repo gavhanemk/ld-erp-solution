@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StockMoveDialog, type MoveMode } from '@/components/inventory/StockMoveDialog'
+import { StockInNext, type SavedStockIn } from '@/components/inventory/StockInNext'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
@@ -130,6 +131,8 @@ function StockScreen() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** A stock-in just saved: it waits for approval, so the message offers the next step. */
+  const [stockIn, setStockIn] = useState<SavedStockIn | null>(null)
   const [exporting, setExporting] = useState(false)
 
   const [search, setSearch] = useState('')
@@ -377,7 +380,9 @@ function StockScreen() {
           <p className="text-sm text-red-400">{error}</p>
         </div>
       )}
-      {message && (
+      {message && stockIn ? (
+        <StockInNext key={stockIn.id} saved={stockIn} message={message} onApproved={() => void load()} />
+      ) : message && (
         <div className="p-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5">
           <p className="text-sm text-emerald-400">{message}</p>
         </div>
@@ -585,7 +590,8 @@ function StockScreen() {
         <StockMoveDialog
           mode={dialog}
           onClose={() => setDialog(null)}
-          onSaved={(msg) => {
+          onSaved={(msg, data) => {
+            setStockIn(dialog === 'stockin' ? (data as SavedStockIn) : null)
             setDialog(null)
             setMessage(msg)
             void load()
@@ -596,6 +602,7 @@ function StockScreen() {
         <ImportItemsDialog
           onClose={() => setImporting(false)}
           onImported={() => {
+            setStockIn(null)
             setMessage('Imported. The list shows the new stock.')
             void load()
           }}

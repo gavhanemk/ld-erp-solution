@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Search,
   RefreshCw,
@@ -20,6 +20,7 @@ import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { formatDate, formatRupees } from '@/lib/utils'
+import { StickerNote, type StickerNews } from '@/components/inventory/StockInNext'
 
 /**
  * The stock documents: what was moved between stores, and what was corrected
@@ -131,6 +132,8 @@ export default function StockDocumentsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** After a stock-in is approved: where its stickers are, or why there are none. */
+  const [stickers, setStickers] = useState<StickerNews | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
@@ -141,9 +144,12 @@ export default function StockDocumentsPage() {
   const me = currentUser() as { id?: string } | null
   const mayApprove = can('inventory', 'approve')
 
-  // Arriving from the approvals inbox, which links to the counts.
+  // Arriving from the approvals inbox, which links to the counts, or from a
+  // stock-in just saved, which opens its own row.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('tab') === 'adjustments') setKind('adjustments')
+    const q = new URLSearchParams(window.location.search)
+    if (q.get('tab') === 'adjustments') setKind('adjustments')
+    if (q.get('open')) setOpen(q.get('open'))
   }, [])
 
   useEffect(() => {
@@ -151,7 +157,13 @@ export default function StockDocumentsPage() {
     return () => clearTimeout(t)
   }, [search])
 
+  // Only the latest load may fill the table. Arriving on the Adjustments tab
+  // starts a load of transfers first, and when that answer came back last its
+  // count of 5 transfers sat over the adjustments.
+  const loadSeq = useRef(0)
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    const current = () => seq === loadSeq.current
     setLoading(true)
     setError(null)
     try {
@@ -166,14 +178,17 @@ export default function StockDocumentsPage() {
 
       if (kind === 'transfers') {
         const res = await api.get<Paginated<Transfer>>(`/inventory/transfers?${qs}`)
+        if (!current()) return
         setTransfers(res.data)
         setTotal(res.pagination.total)
       } else {
         const res = await api.get<Paginated<Adjustment>>(`/inventory/adjustments?${qs}`)
+        if (!current()) return
         setAdjustments(res.data)
         setTotal(res.pagination.total)
       }
     } catch (err) {
+      if (!current()) return
       setError(
         err instanceof ApiError
           ? err.status === 403
@@ -184,7 +199,7 @@ export default function StockDocumentsPage() {
       setTransfers([])
       setAdjustments([])
     } finally {
-      setLoading(false)
+      if (current()) setLoading(false)
     }
   }, [debounced, kind])
 
@@ -201,6 +216,7 @@ export default function StockDocumentsPage() {
     setBusy(t.id)
     setError(null)
     setMessage(null)
+    setStickers(null)
     try {
       const res = await api.patch<{ message?: string }>(`/inventory/transfers/${t.id}/cancel`, {
         reason: reason.trim(),
@@ -219,12 +235,17 @@ export default function StockDocumentsPage() {
     setBusy(a.id)
     setError(null)
     setMessage(null)
+    setStickers(null)
     try {
-      const res = await api.post<{ message?: string }>(`/inventory/adjustments/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
+      const res = await api.post<{ message?: string; stickers?: StickerNews }>(
+        `/inventory/adjustments/${a.id}/${decision}`,
+        decision === 'reject' ? { reason } : {},
+      )
       setRefusing(null)
       setApproving(null)
       await load()
       if (res.message) setMessage(res.message)
+      if (res.stickers) setStickers(res.stickers)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not ${decision === 'approve' ? 'approve' : 'refuse'} it.`)
     } finally {
@@ -258,6 +279,7 @@ export default function StockDocumentsPage() {
       {message && (
         <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
+          {stickers && <StickerNote stickers={stickers} />}
         </div>
       )}
 
