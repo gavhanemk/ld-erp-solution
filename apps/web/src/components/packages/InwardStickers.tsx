@@ -21,6 +21,8 @@ export interface InwardRef {
     ownerCustomerId: string | null
     qty: number
   }>
+  /** Opened by hand ("Print stickers"), so it says so when there is nothing left, rather than not opening. */
+  explicit?: boolean
 }
 
 /** Stock to sticker: one item in one store, and how much of it can be. */
@@ -170,8 +172,9 @@ export function InwardStickers({
       .post<{ data: Plan }>('/packages/plan', { sourceType: source.type, sourceId: source.id, lines: source.lines })
       .then((res) => {
         if (!live) return
-        // Nothing to sticker and nothing to explain: no window at all.
-        if (!res.data.targets.length && !res.data.untracked.length) return onClose()
+        // Nothing to sticker and nothing to explain: no window at all, unless
+        // somebody asked for it — then it says why there is nothing.
+        if (!res.data.targets.length && !res.data.untracked.length && !source.explicit) return onClose()
         setPlan(res.data)
         setRows(Object.fromEntries(res.data.targets.map((t) => [t.key, startRow(t, t.qtys)])))
       })
@@ -289,6 +292,11 @@ export function InwardStickers({
       footerNote={blocker ? <span className="warn-text">{blocker}</span> : null}
     >
       <div className="space-y-2.5">
+        {!plan.targets.length && !plan.untracked.length && (
+          <p className="text-muted-foreground py-4 text-center text-sm">
+            Nothing left to sticker on {plan.sourceRef || 'this'}: it all has stickers already, or has since been used.
+          </p>
+        )}
         {plan.targets.map((t) => {
           const r = rows[t.key]
           if (!r) return null

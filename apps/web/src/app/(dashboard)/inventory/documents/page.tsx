@@ -13,6 +13,7 @@ import {
   FileText,
   CheckCircle2,
   XCircle,
+  Tags,
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
@@ -136,7 +137,7 @@ export default function StockDocumentsPage() {
   /** After a stock-in is approved: where its stickers are, or why there are none. */
   const [stickers, setStickers] = useState<StickerNews | null>(null)
   /** The stock-in whose sticker window is open, and the last one approved, to open it again. */
-  const [stickersFor, setStickersFor] = useState<string | null>(null)
+  const [stickersFor, setStickersFor] = useState<{ id: string; explicit?: boolean } | null>(null)
   const [approvedId, setApprovedId] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -253,7 +254,7 @@ export default function StockDocumentsPage() {
       // A stock-in approved: its stickers, ready to print.
       if (decision === 'approve' && res.stickers?.tracked.length) {
         setApprovedId(a.id)
-        setStickersFor(a.id)
+        setStickersFor({ id: a.id })
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not ${decision === 'approve' ? 'approve' : 'refuse'} it.`)
@@ -288,7 +289,7 @@ export default function StockDocumentsPage() {
       {message && (
         <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
-          {stickers && <StickerNote stickers={stickers} onMake={stickers.tracked.length && approvedId ? () => setStickersFor(approvedId) : undefined} />}
+          {stickers && <StickerNote stickers={stickers} onMake={stickers.tracked.length && approvedId ? () => setStickersFor({ id: approvedId }) : undefined} />}
         </div>
       )}
 
@@ -516,6 +517,10 @@ export default function StockDocumentsPage() {
                       })
                       actions.push({ key: 'reject', label: 'Refuse', icon: <XCircle size={14} />, onClick: () => setRefusing(a), danger: true })
                     }
+                    // The stickers for what a stock-in brought in, any time after it is approved.
+                    if (a.kind === 'STOCK_IN' && a.status === 'APPROVED') {
+                      actions.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => setStickersFor({ id: a.id, explicit: true }) })
+                    }
 
                     return (
                       <Fragment key={a.id}>
@@ -667,7 +672,7 @@ export default function StockDocumentsPage() {
 
       {stickersFor && (
         <InwardStickers
-          source={{ type: 'STOCK_IN', id: stickersFor }}
+          source={{ type: 'STOCK_IN', id: stickersFor.id, explicit: stickersFor.explicit }}
           onClose={() => setStickersFor(null)}
           onDone={(m) => {
             setStickersFor(null)

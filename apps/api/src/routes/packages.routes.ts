@@ -397,12 +397,14 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
   })
   const doneOf = new Map(labelled.map((l) => [l.grnLineId, Number(l._sum.initialQty ?? 0)]))
 
-  // Stock of packaged items on the racks with no sticker yet.
+  // Stock of packaged items on the racks with no sticker yet, what came in
+  // last at the top: stock just added is what somebody is looking for.
   const loose = await prisma.$queryRaw<
-    Array<{ itemId: string; itemCode: string; item: string; categoryId: string; unit: string; warehouseId: string; store: string; ownership: string; ownerCustomerId: string | null; owner: string | null; qty: number }>
+    Array<{ itemId: string; itemCode: string; item: string; categoryId: string; unit: string; warehouseId: string; store: string; ownership: string; ownerCustomerId: string | null; owner: string | null; qty: number; lastIn: Date | null }>
   >`
     SELECT s."itemId", i.code AS "itemCode", i.name AS item, i."categoryId", u.symbol AS unit,
            s."warehouseId", w.name AS store, s.ownership::text AS ownership, s."ownerCustomerId", c.name AS owner,
+           MAX(s."createdAt") FILTER (WHERE s."inQty" > 0) AS "lastIn",
            (SUM(s."inQty" - s."outQty") - COALESCE((
               SELECT SUM(p.qty) FROM ld_erp.stock_packages p
               WHERE p."itemId" = s."itemId" AND p."warehouseId" = s."warehouseId" AND p.ownership = s.ownership
@@ -418,7 +420,7 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
               SELECT SUM(p.qty) FROM ld_erp.stock_packages p
               WHERE p."itemId" = s."itemId" AND p."warehouseId" = s."warehouseId" AND p.ownership = s.ownership
                 AND p."ownerCustomerId" IS NOT DISTINCT FROM s."ownerCustomerId" AND p.status = 'IN_STOCK'), 0) > 0.0005
-    ORDER BY i.name, w.name
+    ORDER BY "lastIn" DESC NULLS LAST, i.name, w.name
   `
   // How each item's stickers start out — its remembered setting, or one per
   // roll or box — and how much of each GRN line is still loose: read for all

@@ -45,6 +45,8 @@ interface ToLabel {
     qty: number
     packType: string
     perPack: number | null
+    /** When stock of it last came in: the list puts what was just added first. */
+    lastIn: string | null
   }>
 }
 
@@ -137,9 +139,9 @@ function PackagesScreen() {
         <h1 className="page-title mr-auto" title="Every labelled box, roll and carton, and stock still waiting for a sticker">
           Packages & Stickers
         </h1>
-        <Figure icon={Boxes} value={summary.packages} label={`in stock · ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`} />
+        <Figure icon={Boxes} value={summary.packages} label={`stickers · ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`} />
         <Figure icon={Warehouse} value={summary.stores} label={summary.stores === 1 ? 'store' : 'stores'} />
-        <Figure icon={Tags} value={waiting} label="waiting for stickers" tone={waiting ? 'warn' : undefined} onClick={() => go('label')} />
+        <Figure icon={Tags} value={waiting} label="need stickers" tone={waiting ? 'warn' : undefined} onClick={() => go('label')} />
         <Figure
           icon={AlertTriangle}
           value={summary.mismatches}
@@ -184,8 +186,8 @@ function PackagesScreen() {
           <div className="inline-flex shrink-0 rounded-lg border border-border bg-secondary p-0.5" role="tablist">
             {(
               [
-                ['list', `Packages (${total})`],
-                ['label', `To label (${waiting})`],
+                ['list', `With stickers (${total})`],
+                ['label', `Needs stickers (${waiting})`],
               ] as const
             ).map(([key, label]) => (
               <button
@@ -290,6 +292,18 @@ function PackagesScreen() {
             onClearGrn={() => go('label', 'grn')}
           />
         )}
+        {/* Stock just added is not here until its stickers are printed: say so, and where it is. */}
+        {tab === 'list' && waiting > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-amber-500/5 px-4 py-2 text-sm">
+            <Tags size={14} className="text-amber-500" />
+            <span className="text-muted-foreground">
+              This list shows stock that already has stickers. {waiting} {waiting === 1 ? 'item still needs' : 'items still need'} stickers.
+            </span>
+            <button className="font-semibold text-primary hover:underline" onClick={() => go('label', 'racks')}>
+              Show them
+            </button>
+          </div>
+        )}
         {tab === 'list' && (
           <PackageGroups
             groups={groups}
@@ -299,7 +313,7 @@ function PackagesScreen() {
                 ? 'Loading…'
                 : q || store || status !== 'IN_STOCK'
                   ? 'No package matches that.'
-                  : 'No packages yet. Stock of the categories kept in packages shows under "To label" — make its stickers there.'
+                  : 'Nothing has stickers yet. Stock that needs them is under "Needs stickers".'
             }
           />
         )}
@@ -490,7 +504,7 @@ function ToLabelView({
   return (
     <>
       <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
-        Stock on the racks with no sticker: from before stickers were switched on, or left over.
+        Stock without stickers, what came in last at the top.
       </div>
       {rackRows.length === 0 ? (
         <p className="p-6 text-center text-sm text-muted-foreground">{searching ? 'Nothing on the racks matches that.' : 'All the stock of these items is in labelled packages.'}</p>
@@ -502,6 +516,7 @@ function ToLabelView({
                 <th>Item</th>
                 <th>Store</th>
                 <th>Owner</th>
+                <th>Came in</th>
                 <th style={{ textAlign: 'right' }}>Without a sticker</th>
                 <th />
               </tr>
@@ -515,6 +530,7 @@ function ToLabelView({
                   </td>
                   <td className="whitespace-nowrap text-sm">{l.store}</td>
                   <td className="whitespace-nowrap text-sm">{l.owner ?? 'Ours'}</td>
+                  <td className="whitespace-nowrap text-sm text-muted-foreground">{l.lastIn ? day(l.lastIn) : '—'}</td>
                   <td className="whitespace-nowrap text-right font-semibold tabular-nums">
                     {qtyText(l.qty)} {l.unit}
                   </td>

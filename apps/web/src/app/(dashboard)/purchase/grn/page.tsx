@@ -22,6 +22,7 @@ import {
   ReceiptIndianRupee,
   Paperclip,
   ClipboardCheck,
+  Tags,
 } from 'lucide-react'
 import { api, ApiError, type Paginated } from '@/lib/api'
 import { ReceiveGoodsDialog } from '@/components/purchase/ReceiveGoodsDialog'
@@ -947,6 +948,8 @@ export default function GoodsReceiptPage() {
       },
     ]
     if (grn.status !== 'CANCELLED') {
+      // The QR stickers for what came in on it, any time after it is saved.
+      items.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => setInward({ type: 'GRN', id: grn.id, explicit: true }) })
       /*
        * Billing: whichever of the two this receipt is actually at.
        *
