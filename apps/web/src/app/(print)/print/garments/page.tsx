@@ -34,60 +34,58 @@ const SIZES: Record<Layout, { label: string; page: string }> = {
 
 const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
 
+const GDIM: Record<Layout, { qr: string; id: string; brand: string; style: string; size: string; sizeWord: string; line: string; desc: string; gap: string }> = {
+  tag: { qr: '15.5mm', id: '8pt', brand: '5pt', style: '7.5pt', size: '13pt', sizeWord: '5.5pt', line: '5.6pt', desc: '0', gap: '1.5mm' },
+  sheet: { qr: '23mm', id: '10pt', brand: '5.8pt', style: '7pt', size: '13pt', sizeWord: '5.6pt', line: '5.6pt', desc: '6.6pt', gap: '2mm' },
+  poly: { qr: '31mm', id: '12.5pt', brand: '7pt', style: '9pt', size: '17pt', sizeWord: '7pt', line: '6.6pt', desc: '8pt', gap: '2.5mm' },
+}
+
 /**
- * One garment's label. The small one carries what a packer reads — style,
- * size, colour — and the QR; everything else is a scan away. The large one
- * adds the buyer, order, MO, lot and SKU.
+ * One garment's label, in the same shape as the package stickers: its ID
+ * large in the header (printed in full, so it can be typed if the QR will not
+ * read), the QR at the left, and what a packer checks — style, size, colour,
+ * order — beside it. The small hang tag keeps to those; the larger labels add
+ * the description, buyer, MO, lot and SKU. Everything else is a scan away.
  */
 function GarmentLabel({ g, layout }: { g: Label; layout: Layout }) {
-  if (layout === 'tag') {
-    return (
-      <div className="sticker" style={{ display: 'flex', gap: '1.5mm', alignItems: 'center' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
-          <QrCode text={g.code} size="19mm" />
-          <div style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 700, fontSize: '6pt' }}>{g.code}</div>
-        </div>
-        <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: '0.4mm' }}>
-          <div style={{ fontSize: '5.5pt', color: '#333', ...clip }}>{g.brand}</div>
-          <div style={{ fontSize: '8pt', fontWeight: 800, ...clip }}>{g.style}</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: '1.5mm' }}>
-            <span style={{ fontSize: '6pt' }}>Size</span>
-            <span style={{ fontSize: '13pt', fontWeight: 800, lineHeight: 1 }}>{g.size || '—'}</span>
-            {g.grade === 'B' && <span style={{ fontSize: '6pt', fontWeight: 800, border: '0.2mm solid #000', padding: '0 0.6mm' }}>B</span>}
-          </div>
-          <div style={{ fontSize: '6.5pt', fontWeight: 600, ...clip }}>{g.color}</div>
-          {g.lot && <div style={{ fontSize: '5.5pt', color: '#333', ...clip }}>Lot {g.lot}</div>}
-        </div>
-      </div>
-    )
-  }
-  const big = layout === 'poly'
-  const f = (a: string, b: string) => (big ? a : b)
+  const d = GDIM[layout]
+  const small = layout === 'tag'
+  const order = g.poRef ? `PO ${g.poRef}` : (g.soNumber ?? 'For stock')
   return (
-    <div className="sticker" style={{ display: 'flex', gap: f('2.5mm', '2mm'), alignItems: 'stretch' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        <QrCode text={g.code} size={f('34mm', '25mm')} />
-        <div style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 700, fontSize: f('8.5pt', '7pt') }}>{g.code}</div>
+    <div className="sticker gm">
+      <div className="gm-head">
+        <span className="gm-id" style={{ fontSize: d.id }}>{g.code}</span>
+        <span style={{ fontSize: d.brand, fontWeight: 600, ...clip }}>{g.brand}</span>
       </div>
-      <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-        <div style={{ fontSize: f('7pt', '5.8pt'), color: '#333', ...clip }}>{g.brand}</div>
-        <div style={{ fontSize: f('9pt', '7pt'), fontWeight: 700, lineHeight: 1.15, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-          {g.description}
+      <div className="gm-body" style={{ gap: d.gap }}>
+        <div style={{ flexShrink: 0 }}>
+          <QrCode text={g.code} size={d.qr} />
         </div>
-        <div style={{ fontSize: f('8pt', '6.5pt'), fontWeight: 700, ...clip }}>Style {g.style}</div>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: '2mm' }}>
-          <span style={{ fontSize: f('7pt', '6pt') }}>Size</span>
-          <span style={{ fontSize: f('18pt', '13pt'), fontWeight: 800, lineHeight: 1 }}>{g.size || '—'}</span>
-          {g.grade === 'B' && <span style={{ fontSize: f('8pt', '6pt'), fontWeight: 800, border: '0.25mm solid #000', padding: '0 0.8mm' }}>B-grade</span>}
-        </div>
-        <div style={{ fontSize: f('8pt', '6.5pt'), fontWeight: 600, ...clip }}>{g.color}</div>
-        {g.buyer && <div style={{ fontSize: f('7pt', '5.8pt'), ...clip }}>{g.buyer}</div>}
-        <div style={{ fontSize: f('6.5pt', '5.5pt'), color: '#333', ...clip }}>
-          {g.poRef ? `PO ${g.poRef}` : g.soNumber ?? ''}
-          {big ? ` · ${g.moNumber}` : ''}
-        </div>
-        <div style={{ fontSize: f('6.5pt', '5.5pt'), color: '#333', ...clip }}>
-          {g.lot ? `Lot ${g.lot} · ` : ''}SKU {g.sku}
+        <div className="gm-info" style={layout === 'poly' ? { gap: '0.15mm' } : undefined}>
+          {!small && <div className="gm-desc" style={{ fontSize: d.desc }}>{g.description}</div>}
+          <div style={{ fontSize: d.style, fontWeight: 800, ...clip }}>{g.style}</div>
+          <div className="gm-size">
+            <span style={{ fontSize: d.sizeWord, fontWeight: 600 }}>SIZE</span>
+            <span style={{ fontSize: d.size, fontWeight: 800, lineHeight: 1 }}>{g.size || '—'}</span>
+            {g.grade === 'B' && <span className="gm-b" style={{ fontSize: d.sizeWord }}>B-GRADE</span>}
+          </div>
+          <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>{g.color}</div>
+          <div style={{ fontSize: d.line, ...clip }}>{order}</div>
+          {layout === 'poly' && g.buyer && <div style={{ fontSize: d.line, ...clip }}>{g.buyer}</div>}
+          {layout === 'sheet' && (
+            <div style={{ fontSize: d.line, color: '#333', ...clip }}>
+              {g.moNumber}
+              {g.lot ? ` · Lot ${g.lot}` : ''}
+            </div>
+          )}
+          {layout === 'poly' && (
+            <>
+              <div style={{ fontSize: d.line, color: '#333', ...clip }}>{g.moNumber}</div>
+              <div style={{ fontSize: d.line, color: '#333', ...clip }}>
+                {g.lot ? `Lot ${g.lot} · ` : ''}SKU {g.sku}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -182,6 +180,15 @@ function Labels() {
         .sticker-options select { padding: 5px 8px; border: 1px solid #aebfd6; border-radius: 6px; font: inherit; }
         .sticker-options label { display: inline-flex; align-items: center; gap: 6px; }
         .sticker { box-sizing: border-box; overflow: hidden; color: #000; background: #fff; font-family: Inter, system-ui, sans-serif; }
+        .gm { display: flex; flex-direction: column; }
+        .gm-head { display: flex; align-items: center; justify-content: space-between; gap: 1.5mm;
+                   border-bottom: 0.3mm solid #000; padding-bottom: 0.5mm; margin-bottom: 0.8mm; }
+        .gm-id { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-weight: 800; letter-spacing: .02em; line-height: 1; flex-shrink: 0; }
+        .gm-body { display: flex; flex: 1; min-height: 0; align-items: center; }
+        .gm-info { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 0.4mm; }
+        .gm-desc { font-weight: 700; line-height: 1.15; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .gm-size { display: flex; align-items: baseline; gap: 1mm; }
+        .gm-b { border: 0.25mm solid #000; padding: 0 0.6mm; font-weight: 800; }
         .sheet { width: 210mm; height: 296mm; margin: 0 auto 12px; background: #fff; display: grid;
                  grid-template-columns: repeat(3, 70mm); grid-auto-rows: 37mm; }
         .sheet .sticker { padding: 2mm 2.5mm; border: 0.2mm dashed #bbb; }

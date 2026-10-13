@@ -32,58 +32,77 @@ type Layout = 'sheet' | 'roll' | 'small'
 
 const day = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })
 
+/** Type sizes per layout, so the three stickers share one design at three scales. */
+const DIM: Record<Layout, { qr: string; id: string; tag: string; item: string; code: string; qty: string; unit: string; line: string; foot: string | null; gap: string }> = {
+  sheet: { qr: '23mm', id: '10.5pt', tag: '6pt', item: '8pt', code: '6.3pt', qty: '15pt', unit: '8pt', line: '6pt', foot: '5.5pt', gap: '2mm' },
+  roll: { qr: '33mm', id: '14pt', tag: '7.5pt', item: '10.5pt', code: '7.8pt', qty: '22pt', unit: '10pt', line: '7.4pt', foot: '7pt', gap: '3mm' },
+  small: { qr: '15.5mm', id: '8.5pt', tag: '5pt', item: '6.6pt', code: '5.4pt', qty: '11pt', unit: '6.4pt', line: '5.3pt', foot: null, gap: '1.5mm' },
+}
+
 /**
- * One sticker: the QR on the left, what is in the package on the right, and
- * the code in print under the QR so it can be typed when a scanner fails.
+ * One package sticker, read top to bottom in the order a storekeeper asks:
+ * which package (the ID, large, with what kind it is), what is in it and how
+ * much, where it came from. The QR sits at the left at the largest size the
+ * sticker allows; the ID is also printed in full in the header, so a sticker
+ * the scanner cannot read can still be typed.
+ *
+ * A roll of fabric reads differently from a box of trims: its metres are the
+ * figure people look for, with the lot and the supplier, so it has a layout
+ * of its own.
  */
 function Sticker({ p, company, layout }: { p: Label; company: string; layout: Layout }) {
-  const small = layout === 'small'
-  const big = layout === 'roll'
+  const d = DIM[layout]
+  const roll = p.packType === 'ROLL'
   const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
+  const inward = p.grnNumber ? `${p.grnNumber} · ${day(p.date)}` : `Labelled ${day(p.date)}`
   return (
-    <div className="sticker" style={{ display: 'flex', gap: small ? '1.5mm' : '2.5mm', alignItems: 'stretch' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        <QrCode text={p.code} size={small ? '19mm' : big ? '38mm' : '27mm'} />
-        <div style={{ fontFamily: 'ui-monospace, monospace', fontWeight: 700, fontSize: small ? '6.5pt' : big ? '9pt' : '7.5pt', letterSpacing: '.03em' }}>{p.code}</div>
+    <div className="sticker pk">
+      <div className="pk-head">
+        <span className="pk-id" style={{ fontSize: d.id }}>{p.code}</span>
+        <span className="pk-tag" style={{ fontSize: d.tag }}>
+          {packLabel(p.packType).toUpperCase()}
+        </span>
       </div>
-      <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-        {!small && <div style={{ fontSize: big ? '7pt' : '5.8pt', color: '#333', ...clip }}>{company}</div>}
-        <div
-          style={{
-            fontSize: small ? '7pt' : big ? '11pt' : '8pt',
-            fontWeight: 700,
-            lineHeight: 1.15,
-            display: '-webkit-box',
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical',
-            overflow: 'hidden',
-          }}
-        >
-          {p.item}
+      <div className="pk-body" style={{ gap: d.gap }}>
+        <div className="pk-qr" style={{ width: d.qr }}>
+          <QrCode text={p.code} size={d.qr} />
         </div>
-        <div style={{ fontSize: small ? '6pt' : big ? '8pt' : '6.5pt', fontFamily: 'ui-monospace, monospace', ...clip }}>
-          {p.itemCode}
-          {p.lotNo ? ` · Lot ${p.lotNo}` : ''}
+        <div className="pk-info">
+          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: layout === 'small' ? 1 : 2 }}>{p.item}</div>
+          <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{p.itemCode}</div>
+          <div className="pk-qty">
+            <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{roll ? p.qty.toFixed(2) : qtyText(p.qty)}</span>
+            <span style={{ fontSize: d.unit, fontWeight: 700 }}>{p.unit}</span>
+          </div>
+          {layout === 'small' ? (
+            // Room for one line: the lot first, as it is what a roll is picked by.
+            <div style={{ fontSize: d.line, ...clip }}>
+              {p.lotNo ? <b>Lot {p.lotNo} · </b> : null}
+              {p.grnNumber ?? day(p.date)}
+            </div>
+          ) : roll ? (
+            <>
+              <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>{p.lotNo ? `Lot ${p.lotNo}` : 'No lot'}</div>
+              <div style={{ fontSize: d.line, ...clip }}>{inward}</div>
+              {p.supplier && <div style={{ fontSize: d.line, color: '#333', ...clip }}>{p.supplier}</div>}
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: d.line, ...clip }}>{inward}</div>
+              {p.lotNo && <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>Lot {p.lotNo}</div>}
+            </>
+          )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: '1.5mm' }}>
-          <span style={{ fontSize: small ? '11pt' : big ? '20pt' : '14pt', fontWeight: 800 }}>{qtyText(p.qty)}</span>
-          <span style={{ fontSize: small ? '7pt' : big ? '10pt' : '8pt', fontWeight: 600 }}>{p.unit}</span>
-          <span style={{ fontSize: small ? '6pt' : big ? '8pt' : '6.5pt', color: '#333', marginLeft: 'auto' }}>{packLabel(p.packType)}</span>
-        </div>
-        {!small && (
-          <div style={{ fontSize: big ? '7pt' : '5.8pt', color: '#333', ...clip }}>
+      </div>
+      {d.foot && (
+        <div className="pk-foot" style={{ fontSize: d.foot }}>
+          <span style={clip}>{company}</span>
+          <span style={{ ...clip, textAlign: 'right' }}>
             {p.store}
             {p.owner ? ` · ${p.owner}` : ''}
-          </div>
-        )}
-        {!small && (
-          <div style={{ fontSize: big ? '7pt' : '5.8pt', color: '#333', ...clip }}>
-            {p.grnNumber ? `${p.grnNumber} · ` : ''}
-            {day(p.date)}
-            {p.supplier && big ? ` · ${p.supplier}` : ''}
-          </div>
-        )}
-      </div>
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -162,6 +181,17 @@ function Stickers() {
         .sticker-options select { padding: 5px 8px; border: 1px solid #aebfd6; border-radius: 6px; font: inherit; }
         .sticker-options label { display: inline-flex; align-items: center; gap: 6px; }
         .sticker { box-sizing: border-box; overflow: hidden; color: #000; background: #fff; font-family: Inter, system-ui, sans-serif; }
+        .pk { display: flex; flex-direction: column; }
+        .pk-head { display: flex; align-items: center; justify-content: space-between; gap: 1.5mm;
+                   border-bottom: 0.3mm solid #000; padding-bottom: 0.6mm; margin-bottom: 0.9mm; }
+        .pk-id { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-weight: 800; letter-spacing: .02em; line-height: 1; }
+        .pk-tag { border: 0.25mm solid #000; border-radius: 0.6mm; padding: 0.2mm 0.8mm; font-weight: 700; letter-spacing: .06em; line-height: 1.2; }
+        .pk-body { display: flex; flex: 1; min-height: 0; align-items: center; }
+        .pk-qr { flex-shrink: 0; }
+        .pk-info { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 0.5mm; }
+        .pk-item { font-weight: 700; line-height: 1.15; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .pk-qty { display: flex; align-items: baseline; gap: 1mm; margin: 0.3mm 0; }
+        .pk-foot { display: flex; justify-content: space-between; gap: 2mm; border-top: 0.2mm solid #999; padding-top: 0.5mm; margin-top: 0.8mm; color: #333; }
         .sheet { width: 210mm; height: 296mm; margin: 0 auto 12px; background: #fff; display: grid;
                  grid-template-columns: repeat(3, 70mm); grid-auto-rows: 37mm; }
         .sheet .sticker { padding: 2mm 2.5mm; border: 0.2mm dashed #bbb; }
