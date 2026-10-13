@@ -362,6 +362,7 @@ model User {
   jobWorkOrdersMade    JobWorkOrder[]         @relation("JobWorkOrderCreatedBy")
   jobCardsMade         JobCard[]              @relation("JobCardCreatedBy")
   packageMoves StockPackageMove[] @relation("PackageMovesBy")
+  garmentEvents GarmentEvent[] @relation("GarmentEventBy")
 }
 
 model Role {
@@ -720,6 +721,7 @@ model Item {
   challanLines        DeliveryChallanLine[]      @relation("DCLineItem")
   quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
   packages StockPackage[] @relation("ItemPackages")
+  garments Garment[] @relation("GarmentItem")
 }
 
 model Style {
@@ -1102,6 +1104,7 @@ model Warehouse {
   deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
   creditNotes              CreditNote[]           @relation("CNWarehouse")
   packages StockPackage[] @relation("WarehousePackages")
+  garments Garment[] @relation("GarmentStore")
 }
 
 model Department {
@@ -1547,6 +1550,7 @@ model FinishedGoodsReceipt {
 
   @@index([soId])
   @@map("finished_goods_receipts")
+  garments Garment[] @relation("GarmentReceipt")
 }
 
 model FinishedGoodsReceiptLine {
@@ -3137,6 +3141,9 @@ model ManufacturingOrder {
   @@index([moNumber])
   @@index([status])
   @@map("manufacturing_orders")
+  /// This order's finished garments get a QR label each, piece by piece.
+  tagGarments Boolean @default(false)
+  garments    Garment[] @relation("GarmentMO")
 }
 
 model MOLine {
@@ -3464,6 +3471,7 @@ model ProductionBundle {
   @@unique([moId, bundleNo])
   @@index([cuttingOrderId])
   @@map("production_bundles")
+  garments Garment[] @relation("GarmentBundle")
 }
 
 /// Something that happened on the floor: a cutting, a transfer sent or
@@ -4149,6 +4157,7 @@ model Size {
   bundles         ProductionBundle[]    @relation("BundleSize")
   @@unique([sizeGroupId, code])
   @@map("sizes")
+  garments Garment[] @relation("GarmentSize")
 }
 
 model SalesOrderLineSize {
@@ -5249,4 +5258,93 @@ model StockPackageMove {
 
   @@index([packageId, createdAt])
   @@map("stock_package_moves")
+}
+
+/// Where one tagged garment is.
+enum GarmentStatus {
+  /// In the finished-goods store.
+  IN_STOCK
+  /// In a carton, still in the store.
+  PACKED
+  /// Gone out on a delivery challan.
+  DISPATCHED
+  /// Tag withdrawn: printed by mistake, or its receipt was cancelled.
+  VOID
+}
+
+enum GarmentEventType {
+  TAGGED
+  PACKED
+  UNPACKED
+  DISPATCHED
+  RETURNED
+  VOIDED
+}
+
+/// One finished garment with its own QR label: a single T-shirt, not a
+/// bundle or a carton.
+///
+/// Made from a finished-goods receipt, one per piece received, so a garment
+/// only exists once it has passed the last check. The stock ledger still
+/// counts the pieces by item, size and grade; a garment says which piece is
+/// which, and where it came from: its order, its bundle, its receipt. The
+/// same code stays with the piece for life — a damaged label is reprinted,
+/// never re-numbered.
+model Garment {
+  id              String             @id @default(cuid())
+  /// What the QR carries and what is printed under it: G-00001234.
+  code            String             @unique
+  moId            String
+  mo              ManufacturingOrder @relation("GarmentMO", fields: [moId], references: [id])
+  moLineId        String?
+  /// The cutting bundle it was sewn in, for its production and QC history.
+  bundleId        String?
+  bundle          ProductionBundle?  @relation("GarmentBundle", fields: [bundleId], references: [id])
+  fgReceiptId     String
+  fgReceipt       FinishedGoodsReceipt @relation("GarmentReceipt", fields: [fgReceiptId], references: [id])
+  fgReceiptLineId String
+  /// The finished item: one per style and colour.
+  itemId          String
+  item            Item               @relation("GarmentItem", fields: [itemId], references: [id])
+  sizeId          String?
+  size            Size?              @relation("GarmentSize", fields: [sizeId], references: [id])
+  grade           String             @default("A")
+  warehouseId     String
+  warehouse       Warehouse          @relation("GarmentStore", fields: [warehouseId], references: [id])
+  ownership       StockOwnership     @default(OWNED)
+  ownerCustomerId String?
+  soId            String?
+  status          GarmentStatus      @default(IN_STOCK)
+  /// How often its label has been printed. A reprint keeps the same code.
+  printCount      Int                @default(0)
+  lastPrintedAt   DateTime?
+  createdById     String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  events GarmentEvent[]
+
+  @@index([moId, status])
+  @@index([fgReceiptLineId])
+  @@index([itemId, sizeId, warehouseId, status])
+  @@index([bundleId])
+  @@map("garments")
+}
+
+/// What happened to one garment after it was tagged, in order.
+model GarmentEvent {
+  id              String           @id @default(cuid())
+  garmentId       String
+  garment         Garment          @relation(fields: [garmentId], references: [id], onDelete: Cascade)
+  type            GarmentEventType
+  referenceType   String?
+  referenceId     String?
+  referenceNumber String?
+  notes           String?
+  createdById     String?
+  createdBy       User?            @relation("GarmentEventBy", fields: [createdById], references: [id])
+  createdAt       DateTime         @default(now())
+
+  @@index([garmentId, createdAt])
+  @@map("garment_events")
 }

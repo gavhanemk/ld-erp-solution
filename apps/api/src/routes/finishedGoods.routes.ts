@@ -9,6 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { recordMovement } from '../services/stock.service'
 import { syncMoPacked } from '../services/manufacturing.service'
 import { packForReceipt, unpackForReceipt } from '../services/floor.service'
+import { voidForCancelledReceipt } from '../services/garment.service'
 
 /**
  * Finished goods in: packed garments going into the finished-goods store.
@@ -452,6 +453,8 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         data: { cancelledAt: new Date(), cancelledById: req.user!.id, cancelReason: reason },
         include: receiptInclude,
       })
+      // Its pieces' garment tags go with them; refused if any are packed or sent.
+      await voidForCancelledReceipt(tx, before.id, `Cancelled ${before.fgrNumber}: ${reason}`, req.user!.id)
       // On an order with a route, the pieces go back to the step they were packed from.
       await unpackForReceipt(tx, before.id, `Cancelled ${before.fgrNumber}: ${reason}`, req.user!.id)
       // Its pieces come off the manufacturing order's packed again.

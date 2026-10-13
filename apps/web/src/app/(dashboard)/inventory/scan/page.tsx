@@ -8,6 +8,7 @@ import { api, ApiError } from '@/lib/api'
 import { Scanner } from '@/components/packages/Scanner'
 import { PackageCard } from '@/components/packages/PackageCard'
 import type { PackageDetail } from '@/components/packages/packageTypes'
+import { GarmentCard, looksLikeGarment, type GarmentDetail } from '@/components/packages/GarmentCard'
 
 /**
  * The store's one screen for a sticker: scan it, see what it is, act on it.
@@ -20,6 +21,8 @@ function ScanScreen() {
   const params = useSearchParams()
   const router = useRouter()
   const [pkg, setPkg] = useState<PackageDetail | null>(null)
+  // A garment's own tag (G-…) rather than a package of stock (PK-…).
+  const [garment, setGarment] = useState<GarmentDetail | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -30,11 +33,20 @@ function ScanScreen() {
       setError(null)
       setMessage(null)
       try {
-        const res = await api.get<{ data: PackageDetail }>(`/packages/scan/${encodeURIComponent(code)}`)
-        setPkg(res.data)
-        router.replace(`/inventory/scan?code=${res.data.code}`, { scroll: false })
+        if (looksLikeGarment(code)) {
+          const res = await api.get<{ data: GarmentDetail }>(`/garments/scan/${encodeURIComponent(code)}`)
+          setPkg(null)
+          setGarment(res.data)
+          router.replace(`/inventory/scan?code=${res.data.code}`, { scroll: false })
+        } else {
+          const res = await api.get<{ data: PackageDetail }>(`/packages/scan/${encodeURIComponent(code)}`)
+          setGarment(null)
+          setPkg(res.data)
+          router.replace(`/inventory/scan?code=${res.data.code}`, { scroll: false })
+        }
       } catch (err) {
         setPkg(null)
+        setGarment(null)
         setError(err instanceof ApiError ? err.message : 'Could not look that up. Is the API running?')
       } finally {
         setBusy(false)
@@ -46,7 +58,7 @@ function ScanScreen() {
   // Opened from a link to one package.
   const linked = params.get('code')
   useEffect(() => {
-    if (linked && linked !== pkg?.code) void find(linked)
+    if (linked && linked !== pkg?.code && linked !== garment?.code) void find(linked)
     // Only when the link changes, not after every action on the package.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [linked])
@@ -56,7 +68,7 @@ function ScanScreen() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Scan</h1>
-          <p className="page-subtitle">Scan a package sticker to issue, move or split it</p>
+          <p className="page-subtitle">Scan a package sticker to issue, move or split it, or a garment tag to see where it came from</p>
         </div>
         <Link href="/inventory/packages" className="btn-ghost">
           <Tags size={15} /> Packages & stickers
@@ -85,7 +97,9 @@ function ScanScreen() {
         </div>
       )}
 
-      {pkg ? (
+      {garment ? (
+        <GarmentCard key={garment.id} g={garment} onChange={setGarment} onDone={setMessage} />
+      ) : pkg ? (
         <PackageCard key={pkg.id} pkg={pkg} onChange={setPkg} onDone={setMessage} />
       ) : (
         !busy &&

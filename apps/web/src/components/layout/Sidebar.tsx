@@ -124,6 +124,7 @@ const navItems: NavItem[] = [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Scan', href: '/inventory/scan' },
       { label: 'Packages & Stickers', href: '/inventory/packages' },
+      { label: 'Garment Tags', href: '/inventory/garment-tags' },
       { label: 'Material Requisitions', href: '/inventory/requisitions' },
       { label: 'Stock Documents', href: '/inventory/documents' },
       { label: 'Finished Goods In', href: '/inventory/finished-goods' },
