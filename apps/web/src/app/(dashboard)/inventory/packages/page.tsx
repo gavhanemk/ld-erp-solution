@@ -7,7 +7,7 @@ import { AlertTriangle, Boxes, CheckCircle2, Printer, RefreshCw, ScanLine, Searc
 import { api, ApiError, can } from '@/lib/api'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { LabelDialog, type LabelTarget } from '@/components/packages/LabelDialog'
+import { InwardStickers, type LabelTarget } from '@/components/packages/InwardStickers'
 import { printLabels, qtyText } from '@/components/packages/packageTypes'
 import { PackageGroups, type PackageGroup } from '@/components/packages/PackageGroups'
 
@@ -306,13 +306,13 @@ function PackagesScreen() {
       </div>
 
       {labelling && (
-        <LabelDialog
-          target={labelling}
+        <InwardStickers
+          targets={[labelling]}
           onClose={() => setLabelling(null)}
           onDone={(m, ids) => {
             setLastBatch(ids)
             setLabelling(null)
-            setMessage(`${m} The stickers have opened in a new tab for printing.`)
+            setMessage(m)
             void load()
           }}
         />
@@ -465,8 +465,7 @@ function ToLabelView({
                               ownership: 'OWNED',
                               ownerCustomerId: null,
                               grnLineId: l.grnLineId,
-                              grnNumber: l.grnNumber,
-                              supplier: l.supplier,
+                              sourceRef: l.grnNumber,
                               lotNo: l.lotNo,
                               packType: l.packType,
                               perPack: l.perPack,

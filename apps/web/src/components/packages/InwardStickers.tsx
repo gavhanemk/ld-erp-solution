@@ -1,10 +1,9 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { Info, ListOrdered, Loader2, Printer, Tags } from 'lucide-react'
+import { Info, Loader2, Printer, Tags } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
-import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { PACK_TYPES, openPrintTab, printLabels, qtyText } from './packageTypes'
 
@@ -24,50 +23,51 @@ export interface InwardRef {
   }>
 }
 
-interface Target {
-  key: string
+/** Stock to sticker: one item in one store, and how much of it can be. */
+export interface LabelTarget {
   itemId: string
-  itemCode: string
   item: string
+  itemCode: string
   unit: string
   warehouseId: string
   store: string
   ownership: 'OWNED' | 'CUSTOMER_OWNED'
   ownerCustomerId: string | null
-  owner: string | null
-  lotNo: string | null
-  grnLineId: string | null
-  max: number
+  owner?: string | null
+  grnLineId?: string | null
+  lotNo?: string | null
   packType: string
-  perPack: number | null
-  remembered: boolean
-  qtys: number[]
+  /** What one sticker usually holds: the item's own setting, or 1 for a roll or box. */
+  perPack?: number | null
+  /** How much can be stickered. */
+  max: number
+  /** Where it came in, for the window's title: GRN-0004. */
+  sourceRef?: string | null
 }
 
 interface Plan {
   sourceRef: string
-  targets: Target[]
+  targets: Array<LabelTarget & { key: string; qtys: number[] }>
   untracked: Array<{ itemId: string; code: string; name: string; category: string }>
 }
 
 interface Row {
-  on: boolean
-  packType: string
-  mode: 'same' | 'each'
-  /** What one sticker holds, when they are all the same. */
+  skip: boolean
+  open: boolean
+  /** Different sizes: one quantity a line, for rolls of 48 m, 51 m… */
+  sizes: boolean
   each: string
-  /** One quantity a line, when they are not. */
+  /** Empty: as many as it takes to cover everything. */
+  count: string
   list: string
   lotNo: string
-  remember: boolean
-  /** Unticked by hand: a later edit does not tick it again. */
-  rememberSet: boolean
+  changed: boolean
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000
 
-/** 12 at 1 → twelve 1s; 25 at 10 → 10, 10, 5. Rounding dust goes on the last one, not a sticker of its own. */
-function split(max: number, each: number): number[] {
+/** Everything, at so much a sticker: 12 at 1 → twelve 1s; 25 at 10 → 10, 10, 5. */
+function cover(max: number, each: number): number[] {
   if (!(each > 0) || !(max > 0)) return []
   if (each >= max) return [r3(max)]
   const n = Math.floor(max / each + 1e-9)
@@ -85,52 +85,95 @@ const parseList = (text: string) =>
     .map((t) => Number(t.replace(/[^\d.]/g, '')))
     .filter((n) => n > 0)
 
-function qtysOf(t: Target, r: Row): number[] {
-  return r.mode === 'same' ? split(t.max, Number(r.each)) : parseList(r.list)
+function qtysOf(t: LabelTarget, r: Row): number[] {
+  if (r.skip) return []
+  if (r.sizes) return parseList(r.list)
+  const each = Number(r.each)
+  const count = Math.floor(Number(r.count) || 0)
+  return count > 0 ? (each > 0 ? Array.from({ length: Math.min(count, 500) }, () => r3(each)) : []) : cover(t.max, each)
 }
 
-function startRow(t: Target): Row {
-  const q = t.qtys
-  const head = q.slice(0, -1)
-  const same = q.length > 0 && head.every((x) => x === q[0])
+function startRow(t: LabelTarget, suggested?: number[]): Row {
+  const q = suggested?.length ? suggested : t.perPack && t.perPack > 0 ? cover(t.max, t.perPack) : [r3(t.max)]
+  // Too many to cover in one go — 1,211 rolls on the rack: what each holds is
+  // known, how many to print now is the one thing to ask.
+  const tooMany = Boolean(!suggested?.length && t.perPack && t.perPack > 0 && !q.length)
+  const same = tooMany || (q.length > 0 && q.slice(0, -1).every((x) => x === q[0]))
   return {
-    on: true,
-    packType: t.packType,
-    mode: same ? 'same' : 'each',
-    each: same ? String(q[0]) : '',
+    skip: false,
+    open: Boolean(tooMany),
+    sizes: !same,
+    each: tooMany ? String(t.perPack) : same ? String(q[0]) : '',
+    count: '',
     list: same ? '' : q.join('\n'),
     lotNo: t.lotNo ?? '',
-    remember: false,
-    rememberSet: false,
+    changed: false,
   }
 }
 
+const many = (packType: string) => (PACK_TYPES.find((p) => p.value === packType) ?? PACK_TYPES[6]).many
+const one = (packType: string) => (PACK_TYPES.find((p) => p.value === packType) ?? PACK_TYPES[6]).one
+
+/** "2 stickers, 1 box on each" — the whole plan for one item, in words. */
+function sentence(t: LabelTarget, r: Row, qtys: number[]) {
+  if (r.skip) return 'No stickers for this one.'
+  if (!qtys.length) return r.sizes ? `Type what is in each ${one(t.packType)}, one a line.` : 'Say how many stickers.'
+  const total = r3(qtys.reduce((s, q) => s + q, 0))
+  const n = `${qtys.length} ${qtys.length === 1 ? 'sticker' : 'stickers'}`
+  const what = r.sizes
+    ? `${qtys.map(qtyText).join(', ')} ${t.unit}`
+    : qtys.length > 1 && qtys[qtys.length - 1] !== qtys[0]
+      ? `${qtyText(qtys[0])} ${t.unit} on each, the last ${qtyText(qtys[qtys.length - 1])}`
+      : `${qtyText(qtys[0])} ${t.unit} on each`
+  const left = r3(t.max - total)
+  return `${n}, ${what}${left > 0.0005 ? ` · ${qtyText(left)} ${t.unit} stays without a sticker` : ''}`
+}
+
 /**
- * The stickers for what just came in, ready to print.
+ * The one sticker window: after stock comes in, and from To label.
  *
- * Opens by itself after a GRN, a stock-in, opening stock, a customer's
- * material, a job worker's return or a return from the floor, filled in from
- * each item's remembered setting — one sticker a roll, say — so printing is
- * one click. Anything can be changed first, and "remember" keeps the change
- * for the item. Nothing is saved until Print, and closing it loses nothing:
- * the same stock waits under Packages & Stickers → To label.
+ * Each item is a sentence — "2 stickers, 1 box on each" — worked out from the
+ * item, so the usual case is one press of Print. "Change" opens the two
+ * figures behind the sentence, a lot, and sizes for rolls that differ; what is
+ * changed is remembered for the item without being asked. Nothing is saved
+ * until Print; Skip leaves the stock under Packages & Stickers → To label.
  */
-export function InwardStickers({ source, onClose, onDone }: { source: InwardRef; onClose: () => void; onDone: (message: string) => void }) {
+export function InwardStickers({
+  source,
+  targets: given,
+  onClose,
+  onDone,
+}: {
+  /** After an inward: the document, its lines read from the server. */
+  source?: InwardRef
+  /** From To label: the stock to sticker, already known. */
+  targets?: LabelTarget[]
+  onClose: () => void
+  /** The message, and the packages made, so they can be printed again. */
+  onDone: (message: string, ids: string[]) => void
+}) {
   const [plan, setPlan] = useState<Plan | null>(null)
   const [rows, setRows] = useState<Record<string, Row>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (given) {
+      const targets = given.map((t, i) => ({ ...t, key: `${t.itemId}-${t.warehouseId}-${t.grnLineId ?? i}`, qtys: [] as number[] }))
+      setPlan({ sourceRef: given[0]?.sourceRef ?? '', targets, untracked: [] })
+      setRows(Object.fromEntries(targets.map((t) => [t.key, startRow(t)])))
+      return
+    }
+    if (!source) return onClose()
     let live = true
     api
       .post<{ data: Plan }>('/packages/plan', { sourceType: source.type, sourceId: source.id, lines: source.lines })
       .then((res) => {
         if (!live) return
-        // Nothing to label and nothing to explain: no window at all.
+        // Nothing to sticker and nothing to explain: no window at all.
         if (!res.data.targets.length && !res.data.untracked.length) return onClose()
         setPlan(res.data)
-        setRows(Object.fromEntries(res.data.targets.map((t) => [t.key, startRow(t)])))
+        setRows(Object.fromEntries(res.data.targets.map((t) => [t.key, startRow(t, t.qtys)])))
       })
       // The document is saved either way; a window that cannot open is not worth an error over it.
       .catch(() => live && onClose())
@@ -138,35 +181,29 @@ export function InwardStickers({ source, onClose, onDone }: { source: InwardRef;
       live = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source.type, source.id])
+  }, [source?.type, source?.id])
 
-  const edit = (key: string, patch: Partial<Row>, settingChange = true) =>
-    setRows((p) => {
-      const r = { ...p[key], ...patch }
-      // Changing how it is packed ticks "remember", unless somebody unticked it.
-      if (settingChange && !r.rememberSet) r.remember = true
-      return { ...p, [key]: r }
-    })
+  const edit = (key: string, patch: Partial<Row>) => setRows((p) => ({ ...p, [key]: { ...p[key], ...patch, changed: true } }))
 
   const picked = useMemo(
     () =>
       (plan?.targets ?? [])
-        .filter((t) => rows[t.key]?.on)
+        .filter((t) => rows[t.key] && !rows[t.key].skip)
         .map((t) => {
           const r = rows[t.key]
           const qtys = qtysOf(t, r)
           const total = r3(qtys.reduce((s, q) => s + q, 0))
           const problem = !qtys.length
-            ? `Say what one sticker holds for ${t.item}.`
+            ? `${t.item}: ${r.sizes ? 'type what is in each, one a line' : 'say how many stickers'}.`
             : total > t.max + 1e-9
-              ? `${t.item}: that is ${qtyText(total)} ${t.unit}; only ${qtyText(t.max)} came in.`
+              ? `${t.item}: that is ${qtyText(total)} ${t.unit}, but only ${qtyText(t.max)} can have stickers.`
               : null
-          return { t, r, qtys, total, problem }
+          return { t, r, qtys, problem }
         }),
     [plan, rows],
   )
   const stickers = picked.reduce((s, p) => s + p.qtys.length, 0)
-  const blocker = !picked.length ? 'Tick at least one item, or close to label it later.' : (picked.find((p) => p.problem)?.problem ?? (stickers > 500 ? 'Up to 500 stickers at a time.' : null))
+  const blocker = !picked.length ? 'Nothing to print.' : (picked.find((p) => p.problem)?.problem ?? (stickers > 500 ? 'Up to 500 stickers at a time.' : null))
 
   const print = async () => {
     if (!plan) return
@@ -175,26 +212,34 @@ export function InwardStickers({ source, onClose, onDone }: { source: InwardRef;
     // Opened on the click itself: a tab opened after the save is blocked as a pop-up.
     const tab = openPrintTab()
     try {
-      const res = await api.post<{ message: string; data: Array<{ id: string }> }>('/packages/batch', {
-        sourceType: source.type,
-        sourceId: source.id,
-        groups: picked.map(({ t, r, qtys }) => ({
-          itemId: t.itemId,
-          warehouseId: t.warehouseId,
-          ownership: t.ownership,
-          ownerCustomerId: t.ownerCustomerId,
-          grnLineId: t.grnLineId,
-          packType: r.packType,
-          qtys,
-          lotNo: r.lotNo.trim() || null,
-          remember: r.remember,
-        })),
-      })
-      printLabels(
-        res.data.map((p) => p.id),
-        tab,
-      )
-      onDone(`${res.message} The stickers have opened in a new tab for printing.`)
+      const groups = picked.map(({ t, r, qtys }) => ({
+        itemId: t.itemId,
+        warehouseId: t.warehouseId,
+        ownership: t.ownership,
+        ownerCustomerId: t.ownerCustomerId,
+        grnLineId: t.grnLineId ?? null,
+        packType: t.packType,
+        qtys,
+        lotNo: r.lotNo.trim() || null,
+        // Changed here, so next time starts the same way. Sizes that differ
+        // roll to roll are nothing to remember.
+        remember: r.changed && !r.sizes,
+      }))
+      const ids: string[] = []
+      let message = ''
+      if (source) {
+        const res = await api.post<{ message: string; data: Array<{ id: string }> }>('/packages/batch', { sourceType: source.type, sourceId: source.id, groups })
+        ids.push(...res.data.map((p) => p.id))
+        message = res.message
+      } else {
+        for (const g of groups) {
+          const res = await api.post<{ message: string; data: Array<{ id: string }> }>('/packages', g)
+          ids.push(...res.data.map((p) => p.id))
+          message = res.message
+        }
+      }
+      printLabels(ids, tab)
+      onDone(`${message} The stickers have opened in a new tab: press Print there.`, ids)
     } catch (err) {
       tab?.close()
       setError(err instanceof ApiError ? err.message : 'Could not make the stickers. Is the API running?')
@@ -207,166 +252,137 @@ export function InwardStickers({ source, onClose, onDone }: { source: InwardRef;
     return (
       <FormFrame icon={Tags} title="Stickers" subtitle="Getting the stickers ready…" onClose={onClose} primary={null} width="max-w-md">
         <div className="text-muted-foreground flex items-center gap-2 py-6 text-sm">
-          <Loader2 size={16} className="animate-spin" /> Working out what came in…
+          <Loader2 size={16} className="animate-spin" /> One moment…
         </div>
       </FormFrame>
     )
   }
 
+  const printButton = plan.targets.length ? (
+    <button type="button" className="btn-primary" onClick={() => void print()} disabled={saving || Boolean(blocker)}>
+      {saving ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />}
+      Print {stickers || ''} {stickers === 1 ? 'sticker' : 'stickers'}
+    </button>
+  ) : (
+    <button type="button" className="btn-primary" onClick={onClose}>
+      Close
+    </button>
+  )
+
   return (
     <FormFrame
       icon={Tags}
-      title={`Stickers for ${plan.sourceRef}`}
-      subtitle="Filled in from each item's sticker settings. Change anything before printing; tick Remember to keep it for next time."
+      title={plan.sourceRef ? `Stickers for ${plan.sourceRef}` : 'Stickers'}
+      subtitle="Check the line below and press Print. Change it only if it is not how the goods are packed."
       onClose={onClose}
       busy={saving}
       error={error}
-      width="max-w-4xl"
-      primary={
-        plan.targets.length ? (
-          <button type="button" className="btn-primary" onClick={() => void print()} disabled={saving || Boolean(blocker)}>
-            {saving ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />}
-            Print {stickers || ''} {stickers === 1 ? 'sticker' : 'stickers'}
-          </button>
-        ) : (
-          <button type="button" className="btn-primary" onClick={onClose}>
-            Close
-          </button>
-        )
-      }
+      width="max-w-2xl"
+      primary={printButton}
       footer={
         plan.targets.length ? (
           <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
-            Later
+            Skip
           </button>
         ) : null
       }
-      footerNote={
-        blocker ? (
-          <span className="warn-text">{blocker}</span>
-        ) : plan.targets.length ? (
-          'Later keeps them under Packages & Stickers → To label.'
-        ) : null
-      }
+      footerNote={blocker ? <span className="warn-text">{blocker}</span> : null}
     >
-      <div className="space-y-3">
+      <div className="space-y-2.5">
         {plan.targets.map((t) => {
           const r = rows[t.key]
           if (!r) return null
           const qtys = qtysOf(t, r)
-          const total = r3(qtys.reduce((s, q) => s + q, 0))
-          const kind = PACK_TYPES.find((p) => p.value === r.packType) ?? PACK_TYPES[6]
           return (
-            <div key={t.key} className={`border-border rounded-xl border p-3 ${r.on ? 'bg-card' : 'bg-secondary/40 opacity-70'}`}>
-              <label className="flex cursor-pointer items-start gap-2.5">
-                <input type="checkbox" className="mt-1 h-4 w-4 shrink-0" checked={r.on} onChange={(e) => edit(t.key, { on: e.target.checked }, false)} />
-                <span className="min-w-0 flex-1">
-                  <span className="text-foreground block text-sm font-semibold">
-                    {t.item} <span className="text-muted-foreground font-mono text-xs font-normal">{t.itemCode}</span>
-                  </span>
-                  <span className="text-muted-foreground block text-xs">
-                    {qtyText(t.max)} {t.unit} into {t.store}
-                    {t.owner ? ` · ${t.owner}'s` : ''}
-                  </span>
+            <div key={t.key} className="border-border bg-card rounded-xl border p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                <span className="text-foreground text-sm font-semibold">
+                  {t.item} <span className="text-muted-foreground font-mono text-xs font-normal">{t.itemCode}</span>
                 </span>
-              </label>
+                <span className="text-muted-foreground text-xs">
+                  {qtyText(t.max)} {t.unit} · {t.store}
+                  {t.owner ? ` · ${t.owner}'s` : ''}
+                </span>
+              </div>
 
-              {r.on && (
-                <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-[9rem_1fr_9rem]">
-                  <div>
-                    <span className="form-label">Each package is a</span>
-                    <SmartSelect className="form-input h-9" value={r.packType} onChange={(e) => edit(t.key, { packType: e.target.value })}>
-                      {PACK_TYPES.map((p) => (
-                        <option key={p.value} value={p.value}>
-                          {p.label}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <span className={`flex items-center gap-1.5 text-sm ${r.skip ? 'text-muted-foreground line-through' : 'text-foreground'}`}>
+                  <Tags size={14} className="text-primary shrink-0" />
+                  {sentence(t, r, qtys)}
+                </span>
+                <button type="button" className="text-primary text-sm font-medium hover:underline" onClick={() => setRows((p) => ({ ...p, [t.key]: { ...r, open: !r.open } }))}>
+                  {r.open ? 'Done' : 'Change'}
+                </button>
+              </div>
 
-                  {r.mode === 'same' ? (
-                    <div className="col-span-2 sm:col-span-1">
-                      {/* Two figures, each named: "1 box = 2 boxes" read as nonsense
-                        when the second was the number of stickers. */}
-                      <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
-                        <label className="block">
-                          <span className="form-label">One sticker holds</span>
-                          <div className="relative w-32">
-                            <StepInput
-                              className="form-input h-9 pr-10"
-                              value={r.each}
-                              onValueChange={(v) => edit(t.key, { each: v })}
-                              decimals
-                              aria-label={`What one sticker holds for ${t.item}`}
-                            />
-                            <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">{t.unit}</span>
-                          </div>
-                        </label>
-                        <label className="block">
-                          <span className="form-label">Number of stickers</span>
-                          <div className="w-24">
-                            <StepInput
-                              className="form-input h-9"
-                              value={qtys.length ? String(qtys.length) : ''}
-                              onValueChange={(v) => {
-                                const n = Math.floor(Number(v) || 0)
-                                if (n > 0) edit(t.key, { each: String(r3(t.max / n)) })
-                              }}
-                              min={1}
-                              aria-label={`Number of stickers for ${t.item}`}
-                            />
-                          </div>
-                        </label>
-                        <button
-                          type="button"
-                          className="text-primary pb-2.5 text-xs font-medium hover:underline"
-                          onClick={() => edit(t.key, { mode: 'each', list: qtys.join('\n') })}
-                          title={`For ${kind.many} that hold different amounts, like rolls of 48 m and 51 m`}
-                        >
-                          <ListOrdered size={12} className="mr-1 inline" />
-                          Each one different
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="col-span-2 sm:col-span-1">
-                      <span className="form-label">One {kind.one} a line</span>
+              {r.open && (
+                <div className="border-border mt-3 space-y-3 border-t pt-3">
+                  {r.sizes ? (
+                    <label className="block">
+                      <span className="form-label">What is in each {one(t.packType)}, one a line</span>
                       <textarea
                         className="form-input font-mono text-sm"
-                        rows={Math.min(6, Math.max(2, r.list.split('\n').length))}
+                        rows={Math.min(6, Math.max(3, r.list.split('\n').length))}
                         value={r.list}
                         onChange={(e) => edit(t.key, { list: e.target.value })}
                         placeholder={'e.g.\n48.5\n51\n50.2'}
-                        aria-label={`Quantities of each ${kind.one} of ${t.item}`}
+                        aria-label={`What is in each ${one(t.packType)} of ${t.item}`}
                       />
-                      <button type="button" className="text-primary mt-1 text-xs font-medium hover:underline" onClick={() => edit(t.key, { mode: 'same', each: String(qtys[0] ?? '') })}>
-                        All the same size
-                      </button>
+                    </label>
+                  ) : (
+                    <div className="flex flex-wrap items-end gap-3">
+                      <label className="block">
+                        <span className="form-label">How many stickers</span>
+                        <StepInput
+                          className="form-input h-10 w-28"
+                          value={r.count || (qtys.length ? String(qtys.length) : '')}
+                          onValueChange={(v) => edit(t.key, { count: v })}
+                          min={1}
+                          aria-label={`How many stickers for ${t.item}`}
+                        />
+                      </label>
+                      <span className="text-muted-foreground pb-2.5">×</span>
+                      <label className="block">
+                        <span className="form-label">On each</span>
+                        <div className="relative w-32">
+                          <StepInput
+                            className="form-input h-10 pr-10"
+                            value={r.each}
+                            // A new amount a sticker: cover everything again, unless a count was typed.
+                            onValueChange={(v) => edit(t.key, { each: v })}
+                            decimals
+                            aria-label={`How much on each sticker for ${t.item}`}
+                          />
+                          <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">{t.unit}</span>
+                        </div>
+                      </label>
                     </div>
                   )}
-
-                  <div>
-                    <span className="form-label">Lot / batch</span>
-                    <input
-                      className="form-input h-9 placeholder:text-muted-foreground/60"
-                      value={r.lotNo}
-                      onChange={(e) => edit(t.key, { lotNo: e.target.value }, false)}
-                      placeholder="Optional"
-                      maxLength={50}
-                      aria-label={`Lot of ${t.item}`}
-                    />
-                  </div>
-
-                  <div className="col-span-2 flex flex-wrap items-center justify-between gap-2 sm:col-span-3">
-                    <span className={`text-xs ${total > t.max + 1e-9 ? 'text-red-400' : 'text-muted-foreground'}`}>
-                      {qtys.length
-                        ? `${qtys.length} ${qtys.length === 1 ? 'sticker' : 'stickers'}, ${qtyText(total)} ${t.unit} in all${total < t.max - 1e-9 ? ` · ${qtyText(r3(t.max - total))} ${t.unit} stays without a sticker` : ''}`
-                        : `Up to ${qtyText(t.max)} ${t.unit}.`}
-                    </span>
-                    <label className="text-muted-foreground flex cursor-pointer items-center gap-1.5 text-xs">
-                      <input type="checkbox" checked={r.remember} onChange={(e) => edit(t.key, { remember: e.target.checked, rememberSet: true }, false)} />
-                      Remember for {t.item.length > 28 ? 'this item' : t.item}
+                  <div className="flex flex-wrap items-end gap-3">
+                    <label className="block">
+                      <span className="form-label">Lot (optional)</span>
+                      <input
+                        className="form-input h-10 w-40"
+                        value={r.lotNo}
+                        onChange={(e) => edit(t.key, { lotNo: e.target.value })}
+                        maxLength={50}
+                        aria-label={`Lot of ${t.item}`}
+                      />
                     </label>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 pb-2.5 text-sm">
+                      <button
+                        type="button"
+                        className="text-primary font-medium hover:underline"
+                        onClick={() =>
+                          edit(t.key, r.sizes ? { sizes: false, each: String(qtys[0] ?? t.perPack ?? ''), count: '' } : { sizes: true, list: qtys.join('\n') })
+                        }
+                      >
+                        {r.sizes ? 'All the same size' : `${many(t.packType).replace(/^./, (c) => c.toUpperCase())} of different sizes`}
+                      </button>
+                      <button type="button" className="text-muted-foreground hover:text-foreground hover:underline" onClick={() => setRows((p) => ({ ...p, [t.key]: { ...r, skip: !r.skip } }))}>
+                        {r.skip ? 'Print stickers for this' : "Don't print this one"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
