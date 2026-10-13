@@ -89,6 +89,8 @@ function PackagesScreen() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  // The packages just labelled, so a closed print tab is one click from coming back.
+  const [lastBatch, setLastBatch] = useState<string[]>([])
   const [labelling, setLabelling] = useState<LabelTarget | null>(null)
 
   const go = (next: 'list' | 'label') => router.replace(next === 'label' ? '/inventory/packages?tab=label' : '/inventory/packages', { scroll: false })
@@ -165,7 +167,19 @@ function PackagesScreen() {
         <div className="flex items-start gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3 text-emerald-600">
           <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
           <p className="font-medium">{message}</p>
-          <button className="ml-auto" onClick={() => setMessage(null)} aria-label="Dismiss">
+          {lastBatch.length > 0 && (
+            <button className="btn-secondary ml-auto h-9 shrink-0" onClick={() => printLabels(lastBatch)}>
+              <Printer size={15} /> Print {lastBatch.length === 1 ? 'this sticker' : `these ${lastBatch.length} stickers`} again
+            </button>
+          )}
+          <button
+            className={lastBatch.length ? 'shrink-0' : 'ml-auto'}
+            onClick={() => {
+              setMessage(null)
+              setLastBatch([])
+            }}
+            aria-label="Dismiss"
+          >
             <X size={16} />
           </button>
         </div>
@@ -320,7 +334,8 @@ function PackagesScreen() {
         <LabelDialog
           target={labelling}
           onClose={() => setLabelling(null)}
-          onDone={(m) => {
+          onDone={(m, ids) => {
+            setLastBatch(ids)
             setLabelling(null)
             setMessage(`${m} The stickers have opened in a new tab for printing.`)
             void load()

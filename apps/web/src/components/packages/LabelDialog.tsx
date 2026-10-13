@@ -43,7 +43,16 @@ const parseList = (text: string) =>
  * its own metres. Every package gets its own QR, and the stickers open for
  * printing as soon as they are saved.
  */
-export function LabelDialog({ target, onClose, onDone }: { target: LabelTarget; onClose: () => void; onDone: (message: string) => void }) {
+export function LabelDialog({
+  target,
+  onClose,
+  onDone,
+}: {
+  target: LabelTarget
+  onClose: () => void
+  /** The message, and the packages made, so their stickers can be printed again. */
+  onDone: (message: string, ids: string[]) => void
+}) {
   const [packType, setPackType] = useState(target.packType || 'BOX')
   const [mode, setMode] = useState<'same' | 'each'>(target.packType === 'ROLL' ? 'each' : 'same')
   const [count, setCount] = useState('')
@@ -83,7 +92,7 @@ export function LabelDialog({ target, onClose, onDone }: { target: LabelTarget; 
         lotNo: lotNo.trim() || null,
       })
       printLabels(res.data.map((p) => p.id), tab)
-      onDone(res.message)
+      onDone(res.message, res.data.map((p) => p.id))
     } catch (err) {
       tab?.close()
       setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
