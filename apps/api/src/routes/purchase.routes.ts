@@ -35,7 +35,7 @@ import {
   type BillLineInput,
 } from '../schemas/bill.schemas'
 import { createPaymentSchema } from '../schemas/payment.schemas'
-import { autoStickers, stickersNote } from '../services/stickers.service'
+import { autoStickers, stickersNote, trimGrnStickers, withdrawStickers } from '../services/stickers.service'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -3375,6 +3375,8 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     }
 
     await syncOrderFromReceipts(tx, po.id)
+    // No line keeps stickers for more than it now brought in.
+    await trimGrnStickers(tx, before, req.user?.id ?? null)
 
     return tx.gRN.findUniqueOrThrow({ where: { id: before.id }, include: grnInclude })
   })
@@ -3387,7 +3389,9 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     after: grn,
   })
 
-  res.json({ success: true, message: `${grn.grnNumber} corrected.`, data: grn })
+  // And any it is now short of, made the usual way.
+  const made = await autoStickers({ sourceType: 'GRN', sourceId: grn.id }, req.user?.id ?? null)
+  res.json({ success: true, message: `${grn.grnNumber} corrected.${stickersNote(made.count)}`, data: grn, made })
 })
 
 /**
@@ -3437,6 +3441,9 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
         })
       }
     }
+
+    // Its stickers come off with it: the goods they were for are no longer here.
+    await withdrawStickers(tx, { type: 'GRN', id: grn.id, ref: grn.grnNumber }, reason ? `${grn.grnNumber} deleted: ${reason}` : `${grn.grnNumber} deleted`, req.user?.id ?? null)
 
     try {
       await tx.gRN.delete({ where: { id: grn.id } })
@@ -3661,6 +3668,9 @@ router.patch(
           notes: `${before.grnNumber} cancelled: ${reason}`,
         })
       }
+
+      // Its stickers come off with it: the goods they were for are no longer here.
+      await withdrawStickers(tx, { type: 'GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       const cancelled = await tx.gRN.update({
         where: { id: before.id },

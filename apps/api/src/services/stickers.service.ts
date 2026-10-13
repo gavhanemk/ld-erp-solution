@@ -2,6 +2,7 @@ import { prisma, type Prisma } from '@ld-erp/database'
 import type { PackType } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { logger } from '../utils/logger'
+import { lockedBalanceOf } from './stock.service'
 import {
   createPackages,
   packageRule,
@@ -93,6 +94,9 @@ export async function labelGroup(
     ownership: g.ownership,
     ownerCustomerId: g.ownership === 'CUSTOMER_OWNED' ? (g.ownerCustomerId ?? null) : null,
   }
+  // Held to the end of the transaction, before anything is counted: what a
+  // GRN line has had stickered, and what is loose, cannot change under us.
+  await lockedBalanceOf(tx, spot)
   let sourceType: PackageSource = source.type
   let sourceId = source.id
   let sourceRef = source.ref
@@ -289,6 +293,8 @@ export async function planStickers(data: InwardQuery) {
       packType: d.packType,
       perPack: d.perPack,
       remembered: item.packType != null || item.packQty != null,
+      /** What the document brought in, before any stickers: rechecked under the lock. */
+      came: c.qty,
       // What one unit holds, for the sentence: "1 box on each (144 pcs)".
       content: item.contentQty && Number(item.contentQty) > 0 ? { each: Number(item.contentQty), unit: item.contentUnit || 'pcs' } : null,
       qtys: suggestQtys(max, d.perPack),
@@ -312,6 +318,21 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
       async (tx) => {
         const all = []
         for (const t of targets) {
+          // Counted again now the stock is locked: a second "Print stickers"
+          // pressed at the same moment has to see the first one's stickers,
+          // or the same 12 rolls get 24.
+          const spot = { itemId: t.itemId, warehouseId: t.warehouseId, ownership: t.ownership, ownerCustomerId: t.ownerCustomerId }
+          await lockedBalanceOf(tx, spot)
+          const done = await tx.stockPackage.aggregate({
+            where: t.grnLineId
+              ? { grnLineId: t.grnLineId, status: { not: 'VOID' } }
+              : { ...spot, sourceType: query.sourceType, sourceId: query.sourceId, status: { not: 'VOID' } },
+            _sum: { initialQty: true },
+          })
+          const remaining = round3(t.came - Number(done._sum.initialQty ?? 0))
+          if (remaining <= 0.0005) continue
+          const planned = round3(t.qtys.reduce((s, q) => s + q, 0))
+          if (remaining < planned - 1e-9) t.qtys = suggestQtys(remaining, t.perPack)
           all.push(
             ...(await labelGroup(
               tx,
@@ -343,3 +364,85 @@ export async function autoStickers(query: InwardQuery, userId: string | null): P
 
 /** " 12 stickers made, ready to print." — added to the message of whatever brought the stock in. */
 export const stickersNote = (count: number) => (count > 0 ? ` ${count} ${count === 1 ? 'sticker' : 'stickers'} made, ready to print.` : '')
+
+/**
+ * A document's stock going out again — a GRN cancelled or deleted, a
+ * customer's receipt cancelled: its stickers still in stock are withdrawn, so
+ * none is left on the books for goods that are not there. Inside the cancel's
+ * own transaction, so the two cannot come apart.
+ */
+export async function withdrawStickers(
+  tx: Prisma.TransactionClient,
+  source: { type: InwardSource; id: string; ref: string },
+  reason: string,
+  userId: string | null,
+): Promise<number> {
+  const live = await tx.stockPackage.findMany({
+    where: { sourceType: source.type, sourceId: source.id, status: 'IN_STOCK' },
+    select: { id: true, qty: true, warehouseId: true },
+  })
+  for (const p of live) {
+    await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
+    await tx.stockPackageMove.create({
+      data: {
+        packageId: p.id,
+        type: 'VOIDED',
+        qty: -Number(p.qty),
+        balanceAfter: 0,
+        warehouseId: p.warehouseId,
+        referenceType: source.type,
+        referenceId: source.id,
+        referenceNumber: source.ref,
+        notes: reason,
+        createdById: userId,
+      },
+    })
+  }
+  return live.length
+}
+
+/**
+ * A GRN corrected: no line may keep stickers for more than it now brought in.
+ * The newest stickers still whole come off first, until what is stickered
+ * fits; the automatic stickers afterwards make any the line is now short of.
+ */
+export async function trimGrnStickers(tx: Prisma.TransactionClient, grn: { id: string; grnNumber: string }, userId: string | null): Promise<number> {
+  const lines = await tx.gRNLine.findMany({ where: { grnId: grn.id }, select: { id: true, acceptedQty: true } })
+  const accepted = new Map(lines.map((l) => [l.id, Number(l.acceptedQty)]))
+  const stickers = await tx.stockPackage.findMany({
+    where: { sourceType: 'GRN', sourceId: grn.id, status: { not: 'VOID' } },
+    select: { id: true, grnLineId: true, initialQty: true, qty: true, status: true, warehouseId: true },
+    orderBy: { createdAt: 'desc' },
+  })
+  let withdrawn = 0
+  const byLine = new Map<string, typeof stickers>()
+  for (const p of stickers) byLine.set(p.grnLineId ?? '', [...(byLine.get(p.grnLineId ?? '') ?? []), p])
+  for (const [lineId, list] of byLine) {
+    // A line taken off the receipt brought in nothing.
+    const allowed = accepted.get(lineId) ?? 0
+    let stickered = round3(list.reduce((s, p) => s + Number(p.initialQty), 0))
+    for (const p of list) {
+      if (stickered <= allowed + 1e-9) break
+      // Only a whole one: a sticker already issued from is stock that moved on.
+      if (p.status !== 'IN_STOCK' || Number(p.qty) < Number(p.initialQty) - 1e-9) continue
+      await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
+      await tx.stockPackageMove.create({
+        data: {
+          packageId: p.id,
+          type: 'VOIDED',
+          qty: -Number(p.qty),
+          balanceAfter: 0,
+          warehouseId: p.warehouseId,
+          referenceType: 'GRN',
+          referenceId: grn.id,
+          referenceNumber: grn.grnNumber,
+          notes: `${grn.grnNumber} corrected to less than its stickers held`,
+          createdById: userId,
+        },
+      })
+      stickered = round3(stickered - Number(p.initialQty))
+      withdrawn++
+    }
+  }
+  return withdrawn
+}

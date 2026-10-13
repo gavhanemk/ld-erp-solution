@@ -22,6 +22,7 @@ import {
 } from '../services/package.service'
 import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
 import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, sourceRefOf } from '../services/stickers.service'
+import { lockedBalanceOf } from '../services/stock.service'
 
 /*
  * Labelled packages of stock and what is done to them by scanning.
@@ -631,6 +632,9 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
         // No more off the packages than left without a scan: the rest of the
         // labelled stock is still on the rack.
         if (!taken.has(key)) {
+          // Locked first: two people bringing the same packages up to date at
+          // once must not both take the same boxes off.
+          await lockedBalanceOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
           const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
           taken.set(key, round3(Math.max(0, -pos.loose)))
         }

@@ -47,7 +47,7 @@ import {
   releaseReservationSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
-import { autoStickers, stickersNote } from '../services/stickers.service'
+import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
 
 const router = Router()
 const MODULE = 'inventory'
@@ -3136,6 +3136,9 @@ router.patch(
           notes: `${before.grnNumber} cancelled: ${reason}`,
         })
       }
+
+      // Its stickers come off with it: the material went back.
+      await withdrawStickers(tx, { type: 'CUSTOMER_GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       return tx.customerGRN.update({
         where: { id: before.id },

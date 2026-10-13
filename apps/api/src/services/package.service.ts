@@ -1,6 +1,6 @@
 import type { Prisma, PackType, PackageMoveType, StockOwnership } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
-import { balanceOf } from './stock.service'
+import { balanceOf, lockedBalanceOf } from './stock.service'
 
 /*
  * Labelled packages of stock: rolls, boxes, cartons with a QR sticker each.
@@ -309,6 +309,10 @@ export async function createPackages(
   const total = round3(qtys.reduce((s, q) => s + q, 0))
 
   if (!input.fromPackage) {
+    // The same lock every stock movement of this item and store takes: two
+    // people stickering the same stock at once wait for each other, so the
+    // second sees what the first made and cannot sticker it again.
+    await lockedBalanceOf(tx, input.spot)
     const pos = await positionOf(tx, input.spot)
     if (total > pos.loose + 1e-9) {
       throw new AppError(
