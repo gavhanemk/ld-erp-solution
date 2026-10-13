@@ -125,6 +125,8 @@ export default function StockDocumentsPage() {
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [adjustments, setAdjustments] = useState<Adjustment[]>([])
   const [total, setTotal] = useState(0)
+  /** Counts and stock-ins waiting for a store manager, shown on the tab so they are not missed. */
+  const [waiting, setWaiting] = useState(0)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -155,6 +157,12 @@ export default function StockDocumentsPage() {
     try {
       const qs = new URLSearchParams({ limit: '50' })
       if (debounced) qs.set('q', debounced)
+
+      // Whichever tab is open, the Adjustments tab says how many are waiting.
+      void api
+        .get<Paginated<Adjustment>>('/inventory/adjustments?status=PENDING&limit=1')
+        .then((r) => setWaiting(r.pagination.total))
+        .catch(() => {})
 
       if (kind === 'transfers') {
         const res = await api.get<Paginated<Transfer>>(`/inventory/transfers?${qs}`)
@@ -270,6 +278,17 @@ export default function StockDocumentsPage() {
                 }}
               >
                 {k === 'transfers' ? 'Transfers' : 'Adjustments'}
+                {k === 'adjustments' && waiting > 0 && (
+                  <span
+                    className={
+                      k === kind
+                        ? 'bg-primary-foreground/20 text-primary-foreground ml-1.5 rounded-full px-1.5 text-[10px] font-semibold'
+                        : 'badge-warning ml-1.5 !px-1.5 !py-0 text-[10px]'
+                    }
+                  >
+                    {waiting} waiting
+                  </span>
+                )}
               </button>
             ))}
           </div>

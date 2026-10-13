@@ -767,7 +767,7 @@ router.post('/stock-in', requirePermission(MODULE, 'create'), async (req: AuthRe
   await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: adj.id, after: adj })
   res.status(201).json({
     success: true,
-    message: `${adj.adjustmentNumber} saved: ${adj.lines.length} ${adj.lines.length === 1 ? 'item' : 'items'} waiting for a store manager's approval. Stock goes up once it is approved.`,
+    message: `${adj.adjustmentNumber} saved: ${adj.lines.length} ${adj.lines.length === 1 ? 'item' : 'items'} waiting for a store manager's approval in Stock Documents → Adjustments. Stock goes up once it is approved.`,
     data: adj,
   })
 })
