@@ -1739,7 +1739,13 @@ export function PurchaseBillDialog({
         top of this one. Filling the height makes the margin the padding and
         nothing else. */}
       <div
-        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        // An expense bill has a handful of fields and one short table, so on a
+        // wide screen it is held to a readable width and centred rather than
+        // stretched edge to edge. A goods bill keeps the full width for its
+        // deliveries table.
+        className={`glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden ${
+          expenseMode ? 'max-w-6xl' : ''
+        }`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="bill-dialog-title"
@@ -2202,7 +2208,14 @@ export function PurchaseBillDialog({
                 one carries a GSTIN line under it and the other a
                 paragraph, and either beside a lone date field would read
                 as unbalanced. */}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 md:grid-cols-4 xl:grid-cols-8">
+              <div
+                className={`grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 md:grid-cols-4 ${
+                  // Six on an expense bill, whose form is held narrower: eight
+                  // left the date boxes too tight for their own calendar icon.
+                  // Location and reverse charge then share the second row.
+                  expenseMode ? 'xl:grid-cols-6' : 'xl:grid-cols-8'
+                }`}
+              >
                 <div className="col-span-full md:col-span-2">
                   <label className="form-label" htmlFor="bill-supplier">
                     Supplier<span className="ml-0.5 text-red-400">*</span>
@@ -2350,7 +2363,11 @@ export function PurchaseBillDialog({
                   </div>
                 )}
 
-                <div className="col-span-full">
+                <div
+                  className={
+                    expenseMode ? 'col-span-full flex items-end pb-2.5 md:col-span-2 xl:col-span-4' : 'col-span-full'
+                  }
+                >
                   <label
                     className="text-foreground inline-flex cursor-pointer items-center gap-2 text-sm"
                     title="Common on transport and on bills from unregistered parties"
@@ -2854,17 +2871,17 @@ export function PurchaseBillDialog({
               bill, the TDS — and the sum on the right, ending in what the
               supplier is actually paid. A goods bill has no TDS card; one
               already carrying TDS keeps it, and the sum still shows it. */}
-            <div className="grid gap-2.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+            <div className="grid items-start gap-2.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)]">
               <div className="space-y-2.5">
                 <Section icon={Tag} title="Discount & Charges">
                   <div className="space-y-2.5">
-                    <div className="grid grid-cols-[minmax(0,1fr)_9rem] items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-3">
                       <label htmlFor="bill-discount" className="text-muted-foreground text-sm">
                         Discount on the whole bill (₹)
                       </label>
                       <StepInput
                         id="bill-discount"
-                        className="form-input h-8 text-right"
+                        className="form-input h-8 w-36 text-right"
                         decimals
                         placeholder="0"
                         value={discountAmount}
@@ -2874,7 +2891,7 @@ export function PurchaseBillDialog({
                     {chargeTypes.length > 0 && (
                       <div className="space-y-1.5">
                         {charges.length > 0 && (
-                          <div className="text-muted-foreground grid grid-cols-[minmax(0,1fr)_7rem_4.5rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
+                          <div className="text-muted-foreground grid grid-cols-[minmax(0,22rem)_7rem_4.5rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
                             <span>Charge</span>
                             <span className="text-right">Amount (₹)</span>
                             <span className="text-right">GST %</span>
@@ -2884,7 +2901,7 @@ export function PurchaseBillDialog({
                         {charges.map((c, i) => (
                           <div
                             key={i}
-                            className="grid grid-cols-[minmax(0,1fr)_7rem_4.5rem_1.75rem] items-center gap-1.5"
+                            className="grid grid-cols-[minmax(0,22rem)_7rem_4.5rem_1.75rem] items-center gap-1.5"
                           >
                             <SmartSelect
                               className="form-input h-8 min-w-0 text-xs"
