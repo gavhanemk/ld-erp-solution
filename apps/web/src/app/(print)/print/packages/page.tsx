@@ -212,7 +212,7 @@ function Stickers() {
 
   useEffect(() => {
     if (!ids && !out) {
-      setError('Open the stickers from Packages & Stickers.')
+      setError('Open the stickers from Inventory → Stickers & Scan.')
       return
     }
     const [type, id] = out.split(':')

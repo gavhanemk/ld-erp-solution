@@ -140,7 +140,7 @@ function sentence(t: LabelTarget, r: Row, qtys: number[]) {
  * item, so the usual case is one press of Print. "Change" opens the two
  * figures behind the sentence, a lot, and sizes for rolls that differ; what is
  * changed is remembered for the item without being asked. Nothing is saved
- * until Print; Skip leaves the stock under Packages & Stickers → To label.
+ * until Print; Skip leaves the stock under Stickers → No stickers.
  */
 export function InwardStickers({
   source,

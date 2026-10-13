@@ -14,7 +14,7 @@ interface Ready {
 /**
  * The note in the corner after stock comes in: its stickers were made by
  * themselves, here they are to print. Nothing to fill in and nothing in the
- * way — "Later" leaves them on Packages & Stickers → Ready to print.
+ * way — "Later" leaves them on Stickers → Ready to print.
  */
 export function StickersReady({ source, onClose, onDone }: { source: InwardRef; onClose: () => void; onDone?: (message: string) => void }) {
   const [ready, setReady] = useState<Ready | null>(null)

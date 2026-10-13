@@ -153,7 +153,7 @@ function PackagesScreen() {
         third of the screen that the packages themselves need. */}
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="page-title mr-auto" title="Every labelled box, roll and carton, and stock still waiting for a sticker">
-          Packages & Stickers
+          Stickers
         </h1>
         <Figure icon={Boxes} value={summary.packages} label={`stickers · ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`} />
         <Figure icon={Warehouse} value={summary.stores} label={summary.stores === 1 ? 'store' : 'stores'} />

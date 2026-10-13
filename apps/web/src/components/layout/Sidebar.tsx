@@ -13,6 +13,7 @@ import {
 import { cn } from '@/lib/utils'
 import { api, currentUser, tokens } from '@/lib/api'
 import { useAppSettings } from '@/lib/appSettings'
+import { INVENTORY_SECTIONS } from './inventorySections'
 
 /**
  * "Mahesh Gavhane" -> "MG"; a single name gives its first two letters.
@@ -32,6 +33,8 @@ function initialsOf(name: string): string {
 interface NavChild {
   label: string
   href: string
+  /** Other screens that belong to this entry — its tabs — so it stays lit on them. */
+  also?: string[]
   /**
    * Screens that do not exist yet are shown greyed and do not navigate.
    * Letting them link produced a 404 on 28 of 38 menu items, which reads as a
@@ -120,18 +123,9 @@ const navItems: NavItem[] = [
   {
     label: 'Inventory', icon: Warehouse,
     children: [
-      { label: 'Dashboard', href: '/inventory/dashboard' },
-      { label: 'Stock', href: '/inventory/stock' },
-      { label: 'Scan', href: '/inventory/scan' },
-      { label: 'Packages & Stickers', href: '/inventory/packages' },
-      { label: 'Garment Tags', href: '/inventory/garment-tags' },
-      { label: 'Garment In / Out', href: '/inventory/garment-moves' },
-      { label: 'Material Requisitions', href: '/inventory/requisitions' },
-      { label: 'Stock Documents', href: '/inventory/documents' },
-      { label: 'Finished Goods In', href: '/inventory/finished-goods' },
-      { label: 'Customer Material', href: '/inventory/customer-material' },
-      { label: 'Job Work', href: '/inventory/job-work' },
-      { label: 'Stock Ledger', href: '/inventory/ledger' },
+      /* One entry a section; the screens of a section are tabs across its
+         top (inventorySections.ts), so twelve menu lines became six. */
+      ...INVENTORY_SECTIONS.map((s) => ({ label: s.label, href: s.tabs[0].href, also: s.tabs.slice(1).map((t) => t.href) })),
     ],
   },
   {
@@ -264,8 +258,18 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + '/')
 
+  /** An entry is lit on its own screen and on the screens that are its tabs. */
+  const isChildActive = (c: NavChild) => isActive(c.href) || (c.also?.some(isActive) ?? false)
+
   const isGroupActive = (item: NavItem) =>
-    item.children?.some((c) => isActive(c.href)) ?? false
+    item.children?.some(isChildActive) ?? false
+
+  // The group you are in opens by itself, so the menu shows where you are.
+  useEffect(() => {
+    const here = items.find((i) => isGroupActive(i))
+    if (here) setOpenMenus((prev) => (prev.includes(here.label) ? prev : [...prev, here.label]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname, items])
 
   return (
     <aside
@@ -365,7 +369,7 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
                             href={child.href}
                             className={cn(
                               'flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium transition-colors',
-                              isActive(child.href)
+                              isChildActive(child)
                                 ? 'text-teal-400 bg-teal-500/10'
                                 : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
                             )}

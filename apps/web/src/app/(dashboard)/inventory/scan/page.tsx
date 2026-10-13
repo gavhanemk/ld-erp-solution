@@ -71,7 +71,7 @@ function ScanScreen() {
           <p className="page-subtitle">Scan a package sticker to issue, move or split it, or a garment tag to see where it came from</p>
         </div>
         <Link href="/inventory/packages" className="btn-ghost">
-          <Tags size={15} /> Packages & stickers
+          <Tags size={15} /> Stickers
         </Link>
       </div>
 
