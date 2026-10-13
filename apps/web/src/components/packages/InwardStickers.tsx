@@ -286,33 +286,43 @@ export function InwardStickers({ source, onClose, onDone }: { source: InwardRef;
 
                   {r.mode === 'same' ? (
                     <div className="col-span-2 sm:col-span-1">
-                      <span className="form-label">One sticker holds</span>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <div className="relative w-32">
-                          <StepInput
-                            className="form-input h-9 pr-10"
-                            value={r.each}
-                            onValueChange={(v) => edit(t.key, { each: v })}
-                            decimals
-                            aria-label={`What one sticker holds for ${t.item}`}
-                          />
-                          <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">{t.unit}</span>
-                        </div>
-                        <span className="text-muted-foreground text-xs">=</span>
-                        <div className="w-20">
-                          <StepInput
-                            className="form-input h-9"
-                            value={qtys.length ? String(qtys.length) : ''}
-                            onValueChange={(v) => {
-                              const n = Math.floor(Number(v) || 0)
-                              if (n > 0) edit(t.key, { each: String(r3(t.max / n)) })
-                            }}
-                            min={1}
-                            aria-label={`Number of stickers for ${t.item}`}
-                          />
-                        </div>
-                        <span className="text-muted-foreground text-xs">{kind.many}</span>
-                        <button type="button" className="text-primary text-xs font-medium hover:underline" onClick={() => edit(t.key, { mode: 'each', list: qtys.join('\n') })}>
+                      {/* Two figures, each named: "1 box = 2 boxes" read as nonsense
+                        when the second was the number of stickers. */}
+                      <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+                        <label className="block">
+                          <span className="form-label">One sticker holds</span>
+                          <div className="relative w-32">
+                            <StepInput
+                              className="form-input h-9 pr-10"
+                              value={r.each}
+                              onValueChange={(v) => edit(t.key, { each: v })}
+                              decimals
+                              aria-label={`What one sticker holds for ${t.item}`}
+                            />
+                            <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">{t.unit}</span>
+                          </div>
+                        </label>
+                        <label className="block">
+                          <span className="form-label">Number of stickers</span>
+                          <div className="w-24">
+                            <StepInput
+                              className="form-input h-9"
+                              value={qtys.length ? String(qtys.length) : ''}
+                              onValueChange={(v) => {
+                                const n = Math.floor(Number(v) || 0)
+                                if (n > 0) edit(t.key, { each: String(r3(t.max / n)) })
+                              }}
+                              min={1}
+                              aria-label={`Number of stickers for ${t.item}`}
+                            />
+                          </div>
+                        </label>
+                        <button
+                          type="button"
+                          className="text-primary pb-2.5 text-xs font-medium hover:underline"
+                          onClick={() => edit(t.key, { mode: 'each', list: qtys.join('\n') })}
+                          title={`For ${kind.many} that hold different amounts, like rolls of 48 m and 51 m`}
+                        >
                           <ListOrdered size={12} className="mr-1 inline" />
                           Each one different
                         </button>
