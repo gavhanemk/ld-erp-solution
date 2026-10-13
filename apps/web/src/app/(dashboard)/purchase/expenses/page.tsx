@@ -661,8 +661,14 @@ function ExpensesTable() {
 
       <p className="text-muted-foreground flex items-start gap-1.5 text-xs">
         <Wallet size={13} className="mt-px shrink-0" />
-        The TDS on a bill is kept back from the supplier and paid to the government, so paying the
-        balance due settles the bill in full. Rates and limits are in Settings → Company → TDS sections.
+        <span>
+          The TDS on a bill is kept back from the supplier and paid to the government, so paying the
+          balance due settles the bill in full. Rates and limits are in{' '}
+          <Link href="/settings/company?tab=tds" className="text-primary underline-offset-2 hover:underline">
+            Settings → Company → TDS Sections
+          </Link>
+          .
+        </span>
       </p>
 
       <PurchaseBillDialog

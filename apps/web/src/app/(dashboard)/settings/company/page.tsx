@@ -1,8 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { Plus, Pencil, X, Check, Ban } from 'lucide-react'
+import { Suspense, useCallback, useEffect, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Plus, Pencil, X, Check, Ban, Building2, Hash, Percent, Receipt } from 'lucide-react'
 import { ApiError } from '@/lib/api'
+import { cn } from '@/lib/utils'
 import {
   settingsApi,
   type Company,
@@ -27,14 +29,92 @@ function describeFY(fy: string | null, startMonth: number): string {
   return `${MONTHS[startMonth - 1]} ${from} – ${MONTHS[endMonth - 1]} ${to}`
 }
 
-export default function CompanySettingsPage() {
+/**
+ * The four parts of this page, one at a time.
+ *
+ * They were stacked, and reaching TDS at the bottom meant scrolling past the
+ * whole company profile and every number series first. The open tab is in the
+ * address (`?tab=tds`), so a link can land on the right one and a refresh
+ * stays put.
+ */
+const SECTIONS = [
+  { key: 'profile', label: 'Company Profile', icon: Building2 },
+  { key: 'numbering', label: 'Document Numbering', icon: Hash },
+  { key: 'gst', label: 'GST Rates', icon: Percent },
+  { key: 'tds', label: 'TDS Sections', icon: Receipt },
+] as const
+
+type SectionKey = (typeof SECTIONS)[number]['key']
+
+function CompanySettings() {
+  const router = useRouter()
+  const params = useSearchParams()
+  const current: SectionKey = SECTIONS.find((s) => s.key === params.get('tab'))?.key ?? 'profile'
+
+  const open = (key: SectionKey) =>
+    router.replace(key === 'profile' ? '/settings/company' : `/settings/company?tab=${key}`, {
+      scroll: false,
+    })
+
   return (
-    <div className="space-y-6">
-      <CompanyProfile />
-      <DocumentNumbering />
-      <TaxRates />
-      <TdsSections />
+    <div className="space-y-5">
+      <div
+        role="tablist"
+        aria-label="Company settings"
+        className="border-border flex gap-1 overflow-x-auto border-b"
+      >
+        {SECTIONS.map((s) => {
+          const Icon = s.icon
+          const on = s.key === current
+          return (
+            <button
+              key={s.key}
+              type="button"
+              role="tab"
+              id={`company-tab-${s.key}`}
+              aria-selected={on}
+              aria-controls={`company-panel-${s.key}`}
+              onClick={() => open(s.key)}
+              className={cn(
+                '-mb-px flex shrink-0 items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
+                on
+                  ? 'border-teal-500 text-teal-400'
+                  : 'text-muted-foreground hover:text-foreground border-transparent'
+              )}
+            >
+              <Icon size={15} />
+              {s.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* All four stay mounted and only the open one shows, so a half-typed
+        company profile survives a look at the GST rates. */}
+      {SECTIONS.map((s) => (
+        <div
+          key={s.key}
+          role="tabpanel"
+          id={`company-panel-${s.key}`}
+          aria-labelledby={`company-tab-${s.key}`}
+          hidden={s.key !== current}
+        >
+          {s.key === 'profile' && <CompanyProfile />}
+          {s.key === 'numbering' && <DocumentNumbering />}
+          {s.key === 'gst' && <TaxRates />}
+          {s.key === 'tds' && <TdsSections />}
+        </div>
+      ))}
     </div>
+  )
+}
+
+export default function CompanySettingsPage() {
+  // useSearchParams needs a Suspense boundary or the route opts out of static rendering.
+  return (
+    <Suspense fallback={<LoadingRow />}>
+      <CompanySettings />
+    </Suspense>
   )
 }
 
