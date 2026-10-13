@@ -21,6 +21,7 @@ interface Label {
   poRef: string | null
   buyer: string | null
   lot: string | null
+  challan: string | null
   printed: boolean
 }
 
@@ -34,23 +35,32 @@ const SIZES: Record<Layout, { label: string; page: string }> = {
 
 const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
 
-const GDIM: Record<Layout, { qr: string; id: string; brand: string; style: string; size: string; sizeWord: string; line: string; desc: string; gap: string }> = {
-  tag: { qr: '15.5mm', id: '8pt', brand: '5pt', style: '7.5pt', size: '13pt', sizeWord: '5.5pt', line: '5.6pt', desc: '0', gap: '1.5mm' },
-  sheet: { qr: '23mm', id: '10pt', brand: '5.8pt', style: '7pt', size: '13pt', sizeWord: '5.6pt', line: '5.6pt', desc: '6.6pt', gap: '2mm' },
-  poly: { qr: '31mm', id: '12.5pt', brand: '7pt', style: '9pt', size: '17pt', sizeWord: '7pt', line: '6.6pt', desc: '8pt', gap: '2.5mm' },
+const GDIM: Record<Layout, { qr: string; id: string; brand: string; style: string; size: string; line: string; desc: string; gap: string; rowGap: string }> = {
+  tag: { qr: '15.5mm', id: '8pt', brand: '5pt', style: '6.8pt', size: '11pt', line: '5.3pt', desc: '0', gap: '1.5mm', rowGap: '0.1mm' },
+  sheet: { qr: '23mm', id: '10pt', brand: '5.8pt', style: '7pt', size: '12pt', line: '5.6pt', desc: '6.4pt', gap: '2mm', rowGap: '0.15mm' },
+  poly: { qr: '31mm', id: '12.5pt', brand: '7pt', style: '8.6pt', size: '16pt', line: '6.5pt', desc: '7.8pt', gap: '2.5mm', rowGap: '0.1mm' },
+}
+
+/** A named field on a label: "Customer Rajmandir Garments", the name small and grey. */
+function Field({ k, v, size, bold = false }: { k: string; v: string; size: string; bold?: boolean }) {
+  return (
+    <div style={{ fontSize: size, lineHeight: 1.2, ...clip }}>
+      <span style={{ fontSize: '0.8em', fontWeight: 600, color: '#555', letterSpacing: '.02em' }}>{k} </span>
+      <span style={{ fontWeight: bold ? 800 : 500 }}>{v}</span>
+    </div>
+  )
 }
 
 /**
  * One garment's label, in the same shape as the package stickers: its ID
  * large in the header (printed in full, so it can be typed if the QR will not
- * read), the QR at the left, and what a packer checks — style, size, colour,
- * order — beside it. The small hang tag keeps to those; the larger labels add
- * the description, buyer, MO, lot and SKU. Everything else is a scan away.
+ * read), the QR at the left, and beside it every field named — style, size
+ * and colour, customer, order, lot, and the delivery challan once the piece
+ * is scanned onto one. The larger labels add the description, MO and SKU.
  */
 function GarmentLabel({ g, layout }: { g: Label; layout: Layout }) {
   const d = GDIM[layout]
-  const small = layout === 'tag'
-  const order = g.poRef ? `PO ${g.poRef}` : (g.soNumber ?? 'For stock')
+  const order = g.poRef ? ['PO', g.poRef] : ['Order', g.soNumber ?? 'For stock']
   return (
     <div className="sticker gm">
       <div className="gm-head">
@@ -61,31 +71,35 @@ function GarmentLabel({ g, layout }: { g: Label; layout: Layout }) {
         <div style={{ flexShrink: 0 }}>
           <QrCode text={g.code} size={d.qr} />
         </div>
-        <div className="gm-info" style={layout === 'poly' ? { gap: '0.15mm' } : undefined}>
-          {!small && <div className="gm-desc" style={{ fontSize: d.desc }}>{g.description}</div>}
-          <div style={{ fontSize: d.style, fontWeight: 800, ...clip }}>{g.style}</div>
-          <div className="gm-size">
-            <span style={{ fontSize: d.sizeWord, fontWeight: 600 }}>SIZE</span>
-            <span style={{ fontSize: d.size, fontWeight: 800, lineHeight: 1 }}>{g.size || '—'}</span>
-            {g.grade === 'B' && <span className="gm-b" style={{ fontSize: d.sizeWord }}>B-GRADE</span>}
-          </div>
-          <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>{g.color}</div>
-          <div style={{ fontSize: d.line, ...clip }}>{order}</div>
-          {layout === 'poly' && g.buyer && <div style={{ fontSize: d.line, ...clip }}>{g.buyer}</div>}
-          {layout === 'sheet' && (
-            <div style={{ fontSize: d.line, color: '#333', ...clip }}>
-              {g.moNumber}
-              {g.lot ? ` · Lot ${g.lot}` : ''}
+        <div className="gm-info" style={{ gap: d.rowGap }}>
+          {layout !== 'tag' && (
+            <div className="gm-desc" style={{ fontSize: d.desc, WebkitLineClamp: layout === 'poly' ? 2 : 1 }}>
+              {g.description}
             </div>
           )}
-          {layout === 'poly' && (
+          <Field k="Style" v={g.style} size={d.style} bold />
+          <div className="gm-size">
+            <span style={{ fontSize: d.line, fontWeight: 600, color: '#555' }}>Size</span>
+            <span style={{ fontSize: d.size, fontWeight: 800, lineHeight: 1 }}>{g.size || '—'}</span>
+            <span style={{ fontSize: d.line, fontWeight: 700, marginLeft: '1mm', ...clip }}>{g.color}</span>
+            {g.grade === 'B' && <span className="gm-b" style={{ fontSize: d.line }}>B</span>}
+          </div>
+          {g.buyer && <Field k="Customer" v={g.buyer} size={d.line} bold />}
+          {layout === 'tag' ? (
+            // The hang tag has room for one more line after the lot: the
+            // challan once the piece is on one, the order until then.
             <>
-              <div style={{ fontSize: d.line, color: '#333', ...clip }}>{g.moNumber}</div>
-              <div style={{ fontSize: d.line, color: '#333', ...clip }}>
-                {g.lot ? `Lot ${g.lot} · ` : ''}SKU {g.sku}
-              </div>
+              <Field k="Lot" v={g.lot ?? '—'} size={d.line} />
+              {g.challan ? <Field k="Challan" v={g.challan} size={d.line} bold /> : <Field k={order[0]} v={order[1]} size={d.line} />}
+            </>
+          ) : (
+            <>
+              <Field k={order[0]} v={order[1]} size={d.line} />
+              <Field k="Lot" v={`${g.lot ?? '—'} · ${g.moNumber}`} size={d.line} />
+              {g.challan && <Field k="Challan" v={g.challan} size={d.line} bold />}
             </>
           )}
+          {layout === 'poly' && <Field k="SKU" v={g.sku} size={d.line} />}
         </div>
       </div>
     </div>

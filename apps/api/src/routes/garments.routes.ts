@@ -326,6 +326,8 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         size: { select: { code: true } },
         mo: { select: { moNumber: true, brand: { select: { name: true } }, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
         bundle: { select: { code: true, cuttingOrder: { select: { lotNo: true } }, moLine: { select: { jobCard: { select: { lotNo: true } } } } } },
+        // The delivery challan it is on or went out on, once it is scanned onto one.
+        dc: { select: { dcNumber: true, status: true } },
       },
     }),
   ])
@@ -348,6 +350,7 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         poRef: g.mo.so?.customerPORef ?? null,
         buyer: g.mo.so?.customer?.name ?? null,
         lot: g.bundle?.cuttingOrder?.lotNo ?? g.bundle?.moLine?.jobCard?.lotNo ?? null,
+        challan: g.dc && g.dc.status !== 'CANCELLED' ? g.dc.dcNumber : null,
         printed: g.printCount > 0,
       })),
     },
