@@ -35,6 +35,7 @@ import {
   type BillLineInput,
 } from '../schemas/bill.schemas'
 import { createPaymentSchema } from '../schemas/payment.schemas'
+import { autoStickers, stickersNote } from '../services/stickers.service'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -3078,14 +3079,17 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
   })
 
   const rejected = grn.lines.reduce((sum, l) => sum + Number(l.rejectedQty), 0)
+  // Its stickers, made now by the item rules, ready to print.
+  const made = await autoStickers({ sourceType: 'GRN', sourceId: grn.id }, req.user?.id ?? null)
 
   res.status(201).json({
     success: true,
     message:
-      rejected > 0
+      (rejected > 0
         ? `${grn.grnNumber} saved. ${rejected} was rejected and has not gone into stock.`
-        : `${grn.grnNumber} saved and the stock is in.`,
+        : `${grn.grnNumber} saved and the stock is in.`) + stickersNote(made.count),
     data: grn,
+    made,
   })
 })
 

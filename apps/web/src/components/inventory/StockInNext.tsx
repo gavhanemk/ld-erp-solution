@@ -6,7 +6,7 @@ import { CheckCircle2, FileText, Info, Tags } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatRupees } from '@/lib/utils'
-import { InwardStickers } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
 
 /** Which items of an approved stock-in need stickers, and which are not kept in packages. */
 export interface StickerNews {
@@ -22,39 +22,18 @@ export interface SavedStockIn {
   lines: Array<{ difference: string | number; unitRate?: string | number | null }>
 }
 
-const names = (list: Array<{ name: string }>) => list.map((x) => x.name).join(', ')
-
 /**
  * Where the stickers are after a stock-in is approved, or why there are none.
  * Without it somebody approves 12 rolls and goes looking for stickers that a
  * category not kept in packages never makes. `onMake` opens the sticker
  * window again, for somebody who closed it with "Later".
  */
-export function StickerNote({ stickers, onMake }: { stickers: StickerNews; onMake?: () => void }) {
+export function StickerNote({ stickers }: { stickers: StickerNews }) {
   const byCategory = new Map<string, string[]>()
   for (const u of stickers.untracked) byCategory.set(u.category, [...(byCategory.get(u.category) ?? []), u.name])
 
   return (
     <div className="mt-2 space-y-2">
-      {stickers.tracked.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          <Tags size={14} className="text-primary shrink-0" />
-          <span className="text-foreground text-sm">
-            {names(stickers.tracked)} {stickers.tracked.length === 1 ? 'is' : 'are'} kept in packages. Print the stickers next.
-          </span>
-          {onMake ? (
-            <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={onMake}>
-              <Tags size={13} />
-              Print stickers
-            </button>
-          ) : (
-            <Link href="/inventory/packages?tab=label" className="btn-primary h-7 px-2.5 text-xs">
-              <Tags size={13} />
-              Make stickers
-            </Link>
-          )}
-        </div>
-      )}
       {[...byCategory].map(([category, items]) => (
         <div key={category} className="flex flex-wrap items-center gap-2">
           <Info size={14} className="text-muted-foreground shrink-0" />
@@ -120,7 +99,7 @@ export function StockInNext({ saved, message, onApproved }: { saved: SavedStockI
               {printed}
             </p>
           ) : (
-            done.stickers && <StickerNote stickers={done.stickers} onMake={() => setStickersOpen(true)} />
+            done.stickers && <StickerNote stickers={done.stickers} />
           )}
         </>
       ) : (
@@ -144,7 +123,7 @@ export function StockInNext({ saved, message, onApproved }: { saved: SavedStockI
       )}
 
       {stickersOpen && (
-        <InwardStickers
+        <StickersReady
           source={{ type: 'STOCK_IN', id: saved.id }}
           onClose={() => setStickersOpen(false)}
           onDone={(m) => {

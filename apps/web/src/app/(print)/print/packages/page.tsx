@@ -1,6 +1,6 @@
 'use client'
 
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
@@ -188,6 +188,7 @@ function Stickers() {
   const q = params.get('q') ?? ''
   const [data, setData] = useState<Payload | null>(null)
   const [outward, setOutward] = useState<OutLabel[]>([])
+  const marked = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [layout, setLayout] = useState<Layout>('sheet')
   const [copies, setCopies] = useState(1)
@@ -217,6 +218,19 @@ function Stickers() {
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the stickers.'))
   }, [ids, out, q])
+
+  // Counted once, when the print box opens: that is a print, opening the page
+  // is not. Printed stickers leave "Ready to print".
+  useEffect(() => {
+    if (!data?.packages.length) return
+    const mark = () => {
+      if (marked.current) return
+      marked.current = true
+      void api.post('/packages/printed', { ids: data.packages.map((p) => p.id) }).catch(() => {})
+    }
+    window.addEventListener('beforeprint', mark)
+    return () => window.removeEventListener('beforeprint', mark)
+  }, [data])
 
   const pick = (l: Layout) => {
     setLayout(l)

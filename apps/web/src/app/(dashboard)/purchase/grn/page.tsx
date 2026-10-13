@@ -45,7 +45,8 @@ import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { InwardStickers, type InwardRef } from '@/components/packages/InwardStickers'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady, printDocStickers } from '@/components/packages/StickersReady'
 
 /**
  * What has actually turned up against the purchase orders.
@@ -949,7 +950,7 @@ export default function GoodsReceiptPage() {
     ]
     if (grn.status !== 'CANCELLED') {
       // The QR stickers for what came in on it, any time after it is saved.
-      items.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => setInward({ type: 'GRN', id: grn.id, explicit: true }) })
+      items.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => void printDocStickers({ type: 'GRN', id: grn.id }).then(setMessage) })
       /*
        * Billing: whichever of the two this receipt is actually at.
        *
@@ -2546,7 +2547,7 @@ export default function GoodsReceiptPage() {
         />
       )}
       {inward && (
-        <InwardStickers
+        <StickersReady
           source={inward}
           onClose={() => setInward(null)}
           onDone={(m) => {

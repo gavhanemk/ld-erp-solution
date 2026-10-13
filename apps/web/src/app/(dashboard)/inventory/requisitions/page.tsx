@@ -20,7 +20,8 @@ import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FloorReturnDialog } from '@/components/inventory/FloorReturnDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { InwardStickers, type InwardRef } from '@/components/packages/InwardStickers'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
 import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 
@@ -1223,7 +1224,7 @@ function RequisitionsScreen() {
         />
       )}
       {inward && (
-        <InwardStickers
+        <StickersReady
           source={inward}
           onClose={() => setInward(null)}
           onDone={(m) => {

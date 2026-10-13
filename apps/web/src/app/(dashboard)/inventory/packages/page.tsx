@@ -62,7 +62,10 @@ const day = (d: string) => new Date(d).toLocaleDateString('en-IN', { day: 'numer
 function PackagesScreen() {
   const params = useSearchParams()
   const router = useRouter()
-  const tab = params.get('tab') === 'label' ? 'label' : 'list'
+  // Ready to print first: stickers are made by themselves when stock comes in,
+  // and printing them is what somebody comes here to do.
+  const tabParam = params.get('tab')
+  const tab: Tab = tabParam === 'label' ? 'label' : tabParam === 'list' ? 'list' : 'ready'
   const grnFilter = params.get('grn') ?? ''
   // To label is two lists: what came in on GRNs, and what was already on the racks.
   const fromParam = params.get('from')
@@ -83,9 +86,13 @@ function PackagesScreen() {
   // Finding one item among dozens waiting: searched and filtered here, without a reload.
   const [lq, setLq] = useState('')
   const [lstore, setLstore] = useState('')
+  const [ready, setReady] = useState<ReadyList | null>(null)
 
-  const go = (next: 'list' | 'label', from?: LabelFrom) =>
-    router.replace(next === 'label' ? `/inventory/packages?tab=label${from ? `&from=${from}` : ''}` : '/inventory/packages', { scroll: false })
+  const go = (next: Tab, from?: LabelFrom) =>
+    router.replace(
+      next === 'label' ? `/inventory/packages?tab=label${from ? `&from=${from}` : ''}` : next === 'list' ? '/inventory/packages?tab=list' : '/inventory/packages',
+      { scroll: false },
+    )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -94,13 +101,15 @@ function PackagesScreen() {
       const qs = new URLSearchParams({ status })
       if (q.trim()) qs.set('q', q.trim())
       if (store) qs.set('warehouseId', store)
-      const [list, label] = await Promise.all([
+      const [list, label, toPrint] = await Promise.all([
         api.get<{ data: PackageGroup[]; summary: typeof summary }>(`/packages/groups?${qs}`),
         api.get<{ data: ToLabel }>(`/packages/to-label${grnFilter ? `?grnId=${grnFilter}` : ''}`),
+        api.get<{ data: ReadyList }>('/packages/ready'),
       ])
       setGroups(list.data)
       setSummary(list.summary)
       setTodo(label.data)
+      setReady(toPrint.data)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load the packages.')
     } finally {
@@ -112,6 +121,13 @@ function PackagesScreen() {
     const t = setTimeout(() => void load(), q ? 300 : 0)
     return () => clearTimeout(t)
   }, [load, q])
+
+  // Back from the print tab: what was printed has left "Ready to print".
+  useEffect(() => {
+    const back = () => void load()
+    window.addEventListener('focus', back)
+    return () => window.removeEventListener('focus', back)
+  }, [load])
 
   useEffect(() => {
     api
@@ -186,8 +202,9 @@ function PackagesScreen() {
           <div className="inline-flex shrink-0 rounded-lg border border-border bg-secondary p-0.5" role="tablist">
             {(
               [
-                ['list', `With stickers (${total})`],
-                ['label', `Needs stickers (${waiting})`],
+                ['ready', `Ready to print (${ready?.count ?? 0})`],
+                ['list', `All stickers (${total})`],
+                ['label', `No stickers (${waiting})`],
               ] as const
             ).map(([key, label]) => (
               <button
@@ -293,11 +310,12 @@ function PackagesScreen() {
           />
         )}
         {/* Stock just added is not here until its stickers are printed: say so, and where it is. */}
+        {tab === 'ready' && <ReadyView ready={ready} loading={loading} />}
         {tab === 'list' && waiting > 0 && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-amber-500/5 px-4 py-2 text-sm">
             <Tags size={14} className="text-amber-500" />
             <span className="text-muted-foreground">
-              This list shows stock that already has stickers. {waiting} {waiting === 1 ? 'item still needs' : 'items still need'} stickers.
+              This list shows stock that has stickers. {waiting} {waiting === 1 ? 'item has' : 'items have'} stock with no stickers.
             </span>
             <button className="font-semibold text-primary hover:underline" onClick={() => go('label', 'racks')}>
               Show them
@@ -368,6 +386,78 @@ function Figure({
     <span className={cls} title={title}>
       {body}
     </span>
+  )
+}
+
+type Tab = 'ready' | 'list' | 'label'
+/** Stickers made by themselves when stock came in, not printed yet: a group a document and item. */
+interface ReadyList {
+  count: number
+  groups: Array<{ key: string; sourceRef: string | null; date: string; itemCode: string; item: string; store: string; unit: string; qty: number; ids: string[] }>
+}
+
+/**
+ * What is waiting at the printer: stickers made by themselves when stock came
+ * in. Print one line, or all of it; printed ones leave the list.
+ */
+function ReadyView({ ready, loading }: { ready: ReadyList | null; loading: boolean }) {
+  if (!ready) return <p className="p-6 text-center text-sm text-muted-foreground">{loading ? 'Loading…' : ''}</p>
+  if (!ready.groups.length) {
+    return (
+      <p className="p-8 text-center text-sm text-muted-foreground">
+        Nothing waiting to print. Stickers are made by themselves when stock comes in, and wait here until they are printed.
+      </p>
+    )
+  }
+  const all = ready.groups.flatMap((g) => g.ids)
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2">
+        <span className="text-sm text-muted-foreground">Made when the stock came in. Print them and stick one on each roll or box.</span>
+        <button className="btn-primary h-9" onClick={() => printLabels(all)}>
+          <Printer size={15} /> Print all {all.length}
+        </button>
+      </div>
+      <ScrollableTable>
+        <table className="data-table table-compact min-w-full">
+          <thead>
+            <tr className="bg-secondary">
+              <th>Came in on</th>
+              <th>Item</th>
+              <th>Store</th>
+              <th style={{ textAlign: 'right' }}>Stickers</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {ready.groups.map((g) => (
+              <tr key={g.key}>
+                <td className="whitespace-nowrap">
+                  <div className="font-mono text-sm font-semibold text-foreground">{g.sourceRef ?? '—'}</div>
+                  <div className="text-xs text-muted-foreground">{day(g.date)}</div>
+                </td>
+                <td>
+                  <div className="font-medium text-foreground">{g.item}</div>
+                  <div className="font-mono text-xs text-muted-foreground">{g.itemCode}</div>
+                </td>
+                <td className="whitespace-nowrap text-sm">{g.store}</td>
+                <td className="whitespace-nowrap text-right text-sm tabular-nums">
+                  <span className="font-semibold">{g.ids.length}</span>{' '}
+                  <span className="text-muted-foreground">
+                    × {qtyText(g.qty / g.ids.length)} {g.unit}
+                  </span>
+                </td>
+                <td className="text-right">
+                  <button className="btn-secondary h-9" onClick={() => printLabels(g.ids)}>
+                    <Printer size={14} /> Print {g.ids.length}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </ScrollableTable>
+    </>
   )
 }
 

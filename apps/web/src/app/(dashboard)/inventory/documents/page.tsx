@@ -22,7 +22,7 @@ import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { StickerNote, type StickerNews } from '@/components/inventory/StockInNext'
-import { InwardStickers } from '@/components/packages/InwardStickers'
+import { StickersReady, printDocStickers } from '@/components/packages/StickersReady'
 
 /**
  * The stock documents: what was moved between stores, and what was corrected
@@ -136,9 +136,8 @@ export default function StockDocumentsPage() {
   const [message, setMessage] = useState<string | null>(null)
   /** After a stock-in is approved: where its stickers are, or why there are none. */
   const [stickers, setStickers] = useState<StickerNews | null>(null)
-  /** The stock-in whose sticker window is open, and the last one approved, to open it again. */
-  const [stickersFor, setStickersFor] = useState<{ id: string; explicit?: boolean } | null>(null)
-  const [approvedId, setApprovedId] = useState<string | null>(null)
+  /** A stock-in just approved: its stickers were made by themselves, ready to print. */
+  const [stickersFor, setStickersFor] = useState<{ id: string } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
@@ -251,11 +250,8 @@ export default function StockDocumentsPage() {
       await load()
       if (res.message) setMessage(res.message)
       if (res.stickers) setStickers(res.stickers)
-      // A stock-in approved: its stickers, ready to print.
-      if (decision === 'approve' && res.stickers?.tracked.length) {
-        setApprovedId(a.id)
-        setStickersFor({ id: a.id })
-      }
+      // A stock-in approved: its stickers were made, ready to print.
+      if (decision === 'approve' && res.stickers?.tracked.length) setStickersFor({ id: a.id })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not ${decision === 'approve' ? 'approve' : 'refuse'} it.`)
     } finally {
@@ -289,7 +285,7 @@ export default function StockDocumentsPage() {
       {message && (
         <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
-          {stickers && <StickerNote stickers={stickers} onMake={stickers.tracked.length && approvedId ? () => setStickersFor({ id: approvedId }) : undefined} />}
+          {stickers && <StickerNote stickers={stickers} />}
         </div>
       )}
 
@@ -519,7 +515,7 @@ export default function StockDocumentsPage() {
                     }
                     // The stickers for what a stock-in brought in, any time after it is approved.
                     if (a.kind === 'STOCK_IN' && a.status === 'APPROVED') {
-                      actions.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => setStickersFor({ id: a.id, explicit: true }) })
+                      actions.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => void printDocStickers({ type: 'STOCK_IN', id: a.id }).then(setMessage) })
                     }
 
                     return (
@@ -671,8 +667,8 @@ export default function StockDocumentsPage() {
       </div>
 
       {stickersFor && (
-        <InwardStickers
-          source={{ type: 'STOCK_IN', id: stickersFor.id, explicit: stickersFor.explicit }}
+        <StickersReady
+          source={{ type: 'STOCK_IN', id: stickersFor.id }}
           onClose={() => setStickersFor(null)}
           onDone={(m) => {
             setStickersFor(null)

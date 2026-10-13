@@ -47,6 +47,7 @@ import {
   releaseReservationSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
+import { autoStickers, stickersNote } from '../services/stickers.service'
 
 const router = Router()
 const MODULE = 'inventory'
@@ -643,10 +644,12 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
     after: result,
   })
 
+  const made = await autoStickers({ sourceType: 'OPENING', sourceId: result.reference }, req.user?.id ?? null)
   res.status(201).json({
     success: true,
-    message: `Opening stock recorded for ${result.lines.length} ${result.lines.length === 1 ? 'item' : 'items'}.`,
+    message: `Opening stock recorded for ${result.lines.length} ${result.lines.length === 1 ? 'item' : 'items'}.${stickersNote(made.count)}`,
     data: result,
+    made,
   })
 })
 
@@ -833,13 +836,14 @@ async function stickersFor(lines: Array<{ itemId: string; difference: Prisma.Dec
 
 /** A store manager accepting a count: the differences go into stock now. */
 router.post('/adjustments/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
-  const { before, after } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
+  const { before, after, stickers: made } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
   await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'StockAdjustment', entityId: after.id, before, after })
   const stockIn = after.kind === 'STOCK_IN'
   res.json({
     success: true,
-    message: `${after.adjustmentNumber} approved. ${stockIn ? 'It is added to stock.' : 'Stock is corrected.'}`,
+    message: `${after.adjustmentNumber} approved. ${stockIn ? 'It is added to stock.' : 'Stock is corrected.'}${stickersNote(made?.count ?? 0)}`,
     data: after,
+    made,
     ...(stockIn ? { stickers: await stickersFor(after.lines) } : {}),
   })
 })
@@ -2841,6 +2845,7 @@ export async function createCustomerGrn(
 router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerGrnSchema.parse(req.body)
   const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null))
+  const made = await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, req.user?.id ?? null)
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -2865,10 +2870,12 @@ router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: Au
       rejected
         ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material; it is in their stock until it goes back on a return challan.`
         : '',
+      stickersNote(made.count).trim(),
     ]
       .filter(Boolean)
       .join(' '),
     data: grn,
+    made,
   })
 })
 
@@ -3990,13 +3997,15 @@ router.post(
       after: result.challan,
     })
 
+    const made = await autoStickers({ sourceType: 'JOB_WORK_RETURN', sourceId: result.returnId }, req.user?.id ?? null)
     res.status(201).json({
       success: true,
       message:
-        result.challan.status === 'CLOSED'
+        (result.challan.status === 'CLOSED'
           ? `${result.returnNumber} saved. Everything sent on ${result.challan.challanNumber} is now back.`
-          : `${result.returnNumber} saved. Some of ${result.challan.challanNumber} is still out.`,
+          : `${result.returnNumber} saved. Some of ${result.challan.challanNumber} is still out.`) + stickersNote(made.count),
       data: result.challan,
+      made,
       // So the screen can offer stickers for what came back.
       returnId: result.returnId,
     })
@@ -4061,7 +4070,25 @@ router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), asy
   const data = floorReturnSchema.parse(req.body)
   const result = await prisma.$transaction((tx) => returnFromFloor(tx, req.params.id, data, req.user?.id ?? null), { timeout: 60_000 })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MaterialRequisition', entityId: req.params.id, after: result })
-  res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.`, data: result })
+  const mrLines = await prisma.materialRequisitionLine.findMany({
+    where: { id: { in: data.lines.map((l) => l.lineId) } },
+    select: { id: true, itemId: true, ownership: true, ownerCustomerId: true },
+  })
+  const lineOf = new Map(mrLines.map((l) => [l.id, l]))
+  const made = await autoStickers(
+    {
+      sourceType: 'MR_RETURN',
+      sourceId: req.params.id,
+      lines: data.lines
+        .filter((l) => lineOf.has(l.lineId))
+        .map((l) => {
+          const m = lineOf.get(l.lineId)!
+          return { itemId: m.itemId, warehouseId: l.warehouseId, ownership: m.ownership, ownerCustomerId: m.ownerCustomerId, qty: l.qty }
+        }),
+    },
+    req.user?.id ?? null,
+  )
+  res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.${stickersNote(made.count)}`, data: result, made })
 })
 
 /**

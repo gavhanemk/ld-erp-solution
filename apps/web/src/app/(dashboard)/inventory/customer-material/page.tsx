@@ -24,7 +24,8 @@ import {
 } from '@/components/inventory/MaterialCharts'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { InwardStickers, type InwardRef } from '@/components/packages/InwardStickers'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
 import { OutwardStickers } from '@/components/packages/OutwardStickers'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 
@@ -1531,7 +1532,7 @@ function CustomerMaterialScreen() {
         />
       )}
       {inward && (
-        <InwardStickers
+        <StickersReady
           source={inward}
           onClose={() => setInward(null)}
           onDone={(m) => {

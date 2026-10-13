@@ -11,7 +11,8 @@ import {
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StockMoveDialog, type MoveMode } from '@/components/inventory/StockMoveDialog'
 import { StockInNext, type SavedStockIn } from '@/components/inventory/StockInNext'
-import { InwardStickers, type InwardRef } from '@/components/packages/InwardStickers'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
@@ -621,7 +622,7 @@ function StockScreen() {
         />
       )}
       {inward && (
-        <InwardStickers
+        <StickersReady
           source={inward}
           onClose={() => setInward(null)}
           onDone={(m) => {

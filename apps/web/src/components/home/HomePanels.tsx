@@ -10,7 +10,7 @@ import { api, ApiError, currentUser } from '@/lib/api'
 import { TONE, inr } from '@/components/dashboard/DashKit'
 import { HealthRing, MODULE, SLATE, moduleOf } from './HomeCharts'
 import type { Approval, Check, HomeData } from './types'
-import { InwardStickers } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
 
 /**
  * The parts of the home dashboard that are not charts: the mill drawn as one
@@ -451,7 +451,7 @@ export function ApprovalsPanel({
       {error && <p className="mb-3 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400">{error}</p>}
       {printed && <p className="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-400">{printed}</p>}
       {stickersFor && (
-        <InwardStickers
+        <StickersReady
           source={{ type: 'STOCK_IN', id: stickersFor }}
           onClose={() => setStickersFor(null)}
           onDone={(m) => {

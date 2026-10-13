@@ -5234,6 +5234,11 @@ model StockPackage {
   sourceId        String?
   /// That document's number, printed on the sticker: GRN-0004, ADJ-2627-0009.
   sourceRef       String?
+  /// Stickers are made by themselves when stock comes in and printed later:
+  /// how often this one has been printed, and when last. Never printed puts it
+  /// on "Ready to print".
+  printCount      Int            @default(0)
+  lastPrintedAt   DateTime?
   grnLineId       String?
   parentId        String?
   parent          StockPackage?  @relation("PackageSplit", fields: [parentId], references: [id])
