@@ -157,63 +157,147 @@ async function detail(id: string) {
   }
 }
 
-/** The list, with what is on the racks in packages at a glance. */
-router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
-  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
-  const status = typeof req.query.status === 'string' ? req.query.status : 'IN_STOCK'
-  const where: Prisma.StockPackageWhereInput = {
+/** The filters the list and the item view share, from the query string. */
+function listWhere(query: Record<string, unknown>): Prisma.StockPackageWhereInput {
+  const str = (k: string) => (typeof query[k] === 'string' ? (query[k] as string).trim() : '')
+  const q = str('q')
+  const status = str('status') || 'IN_STOCK'
+  const owner = str('owner')
+  return {
     ...(status !== 'ALL' ? { status: status as 'IN_STOCK' } : {}),
-    ...(typeof req.query.warehouseId === 'string' && req.query.warehouseId ? { warehouseId: req.query.warehouseId } : {}),
-    ...(typeof req.query.itemId === 'string' && req.query.itemId ? { itemId: req.query.itemId } : {}),
-    ...(typeof req.query.sourceId === 'string' && req.query.sourceId ? { sourceId: req.query.sourceId } : {}),
+    ...(str('warehouseId') ? { warehouseId: str('warehouseId') } : {}),
+    ...(str('itemId') ? { itemId: str('itemId') } : {}),
+    ...(str('sourceId') ? { sourceId: str('sourceId') } : {}),
+    // 'OWNED' for our own; otherwise the customer whose material it is.
+    ...(owner ? (owner === 'OWNED' ? { ownership: 'OWNED' as const } : { ownerCustomerId: owner }) : {}),
     ...(q
       ? {
           OR: [
-            { code: { contains: normaliseCode(q).replace(/^PK-0*/, ''), mode: 'insensitive' } },
-            { lotNo: { contains: q, mode: 'insensitive' } },
-            { item: { name: { contains: q, mode: 'insensitive' } } },
-            { item: { code: { contains: q, mode: 'insensitive' } } },
+            { code: { contains: normaliseCode(q).replace(/^PK-0*/, ''), mode: 'insensitive' as const } },
+            { lotNo: { contains: q, mode: 'insensitive' as const } },
+            { item: { name: { contains: q, mode: 'insensitive' as const } } },
+            { item: { code: { contains: q, mode: 'insensitive' as const } } },
           ],
         }
       : {}),
   }
-  const page = Math.max(1, Number(req.query.page) || 1)
-  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
-  const [total, rows] = await Promise.all([
-    prisma.stockPackage.count({ where }),
-    prisma.stockPackage.findMany({
-      where,
-      include: pkgInclude,
-      orderBy: [{ createdAt: 'desc' }, { code: 'desc' }],
-      skip: (page - 1) * limit,
-      take: limit,
-    }),
-  ])
+}
 
-  // Item and store pairs where the packages claim more than the store holds:
-  // stock left without its package being scanned.
+/** The tiles: packages on the racks, and item-store pairs that no longer match the stock. */
+async function summaryOf() {
   const groups = await prisma.stockPackage.groupBy({
     by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
     where: { status: 'IN_STOCK' },
     _sum: { qty: true },
     _count: true,
   })
+  // Packages claiming more than the store holds: stock left without its
+  // package being scanned.
   let mismatches = 0
   for (const g of groups) {
     const pos = await positionOf(prisma, { itemId: g.itemId, warehouseId: g.warehouseId, ownership: g.ownership, ownerCustomerId: g.ownerCustomerId })
     if (pos.loose < -0.0005) mismatches += 1
   }
+  return {
+    packages: groups.reduce((s, g) => s + g._count, 0),
+    items: new Set(groups.map((g) => g.itemId)).size,
+    stores: new Set(groups.map((g) => g.warehouseId)).size,
+    mismatches,
+  }
+}
 
+/** The packages themselves. One item's, oldest code first, when an item is named. */
+router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
+  const where = listWhere(req.query)
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 50))
+  const [total, rows, summary] = await Promise.all([
+    prisma.stockPackage.count({ where }),
+    prisma.stockPackage.findMany({
+      where,
+      include: pkgInclude,
+      orderBy: req.query.itemId ? [{ code: 'asc' }] : [{ createdAt: 'desc' }, { code: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    summaryOf(),
+  ])
   res.json({
     success: true,
     data: rows.map((r) => ({ ...r, qty: Number(r.qty), initialQty: Number(r.initialQty), unit: r.item.uom?.symbol ?? '' })),
     pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
-    summary: {
-      packages: groups.reduce((s, g) => s + g._count, 0),
-      items: new Set(groups.map((g) => g.itemId)).size,
-      stores: new Set(groups.map((g) => g.warehouseId)).size,
-      mismatches,
-    },
+    summary,
+  })
+})
+
+/**
+ * One line per item in a store: how many packages, how much is in them, which
+ * lots. Fifty boxes of one button read as one line, opened to see the boxes.
+ */
+router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.stockPackage.findMany({
+    where: listWhere(req.query),
+    select: { itemId: true, warehouseId: true, ownerCustomerId: true, packType: true, lotNo: true, qty: true, createdAt: true },
+    take: 50_000,
+  })
+  const byKey = new Map<
+    string,
+    { itemId: string; warehouseId: string; ownerCustomerId: string | null; packages: number; qty: number; types: Map<string, number>; lots: Set<string>; lastAt: Date }
+  >()
+  for (const r of rows) {
+    const key = `${r.itemId}|${r.warehouseId}|${r.ownerCustomerId ?? ''}`
+    let g = byKey.get(key)
+    if (!g) {
+      g = { itemId: r.itemId, warehouseId: r.warehouseId, ownerCustomerId: r.ownerCustomerId, packages: 0, qty: 0, types: new Map(), lots: new Set(), lastAt: r.createdAt }
+      byKey.set(key, g)
+    }
+    g.packages += 1
+    g.qty += Number(r.qty)
+    g.types.set(r.packType, (g.types.get(r.packType) ?? 0) + 1)
+    if (r.lotNo) g.lots.add(r.lotNo)
+    if (r.createdAt > g.lastAt) g.lastAt = r.createdAt
+  }
+  const groups = [...byKey.values()]
+  const [items, stores, owners, summary] = await Promise.all([
+    prisma.item.findMany({
+      where: { id: { in: [...new Set(groups.map((g) => g.itemId))] } },
+      select: { id: true, code: true, name: true, uom: { select: { symbol: true } }, category: { select: { name: true } } },
+    }),
+    prisma.warehouse.findMany({ where: { id: { in: [...new Set(groups.map((g) => g.warehouseId))] } }, select: { id: true, name: true } }),
+    prisma.customer.findMany({
+      where: { id: { in: [...new Set(groups.map((g) => g.ownerCustomerId).filter((x): x is string => Boolean(x)))] } },
+      select: { id: true, name: true },
+    }),
+    summaryOf(),
+  ])
+  const itemOf = new Map(items.map((i) => [i.id, i]))
+  const storeOf = new Map(stores.map((s) => [s.id, s.name]))
+  const ownerOf = new Map(owners.map((c) => [c.id, c.name]))
+  res.json({
+    success: true,
+    data: groups
+      .map((g) => {
+        const item = itemOf.get(g.itemId)
+        return {
+          key: `${g.itemId}|${g.warehouseId}|${g.ownerCustomerId ?? ''}`,
+          itemId: g.itemId,
+          itemCode: item?.code ?? '',
+          item: item?.name ?? '',
+          category: item?.category?.name ?? '',
+          unit: item?.uom?.symbol ?? '',
+          warehouseId: g.warehouseId,
+          store: storeOf.get(g.warehouseId) ?? '',
+          ownerCustomerId: g.ownerCustomerId,
+          owner: g.ownerCustomerId ? (ownerOf.get(g.ownerCustomerId) ?? 'Customer') : null,
+          packages: g.packages,
+          qty: round3(g.qty),
+          packTypes: [...g.types].sort((a, b) => b[1] - a[1]).map(([t]) => t),
+          lots: [...g.lots].sort(),
+          lastAt: g.lastAt,
+        }
+      })
+      .sort((a, b) => b.lastAt.getTime() - a.lastAt.getTime()),
+    summary,
   })
 })
 

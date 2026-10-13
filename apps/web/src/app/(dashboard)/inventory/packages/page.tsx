@@ -9,23 +9,8 @@ import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { LabelDialog, type LabelTarget } from '@/components/packages/LabelDialog'
-import { STATUS, packLabel, printLabels, qtyText } from '@/components/packages/packageTypes'
-
-interface Row {
-  id: string
-  code: string
-  status: string
-  packType: string
-  qty: number
-  initialQty: number
-  unit: string
-  lotNo: string | null
-  sourceType: string
-  createdAt: string
-  item: { code: string; name: string; category: { name: string } | null }
-  warehouse: { id: string; name: string }
-  ownerCustomer: { name: string } | null
-}
+import { printLabels, qtyText } from '@/components/packages/packageTypes'
+import { PackageGroups, type PackageGroup } from '@/components/packages/PackageGroups'
 
 interface ToLabel {
   tracked: boolean
@@ -77,15 +62,13 @@ function PackagesScreen() {
   const tab = params.get('tab') === 'label' ? 'label' : 'list'
   const grnFilter = params.get('grn') ?? ''
 
-  const [rows, setRows] = useState<Row[]>([])
+  const [groups, setGroups] = useState<PackageGroup[]>([])
   const [summary, setSummary] = useState({ packages: 0, items: 0, stores: 0, mismatches: 0 })
-  const [total, setTotal] = useState(0)
   const [todo, setTodo] = useState<ToLabel | null>(null)
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('IN_STOCK')
   const [store, setStore] = useState('')
   const [stores, setStores] = useState<Array<{ id: string; name: string }>>([])
-  const [picked, setPicked] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -99,16 +82,15 @@ function PackagesScreen() {
     setLoading(true)
     setError(null)
     try {
-      const qs = new URLSearchParams({ status, limit: '200' })
+      const qs = new URLSearchParams({ status })
       if (q.trim()) qs.set('q', q.trim())
       if (store) qs.set('warehouseId', store)
       const [list, label] = await Promise.all([
-        api.get<{ data: Row[]; summary: typeof summary; pagination: { total: number } }>(`/packages?${qs}`),
+        api.get<{ data: PackageGroup[]; summary: typeof summary }>(`/packages/groups?${qs}`),
         api.get<{ data: ToLabel }>(`/packages/to-label${grnFilter ? `?grnId=${grnFilter}` : ''}`),
       ])
-      setRows(list.data)
+      setGroups(list.data)
       setSummary(list.summary)
-      setTotal(list.pagination.total)
       setTodo(label.data)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load the packages.')
@@ -129,6 +111,7 @@ function PackagesScreen() {
       .catch(() => {})
   }, [])
 
+  const total = groups.reduce((s, g) => s + g.packages, 0)
   const waiting = (todo?.lines.filter((l) => l.toLabel > 0).length ?? 0) + (todo?.loose.length ?? 0)
   const creator = can('inventory', 'create')
 
@@ -231,100 +214,18 @@ function PackagesScreen() {
                 </option>
               ))}
             </SmartSelect>
-            {picked.size > 0 && (
-              <button className="btn-primary h-10" onClick={() => printLabels([...picked])}>
-                <Printer size={15} /> Print {picked.size} {picked.size === 1 ? 'label' : 'labels'}
-              </button>
-            )}
           </div>
-          {rows.length === 0 ? (
-            <div className="p-10 text-center text-muted-foreground">
-              {loading
+          <PackageGroups
+            groups={groups}
+            filters={{ q, status }}
+            emptyText={
+              loading
                 ? 'Loading…'
                 : q || store || status !== 'IN_STOCK'
                   ? 'No package matches that.'
-                  : 'No packages yet. Stock of the categories kept in packages shows under "To label" — make its stickers there.'}
-            </div>
-          ) : (
-            <ScrollableTable>
-              <table className="data-table table-compact min-w-full">
-                <thead>
-                  <tr className="bg-secondary">
-                    <th className="w-8">
-                      <input
-                        type="checkbox"
-                        aria-label="Select all"
-                        checked={picked.size === rows.length}
-                        onChange={(e) => setPicked(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())}
-                      />
-                    </th>
-                    <th>Code</th>
-                    <th>Item</th>
-                    <th>Type</th>
-                    <th style={{ textAlign: 'right' }}>In it</th>
-                    <th style={{ textAlign: 'right' }}>Labelled with</th>
-                    <th>Lot</th>
-                    <th>Store</th>
-                    <th>Labelled on</th>
-                    <th>Status</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r) => {
-                    const st = STATUS[r.status] ?? { label: r.status, cls: 'badge-neutral' }
-                    return (
-                      <tr key={r.id}>
-                        <td>
-                          <input
-                            type="checkbox"
-                            aria-label={`Select ${r.code}`}
-                            checked={picked.has(r.id)}
-                            onChange={(e) =>
-                              setPicked((p) => {
-                                const n = new Set(p)
-                                if (e.target.checked) n.add(r.id)
-                                else n.delete(r.id)
-                                return n
-                              })
-                            }
-                          />
-                        </td>
-                        <td className="whitespace-nowrap">
-                          <Link href={`/inventory/scan?code=${r.code}`} className="font-mono text-sm font-semibold text-primary hover:underline">
-                            {r.code}
-                          </Link>
-                        </td>
-                        <td>
-                          <div className="font-medium text-foreground">{r.item.name}</div>
-                          <div className="text-xs text-muted-foreground">
-                            <span className="font-mono">{r.item.code}</span>
-                            {r.ownerCustomer ? ` · ${r.ownerCustomer.name}'s` : ''}
-                          </div>
-                        </td>
-                        <td className="whitespace-nowrap text-sm">{packLabel(r.packType)}</td>
-                        <td className="whitespace-nowrap text-right font-semibold tabular-nums">
-                          {qtyText(r.qty)} <span className="text-xs font-normal text-muted-foreground">{r.unit}</span>
-                        </td>
-                        <td className="whitespace-nowrap text-right text-sm tabular-nums text-muted-foreground">{qtyText(r.initialQty)}</td>
-                        <td className="whitespace-nowrap text-sm">{r.lotNo ?? <span className="text-muted-foreground">—</span>}</td>
-                        <td className="whitespace-nowrap text-sm">{r.warehouse.name}</td>
-                        <td className="whitespace-nowrap text-sm">{day(r.createdAt)}</td>
-                        <td>
-                          <span className={`badge ${st.cls}`}>{st.label}</span>
-                        </td>
-                        <td className="whitespace-nowrap text-right">
-                          <button className="btn-ghost p-1.5" title="Print label" onClick={() => printLabels([r.id])}>
-                            <Printer size={15} />
-                          </button>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </ScrollableTable>
-          )}
+                  : 'No packages yet. Stock of the categories kept in packages shows under "To label" — make its stickers there.'
+            }
+          />
         </div>
       ) : (
         <ToLabelView todo={todo} loading={loading} grnFilter={grnFilter} creator={creator} onLabel={setLabelling} onClearGrn={() => go('label')} />
