@@ -307,6 +307,9 @@ export const createItemSchema = z
       z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
     ),
     packQty: nonNegativeDecimal,
+    // What one unit holds, printed on its stickers: a box of 144 pcs.
+    contentQty: nonNegativeDecimal,
+    contentUnit: z.preprocess((v) => (v === '' ? null : v), z.string().trim().max(20).optional().nullable()),
     imageUrl: z.string().url().optional().nullable(),
     // Which garment this is, for a finished good. Shape only, here — whether
     // the colour is actually one of the style's own colours needs a database

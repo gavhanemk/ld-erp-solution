@@ -13,6 +13,8 @@ interface Label {
   packType: string
   qty: number
   unit: string
+  /** What is inside, when the item says: 288 pcs in 2 box. */
+  content: { qty: number; unit: string } | null
   itemCode: string
   item: string
   category: string
@@ -87,6 +89,12 @@ function Sticker({ p, company, layout }: { p: Label; company: string; layout: La
           <div className="pk-qty">
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{roll ? p.qty.toFixed(2) : qtyText(p.qty)}</span>
             <span style={{ fontSize: d.unit, fontWeight: 700 }}>{p.unit}</span>
+            {/* What is inside: "1 box · 144 pcs". */}
+            {p.content && (
+              <span style={{ fontSize: d.unit, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                · {qtyText(p.content.qty)} {p.content.unit}
+              </span>
+            )}
           </div>
           {layout === 'small' ? (
             // Room for one line: the lot first, as it is what a roll is picked by.

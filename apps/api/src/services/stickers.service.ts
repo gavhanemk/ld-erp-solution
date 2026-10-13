@@ -225,7 +225,7 @@ export async function planStickers(data: InwardQuery) {
   const [items, stores, owners] = await Promise.all([
     prisma.item.findMany({
       where: { id: { in: [...new Set(came.map((c) => c.itemId))] } },
-      select: { id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+      select: { id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, contentQty: true, contentUnit: true, uom: { select: { symbol: true, name: true } } },
     }),
     prisma.warehouse.findMany({ where: { id: { in: [...new Set(came.map((c) => c.warehouseId))] } }, select: { id: true, name: true } }),
     prisma.customer.findMany({
@@ -289,6 +289,8 @@ export async function planStickers(data: InwardQuery) {
       packType: d.packType,
       perPack: d.perPack,
       remembered: item.packType != null || item.packQty != null,
+      // What one unit holds, for the sentence: "1 box on each (144 pcs)".
+      content: item.contentQty && Number(item.contentQty) > 0 ? { each: Number(item.contentQty), unit: item.contentUnit || 'pcs' } : null,
       qtys: suggestQtys(max, d.perPack),
     })
   }

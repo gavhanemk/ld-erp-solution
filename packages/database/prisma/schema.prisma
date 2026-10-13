@@ -693,6 +693,11 @@ model Item {
   /// a package (roll, box) or one for the whole quantity otherwise.
   packType     PackType?
   packQty      Decimal?     @db.Decimal(10, 3)
+  /// What one unit of it holds, for its stickers: a box of buttons is 144
+  /// pcs, a roll of tape 65 m. Stock is still counted in the item's own unit;
+  /// this only says what is inside, so a sticker can read "1 box · 144 pcs".
+  contentQty   Decimal?     @db.Decimal(12, 3)
+  contentUnit  String?
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt

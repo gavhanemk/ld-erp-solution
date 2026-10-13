@@ -109,6 +109,8 @@ const pkgInclude = {
       code: true,
       name: true,
       categoryId: true,
+      contentQty: true,
+      contentUnit: true,
       uom: { select: { symbol: true } },
       category: { select: { name: true } },
     },
@@ -483,6 +485,8 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           packType: r.packType,
           qty: Number(r.qty),
           unit: r.item.uom?.symbol ?? '',
+          // What is inside, when the item says: 2 box of 144 is 288 pcs.
+          content: r.item.contentQty && Number(r.item.contentQty) > 0 ? { qty: round3(Number(r.qty) * Number(r.item.contentQty)), unit: r.item.contentUnit || 'pcs' } : null,
           itemCode: r.item.code,
           item: r.item.name,
           category: r.item.category?.name ?? '',

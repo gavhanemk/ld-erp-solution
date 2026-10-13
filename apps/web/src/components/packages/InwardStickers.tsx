@@ -45,6 +45,8 @@ export interface LabelTarget {
   max: number
   /** Where it came in, for the window's title: GRN-0004. */
   sourceRef?: string | null
+  /** What one unit holds, when the item says: 144 pcs to a box. */
+  content?: { each: number; unit: string } | null
 }
 
 interface Plan {
@@ -126,7 +128,7 @@ function sentence(t: LabelTarget, r: Row, qtys: number[]) {
     ? `${qtys.map(qtyText).join(', ')} ${t.unit}`
     : qtys.length > 1 && qtys[qtys.length - 1] !== qtys[0]
       ? `${qtyText(qtys[0])} ${t.unit} on each, the last ${qtyText(qtys[qtys.length - 1])}`
-      : `${qtyText(qtys[0])} ${t.unit} on each`
+      : `${qtyText(qtys[0])} ${t.unit} on each${t.content ? ` (${qtyText(qtys[0] * t.content.each)} ${t.content.unit})` : ''}`
   const left = r3(t.max - total)
   return `${n}, ${what}${left > 0.0005 ? ` · ${qtyText(left)} ${t.unit} stays without a sticker` : ''}`
 }
