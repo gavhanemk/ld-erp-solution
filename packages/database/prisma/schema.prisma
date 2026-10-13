@@ -2733,6 +2733,12 @@ model StockAdjustment {
   approvedBy   User?     @relation("AdjustmentApprovedBy", fields: [approvedById], references: [id])
   approvedAt   DateTime?
   rejectReason String?
+  /// COUNT: a correction after counting the rack. STOCK_IN: stock that came in
+  /// without a purchase order — a sample, from another unit, a supplier's
+  /// replacement — at the rate given, approved the same way.
+  kind         String    @default("COUNT")
+  /// For a stock-in: where it came from.
+  source       String?
   @@index([adjustmentDate])
   @@map("stock_adjustments")
 }

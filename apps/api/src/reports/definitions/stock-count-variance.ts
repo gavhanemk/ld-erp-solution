@@ -60,6 +60,9 @@ export const stockCountVariance: ReportDefinition = {
 
     const where: Prisma.StockAdjustmentLineWhereInput = {
       adjustment: {
+        // Counts only: a stock-in is not a count, and an approved one only.
+        kind: 'COUNT',
+        status: 'APPROVED',
         ...(params.warehouseId ? { warehouseId: params.warehouseId } : {}),
         ...(from || to ? { adjustmentDate: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } } : {}),
       },

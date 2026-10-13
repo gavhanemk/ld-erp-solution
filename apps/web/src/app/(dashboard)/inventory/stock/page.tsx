@@ -361,8 +361,12 @@ function StockScreen() {
           >
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
-          <button className="btn-primary" onClick={() => setDialog('opening')}>
+          <button className="btn-secondary" onClick={() => setDialog('opening')} title="What was on hand the day the system started; once per item and store">
             <PackagePlus size={15} /> Opening stock
+          </button>
+          {/* Stock that came in later without a purchase order, approved by a store manager. */}
+          <button className="btn-primary" onClick={() => setDialog('stockin')}>
+            <PackagePlus size={15} /> Stock in
           </button>
         </div>
       </div>

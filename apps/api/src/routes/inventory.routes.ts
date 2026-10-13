@@ -21,6 +21,8 @@ import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
+  stockInSchema,
+  STOCK_IN_SOURCES,
   adjustmentSchema,
   cancelCustomerGrnSchema,
   cancelCustomerReturnSchema,
@@ -606,7 +608,7 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
           select: { name: true },
         })
         throw new AppError(
-          `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once — use a stock adjustment to correct it.`,
+          `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once. To add stock that came in without a purchase order, use Stock in.`,
           409,
           'OPENING_ALREADY_SET',
         )
@@ -714,6 +716,63 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
 }
 
 /**
+ * Stock that came in without a purchase order: a sample, material from
+ * another unit, a supplier's free replacement. Saved as an adjustment of its
+ * own kind, so it goes to the same store manager and the same approvals
+ * inbox as a count, and stock rises only when it is approved — at the rate
+ * given here, not the rate the store happens to carry.
+ */
+export async function createStockIn(tx: Prisma.TransactionClient, data: z.infer<typeof stockInSchema>, userId: string | null) {
+  const when = data.adjustmentDate ?? new Date()
+  const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { name: true, isActive: true } })
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+  if (!warehouse.isActive) throw new AppError(`${warehouse.name} is switched off`, 400, 'INACTIVE')
+
+  const lines = []
+  for (const l of data.lines) {
+    const before = await lockedBalanceOf(tx, { itemId: l.itemId, warehouseId: data.warehouseId })
+    const qty = Number(l.qty.toFixed(3))
+    lines.push({
+      itemId: l.itemId,
+      ownership: 'OWNED' as const,
+      ownerCustomerId: null,
+      sizeId: null,
+      bookQty: before.qty,
+      countedQty: Number((before.qty + qty).toFixed(3)),
+      difference: qty,
+      unitRate: l.unitRate,
+    })
+  }
+  const label = STOCK_IN_SOURCES[data.source]
+  const adjustmentNumber = await nextDocumentNumber(tx, 'ADJ', when)
+  const created = await tx.stockAdjustment.create({
+    data: {
+      adjustmentNumber,
+      warehouseId: data.warehouseId,
+      adjustmentDate: when,
+      kind: 'STOCK_IN',
+      source: data.source,
+      reason: `Stock in, ${label.toLowerCase()}${data.notes?.trim() ? `: ${data.notes.trim()}` : ''}`,
+      madeById: userId,
+      status: 'PENDING',
+      lines: { create: lines },
+    },
+  })
+  return tx.stockAdjustment.findUniqueOrThrow({ where: { id: created.id }, include: adjustmentInclude })
+}
+
+router.post('/stock-in', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = stockInSchema.parse(req.body)
+  const adj = await prisma.$transaction((tx) => createStockIn(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: adj.id, after: adj })
+  res.status(201).json({
+    success: true,
+    message: `${adj.adjustmentNumber} saved: ${adj.lines.length} ${adj.lines.length === 1 ? 'item' : 'items'} waiting for a store manager's approval. Stock goes up once it is approved.`,
+    data: adj,
+  })
+})
+
+/**
  * A correction after a physical count.
  *
  * The store keeper enters what is on the rack; the book figure and the
@@ -753,7 +812,11 @@ router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: Aut
 router.post('/adjustments/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const { before, after } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
   await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'StockAdjustment', entityId: after.id, before, after })
-  res.json({ success: true, message: `${after.adjustmentNumber} approved. Stock is corrected.`, data: after })
+  res.json({
+    success: true,
+    message: `${after.adjustmentNumber} approved. ${after.kind === 'STOCK_IN' ? 'It is added to stock.' : 'Stock is corrected.'}`,
+    data: after,
+  })
 })
 
 /** A store manager turning a count down, with why. Stock is not touched. */

@@ -127,6 +127,46 @@ export const requisitionSourcingSchema = z.object({
  * job, and a person doing it in their head is a person who sometimes gets the
  * sign the wrong way round.
  */
+/** Where stock that came in without a purchase order came from. */
+export const STOCK_IN_SOURCES = {
+  SAMPLE: 'Sample',
+  OTHER_UNIT: 'From another unit',
+  SUPPLIER_REPLACEMENT: "Supplier's replacement",
+  FREE_GOODS: 'Free goods',
+  FOUND: 'Found in store',
+  OTHER: 'Other',
+} as const
+
+/**
+ * Stock that came in without a purchase order. Each line is what came in and
+ * what one unit is worth; it waits for a store manager like a stock count.
+ */
+export const stockInSchema = z
+  .object({
+    warehouseId: id('a store'),
+    adjustmentDate: z.coerce.date().optional(),
+    source: z.enum(Object.keys(STOCK_IN_SOURCES) as [keyof typeof STOCK_IN_SOURCES, ...Array<keyof typeof STOCK_IN_SOURCES>], {
+      errorMap: () => ({ message: 'Say where it came from' }),
+    }),
+    notes: z.string().trim().max(500).optional().nullable(),
+    lines: z
+      .array(
+        z.object({
+          itemId: id('an item'),
+          qty: z.number({ invalid_type_error: 'Quantity has to be a number' }).positive('Quantity has to be more than nought').max(9_999_999),
+          unitRate: z.number({ invalid_type_error: 'Rate has to be a number' }).positive('Enter what one unit is worth; at ₹0 it would be valued at nothing').max(9_999_999),
+        }),
+      )
+      .min(1, 'Add at least one item'),
+  })
+  .superRefine((d, ctx) => {
+    if (d.source === 'OTHER' && !(d.notes && d.notes.trim().length >= 5)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['notes'], message: 'Say where it came from, in a few words' })
+    }
+    const ids = d.lines.map((l) => l.itemId)
+    if (new Set(ids).size !== ids.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines'], message: 'An item is on the list twice. Enter it once, with the total.' })
+  })
+
 export const adjustmentSchema = z.object({
   warehouseId: id('a warehouse'),
   adjustmentDate: z.coerce.date().optional(),

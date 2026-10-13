@@ -119,6 +119,7 @@ export type Bucket =
   | 'jobwork'
   | 'transfer'
   | 'adjustment'
+  | 'stockin'
   | 'sale'
 
 export function bucketOf(type: string, ref: string | null): Bucket {
@@ -134,7 +135,7 @@ export function bucketOf(type: string, ref: string | null): Bucket {
     case 'PRODUCTION':
       return 'jobwork'
     case 'ADJUSTMENT':
-      return 'adjustment'
+      return ref === 'STOCK_IN' ? 'stockin' : 'adjustment'
     case 'SALE':
       return 'sale'
     case 'TRANSFER':
@@ -154,6 +155,7 @@ export const BUCKET_LABEL: Record<Bucket, string> = {
   jobwork: 'Job work',
   transfer: 'Store transfer',
   adjustment: 'Stock adjustment',
+  stockin: 'Stock in (no PO)',
   sale: 'Despatched',
 }
 
@@ -165,6 +167,7 @@ export const BUCKET_TONE: Record<Bucket, Tone> = {
   jobwork: 'info',
   transfer: 'neutral',
   adjustment: 'warn',
+  stockin: 'info',
   sale: 'normal',
 }
 
@@ -190,7 +193,7 @@ export async function documentNumbers(
   const put = (rows: Array<{ id: string; n: string }>) => rows.forEach((r) => out.set(r.id, r.n))
 
   const grn = ids((t) => t.startsWith('GRN') && !t.startsWith('GRN_QC'))
-  const adj = ids((t) => t === 'STOCK_ADJUSTMENT')
+  const adj = ids((t) => t === 'STOCK_ADJUSTMENT' || t === 'STOCK_IN')
   const trf = ids((t) => t.startsWith('STOCK_TRANSFER'))
   const mr = ids((t) => t === 'MATERIAL_REQUISITION')
   const cgrn = ids((t) => t.startsWith('CUSTOMER_GRN'))

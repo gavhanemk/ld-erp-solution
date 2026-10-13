@@ -66,7 +66,8 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
       qty: Math.abs(difference),
       // A customer's cloth carries no value of ours, found or lost.
       unitRate: difference > 0 ? (line.ownership === 'CUSTOMER_OWNED' ? 0 : Number(line.unitRate ?? 0)) : undefined,
-      referenceType: 'STOCK_ADJUSTMENT',
+      // A stock-in reads as one in the ledger and the reports, not as a count.
+      referenceType: before.kind === 'STOCK_IN' ? 'STOCK_IN' : 'STOCK_ADJUSTMENT',
       referenceId: before.id,
       transactionDate: before.adjustmentDate,
       notes: `${before.adjustmentNumber}${owner}: ${before.reason}`,

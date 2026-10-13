@@ -131,6 +131,7 @@ const DOCUMENT: Record<string, string> = {
   PurchaseReturn: 'Purchase return',
   PurchaseNote: 'Purchase note',
   STOCK_ADJUSTMENT: 'Stock count',
+  STOCK_IN: 'Stock in (no PO)',
   STOCK_TRANSFER: 'Store transfer',
   STOCK_TRANSFER_CANCELLED: 'Store transfer cancelled',
   MATERIAL_REQUISITION: 'Material requisition',
