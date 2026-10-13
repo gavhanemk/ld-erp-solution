@@ -70,13 +70,26 @@ export interface TaxRate {
   isActive: boolean
 }
 
+/** One rate and its limits, from a date onwards. */
+export interface TdsSectionRate {
+  id: string
+  effectiveFrom: string
+  rate: number
+  noPanRate: number | null
+  singleLimit: number | null
+  yearlyLimit: number | null
+}
+
 export interface TdsSection {
   id: string
   section: string
   label: string
+  /** Today's rate, for a glance. Bills read `rates` for their own date. */
   rate: number
   isDefault: boolean
   isActive: boolean
+  /** Oldest first. */
+  rates: TdsSectionRate[]
 }
 
 export interface PreferenceDefinition {
@@ -213,6 +226,11 @@ export const settingsApi = {
     update: (id: string, data: Record<string, unknown>) =>
       api.patch<Single<TdsSection>>(`/settings/tds-sections/${id}`, data),
     remove: (id: string) => api.delete<{ success: boolean; message: string }>(`/settings/tds-sections/${id}`),
+    /** A new rate from a date; the old one stays for earlier bills. */
+    addRate: (id: string, data: Record<string, unknown>) =>
+      api.post<Single<TdsSection>>(`/settings/tds-sections/${id}/rates`, data),
+    removeRate: (id: string, rateId: string) =>
+      api.delete<Single<TdsSection>>(`/settings/tds-sections/${id}/rates/${rateId}`),
   },
 
   preferences: {

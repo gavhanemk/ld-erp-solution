@@ -146,6 +146,8 @@ export const purchaseOrderStatus: ReportDefinition = {
       ...(params.itemId ? { itemId: params.itemId } : {}),
       po: {
         deletedAt: null,
+        // Goods orders: a service order is billed, not received.
+        isService: false,
         status: { in: wanted as Prisma.EnumPurchaseOrderStatusFilter['in'] },
         ...(params.supplierId ? { supplierId: params.supplierId } : {}),
         ...(range ? { poDate: range } : {}),

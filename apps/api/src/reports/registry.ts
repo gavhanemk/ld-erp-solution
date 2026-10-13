@@ -7,6 +7,7 @@ import { noteRegister } from './definitions/note-register'
 import { indentAgainstPo } from './definitions/indent-against-po'
 import { purchasesByItem } from './definitions/purchases-by-item'
 import { grnQcRegister } from './definitions/grn-qc'
+import { tdsRegister } from './definitions/tds-register'
 import { SALES_REPORTS } from './definitions/sales'
 import { stockSummary } from './definitions/stock-summary'
 import { stockMovement } from './definitions/stock-movement'
@@ -30,6 +31,8 @@ export const REPORTS: ReportDefinition[] = [
   // GRN Against Bill (Goods Receipt Register), Rejected on QC (GRN QC
   // Register), Pending PO Items (Purchase Order Status) and the Expenses
   // Booking Register (Purchases by Item); old links to them land on these.
+  // The TDS Register is the one addition since: nothing else lists the tax
+  // kept back from suppliers.
   purchaseRegister,
   purchasesByItem,
   goodsReceiptRegister,
@@ -38,6 +41,7 @@ export const REPORTS: ReportDefinition[] = [
   indentAgainstPo,
   supplierOutstanding,
   noteRegister,
+  tdsRegister,
   // Inventory
   stockSummary,
   stockMovement,

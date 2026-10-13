@@ -195,7 +195,9 @@ function PurchaseBillsTable() {
    * never describe two different lists.
    */
   const query = (p: number, limit: number) => {
-    const qs = new URLSearchParams({ page: String(p), limit: String(limit) })
+    // Goods bills only. Expense and service bills have their own screen under
+    // Services & Expenses, with the TDS columns they need.
+    const qs = new URLSearchParams({ page: String(p), limit: String(limit), kind: 'goods' })
     if (debounced) qs.set('q', debounced)
     if (status) qs.set('status', status)
     if (supplierId) qs.set('supplierId', supplierId)
@@ -460,17 +462,17 @@ function PurchaseBillsTable() {
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
           <ExportButton onExport={exportList} onReport={exportReport} disabled={loading} />
-          {/* Beside Book Bill, not inside it: a bill with no order and no
-            receipt behind it — electricity, rent, a repair — has nothing for
-            the deliveries half of the ordinary form to find. */}
-          <button
+          {/* Expense and service bills — electricity, rent, a contractor — now
+            live on their own screen with TDS. The way there stays here for
+            anyone who still looks for it beside Book Bill. */}
+          <Link
+            href="/purchase/expenses"
             className="btn-secondary"
-            onClick={() => setDialog({ open: true, record: null, expense: true })}
-            aria-label="Expense bill (no PO)"
-            title="Electricity, rent, repairs, services — a bill with no order or receipt"
+            aria-label="Expenses"
+            title="Electricity, rent, repairs, services — bills with no goods received"
           >
-            <Wallet size={15} /> <span className="hidden sm:inline">Expense bill</span>
-          </button>
+            <Wallet size={15} /> <span className="hidden sm:inline">Expenses</span>
+          </Link>
           <button
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}

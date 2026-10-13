@@ -248,6 +248,8 @@ const supplierFields = z.object({
   isMsme: z.boolean().optional(),
   msmeNumber: z.string().max(30).optional().nullable(),
   isGroupCompany: z.boolean().optional(),
+  // The section their bills are usually deducted under. Null clears it.
+  tdsSectionId: z.string().min(1).optional().nullable(),
   creditDays: z.number().int().min(0).max(365).optional(),
   leadTimeDays: z.number().int().min(0).max(365).optional(),
   paymentTerms: optionalText,
@@ -306,6 +308,8 @@ export const createItemSchema = z
     // lookup, so that lives in assertItemStyleColorValid instead.
     styleId: z.string().min(1, 'Choose a style').optional().nullable(),
     color: z.string().min(1, 'Choose a colour').max(50).optional().nullable(),
+    // On an expense head: the TDS section a bill for it usually falls under.
+    tdsSectionId: z.string().min(1).optional().nullable(),
     isActive,
   })
   // One superRefine, not several chained refines: each .refine() wraps the
