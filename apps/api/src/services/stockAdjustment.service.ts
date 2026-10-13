@@ -2,6 +2,7 @@ import { prisma } from '@ld-erp/database'
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement } from './stock.service'
+import { afterAdjustmentDecided } from './garmentHooks.service'
 
 /**
  * A stock adjustment is a count the store keeper made; it changes stock only
@@ -77,6 +78,8 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
     data: { status: 'APPROVED', approvedById: userId, approvedAt: new Date() },
     include,
   })
+  // Tagged garments waiting on this write-off are written off with it.
+  await afterAdjustmentDecided(tx, id, true, userId)
   return { before, after }
 }
 
@@ -94,6 +97,8 @@ export async function rejectAdjustment(id: string, userId: string, reason: strin
       'ALREADY_DECIDED',
     )
   }
+  // Tagged garments it was writing off are free again.
+  await prisma.$transaction((tx) => afterAdjustmentDecided(tx, id, false, userId))
   const after = await prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include })
   return { before, after }
 }

@@ -1475,6 +1475,7 @@ model DeliveryChallan {
   @@index([soId])
   @@index([customerId])
   @@map("delivery_challans")
+  garments Garment[] @relation("GarmentChallan")
 }
 
 model DeliveryChallanLine {
@@ -5270,6 +5271,8 @@ enum GarmentStatus {
   DISPATCHED
   /// Tag withdrawn: printed by mistake, or its receipt was cancelled.
   VOID
+  /// Written off as damaged, once the write-off was approved.
+  SCRAPPED
 }
 
 enum GarmentEventType {
@@ -5279,6 +5282,12 @@ enum GarmentEventType {
   DISPATCHED
   RETURNED
   VOIDED
+  ON_CHALLAN
+  OFF_CHALLAN
+  TRANSFERRED
+  SCRAP_REQUESTED
+  SCRAP_REFUSED
+  SCRAPPED
 }
 
 /// One finished garment with its own QR label: a single T-shirt, not a
@@ -5315,6 +5324,14 @@ model Garment {
   ownerCustomerId String?
   soId            String?
   status          GarmentStatus      @default(IN_STOCK)
+  /// The delivery challan it is on. Held for it while the challan is a draft,
+  /// so no other challan can take the same piece; gone with it once dispatched.
+  dcId            String?
+  dc              DeliveryChallan?   @relation("GarmentChallan", fields: [dcId], references: [id])
+  /// A write-off waiting for approval, or approved. Held while it waits.
+  adjustmentId    String?
+  /// The credit note it last came back on.
+  creditNoteId    String?
   /// How often its label has been printed. A reprint keeps the same code.
   printCount      Int                @default(0)
   lastPrintedAt   DateTime?
@@ -5328,6 +5345,8 @@ model Garment {
   @@index([fgReceiptLineId])
   @@index([itemId, sizeId, warehouseId, status])
   @@index([bundleId])
+  @@index([dcId])
+  @@index([adjustmentId])
   @@map("garments")
 }
 

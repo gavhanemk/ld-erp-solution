@@ -5,6 +5,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { generateGarments, normaliseGarmentCode } from '../services/garment.service'
+import { addToChallan, dispatchScanned, moveGarments, removeFromChallan, requestScrap, returnGarments } from '../services/garmentMove.service'
 
 /*
  * Garment tags: one QR label per finished piece.
@@ -366,6 +367,220 @@ router.get('/scan/:code', requirePermission(MODULE, 'view'), async (req, res) =>
   const g = await prisma.garment.findUnique({ where: { code }, select: { id: true } })
   if (!g) throw new AppError(`No garment with the code ${code}. Check the label, or type the number under the QR.`, 404, 'NOT_FOUND')
   res.json({ success: true, data: await garmentDetail(g.id) })
+})
+
+// ── Moving garments by scanning ────────────────────────────────────────────
+
+const codesSchema = z.array(z.string().trim().min(1)).min(1, 'Scan at least one garment').max(2000, 'Up to 2,000 pieces at a time')
+const OPEN = ['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DISPATCHED'] as const
+
+/**
+ * Whether a scanned piece can go on the action chosen, before it is added to
+ * the list — so a piece already sent, held or written off is refused on the
+ * spot, with where it is, rather than at the end.
+ */
+router.get('/check/:code', requirePermission(MODULE, 'view'), async (req, res) => {
+  const code = normaliseGarmentCode(decodeURIComponent(req.params.code))
+  const action = String(req.query.for ?? '')
+  const g = await prisma.garment.findUnique({
+    where: { code },
+    select: {
+      id: true,
+      code: true,
+      status: true,
+      grade: true,
+      soId: true,
+      dcId: true,
+      adjustmentId: true,
+      warehouseId: true,
+      item: { select: { name: true, color: true, style: { select: { code: true } } } },
+      size: { select: { code: true } },
+      warehouse: { select: { name: true } },
+      dc: { select: { dcNumber: true, dispatchedAt: true, invoices: { where: { status: { not: 'CANCELLED' } }, select: { invoiceNumber: true } } } },
+    },
+  })
+  if (!g) throw new AppError(`No garment with the code ${code}.`, 404, 'NOT_FOUND')
+  const what = `${g.item.style?.code ?? g.item.name} ${g.item.color ?? ''} size ${g.size?.code ?? '—'}`.replace(/\s+/g, ' ')
+  let problem: string | null = null
+  if (action === 'return') {
+    if (g.status !== 'DISPATCHED') problem = `${g.code} was never despatched, so it cannot come back.`
+  } else if (g.status === 'DISPATCHED') {
+    problem = `${g.code} was despatched on ${g.dc?.dcNumber ?? 'a challan'}${g.dc?.dispatchedAt ? ` on ${g.dc.dispatchedAt.toLocaleDateString('en-IN')}` : ''}. It cannot go out twice.`
+  } else if (g.status === 'SCRAPPED') problem = `${g.code} was written off.`
+  else if (g.status === 'VOID') problem = `${g.code}'s tag was withdrawn.`
+  else if (g.adjustmentId) problem = `${g.code} is waiting for a write-off to be approved.`
+  else if (g.dcId && action !== 'dispatch') problem = `${g.code} is on ${g.dc?.dcNumber}; take it off the challan first.`
+  else if (g.grade === 'B' && (action === 'move' || action === 'scrap')) {
+    problem = `${g.code} is B-grade; B-grade pieces cannot be ${action === 'move' ? 'moved between stores' : 'written off'} by scan yet.`
+  }
+  res.json({
+    success: true,
+    data: {
+      id: g.id,
+      code: g.code,
+      what,
+      grade: g.grade,
+      store: g.warehouse.name,
+      warehouseId: g.warehouseId,
+      soId: g.soId,
+      dcNumber: g.dc?.dcNumber ?? null,
+      invoice: g.dc?.invoices[0]?.invoiceNumber ?? null,
+      problem,
+    },
+  })
+})
+
+/** Open orders with tagged pieces to send, and the challans already being loaded for them. */
+router.get('/dispatch/orders', requirePermission('sales', 'view'), async (_req, res) => {
+  const free = await prisma.garment.groupBy({
+    by: ['soId'],
+    where: { status: 'IN_STOCK', dcId: null, adjustmentId: null, soId: { not: null } },
+    _count: true,
+  })
+  const drafts = await prisma.deliveryChallan.findMany({
+    where: { status: 'DRAFT', garments: { some: {} } },
+    select: { id: true, dcNumber: true, soId: true, dcDate: true, warehouse: { select: { name: true } }, _count: { select: { garments: true } } },
+  })
+  const soIds = [...new Set([...free.map((f) => f.soId as string), ...drafts.map((d) => d.soId)])]
+  const orders = await prisma.salesOrder.findMany({
+    where: { id: { in: soIds }, status: { in: [...OPEN] } },
+    select: { id: true, soNumber: true, customerPORef: true, customer: { select: { name: true } } },
+    orderBy: { soNumber: 'desc' },
+  })
+  res.json({
+    success: true,
+    data: orders.map((o) => ({
+      soId: o.id,
+      soNumber: o.soNumber,
+      poRef: o.customerPORef,
+      customer: o.customer?.name ?? '',
+      ready: free.find((f) => f.soId === o.id)?._count ?? 0,
+      drafts: drafts
+        .filter((d) => d.soId === o.id)
+        .map((d) => ({ dcId: d.id, dcNumber: d.dcNumber, store: d.warehouse?.name ?? '', pieces: d._count.garments })),
+    })),
+  })
+})
+
+/** A challan being loaded: the pieces scanned onto it, by size. */
+router.get('/dispatch/:dcId', requirePermission('sales', 'view'), async (req, res) => {
+  res.json({ success: true, data: await loading(req.params.dcId) })
+})
+
+async function loading(dcId: string) {
+  const dc = await prisma.deliveryChallan.findUnique({
+    where: { id: dcId },
+    select: {
+      id: true,
+      dcNumber: true,
+      status: true,
+      soId: true,
+      so: { select: { soNumber: true, customer: { select: { name: true } } } },
+      warehouse: { select: { name: true } },
+    },
+  })
+  if (!dc) throw new AppError('That challan does not exist.', 404, 'NOT_FOUND')
+  const pieces = await prisma.garment.findMany({
+    where: { dcId },
+    select: {
+      id: true,
+      code: true,
+      grade: true,
+      item: { select: { name: true, color: true, style: { select: { code: true } } } },
+      size: { select: { code: true, sequence: true } },
+    },
+    orderBy: { updatedAt: 'desc' },
+  })
+  const bySize = new Map<string, { what: string; size: string; seq: number; grade: string; n: number }>()
+  for (const p of pieces) {
+    const what = `${p.item.style?.code ?? p.item.name} ${p.item.color ?? ''}`.trim()
+    const key = `${what}|${p.size?.code ?? ''}|${p.grade}`
+    const e = bySize.get(key) ?? { what, size: p.size?.code ?? '—', seq: p.size?.sequence ?? 0, grade: p.grade, n: 0 }
+    e.n += 1
+    bySize.set(key, e)
+  }
+  return {
+    dcId: dc.id,
+    dcNumber: dc.dcNumber,
+    status: dc.status,
+    soId: dc.soId,
+    soNumber: dc.so.soNumber,
+    customer: dc.so.customer?.name ?? '',
+    store: dc.warehouse?.name ?? '',
+    pieces: pieces.map((p) => ({ id: p.id, code: p.code, grade: p.grade, size: p.size?.code ?? '', what: `${p.item.style?.code ?? p.item.name} ${p.item.color ?? ''}`.trim() })),
+    bySize: [...bySize.values()].sort((a, b) => a.what.localeCompare(b.what) || a.seq - b.seq),
+  }
+}
+
+/** A scanned piece put on the order's challan; the first starts a draft. */
+router.post('/dispatch/scan', requirePermission('sales', 'create'), async (req: AuthRequest, res) => {
+  const data = z
+    .object({ soId: z.string().min(1, 'Pick the order'), dcId: z.string().nullable().optional(), code: z.string().trim().min(1) })
+    .parse(req.body)
+  const r = await prisma.$transaction((tx) => addToChallan(tx, data, req.user!.id), { timeout: 60_000, maxWait: 20_000 })
+  res.json({ success: true, message: `${r.piece.code} on the challan.`, data: await loading(r.dcId) })
+})
+
+/** A piece taken back off a challan still being loaded. */
+router.delete('/dispatch/:dcId/pieces/:garmentId', requirePermission('sales', 'create'), async (req: AuthRequest, res) => {
+  const r = await prisma.$transaction((tx) => removeFromChallan(tx, req.params.dcId, req.params.garmentId, req.user!.id), {
+    timeout: 60_000,
+    maxWait: 20_000,
+  })
+  res.json({
+    success: true,
+    message: r.emptied ? `${r.dcNumber} had nothing left on it and was cancelled.` : 'Taken off the challan.',
+    data: r.emptied ? null : await loading(req.params.dcId),
+  })
+})
+
+/** Dispatching the loaded challan: stock drops by exactly the pieces scanned. */
+router.post('/dispatch/:dcId/dispatch', requirePermission('sales', 'create'), async (req: AuthRequest, res) => {
+  const header = z
+    .object({
+      vehicleNumber: z.string().max(30).nullable().optional(),
+      transporter: z.string().max(120).nullable().optional(),
+      lrNumber: z.string().max(60).nullable().optional(),
+      cartons: z.number().int().min(0).nullable().optional(),
+    })
+    .parse(req.body ?? {})
+  const r = await prisma.$transaction((tx) => dispatchScanned(tx, req.params.dcId, header, req.user!.id), { timeout: 120_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: 'sales', action: 'UPDATE', entityType: 'DeliveryChallan', entityId: req.params.dcId, after: { dispatchedByScan: r.pieces } })
+  res.json({ success: true, message: `${r.dcNumber} dispatched: ${r.pieces} ${r.pieces === 1 ? 'piece' : 'pieces'} out of stock.`, data: r })
+})
+
+/** Scanned pieces moved to another store on one transfer note. */
+router.post('/move', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = z.object({ codes: codesSchema, toWarehouseId: z.string().min(1, 'Pick the store they go to') }).parse(req.body)
+  const r = await prisma.$transaction((tx) => moveGarments(tx, data, req.user!.id), { timeout: 120_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockTransfer', entityId: r.transferNumber, after: { garments: data.codes.length } })
+  res.json({ success: true, message: `${r.pieces} ${r.pieces === 1 ? 'piece' : 'pieces'} moved to ${r.to} on ${r.transferNumber}.`, data: r })
+})
+
+/** Despatched pieces back from a customer, on a return credit note. */
+router.post('/return', requirePermission('sales', 'create'), async (req: AuthRequest, res) => {
+  const data = z
+    .object({
+      codes: codesSchema,
+      warehouseId: z.string().min(1, 'Pick the store they come back into'),
+      reason: z.string().trim().min(3, 'Say why they came back'),
+    })
+    .parse(req.body)
+  const r = await prisma.$transaction((tx) => returnGarments(tx, data, req.user!.id), { timeout: 120_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: 'sales', action: 'CREATE', entityType: 'CreditNote', entityId: r.noteNumber, after: { garments: data.codes.length } })
+  res.json({ success: true, message: `${r.pieces} ${r.pieces === 1 ? 'piece' : 'pieces'} back in stock on ${r.noteNumber} (against ${r.invoiceNumber}).`, data: r })
+})
+
+/** Damaged pieces put up for write-off, waiting for a store manager. */
+router.post('/scrap', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = z.object({ codes: codesSchema, reason: z.string().trim().min(5, 'Say what is wrong with them') }).parse(req.body)
+  const r = await prisma.$transaction((tx) => requestScrap(tx, data, req.user!.id), { timeout: 120_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: r.adjustmentNumber, after: { garments: data.codes.length } })
+  res.json({
+    success: true,
+    message: `${r.pieces} ${r.pieces === 1 ? 'piece' : 'pieces'} put up for write-off on ${r.adjustmentNumber}. Stock leaves when a store manager approves it; until then they are held.`,
+    data: r,
+  })
 })
 
 router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
