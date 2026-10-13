@@ -1,0 +1,652 @@
+import { Router } from 'express'
+import { z } from 'zod'
+import { prisma, type Prisma } from '@ld-erp/database'
+import { AppError } from '../middleware/errorHandler'
+import { requirePermission, type AuthRequest } from '../middleware/auth'
+import { writeAuditLog } from '../lib/audit'
+import { createTransfer, issueRequisition } from './inventory.routes'
+import {
+  createPackages,
+  lockPackage,
+  normaliseCode,
+  packageRule,
+  positionOf,
+  recordPackageMove,
+  round3,
+  trackedCategoryIds,
+} from '../services/package.service'
+
+/*
+ * Labelled packages of stock and what is done to them by scanning.
+ *
+ * Every action that moves stock goes through the same code as the screens
+ * that do it without a scanner — an issue is a requisition issue, a move is a
+ * stock transfer — so a scan can never do what the store could not.
+ */
+
+const router = Router()
+const MODULE = 'inventory'
+
+const PACK_TYPES = ['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER'] as const
+const qty = z.number({ invalid_type_error: 'Quantity has to be a number' }).positive('Quantity has to be more than nought')
+
+const createSchema = z.object({
+  itemId: z.string().min(1, 'Choose the item'),
+  warehouseId: z.string().min(1, 'Choose the store'),
+  ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).default('OWNED'),
+  ownerCustomerId: z.string().optional().nullable(),
+  packType: z.enum(PACK_TYPES),
+  qtys: z.array(qty).min(1, 'Enter at least one package').max(500, 'Up to 500 packages at a time'),
+  lotNo: z.string().max(50).optional().nullable(),
+  notes: z.string().max(500).optional().nullable(),
+  grnLineId: z.string().optional().nullable(),
+})
+const issueSchema = z.object({
+  mrId: z.string().min(1, 'Choose the requisition'),
+  lineId: z.string().min(1, 'Choose the requisition line'),
+  qty,
+})
+const transferSchema = z.object({ toWarehouseId: z.string().min(1, 'Choose the store it goes to'), qty })
+const splitSchema = z.object({ qtys: z.array(qty).min(1, 'Enter at least one new package').max(200) })
+const correctSchema = z.object({
+  qty: z.number().min(0, 'Quantity cannot be negative'),
+  reason: z.string().trim().min(3, 'Say why the quantity is being corrected'),
+})
+const voidSchema = z.object({ reason: z.string().trim().min(3, 'Say why the label is being withdrawn') })
+
+const pkgInclude = {
+  item: {
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      categoryId: true,
+      uom: { select: { symbol: true } },
+      category: { select: { name: true } },
+    },
+  },
+  warehouse: { select: { id: true, name: true } },
+  ownerCustomer: { select: { id: true, name: true } },
+} satisfies Prisma.StockPackageInclude
+
+/** Everything the scan screen shows about one package, and what can be done with it. */
+async function detail(id: string) {
+  const pkg = await prisma.stockPackage.findUnique({
+    where: { id },
+    include: {
+      ...pkgInclude,
+      parent: { select: { id: true, code: true } },
+      children: { select: { id: true, code: true, qty: true, status: true }, orderBy: { createdAt: 'asc' } },
+      moves: { orderBy: { createdAt: 'desc' }, take: 50, include: { createdBy: { select: { name: true } } } },
+    },
+  })
+  if (!pkg) throw new AppError('That package does not exist', 404, 'NOT_FOUND')
+
+  const spot = { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId }
+  const [position, stores, grn, wanting] = await Promise.all([
+    positionOf(prisma, spot),
+    prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    pkg.sourceType === 'GRN' && pkg.sourceId
+      ? prisma.gRN.findUnique({ where: { id: pkg.sourceId }, select: { grnNumber: true, grnDate: true, po: { select: { supplier: { select: { name: true } } } } } })
+      : null,
+    // Requisitions this package could be issued against: approved, open, and
+    // still owed this item from the same owner's stock.
+    prisma.materialRequisitionLine.findMany({
+      where: {
+        itemId: pkg.itemId,
+        ownership: pkg.ownership,
+        ownerCustomerId: pkg.ownerCustomerId,
+        mr: { status: 'APPROVED', closedAt: null, issuedAt: null },
+      },
+      select: {
+        id: true,
+        requestedQty: true,
+        issuedQty: true,
+        styleNo: true,
+        purpose: true,
+        warehouseId: true,
+        mr: {
+          select: {
+            id: true,
+            mrNumber: true,
+            requiredDate: true,
+            department: { select: { name: true } },
+            mo: { select: { moNumber: true } },
+            so: { select: { soNumber: true, customer: { select: { name: true } } } },
+          },
+        },
+      },
+      orderBy: { mr: { requestDate: 'asc' } },
+      take: 30,
+    }),
+  ])
+
+  const storeName = new Map(stores.map((s) => [s.id, s.name]))
+  return {
+    ...pkg,
+    qty: Number(pkg.qty),
+    initialQty: Number(pkg.initialQty),
+    unit: pkg.item.uom?.symbol ?? '',
+    grn,
+    position,
+    stores,
+    requisitions: wanting
+      .map((l) => ({
+        lineId: l.id,
+        mrId: l.mr.id,
+        mrNumber: l.mr.mrNumber,
+        department: l.mr.department?.name ?? '',
+        owed: round3(Number(l.requestedQty) - Number(l.issuedQty)),
+        requiredDate: l.mr.requiredDate,
+        styleNo: l.styleNo,
+        purpose: l.purpose,
+        moNumber: l.mr.mo?.moNumber ?? null,
+        soNumber: l.mr.so?.soNumber ?? null,
+        customer: l.mr.so?.customer?.name ?? null,
+        sameStore: l.warehouseId === pkg.warehouseId,
+      }))
+      .filter((r) => r.owed > 0),
+    moves: pkg.moves.map((m) => ({
+      ...m,
+      qty: Number(m.qty),
+      balanceAfter: Number(m.balanceAfter),
+      store: storeName.get(m.warehouseId) ?? '',
+      toStore: m.toWarehouseId ? (storeName.get(m.toWarehouseId) ?? '') : null,
+      by: m.createdBy?.name ?? null,
+    })),
+  }
+}
+
+/** The list, with what is on the racks in packages at a glance. */
+router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
+  const status = typeof req.query.status === 'string' ? req.query.status : 'IN_STOCK'
+  const where: Prisma.StockPackageWhereInput = {
+    ...(status !== 'ALL' ? { status: status as 'IN_STOCK' } : {}),
+    ...(typeof req.query.warehouseId === 'string' && req.query.warehouseId ? { warehouseId: req.query.warehouseId } : {}),
+    ...(typeof req.query.itemId === 'string' && req.query.itemId ? { itemId: req.query.itemId } : {}),
+    ...(typeof req.query.sourceId === 'string' && req.query.sourceId ? { sourceId: req.query.sourceId } : {}),
+    ...(q
+      ? {
+          OR: [
+            { code: { contains: normaliseCode(q).replace(/^PK-0*/, ''), mode: 'insensitive' } },
+            { lotNo: { contains: q, mode: 'insensitive' } },
+            { item: { name: { contains: q, mode: 'insensitive' } } },
+            { item: { code: { contains: q, mode: 'insensitive' } } },
+          ],
+        }
+      : {}),
+  }
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50))
+  const [total, rows] = await Promise.all([
+    prisma.stockPackage.count({ where }),
+    prisma.stockPackage.findMany({
+      where,
+      include: pkgInclude,
+      orderBy: [{ createdAt: 'desc' }, { code: 'desc' }],
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+  ])
+
+  // Item and store pairs where the packages claim more than the store holds:
+  // stock left without its package being scanned.
+  const groups = await prisma.stockPackage.groupBy({
+    by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
+    where: { status: 'IN_STOCK' },
+    _sum: { qty: true },
+    _count: true,
+  })
+  let mismatches = 0
+  for (const g of groups) {
+    const pos = await positionOf(prisma, { itemId: g.itemId, warehouseId: g.warehouseId, ownership: g.ownership, ownerCustomerId: g.ownerCustomerId })
+    if (pos.loose < -0.0005) mismatches += 1
+  }
+
+  res.json({
+    success: true,
+    data: rows.map((r) => ({ ...r, qty: Number(r.qty), initialQty: Number(r.initialQty), unit: r.item.uom?.symbol ?? '' })),
+    pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    summary: {
+      packages: groups.reduce((s, g) => s + g._count, 0),
+      items: new Set(groups.map((g) => g.itemId)).size,
+      stores: new Set(groups.map((g) => g.warehouseId)).size,
+      mismatches,
+    },
+  })
+})
+
+/**
+ * What can be labelled: GRN lines of packaged items not yet in packages, and
+ * stock of those items already on the racks with no sticker.
+ */
+router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
+  const cats = await trackedCategoryIds(prisma)
+  if (!cats.length) {
+    res.json({ success: true, data: { tracked: false, grns: [], lines: [], loose: [] } })
+    return
+  }
+  const grnId = typeof req.query.grnId === 'string' ? req.query.grnId : ''
+
+  const grnLines = await prisma.gRNLine.findMany({
+    where: {
+      item: { categoryId: { in: cats } },
+      acceptedQty: { gt: 0 },
+      grn: { status: { notIn: ['DRAFT', 'CANCELLED'] }, ...(grnId ? { id: grnId } : { grnDate: { gte: new Date(Date.now() - 90 * 86_400_000) } }) },
+    },
+    select: {
+      id: true,
+      itemId: true,
+      warehouseId: true,
+      acceptedQty: true,
+      batchNumber: true,
+      item: { select: { code: true, name: true, categoryId: true, uom: { select: { symbol: true } } } },
+      warehouse: { select: { name: true } },
+      grn: { select: { id: true, grnNumber: true, grnDate: true, po: { select: { supplier: { select: { name: true } } } } } },
+    },
+    orderBy: { grn: { grnDate: 'desc' } },
+  })
+  const labelled = await prisma.stockPackage.groupBy({
+    by: ['grnLineId'],
+    where: { grnLineId: { in: grnLines.map((l) => l.id) }, status: { not: 'VOID' } },
+    _sum: { initialQty: true },
+  })
+  const doneOf = new Map(labelled.map((l) => [l.grnLineId, Number(l._sum.initialQty ?? 0)]))
+
+  const rules = new Map<string, Awaited<ReturnType<typeof packageRule>>>()
+  const ruleOf = async (categoryId: string) => {
+    if (!rules.has(categoryId)) rules.set(categoryId, await packageRule(prisma, categoryId))
+    return rules.get(categoryId)!
+  }
+
+  const lines = []
+  for (const l of grnLines) {
+    const remaining = round3(Number(l.acceptedQty) - (doneOf.get(l.id) ?? 0))
+    if (remaining <= 0) continue
+    const pos = await positionOf(prisma, { itemId: l.itemId, warehouseId: l.warehouseId, ownership: 'OWNED', ownerCustomerId: null })
+    lines.push({
+      grnLineId: l.id,
+      grnId: l.grn.id,
+      grnNumber: l.grn.grnNumber,
+      grnDate: l.grn.grnDate,
+      supplier: l.grn.po?.supplier?.name ?? '',
+      itemId: l.itemId,
+      itemCode: l.item.code,
+      item: l.item.name,
+      unit: l.item.uom?.symbol ?? '',
+      warehouseId: l.warehouseId,
+      store: l.warehouse.name,
+      lotNo: l.batchNumber,
+      accepted: Number(l.acceptedQty),
+      toLabel: Math.max(0, Math.min(remaining, pos.loose)),
+      packType: (await ruleOf(l.item.categoryId)).packType ?? 'BOX',
+    })
+  }
+
+  // Stock of packaged items on the racks with no sticker yet.
+  const loose = await prisma.$queryRaw<
+    Array<{ itemId: string; itemCode: string; item: string; categoryId: string; unit: string; warehouseId: string; store: string; ownership: string; ownerCustomerId: string | null; owner: string | null; qty: number }>
+  >`
+    SELECT s."itemId", i.code AS "itemCode", i.name AS item, i."categoryId", u.symbol AS unit,
+           s."warehouseId", w.name AS store, s.ownership::text AS ownership, s."ownerCustomerId", c.name AS owner,
+           (SUM(s."inQty" - s."outQty") - COALESCE((
+              SELECT SUM(p.qty) FROM ld_erp.stock_packages p
+              WHERE p."itemId" = s."itemId" AND p."warehouseId" = s."warehouseId" AND p.ownership = s.ownership
+                AND p."ownerCustomerId" IS NOT DISTINCT FROM s."ownerCustomerId" AND p.status = 'IN_STOCK'), 0))::float8 AS qty
+    FROM ld_erp.stock_ledger s
+    JOIN ld_erp.items i ON i.id = s."itemId"
+    JOIN ld_erp.uom u ON u.id = i."uomId"
+    JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
+    LEFT JOIN ld_erp.customers c ON c.id = s."ownerCustomerId"
+    WHERE i."categoryId" = ANY(${cats}::text[]) AND s."sizeId" IS NULL
+    GROUP BY s."itemId", i.code, i.name, i."categoryId", u.symbol, s."warehouseId", w.name, s.ownership, s."ownerCustomerId", c.name
+    HAVING SUM(s."inQty" - s."outQty") - COALESCE((
+              SELECT SUM(p.qty) FROM ld_erp.stock_packages p
+              WHERE p."itemId" = s."itemId" AND p."warehouseId" = s."warehouseId" AND p.ownership = s.ownership
+                AND p."ownerCustomerId" IS NOT DISTINCT FROM s."ownerCustomerId" AND p.status = 'IN_STOCK'), 0) > 0.0005
+    ORDER BY i.name, w.name
+  `
+  const looseRows = []
+  for (const r of loose) looseRows.push({ ...r, qty: round3(r.qty), packType: (await ruleOf(r.categoryId)).packType ?? 'BOX' })
+
+  const grns = [...new Map(lines.map((l) => [l.grnId, { id: l.grnId, grnNumber: l.grnNumber, grnDate: l.grnDate, supplier: l.supplier }])).values()]
+  res.json({ success: true, data: { tracked: true, grns, lines, loose: looseRows } })
+})
+
+/** For printing: the stickers for the packages named. */
+router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
+  const ids = String(req.query.ids ?? '').split(',').filter(Boolean).slice(0, 500)
+  if (!ids.length) throw new AppError('Choose the packages to print', 400, 'NO_IDS')
+  const [company, rows] = await Promise.all([
+    prisma.company.findFirst({ select: { name: true } }),
+    prisma.stockPackage.findMany({ where: { id: { in: ids } }, include: pkgInclude, orderBy: { code: 'asc' } }),
+  ])
+  const grnIds = [...new Set(rows.filter((r) => r.sourceType === 'GRN' && r.sourceId).map((r) => r.sourceId as string))]
+  const grns = await prisma.gRN.findMany({ where: { id: { in: grnIds } }, select: { id: true, grnNumber: true, grnDate: true, po: { select: { supplier: { select: { name: true } } } } } })
+  const grnOf = new Map(grns.map((g) => [g.id, g]))
+  res.json({
+    success: true,
+    data: {
+      company: company?.name ?? '',
+      packages: rows.map((r) => {
+        const g = r.sourceId ? grnOf.get(r.sourceId) : undefined
+        return {
+          id: r.id,
+          code: r.code,
+          packType: r.packType,
+          qty: Number(r.qty),
+          unit: r.item.uom?.symbol ?? '',
+          itemCode: r.item.code,
+          item: r.item.name,
+          category: r.item.category?.name ?? '',
+          store: r.warehouse.name,
+          lotNo: r.lotNo,
+          owner: r.ownerCustomer?.name ?? null,
+          grnNumber: g?.grnNumber ?? null,
+          supplier: g?.po?.supplier?.name ?? null,
+          date: g?.grnDate ?? r.createdAt,
+        }
+      }),
+    },
+  })
+})
+
+/** A scanned or typed code: the package behind it. */
+router.get('/scan/:code', requirePermission(MODULE, 'view'), async (req, res) => {
+  const code = normaliseCode(decodeURIComponent(req.params.code))
+  const pkg = await prisma.stockPackage.findUnique({ where: { code }, select: { id: true } })
+  if (!pkg) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
+  res.json({ success: true, data: await detail(pkg.id) })
+})
+
+router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await detail(req.params.id) })
+})
+
+/** Labelling stock: one package per quantity given. */
+router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createSchema.parse(req.body)
+  const created = await prisma.$transaction(
+    async (tx) => {
+      const item = await tx.item.findUnique({ where: { id: data.itemId }, select: { name: true, categoryId: true, uom: { select: { symbol: true } } } })
+      if (!item) throw new AppError('That item does not exist', 404, 'NOT_FOUND')
+      const rule = await packageRule(tx, item.categoryId)
+      if (!rule.tracked) {
+        throw new AppError(
+          `${item.name} is not kept in packages. Switch on "Track by package" for ${rule.category} in Masters → Item Categories first.`,
+          400,
+          'NOT_TRACKED',
+        )
+      }
+      const spot = {
+        itemId: data.itemId,
+        warehouseId: data.warehouseId,
+        ownership: data.ownership,
+        ownerCustomerId: data.ownership === 'CUSTOMER_OWNED' ? (data.ownerCustomerId ?? null) : null,
+      }
+      let sourceId: string | null = null
+      if (data.grnLineId) {
+        const line = await tx.gRNLine.findUnique({ where: { id: data.grnLineId }, select: { grnId: true, itemId: true, warehouseId: true, acceptedQty: true } })
+        if (!line || line.itemId !== data.itemId || line.warehouseId !== data.warehouseId) {
+          throw new AppError('That GRN line is not for this item in this store.', 400, 'WRONG_LINE')
+        }
+        const done = await tx.stockPackage.aggregate({ where: { grnLineId: data.grnLineId, status: { not: 'VOID' } }, _sum: { initialQty: true } })
+        const left = round3(Number(line.acceptedQty) - Number(done._sum.initialQty ?? 0))
+        const total = round3(data.qtys.reduce((s, q) => s + q, 0))
+        if (total > left + 1e-9) {
+          throw new AppError(`Only ${left} ${item.uom?.symbol ?? ''} of this GRN line is still to be labelled, not ${total}.`, 400, 'OVER_GRN')
+        }
+        sourceId = line.grnId
+      }
+      return createPackages(tx, {
+        spot,
+        packType: data.packType,
+        qtys: data.qtys,
+        lotNo: data.lotNo,
+        notes: data.notes,
+        sourceType: data.grnLineId ? 'GRN' : 'STOCK',
+        sourceId,
+        grnLineId: data.grnLineId ?? null,
+        userId: req.user?.id ?? null,
+        unit: item.uom?.symbol ?? '',
+        itemName: item.name,
+      })
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockPackage', entityId: created[0].id, after: { codes: created.map((c) => c.code) } })
+  res.status(201).json({
+    success: true,
+    message: `${created.length} ${created.length === 1 ? 'package' : 'packages'} labelled: ${created[0].code}${created.length > 1 ? ` to ${created[created.length - 1].code}` : ''}.`,
+    data: created.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })),
+  })
+})
+
+/** Issuing from a scanned package against a requisition. The rest stays in the package. */
+router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = issueSchema.parse(req.body)
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const pkg = await lockPackage(tx, req.params.id)
+      const unit = pkg.item.uom?.symbol ?? ''
+      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is ${pkg.status === 'EMPTY' ? 'empty' : pkg.status === 'SPLIT' ? 'split into other packages' : 'withdrawn'}; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
+      if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
+      const line = await tx.materialRequisitionLine.findUnique({ where: { id: data.lineId }, select: { mrId: true, itemId: true, ownership: true, ownerCustomerId: true } })
+      if (!line || line.mrId !== data.mrId) throw new AppError('That line is not on this requisition.', 400, 'WRONG_LINE')
+      if (line.itemId !== pkg.itemId) throw new AppError(`That requisition line is not for ${pkg.item.name}.`, 400, 'WRONG_ITEM')
+      if (line.ownership !== pkg.ownership || (line.ownerCustomerId ?? null) !== (pkg.ownerCustomerId ?? null)) {
+        throw new AppError("That requisition wants a different owner's stock than this package holds.", 400, 'WRONG_OWNER')
+      }
+
+      // The issue itself, with every rule the Issue screen has.
+      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user)
+
+      const left = round3(Number(pkg.qty) - data.qty)
+      await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'EMPTY' : 'IN_STOCK' } })
+      await recordPackageMove(tx, {
+        packageId: pkg.id,
+        type: 'ISSUED',
+        qty: -data.qty,
+        balanceAfter: left,
+        warehouseId: pkg.warehouseId,
+        referenceType: 'MATERIAL_REQUISITION',
+        referenceId: data.mrId,
+        referenceNumber: issued.after.mrNumber,
+        notes: `To ${issued.after.department?.name ?? 'production'}`,
+        userId: req.user?.id ?? null,
+      })
+      return { pkg, left, unit, mrNumber: issued.after.mrNumber }
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { issued: data.qty, against: result.mrNumber, left: result.left } })
+  res.json({
+    success: true,
+    message: `${data.qty} ${result.unit} issued from ${result.pkg.code} against ${result.mrNumber}. ${result.left > 0 ? `${result.left} ${result.unit} left in it.` : 'The package is now empty.'}`,
+    data: await detail(result.pkg.id),
+  })
+})
+
+/**
+ * Moving a package to another store. The whole of it moves with its label;
+ * part of it moves as a new package with its own label, which needs printing.
+ */
+router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = transferSchema.parse(req.body)
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const pkg = await lockPackage(tx, req.params.id)
+      const unit = pkg.item.uom?.symbol ?? ''
+      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} has nothing in it to move.`, 400, 'NOT_IN_STOCK')
+      if (data.toWarehouseId === pkg.warehouseId) throw new AppError(`${pkg.code} is already in ${pkg.warehouse.name}.`, 400, 'SAME_STORE')
+      if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
+
+      const note = await createTransfer(
+        tx,
+        {
+          fromWarehouseId: pkg.warehouseId,
+          toWarehouseId: data.toWarehouseId,
+          notes: `Package ${pkg.code}`,
+          lines: [{ itemId: pkg.itemId, qty: data.qty, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId }],
+        },
+        req.user?.id ?? null,
+      )
+      const whole = Math.abs(data.qty - Number(pkg.qty)) < 1e-9
+      let moved = pkg.id
+      if (whole) {
+        await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: data.toWarehouseId } })
+        await recordPackageMove(tx, {
+          packageId: pkg.id,
+          type: 'TRANSFERRED',
+          qty: 0,
+          balanceAfter: Number(pkg.qty),
+          warehouseId: pkg.warehouseId,
+          toWarehouseId: data.toWarehouseId,
+          referenceType: 'STOCK_TRANSFER',
+          referenceId: note.id,
+          referenceNumber: note.transferNumber,
+          userId: req.user?.id ?? null,
+        })
+      } else {
+        // Part of it: the part that goes becomes a package of its own, at the other store.
+        const left = round3(Number(pkg.qty) - data.qty)
+        await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left } })
+        const [child] = await createPackages(tx, {
+          spot: { itemId: pkg.itemId, warehouseId: data.toWarehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
+          packType: pkg.packType,
+          qtys: [data.qty],
+          lotNo: pkg.lotNo,
+          notes: `Part of ${pkg.code}, moved on ${note.transferNumber}`,
+          sourceType: 'SPLIT',
+          sourceId: pkg.sourceId,
+          grnLineId: pkg.grnLineId,
+          parentId: pkg.id,
+          userId: req.user?.id ?? null,
+          fromPackage: true,
+          unit,
+          itemName: pkg.item.name,
+        })
+        await recordPackageMove(tx, {
+          packageId: pkg.id,
+          type: 'SPLIT',
+          qty: -data.qty,
+          balanceAfter: left,
+          warehouseId: pkg.warehouseId,
+          toWarehouseId: data.toWarehouseId,
+          referenceType: 'STOCK_TRANSFER',
+          referenceId: note.id,
+          referenceNumber: note.transferNumber,
+          relatedPackageId: child.id,
+          userId: req.user?.id ?? null,
+        })
+        moved = child.id
+      }
+      return { pkg, note, whole, moved, unit, to: note.toWarehouse.name }
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { moved: data.qty, to: result.to, note: result.note.transferNumber } })
+  const child = result.whole ? null : await prisma.stockPackage.findUnique({ where: { id: result.moved }, select: { id: true, code: true } })
+  res.json({
+    success: true,
+    message: result.whole
+      ? `${result.pkg.code} moved to ${result.to} on ${result.note.transferNumber}.`
+      : `${data.qty} ${result.unit} moved to ${result.to} as a new package ${child?.code}. Print its label and stick it on.`,
+    data: { ...(await detail(result.pkg.id)), newPackage: child },
+  })
+})
+
+/** Splitting or repacking: new packages cut from this one, each with its own label. */
+router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = splitSchema.parse(req.body)
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const pkg = await lockPackage(tx, req.params.id)
+      const unit = pkg.item.uom?.symbol ?? ''
+      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} has nothing in it to split.`, 400, 'NOT_IN_STOCK')
+      const total = round3(data.qtys.reduce((s, q) => s + q, 0))
+      if (total > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has ${Number(pkg.qty)} ${unit}; the new packages add up to ${total}.`, 400, 'OVER_PACKAGE')
+      const left = round3(Number(pkg.qty) - total)
+      const children = await createPackages(tx, {
+        spot: { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
+        packType: pkg.packType,
+        qtys: data.qtys,
+        lotNo: pkg.lotNo,
+        notes: `Split from ${pkg.code}`,
+        sourceType: 'SPLIT',
+        sourceId: pkg.sourceId,
+        grnLineId: pkg.grnLineId,
+        parentId: pkg.id,
+        userId: req.user?.id ?? null,
+        fromPackage: true,
+        unit,
+        itemName: pkg.item.name,
+      })
+      await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'SPLIT' : 'IN_STOCK' } })
+      await recordPackageMove(tx, {
+        packageId: pkg.id,
+        type: 'SPLIT',
+        qty: -total,
+        balanceAfter: left,
+        warehouseId: pkg.warehouseId,
+        notes: `Into ${children.map((c) => c.code).join(', ')}`,
+        userId: req.user?.id ?? null,
+      })
+      return { pkg, children, left, unit }
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { splitInto: result.children.map((c) => c.code) } })
+  res.json({
+    success: true,
+    message: `${result.pkg.code} split into ${result.children.length} new ${result.children.length === 1 ? 'package' : 'packages'}${result.left > 0 ? `; ${result.left} ${result.unit} stays in it` : ''}. Print the new labels.`,
+    data: { ...(await detail(result.pkg.id)), newPackages: result.children.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })) },
+  })
+})
+
+/**
+ * Setting a package's quantity to what is actually in it. The store's stock is
+ * not changed here — that is a stock count — so a package can be brought down
+ * to match, or up only as far as loose stock allows.
+ */
+router.post('/:id/correct', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = correctSchema.parse(req.body)
+  const result = await prisma.$transaction(async (tx) => {
+    const pkg = await lockPackage(tx, req.params.id)
+    const unit = pkg.item.uom?.symbol ?? ''
+    if (pkg.status === 'VOID') throw new AppError(`${pkg.code} was withdrawn.`, 400, 'VOID')
+    const change = round3(data.qty - Number(pkg.qty))
+    if (change > 0) {
+      const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
+      if (change > pos.loose + 1e-9) {
+        throw new AppError(
+          `${pkg.warehouse.name} has only ${Math.max(0, pos.loose)} ${unit} of ${pkg.item.name} outside packages, so this one cannot go up by ${change}. If there is more on the rack than the books say, record a stock count first.`,
+          400,
+          'NOT_ENOUGH_LOOSE',
+        )
+      }
+    }
+    await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: data.qty, status: data.qty > 0 ? 'IN_STOCK' : 'EMPTY' } })
+    await recordPackageMove(tx, { packageId: pkg.id, type: 'CORRECTED', qty: change, balanceAfter: data.qty, warehouseId: pkg.warehouseId, notes: data.reason, userId: req.user?.id ?? null })
+    return { pkg, unit, change }
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, before: { qty: Number(result.pkg.qty) }, after: { qty: data.qty, reason: data.reason } })
+  res.json({ success: true, message: `${result.pkg.code} now holds ${data.qty} ${result.unit}.`, data: await detail(result.pkg.id) })
+})
+
+/** Withdrawing a label: printed by mistake, or the package is not on the rack. Stock is not touched. */
+router.post('/:id/void', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = voidSchema.parse(req.body)
+  const pkg = await prisma.$transaction(async (tx) => {
+    const p = await lockPackage(tx, req.params.id)
+    if (p.status === 'VOID') throw new AppError(`${p.code} is already withdrawn.`, 400, 'VOID')
+    await tx.stockPackage.update({ where: { id: p.id }, data: { qty: 0, status: 'VOID' } })
+    await recordPackageMove(tx, { packageId: p.id, type: 'VOIDED', qty: -Number(p.qty), balanceAfter: 0, warehouseId: p.warehouseId, notes: data.reason, userId: req.user?.id ?? null })
+    return p
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: pkg.id, before: { status: pkg.status, qty: Number(pkg.qty) }, after: { status: 'VOID', reason: data.reason } })
+  res.json({ success: true, message: `${pkg.code} withdrawn. Its stock is now loose in ${pkg.warehouse.name}; label it again if needed.`, data: await detail(pkg.id) })
+})
+
+export default router

@@ -130,6 +130,31 @@ const formFields: FormField[] = [
     span: 2,
     help: 'Who normally uses what is filed here. A new item in this category starts with it.',
   },
+  // Stock of these items is labelled with QR stickers and issued by scanning.
+  // A sub-category follows its main category, so ticking Fabric covers them all.
+  {
+    name: 'trackPackages',
+    label: 'Track by package',
+    type: 'checkbox',
+    placeholder: 'Each roll, box or carton gets a QR sticker',
+    help: 'Ticked on a main category, every sub-category under it is tracked too.',
+  },
+  {
+    name: 'packType',
+    label: 'Usual package',
+    type: 'select',
+    options: [
+      { value: 'ROLL', label: 'Roll' },
+      { value: 'BOX', label: 'Box' },
+      { value: 'CARTON', label: 'Carton' },
+      { value: 'BAG', label: 'Bag' },
+      { value: 'BUNDLE', label: 'Bundle' },
+      { value: 'PACKET', label: 'Packet' },
+      { value: 'OTHER', label: 'Other' },
+    ],
+    showIf: (v) => Boolean(v.trackPackages),
+    help: 'What one package of these items usually is. It can be changed when the stickers are made.',
+  },
   {
     name: 'isActive',
     label: 'Active',

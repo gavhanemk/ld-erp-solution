@@ -122,6 +122,8 @@ const navItems: NavItem[] = [
     children: [
       { label: 'Dashboard', href: '/inventory/dashboard' },
       { label: 'Stock', href: '/inventory/stock' },
+      { label: 'Scan', href: '/inventory/scan' },
+      { label: 'Packages & Stickers', href: '/inventory/packages' },
       { label: 'Material Requisitions', href: '/inventory/requisitions' },
       { label: 'Stock Documents', href: '/inventory/documents' },
       { label: 'Finished Goods In', href: '/inventory/finished-goods' },

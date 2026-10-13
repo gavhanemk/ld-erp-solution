@@ -29,6 +29,7 @@ import grnQcRoutes from './routes/grn-qc.routes'
 import purchaseDashboardRoutes from './routes/purchase-dashboard.routes'
 import reportsRoutes from './routes/reports.routes'
 import inventoryRoutes from './routes/inventory.routes'
+import packageRoutes from './routes/packages.routes'
 import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
@@ -288,6 +289,8 @@ app.use('/api/purchase/orders-dashboard', authMiddleware, purchaseDashboardRoute
 app.use('/api/purchase', authMiddleware, purchaseRoutes)
 app.use('/api/reports', authMiddleware, reportsRoutes)
 app.use('/api/inventory', authMiddleware, inventoryRoutes)
+// Labelled packages of stock with QR stickers: scan, issue, move, split.
+app.use('/api/packages', authMiddleware, packageRoutes)
 // Packed garments into the finished-goods store, by size. A store document,
 // under Inventory's permissions, kept out of inventory.routes.ts.
 app.use('/api/finished-goods', authMiddleware, finishedGoodsRoutes)

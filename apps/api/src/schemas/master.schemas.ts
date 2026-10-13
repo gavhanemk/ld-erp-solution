@@ -695,6 +695,10 @@ export const createItemCategorySchema = z.object({
   parentId: z.string().optional().nullable(),
   // The department a new item in this category starts with. Null clears it.
   departmentId: z.string().min(1).optional().nullable(),
+  // Stock of these items is kept as labelled packages with QR stickers, and
+  // what one package usually is. A sub-category follows its main category.
+  trackPackages: z.boolean().optional(),
+  packType: z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
   isActive,
 })
 export const updateItemCategorySchema = createItemCategorySchema.partial()

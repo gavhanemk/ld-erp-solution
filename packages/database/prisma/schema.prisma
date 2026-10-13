@@ -361,6 +361,7 @@ model User {
   transfersCancelled   ProcessTransfer[]      @relation("TransferCancelledBy")
   jobWorkOrdersMade    JobWorkOrder[]         @relation("JobWorkOrderCreatedBy")
   jobCardsMade         JobCard[]              @relation("JobCardCreatedBy")
+  packageMoves StockPackageMove[] @relation("PackageMovesBy")
 }
 
 model Role {
@@ -626,6 +627,11 @@ model ItemCategory {
   departmentId String?
   department   Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   isActive Boolean        @default(true)
+  /// Stock of these items is kept as labelled packages — rolls, boxes, cartons —
+  /// each with its own QR sticker, scanned to issue and move it.
+  trackPackages Boolean   @default(false)
+  /// What one package of these items usually is: a roll of fabric, a box of tape.
+  packType      PackType?
 
   items Item[]
 
@@ -713,6 +719,7 @@ model Item {
   fgReceiptLines      FinishedGoodsReceiptLine[] @relation("FGRLineItem")
   challanLines        DeliveryChallanLine[]      @relation("DCLineItem")
   quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
+  packages StockPackage[] @relation("ItemPackages")
 }
 
 model Style {
@@ -968,6 +975,7 @@ model Customer {
   @@map("customers")
   deliveryChallans  DeliveryChallan[]  @relation("DCCustomer")
   quotations        SalesQuotation[]   @relation("QuoteCustomer")
+  ownedPackages StockPackage[] @relation("CustomerPackages")
 }
 
 /// One of the places a supplier bills from.
@@ -1093,6 +1101,7 @@ model Warehouse {
   fgReceipts               FinishedGoodsReceipt[] @relation("FGRWarehouse")
   deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
   creditNotes              CreditNote[]           @relation("CNWarehouse")
+  packages StockPackage[] @relation("WarehousePackages")
 }
 
 model Department {
@@ -5127,4 +5136,117 @@ enum ReservationStatus {
   ACTIVE
   CONSUMED
   RELEASED
+}
+
+/// What one labelled package of stock physically is.
+enum PackType {
+  BOX
+  ROLL
+  CARTON
+  BAG
+  BUNDLE
+  PACKET
+  OTHER
+}
+
+/// Where a labelled package is in its life.
+enum PackageStatus {
+  /// On the rack with something in it.
+  IN_STOCK
+  /// Everything in it has been issued or moved out.
+  EMPTY
+  /// Broken into smaller packages, each with its own label; nothing left in it.
+  SPLIT
+  /// Label withdrawn: printed by mistake, or the package is not on the rack.
+  VOID
+}
+
+enum PackageMoveType {
+  CREATED
+  ISSUED
+  TRANSFERRED
+  SPLIT
+  SPLIT_FROM
+  CORRECTED
+  VOIDED
+}
+
+/// One physical package of stock — a roll, a box, a carton — with the QR
+/// sticker on it.
+///
+/// The stock ledger stays the record of how much of an item a store holds.
+/// A package says how that stock sits on the rack: five boxes of ten, three
+/// rolls of 48.5, 51 and 50.2 metres. Packages of an item in a store never add
+/// up to more than the ledger holds there; what is not in a package is loose.
+///
+/// The same package keeps its code while it is the same physical thing. A new
+/// code is made only when it is split or repacked, and the new package points
+/// back at the one it came from.
+model StockPackage {
+  id              String         @id @default(cuid())
+  /// What the QR sticker carries, and what a person reads off it: PK-000123.
+  code            String         @unique
+  itemId          String
+  item            Item           @relation("ItemPackages", fields: [itemId], references: [id])
+  warehouseId     String
+  warehouse       Warehouse      @relation("WarehousePackages", fields: [warehouseId], references: [id])
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("CustomerPackages", fields: [ownerCustomerId], references: [id])
+  packType        PackType       @default(BOX)
+  /// What it held when it was labelled, and what it holds now.
+  initialQty      Decimal        @db.Decimal(10, 3)
+  qty             Decimal        @db.Decimal(10, 3)
+  /// The supplier's lot or batch, from the GRN, or as typed.
+  lotNo           String?
+  notes           String?
+  status          PackageStatus  @default(IN_STOCK)
+  /// Where it came from: GRN (labelled on receipt), STOCK (stock already on
+  /// the rack, labelled later) or SPLIT (cut from another package).
+  sourceType      String
+  /// The GRN, for one labelled on receipt.
+  sourceId        String?
+  grnLineId       String?
+  parentId        String?
+  parent          StockPackage?  @relation("PackageSplit", fields: [parentId], references: [id])
+  children        StockPackage[] @relation("PackageSplit")
+  createdById     String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  moves StockPackageMove[]
+
+  @@index([itemId, warehouseId, status])
+  @@index([sourceType, sourceId])
+  @@index([parentId])
+  @@map("stock_packages")
+}
+
+/// Everything that happened to one package, in order: labelled, issued from,
+/// moved, split, corrected. The stock ledger carries the item-level movement;
+/// this carries which package it came out of.
+model StockPackageMove {
+  id               String          @id @default(cuid())
+  packageId        String
+  package          StockPackage    @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  type             PackageMoveType
+  /// The change to the package, signed: −3 for three issued.
+  qty              Decimal         @db.Decimal(10, 3)
+  balanceAfter     Decimal         @db.Decimal(10, 3)
+  /// The store it was in, and for a move the store it went to.
+  warehouseId      String
+  toWarehouseId    String?
+  /// The document behind it — the requisition issued against, the transfer note.
+  referenceType    String?
+  referenceId      String?
+  referenceNumber  String?
+  /// The other package of a split: the new one, or the one it was cut from.
+  relatedPackageId String?
+  notes            String?
+  createdById      String?
+  createdBy        User?           @relation("PackageMovesBy", fields: [createdById], references: [id])
+  createdAt        DateTime        @default(now())
+
+  @@index([packageId, createdAt])
+  @@map("stock_package_moves")
 }
