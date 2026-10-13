@@ -1,8 +1,8 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { ChevronDown, ChevronRight, Loader2, Printer } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronUp, Loader2, Printer } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { STATUS, openPrintTab, packCount, packLabel, printLabels, qtyText } from './packageTypes'
@@ -60,6 +60,10 @@ export function PackageGroups({
   const [loadingKey, setLoadingKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  // Each item's line, to bring it back into view when it is opened or closed.
+  const lineRefs = useRef(new Map<string, HTMLTableRowElement>())
+  const showLine = (key: string) =>
+    requestAnimationFrame(() => lineRefs.current.get(key)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }))
 
   const fetchRows = useCallback(
     async (g: PackageGroup) => {
@@ -88,15 +92,16 @@ export function PackageGroups({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groups])
 
+  // One item open at a time: opening another closes the last, so the list
+  // never grows into several long ones.
   const toggle = async (g: PackageGroup) => {
-    const next = new Set(open)
-    if (next.has(g.key)) {
-      next.delete(g.key)
-      setOpen(next)
+    if (open.has(g.key)) {
+      setOpen(new Set())
+      showLine(g.key)
       return
     }
-    next.add(g.key)
-    setOpen(next)
+    setOpen(new Set([g.key]))
+    showLine(g.key)
     if (rows[g.key]) return
     setLoadingKey(g.key)
     setError(null)
@@ -169,7 +174,14 @@ export function PackageGroups({
               const allPicked = Boolean(list?.length) && list!.every((p) => picked.has(p.id))
               return (
                 <Fragment key={g.key}>
-                  <tr className={`cursor-pointer ${isOpen ? 'bg-primary/5' : ''}`} onClick={() => void toggle(g)}>
+                  <tr
+                    ref={(el) => {
+                      if (el) lineRefs.current.set(g.key, el)
+                      else lineRefs.current.delete(g.key)
+                    }}
+                    className={`cursor-pointer ${isOpen ? 'bg-primary/5' : ''}`}
+                    onClick={() => void toggle(g)}
+                  >
                     <td className="text-muted-foreground">{isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</td>
                     <td>
                       <div className="font-medium text-foreground">{g.item}</div>
@@ -196,72 +208,90 @@ export function PackageGroups({
                   </tr>
                   {isOpen && (
                     <tr>
-                      <td colSpan={8} className="bg-secondary/30 p-0">
-                        {loadingKey === g.key || !list ? (
-                          <p className="flex items-center gap-2 px-12 py-4 text-sm text-muted-foreground">
-                            <Loader2 size={15} className="animate-spin" /> Loading the packages…
-                          </p>
-                        ) : (
-                          <table className="data-table table-compact min-w-full">
-                            <thead>
-                              <tr>
-                                <th className="w-8 pl-12">
-                                  <input
-                                    type="checkbox"
-                                    aria-label={`Select every package of ${g.item}`}
-                                    checked={allPicked}
-                                    onChange={(e) => pick(list.map((p) => p.id), e.target.checked)}
-                                  />
-                                </th>
-                                <th>Code</th>
-                                <th>Type</th>
-                                <th style={{ textAlign: 'right' }}>In it</th>
-                                <th style={{ textAlign: 'right' }}>Labelled with</th>
-                                <th>Lot</th>
-                                <th>Labelled on</th>
-                                <th>Status</th>
-                                <th />
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {list.map((p) => {
-                                const st = STATUS[p.status] ?? { label: p.status, cls: 'badge-neutral' }
-                                return (
-                                  <tr key={p.id}>
-                                    <td className="pl-12">
-                                      <input
-                                        type="checkbox"
-                                        aria-label={`Select ${p.code}`}
-                                        checked={picked.has(p.id)}
-                                        onChange={(e) => pick([p.id], e.target.checked)}
-                                      />
-                                    </td>
-                                    <td className="whitespace-nowrap">
-                                      <Link href={`/inventory/scan?code=${p.code}`} className="font-mono text-sm font-semibold text-primary hover:underline">
-                                        {p.code}
-                                      </Link>
-                                    </td>
-                                    <td className="whitespace-nowrap text-sm">{packLabel(p.packType)}</td>
-                                    <td className="whitespace-nowrap text-right font-semibold tabular-nums">
-                                      {qtyText(p.qty)} <span className="text-xs font-normal text-muted-foreground">{p.unit}</span>
-                                    </td>
-                                    <td className="whitespace-nowrap text-right text-sm tabular-nums text-muted-foreground">{qtyText(p.initialQty)}</td>
-                                    <td className="whitespace-nowrap text-sm">{p.lotNo ?? <span className="text-muted-foreground">—</span>}</td>
-                                    <td className="whitespace-nowrap text-sm">{day(p.createdAt)}</td>
-                                    <td>
-                                      <span className={`badge ${st.cls}`}>{st.label}</span>
-                                    </td>
-                                    <td className="whitespace-nowrap text-right">
-                                      <button className="btn-ghost p-1.5" title="Print this sticker" onClick={() => printLabels([p.id])}>
-                                        <Printer size={15} />
-                                      </button>
-                                    </td>
+                      <td colSpan={8} className="p-0">
+                        {/* Its own short box: fifty boxes open under one line must
+                          not push the rest of the list, or this line, off the screen. */}
+                        <div className="border-y border-primary/20 bg-secondary/30">
+                          <div className="flex flex-wrap items-center gap-3 px-4 py-2">
+                            {list && (
+                              <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-foreground">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Select every package of ${g.item}`}
+                                  checked={allPicked}
+                                  onChange={(e) => pick(list.map((p) => p.id), e.target.checked)}
+                                />
+                                Select all {list.length}
+                              </label>
+                            )}
+                            <span className="text-sm text-muted-foreground">
+                              {packCount(g.packages, g.packTypes[0] ?? 'OTHER')} of {g.item} in {g.store}
+                            </span>
+                            <button type="button" className="btn-ghost ml-auto h-8" onClick={() => void toggle(g)}>
+                              <ChevronUp size={15} /> Close
+                            </button>
+                          </div>
+                          {loadingKey === g.key || !list ? (
+                            <p className="flex items-center gap-2 px-4 pb-4 text-sm text-muted-foreground">
+                              <Loader2 size={15} className="animate-spin" /> Loading the packages…
+                            </p>
+                          ) : (
+                            <div className="max-h-[22rem] overflow-auto border-t border-border bg-card">
+                              <table className="data-table table-compact w-full">
+                                <thead className="sticky top-0 z-10">
+                                  <tr className="bg-secondary">
+                                    <th className="w-8" />
+                                    <th>Code</th>
+                                    <th>Type</th>
+                                    <th style={{ textAlign: 'right' }}>In it</th>
+                                    <th style={{ textAlign: 'right' }}>Labelled with</th>
+                                    <th>Lot</th>
+                                    <th>Labelled on</th>
+                                    <th>Status</th>
+                                    <th />
                                   </tr>
-                                )
-                              })}
-                            </tbody>
-                          </table>
-                        )}
+                                </thead>
+                                <tbody>
+                                  {list.map((p) => {
+                                    const st = STATUS[p.status] ?? { label: p.status, cls: 'badge-neutral' }
+                                    return (
+                                      <tr key={p.id}>
+                                        <td>
+                                          <input
+                                            type="checkbox"
+                                            aria-label={`Select ${p.code}`}
+                                            checked={picked.has(p.id)}
+                                            onChange={(e) => pick([p.id], e.target.checked)}
+                                          />
+                                        </td>
+                                        <td className="whitespace-nowrap">
+                                          <Link href={`/inventory/scan?code=${p.code}`} className="font-mono text-sm font-semibold text-primary hover:underline">
+                                            {p.code}
+                                          </Link>
+                                        </td>
+                                        <td className="whitespace-nowrap text-sm">{packLabel(p.packType)}</td>
+                                        <td className="whitespace-nowrap text-right font-semibold tabular-nums">
+                                          {qtyText(p.qty)} <span className="text-xs font-normal text-muted-foreground">{p.unit}</span>
+                                        </td>
+                                        <td className="whitespace-nowrap text-right text-sm tabular-nums text-muted-foreground">{qtyText(p.initialQty)}</td>
+                                        <td className="whitespace-nowrap text-sm">{p.lotNo ?? <span className="text-muted-foreground">—</span>}</td>
+                                        <td className="whitespace-nowrap text-sm">{day(p.createdAt)}</td>
+                                        <td>
+                                          <span className={`badge ${st.cls}`}>{st.label}</span>
+                                        </td>
+                                        <td className="whitespace-nowrap text-right">
+                                          <button className="btn-ghost p-1.5" title="Print this sticker" onClick={() => printLabels([p.id])}>
+                                            <Printer size={15} />
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )}
