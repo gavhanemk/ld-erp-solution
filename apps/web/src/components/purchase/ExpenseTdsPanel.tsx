@@ -80,7 +80,7 @@ export function ExpenseTdsPanel({
   const hasLimits = chosen != null && (chosen.singleLimit != null || chosen.yearlyLimit != null)
 
   return (
-    <div className="border-border space-y-2 border-t pt-2">
+    <div className="space-y-2.5 text-sm">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
         <div className="min-w-0">
           <label className="text-muted-foreground mb-1 block text-xs" htmlFor="bill-tds-section">

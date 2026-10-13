@@ -16,6 +16,8 @@ import {
   Package,
   Calculator,
   MapPin,
+  Percent,
+  Tag,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 // The same panel the order and receipt forms are built from, so all three
@@ -26,6 +28,7 @@ import type { NewItem } from '@/components/purchase/NewItemDialog'
 import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
+import { StepInput } from '@/components/ui/StepInput'
 import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
 import {
   CashPaymentSection,
@@ -2347,20 +2350,19 @@ export function PurchaseBillDialog({
                   </div>
                 )}
 
-                <div className="col-span-full flex items-end md:col-span-2">
-                  <label className="text-foreground flex cursor-pointer items-start gap-2 text-sm">
+                <div className="col-span-full">
+                  <label
+                    className="text-foreground inline-flex cursor-pointer items-center gap-2 text-sm"
+                    title="Common on transport and on bills from unregistered parties"
+                  >
                     <input
                       type="checkbox"
-                      className="mt-0.5"
                       checked={isReverseCharge}
                       onChange={(e) => setIsReverseCharge(e.target.checked)}
                     />
-                    <span>
-                      Reverse charge
-                      <span className="text-muted-foreground block text-xs">
-                        We pay the GST to the government, not to the supplier. Common on transport
-                        and on bills from unregistered parties.
-                      </span>
+                    Reverse charge
+                    <span className="text-muted-foreground text-xs">
+                      — we pay this bill’s GST to the government, not the supplier
                     </span>
                   </label>
                 </div>
@@ -2847,205 +2849,217 @@ export function PurchaseBillDialog({
               </div>
             </Section>
 
-            {/* On a goods bill, TDS and the notes box used to sit to the left
-              of this and were taken off the form on request; a bill already
-              carrying either keeps it. An expense bill — where TDS is actually
-              deducted, on services — has its TDS box inside the totals. */}
-            <Section icon={Calculator} title="Totals">
-              <div className="border-border bg-secondary/40 h-fit space-y-1.5 rounded-lg border p-2.5 text-sm">
-                <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
-                <div className="flex items-center justify-between gap-4">
-                  <label htmlFor="bill-discount" className="text-muted-foreground">
-                    Discount on the whole bill
-                  </label>
-                  <input
-                    id="bill-discount"
-                    type="number"
-                    step="0.01"
-                    min={0}
-                    className="form-input h-8 w-32 text-right"
-                    value={discountAmount}
-                    onChange={(e) => setDiscountAmount(e.target.value)}
-                  />
-                </div>
-                {chargeTypes.length > 0 && (
-                  <div className="space-y-1.5 py-0.5">
-                    {charges.map((c, i) => (
-                      <div key={i} className="flex items-center gap-1.5">
-                        <SmartSelect
-                          className="form-input h-8 min-w-0 flex-1 text-xs"
-                          value={c.chargeTypeId}
-                          onChange={(e) => {
-                            const ct = chargeById.get(e.target.value)
-                            setCharges((p) =>
-                              p.map((x, y) =>
-                                y === i
-                                  ? {
-                                      ...x,
-                                      chargeTypeId: e.target.value,
-                                      gstRate:
-                                        x.gstRate ||
-                                        (ct?.defaultGstRate != null
-                                          ? String(ct.defaultGstRate)
-                                          : ''),
-                                    }
-                                  : x
-                              )
-                            )
-                          }}
-                          aria-label={`Charge ${i + 1} type`}
-                        >
-                          <option value="">Charge type…</option>
-                          {chargeTypes.map((ct) => (
-                            <option key={ct.id} value={ct.id}>
-                              {ct.name}
-                            </option>
-                          ))}
-                        </SmartSelect>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min={0}
-                          className="form-input h-8 w-24 shrink-0 text-right text-xs"
-                          placeholder="Amount"
-                          value={String(c.amount)}
-                          onChange={(e) =>
-                            setCharges((p) =>
-                              p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
-                            )
-                          }
-                          aria-label={`Charge ${i + 1} amount`}
-                        />
-                        <input
-                          type="number"
-                          step="0.01"
-                          min={0}
-                          max={100}
-                          className="form-input h-8 w-16 shrink-0 text-right text-xs"
-                          placeholder="GST%"
-                          disabled={taxMode === 'NONE'}
-                          value={taxMode === 'NONE' ? '' : String(c.gstRate)}
-                          onChange={(e) =>
-                            setCharges((p) =>
-                              p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
-                            )
-                          }
-                          aria-label={`Charge ${i + 1} GST rate`}
-                        />
+            {/* The money, in two columns as on the purchase order: what can be
+              changed on the left — the discount, the charges and, on an expense
+              bill, the TDS — and the sum on the right, ending in what the
+              supplier is actually paid. A goods bill has no TDS card; one
+              already carrying TDS keeps it, and the sum still shows it. */}
+            <div className="grid gap-2.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,26rem)]">
+              <div className="space-y-2.5">
+                <Section icon={Tag} title="Discount & Charges">
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-[minmax(0,1fr)_9rem] items-center gap-3">
+                      <label htmlFor="bill-discount" className="text-muted-foreground text-sm">
+                        Discount on the whole bill (₹)
+                      </label>
+                      <StepInput
+                        id="bill-discount"
+                        className="form-input h-8 text-right"
+                        decimals
+                        placeholder="0"
+                        value={discountAmount}
+                        onValueChange={setDiscountAmount}
+                      />
+                    </div>
+                    {chargeTypes.length > 0 && (
+                      <div className="space-y-1.5">
+                        {charges.length > 0 && (
+                          <div className="text-muted-foreground grid grid-cols-[minmax(0,1fr)_7rem_4.5rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
+                            <span>Charge</span>
+                            <span className="text-right">Amount (₹)</span>
+                            <span className="text-right">GST %</span>
+                            <span />
+                          </div>
+                        )}
+                        {charges.map((c, i) => (
+                          <div
+                            key={i}
+                            className="grid grid-cols-[minmax(0,1fr)_7rem_4.5rem_1.75rem] items-center gap-1.5"
+                          >
+                            <SmartSelect
+                              className="form-input h-8 min-w-0 text-xs"
+                              value={c.chargeTypeId}
+                              onChange={(e) => {
+                                const ct = chargeById.get(e.target.value)
+                                setCharges((p) =>
+                                  p.map((x, y) =>
+                                    y === i
+                                      ? {
+                                          ...x,
+                                          chargeTypeId: e.target.value,
+                                          gstRate:
+                                            x.gstRate ||
+                                            (ct?.defaultGstRate != null
+                                              ? String(ct.defaultGstRate)
+                                              : ''),
+                                        }
+                                      : x
+                                  )
+                                )
+                              }}
+                              aria-label={`Charge ${i + 1} type`}
+                            >
+                              <option value="">Pick a charge…</option>
+                              {chargeTypes.map((ct) => (
+                                <option key={ct.id} value={ct.id}>
+                                  {ct.name}
+                                </option>
+                              ))}
+                            </SmartSelect>
+                            <StepInput
+                              className="form-input h-8 text-right text-xs"
+                              decimals
+                              placeholder="0"
+                              value={String(c.amount)}
+                              onValueChange={(v) =>
+                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, amount: v } : x)))
+                              }
+                              aria-label={`Charge ${i + 1} amount`}
+                            />
+                            <StepInput
+                              className="form-input h-8 text-right text-xs"
+                              decimals
+                              max={100}
+                              placeholder="0"
+                              disabled={taxMode === 'NONE'}
+                              value={taxMode === 'NONE' ? '' : String(c.gstRate)}
+                              onValueChange={(v) =>
+                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstRate: v } : x)))
+                              }
+                              aria-label={`Charge ${i + 1} GST rate`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
+                              className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                              aria-label={`Remove charge ${i + 1}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        ))}
                         <button
                           type="button"
-                          onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
-                          className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
-                          aria-label={`Remove charge ${i + 1}`}
+                          onClick={() =>
+                            setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
+                          }
+                          className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
                         >
-                          <Trash2 size={12} />
+                          <Plus size={12} /> Add a charge — freight, transport, packing
                         </button>
                       </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
-                      }
-                      className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
-                    >
-                      <Plus size={12} /> Add charge
-                    </button>
-                  </div>
-                )}
-                <Row label="Taxable value" value={totals.taxable} />
-                {taxMode === 'CGST_SGST' && (
-                  <>
-                    <Row label="CGST" value={totals.tax / 2} />
-                    <Row label="SGST" value={totals.tax / 2} />
-                  </>
-                )}
-                {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                {taxMode === 'NONE' && (
-                  <p className="text-muted-foreground py-1 text-xs">
-                    No GST — this supplier is not registered.
-                  </p>
-                )}
-                {taxMode === null && (
-                  <>
-                    <Row label="GST" value={totals.tax} />
-                    <p className="text-muted-foreground py-1 text-xs">
-                      Choose a supplier to see whether this splits into CGST + SGST or is IGST.
-                    </p>
-                  </>
-                )}
-                {isReverseCharge && totals.tax > 0 && (
-                  <p className="py-1 text-xs text-amber-400">
-                    Reverse charge — the ₹{inr(totals.tax)} of GST above is payable by us to the
-                    government and is not part of what the supplier is paid.
-                  </p>
-                )}
-                <Row label="Rounding" value={totals.roundOff} />
-                <div className="border-border flex items-center justify-between border-t pt-2">
-                  <span className="text-foreground font-semibold">Bill total</span>
-                  <span className="text-foreground text-lg font-semibold tabular-nums">
-                    ₹{inr(totals.total)}
-                  </span>
-                </div>
-                {expenseMode && (
-                  <ExpenseTdsPanel
-                    sections={tdsSections}
-                    sectionId={tdsSectionId}
-                    onSection={(id) => {
-                      tdsChosen.current = true
-                      setTdsSectionId(id)
-                      if (!id) {
-                        setTdsAuto(true)
-                        setTdsTyped('')
-                      }
-                    }}
-                    auto={tdsAuto}
-                    onAuto={(a) => {
-                      setTdsAuto(a)
-                      // The typed box starts from the worked-out figure.
-                      if (!a && !tdsTyped) setTdsTyped(String(totals.tds))
-                    }}
-                    typed={tdsTyped}
-                    onTyped={setTdsTyped}
-                    computed={Math.round((totals.taxable * tdsRateInUse) / 100)}
-                    rate={tdsChoice ? tdsRateInUse : null}
-                    panMissing={panMissing}
-                    taxable={totals.taxable}
-                    yearSoFar={yearSoFar}
-                    onSectionAdded={(id) => {
-                      tdsChosen.current = true
-                      void api
-                        .get<{ data: TdsChoice[] }>(`/purchase/tds/sections?date=${billDate}`)
-                        .then((r) => {
-                          setTdsSections(r.data)
-                          setTdsSectionId(id)
-                        })
-                        .catch(() => setTdsSectionId(id))
-                    }}
-                  />
-                )}
-                {(totals.tds > 0 || (expenseMode && tdsChoice)) && (
-                  <>
-                    {!expenseMode && (
-                      <Row
-                        label={`TDS withheld${tdsSection ? ` (${tdsSection})` : ''}`}
-                        value={-totals.tds}
-                      />
                     )}
-                    <div className="border-border flex items-center justify-between border-t pt-2">
-                      <span className="text-foreground font-medium">Net payable to supplier</span>
-                      <span className="text-foreground font-semibold tabular-nums">
-                        ₹{inr(totals.balance)}
-                      </span>
-                    </div>
-                    <p className="text-muted-foreground text-xs">
-                      Paying this smaller amount settles the bill in full — the TDS goes to the
-                      government instead of to the supplier.
-                    </p>
-                  </>
+                  </div>
+                </Section>
+
+                {expenseMode && (
+                  <Section icon={Percent} title="TDS">
+                    <ExpenseTdsPanel
+                      sections={tdsSections}
+                      sectionId={tdsSectionId}
+                      onSection={(id) => {
+                        tdsChosen.current = true
+                        setTdsSectionId(id)
+                        if (!id) {
+                          setTdsAuto(true)
+                          setTdsTyped('')
+                        }
+                      }}
+                      auto={tdsAuto}
+                      onAuto={(a) => {
+                        setTdsAuto(a)
+                        // The typed box starts from the worked-out figure.
+                        if (!a && !tdsTyped) setTdsTyped(String(totals.tds))
+                      }}
+                      typed={tdsTyped}
+                      onTyped={setTdsTyped}
+                      computed={Math.round((totals.taxable * tdsRateInUse) / 100)}
+                      rate={tdsChoice ? tdsRateInUse : null}
+                      panMissing={panMissing}
+                      taxable={totals.taxable}
+                      yearSoFar={yearSoFar}
+                      onSectionAdded={(id) => {
+                        tdsChosen.current = true
+                        void api
+                          .get<{ data: TdsChoice[] }>(`/purchase/tds/sections?date=${billDate}`)
+                          .then((r) => {
+                            setTdsSections(r.data)
+                            setTdsSectionId(id)
+                          })
+                          .catch(() => setTdsSectionId(id))
+                      }}
+                    />
+                  </Section>
                 )}
               </div>
-            </Section>
+
+              <Section icon={Calculator} title="Totals">
+                <div className="space-y-1.5 text-sm">
+                  <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
+                  {totals.discount > 0 && <Row label="Less discount" value={-totals.discount} />}
+                  {totals.chargeTotal > 0 && <Row label="Add charges" value={totals.chargeTotal} />}
+                  <Row label="Taxable value" value={totals.taxable} />
+                  {taxMode === 'CGST_SGST' && (
+                    <>
+                      <Row label="CGST" value={totals.tax / 2} />
+                      <Row label="SGST" value={totals.tax / 2} />
+                    </>
+                  )}
+                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                  {taxMode === 'NONE' && (
+                    <p className="text-muted-foreground text-xs">No GST — the supplier is not registered.</p>
+                  )}
+                  {taxMode === null && (
+                    <>
+                      <Row label="GST" value={totals.tax} />
+                      <p className="text-muted-foreground text-xs">
+                        Pick the supplier to split this into CGST + SGST or IGST.
+                      </p>
+                    </>
+                  )}
+                  {isReverseCharge && totals.tax > 0 && (
+                    <p className="text-xs text-amber-400">
+                      Reverse charge: the ₹{inr(totals.tax)} of GST is ours to pay, not part of what
+                      the supplier is paid.
+                    </p>
+                  )}
+                  <Row label="Rounding" value={totals.roundOff} />
+                  <div className="border-border flex items-center justify-between border-t pt-2">
+                    <span className="text-foreground font-semibold">Bill total</span>
+                    <span className="text-foreground text-lg font-semibold tabular-nums">
+                      ₹{inr(totals.total)}
+                    </span>
+                  </div>
+                  {(totals.tds > 0 || (expenseMode && tdsChoice)) && (
+                    <>
+                      <Row
+                        label={`Less TDS${(tdsChoice?.section ?? tdsSection) ? ` · ${tdsChoice?.section ?? tdsSection}` : ''}`}
+                        value={-totals.tds}
+                      />
+                      <div className="border-primary/25 bg-primary/10 flex items-center justify-between rounded-lg border px-3 py-2">
+                        <span className="text-foreground font-semibold">Net payable</span>
+                        <span className="text-primary text-lg font-semibold tabular-nums">
+                          ₹{inr(totals.balance)}
+                        </span>
+                      </div>
+                      <p className="text-muted-foreground text-xs">
+                        Paying this settles the bill in full — the TDS goes to the government.
+                      </p>
+                    </>
+                  )}
+                </div>
+              </Section>
+            </div>
 
             {cash && !isEdit && (
               <CashPaymentSection
