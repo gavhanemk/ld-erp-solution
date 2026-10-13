@@ -6,6 +6,7 @@ import { X, Loader2, AlertCircle, Plus, Trash2, Undo2, FileText, Truck, Boxes } 
 import { api, ApiError } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * Sending a customer's own material back to them unworked.
@@ -59,7 +60,8 @@ export function CustomerReturnDialog({
   /** Opened from a row of "Still with us": that customer, store and item. */
   start?: { customerId: string; warehouseId: string; itemId?: string }
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `outward`: the return just saved, for its labels. */
+  onSaved: (message: string, outward?: OutwardRef) => void
 }) {
   const [customerId, setCustomerId] = useState(start?.customerId ?? '')
   const [warehouseId, setWarehouseId] = useState(start?.warehouseId ?? '')
@@ -121,7 +123,7 @@ export function CustomerReturnDialog({
 
     setSaving(true)
     try {
-      const res = await api.post<{ message?: string; data: { returnNumber: string } }>('/inventory/customer-return', {
+      const res = await api.post<{ message?: string; data: { id: string; returnNumber: string } }>('/inventory/customer-return', {
         customerId,
         grnId: grnId || null,
         warehouseId,
@@ -133,7 +135,7 @@ export function CustomerReturnDialog({
         notes: notes || null,
         lines: filled.map((l) => ({ itemId: l.itemId, qty: num(l.qty), notes: l.notes || null })),
       })
-      onSaved(res.message ?? `${res.data.returnNumber} saved.`)
+      onSaved(res.message ?? `${res.data.returnNumber} saved.`, { type: 'CUSTOMER_RETURN', id: res.data.id })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {

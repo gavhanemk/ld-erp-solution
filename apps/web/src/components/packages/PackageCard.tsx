@@ -19,7 +19,10 @@ import { api, ApiError, can } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { QrCode } from './QrCode'
-import { STATUS, openPrintTab, packLabel, printLabels, qtyText, type PackageDetail } from './packageTypes'
+import { STATUS, openPrintTab, packLabel, printLabels, printOutward, qtyText, type OutwardRef, type PackageDetail } from './packageTypes'
+
+/** What an action prints: a label for stock that went out, and the stickers that changed. */
+type Prints = (d: PackageDetail) => { out?: OutwardRef | null; ids: string[] }
 
 type Action = 'issue' | 'move' | 'split' | 'history' | 'more'
 
@@ -63,16 +66,19 @@ export function PackageCard({
   const st = STATUS[pkg.status] ?? { label: pkg.status, cls: 'badge-neutral' }
   const editable = can('inventory', 'edit')
 
-  /** Saves an action. `labels` names the new stickers it makes, printed in a tab opened on the click. */
-  const run = async (path: string, body: unknown, labels?: (d: PackageDetail) => string[]) => {
+  /** Saves an action. `prints` names what it prints, in a tab opened on the click. */
+  const run = async (path: string, body: unknown, prints?: Prints) => {
     setBusy(true)
     setError(null)
-    const tab = labels ? openPrintTab() : null
+    const tab = prints ? openPrintTab() : null
     try {
       const res = await api.post<{ message: string; data: PackageDetail }>(`/packages/${pkg.id}/${path}`, body)
       onChange(res.data)
       onDone(res.message)
-      if (labels) printLabels(labels(res.data), tab)
+      if (prints) {
+        const p = prints(res.data)
+        printOutward(p.out ?? null, p.ids, tab)
+      }
     } catch (err) {
       tab?.close()
       setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
@@ -177,16 +183,29 @@ export function PackageCard({
         {!live && action !== 'history' && action !== 'more' && (
           <p className="text-sm text-muted-foreground">This package has nothing in it, so it cannot be issued, moved or split.</p>
         )}
-        {live && action === 'issue' && <IssuePanel pkg={pkg} busy={busy} onIssue={(b) => run('issue', b)} />}
+        {live && action === 'issue' && (
+          <IssuePanel
+            pkg={pkg}
+            busy={busy}
+            // A label for what goes to the floor, and a fresh sticker for what stays in the package.
+            onIssue={(b) =>
+              run('issue', b, (d) => ({
+                out: { type: 'MR', id: b.mrId, q: `${b.lineId}:${b.qty}:${pkg.warehouse.id}` },
+                ids: d.status === 'IN_STOCK' && d.qty > 0 ? [d.id] : [],
+              }))
+            }
+          />
+        )}
         {live && action === 'move' && (
           <MovePanel
             pkg={pkg}
             busy={busy}
-            onMove={(b) => run('transfer', b, b.qty < pkg.qty - 1e-9 ? (d) => (d.newPackage ? [d.newPackage.id] : []) : undefined)}
+            // Part of it: the new package that went, and a fresh sticker for what stayed.
+            onMove={(b) => run('transfer', b, b.qty < pkg.qty - 1e-9 ? (d) => ({ ids: d.newPackage ? [d.newPackage.id, d.id] : [] }) : undefined)}
           />
         )}
         {live && action === 'split' && (
-          <SplitPanel pkg={pkg} busy={busy} onSplit={(b) => run('split', b, (d) => (d.newPackages ?? []).map((p) => p.id))} />
+          <SplitPanel pkg={pkg} busy={busy} onSplit={(b) => run('split', b, (d) => ({ ids: (d.newPackages ?? []).map((p) => p.id) }))} />
         )}
         {action === 'history' && <HistoryPanel pkg={pkg} />}
         {action === 'more' && (

@@ -46,6 +46,9 @@ export async function lockPackage(tx: Prisma.TransactionClient, id: string) {
   return pkg
 }
 
+/** What a package was labelled from: a GRN, stock already on the rack, a split, or another inward. */
+export type PackageSource = 'GRN' | 'STOCK' | 'SPLIT' | 'STOCK_IN' | 'OPENING' | 'CUSTOMER_GRN' | 'JOB_WORK_RETURN' | 'MR_RETURN'
+
 export interface StockSpot {
   itemId: string
   warehouseId: string
@@ -105,6 +108,53 @@ export async function packageRule(
     c = c.parentId ? byId.get(c.parentId) : undefined
   }
   return { tracked: false, packType, category: own }
+}
+
+/** Units that are themselves a package: 12 rolls are 12 stickers, not one. */
+const UNIT_PACK: Array<[RegExp, PackType]> = [
+  [/^(roll|rolls|rl|rls|than|thans|reel|reels)$/, 'ROLL'],
+  [/^(box|boxes|bx)$/, 'BOX'],
+  [/^(carton|cartons|ctn|ctns)$/, 'CARTON'],
+  [/^(bag|bags)$/, 'BAG'],
+  [/^(bundle|bundles|bdl|bdls)$/, 'BUNDLE'],
+  [/^(packet|packets|pkt|pkts|pack|packs)$/, 'PACKET'],
+  [/^(cone|cones|spool|spools|tube|tubes|drum|drums|can|cans)$/, 'OTHER'],
+]
+
+/**
+ * How an item's stickers start out in the sticker window: what one package is
+ * and how much one sticker holds.
+ *
+ * The item's own remembered setting first. Without one, a unit that is itself
+ * a package — rolls, boxes — gets a sticker each; anything measured — metres,
+ * kilos, pieces — one sticker for the lot, which the person splits if it came
+ * in several. The window always lets them change it.
+ */
+export async function stickerDefaults(
+  tx: Prisma.TransactionClient,
+  item: { categoryId: string; packType: PackType | null; packQty: Prisma.Decimal | number | null; uom: { symbol: string; name?: string | null } | null },
+): Promise<{ packType: PackType; perPack: number | null; tracked: boolean; category: string }> {
+  const rule = await packageRule(tx, item.categoryId)
+  const unit = [item.uom?.symbol, item.uom?.name].map((u) => (u ?? '').trim().toLowerCase())
+  const byUnit = UNIT_PACK.find(([re]) => unit.some((u) => re.test(u)))?.[1] ?? null
+  const remembered = item.packQty != null && Number(item.packQty) > 0 ? Number(item.packQty) : null
+  return {
+    packType: item.packType ?? (byUnit && byUnit !== 'OTHER' ? byUnit : null) ?? rule.packType ?? byUnit ?? 'BOX',
+    perPack: remembered ?? (byUnit ? 1 : null),
+    tracked: rule.tracked,
+    category: rule.category,
+  }
+}
+
+/** 12 at 1 a sticker → twelve 1s; 25 at 10 → 10, 10, 5; nothing to go by → one for the lot. */
+export function suggestQtys(total: number, perPack: number | null): number[] {
+  const t = round3(total)
+  if (!(t > 0)) return []
+  if (!perPack || perPack >= t) return [t]
+  const n = Math.floor(t / perPack + 1e-9)
+  if (n > 500) return [t]
+  const rest = round3(t - n * perPack)
+  return [...Array.from({ length: n }, () => perPack), ...(rest > 0.0005 ? [rest] : [])]
 }
 
 /** Every category whose items are kept in packages, including sub-categories that inherit it. */
@@ -173,8 +223,10 @@ export async function createPackages(
     qtys: number[]
     lotNo?: string | null
     notes?: string | null
-    sourceType: 'GRN' | 'STOCK' | 'SPLIT'
+    sourceType: PackageSource
     sourceId?: string | null
+    /** The document's number, printed on the sticker. */
+    sourceRef?: string | null
     grnLineId?: string | null
     parentId?: string | null
     userId: string | null
@@ -219,6 +271,7 @@ export async function createPackages(
         notes: input.notes || null,
         sourceType: input.sourceType,
         sourceId: input.sourceId ?? null,
+        sourceRef: input.sourceRef ?? null,
         grnLineId: input.grnLineId ?? null,
         parentId: input.parentId ?? null,
         createdById: input.userId,

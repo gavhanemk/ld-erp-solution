@@ -6,6 +6,7 @@ import { CheckCircle2, FileText, Info, Tags } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatRupees } from '@/lib/utils'
+import { InwardStickers } from '@/components/packages/InwardStickers'
 
 /** Which items of an approved stock-in need stickers, and which are not kept in packages. */
 export interface StickerNews {
@@ -26,9 +27,10 @@ const names = (list: Array<{ name: string }>) => list.map((x) => x.name).join(',
 /**
  * Where the stickers are after a stock-in is approved, or why there are none.
  * Without it somebody approves 12 rolls and goes looking for stickers that a
- * category not kept in packages never makes.
+ * category not kept in packages never makes. `onMake` opens the sticker
+ * window again, for somebody who closed it with "Later".
  */
-export function StickerNote({ stickers }: { stickers: StickerNews }) {
+export function StickerNote({ stickers, onMake }: { stickers: StickerNews; onMake?: () => void }) {
   const byCategory = new Map<string, string[]>()
   for (const u of stickers.untracked) byCategory.set(u.category, [...(byCategory.get(u.category) ?? []), u.name])
 
@@ -38,12 +40,19 @@ export function StickerNote({ stickers }: { stickers: StickerNews }) {
         <div className="flex flex-wrap items-center gap-2">
           <Tags size={14} className="text-primary shrink-0" />
           <span className="text-foreground text-sm">
-            {names(stickers.tracked)} {stickers.tracked.length === 1 ? 'is' : 'are'} kept in packages. Make the stickers next.
+            {names(stickers.tracked)} {stickers.tracked.length === 1 ? 'is' : 'are'} kept in packages. Print the stickers next.
           </span>
-          <Link href="/inventory/packages?tab=label" className="btn-primary h-7 px-2.5 text-xs">
-            <Tags size={13} />
-            Make stickers
-          </Link>
+          {onMake ? (
+            <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={onMake}>
+              <Tags size={13} />
+              Print stickers
+            </button>
+          ) : (
+            <Link href="/inventory/packages?tab=label" className="btn-primary h-7 px-2.5 text-xs">
+              <Tags size={13} />
+              Make stickers
+            </Link>
+          )}
         </div>
       )}
       {[...byCategory].map(([category, items]) => (
@@ -74,6 +83,9 @@ export function StockInNext({ saved, message, onApproved }: { saved: SavedStockI
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<{ message: string; stickers?: StickerNews } | null>(null)
+  // Approving opens the sticker window by itself; printing from it says so here.
+  const [stickersOpen, setStickersOpen] = useState(false)
+  const [printed, setPrinted] = useState<string | null>(null)
 
   const worth = saved.lines.reduce((s, l) => s + Number(l.difference) * Number(l.unitRate ?? 0), 0)
 
@@ -84,6 +96,7 @@ export function StockInNext({ saved, message, onApproved }: { saved: SavedStockI
       const res = await api.post<{ message?: string; stickers?: StickerNews }>(`/inventory/adjustments/${saved.id}/approve`, {})
       setDone({ message: res.message ?? `${saved.adjustmentNumber} approved.`, stickers: res.stickers })
       setConfirming(false)
+      if (res.stickers?.tracked.length) setStickersOpen(true)
       onApproved()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not approve it.')
@@ -101,7 +114,14 @@ export function StockInNext({ saved, message, onApproved }: { saved: SavedStockI
             <CheckCircle2 size={15} />
             {done.message}
           </p>
-          {done.stickers && <StickerNote stickers={done.stickers} />}
+          {printed ? (
+            <p className="mt-1 flex items-center gap-1.5 text-sm text-emerald-400">
+              <Tags size={14} />
+              {printed}
+            </p>
+          ) : (
+            done.stickers && <StickerNote stickers={done.stickers} onMake={() => setStickersOpen(true)} />
+          )}
         </>
       ) : (
         <>
@@ -123,6 +143,16 @@ export function StockInNext({ saved, message, onApproved }: { saved: SavedStockI
         </>
       )}
 
+      {stickersOpen && (
+        <InwardStickers
+          source={{ type: 'STOCK_IN', id: saved.id }}
+          onClose={() => setStickersOpen(false)}
+          onDone={(m) => {
+            setStickersOpen(false)
+            setPrinted(m)
+          }}
+        />
+      )}
       {confirming && (
         <ReasonDialog
           title={`Approve ${saved.adjustmentNumber}?`}

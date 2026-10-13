@@ -30,6 +30,7 @@ interface ToLabel {
     accepted: number
     toLabel: number
     packType: string
+    perPack: number | null
   }>
   loose: Array<{
     itemId: string
@@ -43,6 +44,7 @@ interface ToLabel {
     owner: string | null
     qty: number
     packType: string
+    perPack: number | null
   }>
 }
 
@@ -384,6 +386,7 @@ function ToLabelView({
                               supplier: l.supplier,
                               lotNo: l.lotNo,
                               packType: l.packType,
+                              perPack: l.perPack,
                               max: l.toLabel,
                             })
                           }
@@ -448,6 +451,7 @@ function ToLabelView({
                                 ownerCustomerId: l.ownerCustomerId,
                                 owner: l.owner,
                                 packType: l.packType,
+                                perPack: l.perPack,
                                 max: l.qty,
                               })
                             }

@@ -153,10 +153,12 @@ const formFields: FormField[] = [
   },
   // Stock of these items is labelled with QR stickers and issued by scanning.
   // A sub-category follows its main category, so ticking Fabric covers them all.
+  // On for a new category: stickers pop up after every inward unless switched off.
   {
     name: 'trackPackages',
     label: 'Track by package',
     type: 'checkbox',
+    checkedForNew: true,
     placeholder: 'QR sticker on each package',
     helpFor: (v) =>
       v.parentId

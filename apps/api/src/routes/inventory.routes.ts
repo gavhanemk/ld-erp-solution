@@ -3997,6 +3997,8 @@ router.post(
           ? `${result.returnNumber} saved. Everything sent on ${result.challan.challanNumber} is now back.`
           : `${result.returnNumber} saved. Some of ${result.challan.challanNumber} is still out.`,
       data: result.challan,
+      // So the screen can offer stickers for what came back.
+      returnId: result.returnId,
     })
   },
 )

@@ -33,6 +33,7 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { InwardRef } from '@/components/packages/InwardStickers'
 
 /**
  * Booking in what arrived against an order.
@@ -580,7 +581,8 @@ export function ReceiveGoodsDialog({
   grnId,
 }: {
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `stickers`: a new receipt, for its sticker window. A correction has none. */
+  onSaved: (message: string, stickers?: InwardRef) => void
   /**
    * The order to open on, when the screen already knows which one.
    *
@@ -1122,7 +1124,8 @@ export function ReceiveGoodsDialog({
       onSaved(
         failed.length
           ? `${base} ${failed.length === 1 ? 'A file' : `${failed.length} files`} did not attach: ${failed.join(', ')}.`
-          : base
+          : base,
+        editing ? undefined : { type: 'GRN', id: res.data.id }
       )
     } catch (err) {
       setError(apiErrorMessage(err))

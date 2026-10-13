@@ -25,6 +25,8 @@ export interface LabelTarget {
   supplier?: string | null
   lotNo?: string | null
   packType: string
+  /** What one sticker holds, from the item's remembered setting or its unit. */
+  perPack?: number | null
   /** How much can be labelled. */
   max: number
 }
@@ -54,9 +56,12 @@ export function LabelDialog({
   onDone: (message: string, ids: string[]) => void
 }) {
   const [packType, setPackType] = useState(target.packType || 'BOX')
-  const [mode, setMode] = useState<'same' | 'each'>(target.packType === 'ROLL' ? 'each' : 'same')
-  const [count, setCount] = useState('')
-  const [each, setEach] = useState('')
+  // Starts from what one sticker usually holds: a roll a sticker, say.
+  const start = target.perPack && target.perPack > 0 ? Math.floor(target.max / target.perPack + 1e-9) : 0
+  const [mode, setMode] = useState<'same' | 'each'>(start > 0 || target.packType !== 'ROLL' ? 'same' : 'each')
+  const [count, setCount] = useState(start > 0 && start <= 500 ? String(start) : '')
+  const [each, setEach] = useState(start > 0 && start <= 500 ? String(target.perPack) : '')
+  const [remember, setRemember] = useState(false)
   const [rows, setRows] = useState<string[]>(['', '', ''])
   const [paste, setPaste] = useState<string | null>(null)
   const [lotNo, setLotNo] = useState(target.lotNo ?? '')
@@ -90,6 +95,7 @@ export function LabelDialog({
         packType,
         qtys,
         lotNo: lotNo.trim() || null,
+        remember,
       })
       printLabels(res.data.map((p) => p.id), tab)
       onDone(res.message, res.data.map((p) => p.id))
@@ -127,7 +133,19 @@ export function LabelDialog({
           Cancel
         </button>
       }
-      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${packCount(qtys.length, packType)}, ${qtyText(total)} ${unit}`}
+      footerNote={
+        blocker ? (
+          <span className="warn-text">{blocker}</span>
+        ) : (
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            {`${packCount(qtys.length, packType)}, ${qtyText(total)} ${unit}`}
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+              Remember for this item
+            </label>
+          </span>
+        )
+      }
     >
       <Section icon={Tags} title="What is being labelled">
         <div className="grid gap-x-4 gap-y-3 sm:grid-cols-3">

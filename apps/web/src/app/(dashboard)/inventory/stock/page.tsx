@@ -11,9 +11,12 @@ import {
 import { api, ApiError, masterResource } from '@/lib/api'
 import { StockMoveDialog, type MoveMode } from '@/components/inventory/StockMoveDialog'
 import { StockInNext, type SavedStockIn } from '@/components/inventory/StockInNext'
+import { InwardStickers, type InwardRef } from '@/components/packages/InwardStickers'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { ImportItemsDialog } from '@/components/masters/ImportItemsDialog'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { OutwardStickers } from '@/components/packages/OutwardStickers'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * What is on hand, right now, everywhere.
@@ -133,6 +136,10 @@ function StockScreen() {
   const [message, setMessage] = useState<string | null>(null)
   /** A stock-in just saved: it waits for approval, so the message offers the next step. */
   const [stockIn, setStockIn] = useState<SavedStockIn | null>(null)
+  /** Opening stock just entered: its stickers, ready to print. */
+  const [inward, setInward] = useState<InwardRef | null>(null)
+  /** Stock that just went out: its labels, and the packages it came from. */
+  const [outward, setOutward] = useState<OutwardRef | null>(null)
   const [exporting, setExporting] = useState(false)
 
   const [search, setSearch] = useState('')
@@ -592,9 +599,35 @@ function StockScreen() {
           onClose={() => setDialog(null)}
           onSaved={(msg, data) => {
             setStockIn(dialog === 'stockin' ? (data as SavedStockIn) : null)
+            const reference = (data as { reference?: string } | undefined)?.reference
+            if (dialog === 'opening' && reference) setInward({ type: 'OPENING', id: reference })
+            // A transfer: labels for what is going across, and the rolls it came from.
+            const moved = (data as { id?: string; transferNumber?: string } | undefined)
+            if (dialog === 'transfer' && moved?.id && moved.transferNumber) setOutward({ type: 'TRANSFER', id: moved.id })
             setDialog(null)
             setMessage(msg)
             void load()
+          }}
+        />
+      )}
+      {outward && (
+        <OutwardStickers
+          source={outward}
+          onClose={() => setOutward(null)}
+          onDone={(m) => {
+            setOutward(null)
+            setMessage(m)
+          }}
+        />
+      )}
+      {inward && (
+        <InwardStickers
+          source={inward}
+          onClose={() => setInward(null)}
+          onDone={(m) => {
+            setInward(null)
+            setStockIn(null)
+            setMessage(m)
           }}
         />
       )}

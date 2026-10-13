@@ -13,8 +13,12 @@ import {
   positionOf,
   recordPackageMove,
   round3,
+  stickerDefaults,
+  suggestQtys,
   trackedCategoryIds,
+  type PackageSource,
 } from '../services/package.service'
+import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
 
 /*
  * Labelled packages of stock and what is done to them by scanning.
@@ -30,7 +34,8 @@ const MODULE = 'inventory'
 const PACK_TYPES = ['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER'] as const
 const qty = z.number({ invalid_type_error: 'Quantity has to be a number' }).positive('Quantity has to be more than nought')
 
-const createSchema = z.object({
+/** One item's stickers in one store. */
+const groupSchema = z.object({
   itemId: z.string().min(1, 'Choose the item'),
   warehouseId: z.string().min(1, 'Choose the store'),
   ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).default('OWNED'),
@@ -40,6 +45,58 @@ const createSchema = z.object({
   lotNo: z.string().max(50).optional().nullable(),
   notes: z.string().max(500).optional().nullable(),
   grnLineId: z.string().optional().nullable(),
+  /** Keep this pack type and quantity as the item's own, for next time. */
+  remember: z.boolean().optional().default(false),
+})
+
+/** The inward documents the sticker window opens after. */
+const INWARD_SOURCES = ['GRN', 'STOCK_IN', 'OPENING', 'CUSTOMER_GRN', 'JOB_WORK_RETURN', 'MR_RETURN'] as const
+type InwardSource = (typeof INWARD_SOURCES)[number]
+/** What each one writes on the stock ledger. */
+const LEDGER_REF: Record<InwardSource, string> = {
+  GRN: 'GRN',
+  STOCK_IN: 'STOCK_IN',
+  OPENING: 'OPENING_STOCK',
+  CUSTOMER_GRN: 'CUSTOMER_GRN',
+  JOB_WORK_RETURN: 'JOB_WORK_RETURN',
+  MR_RETURN: 'MR_RETURN',
+}
+const planSchema = z.object({
+  sourceType: z.enum(INWARD_SOURCES),
+  sourceId: z.string().min(1),
+  /**
+   * What came in, when the document alone cannot say: a requisition can be
+   * returned to more than once, and its ledger rows share its id.
+   */
+  lines: z
+    .array(
+      z.object({
+        itemId: z.string().min(1),
+        warehouseId: z.string().min(1),
+        ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).default('OWNED'),
+        ownerCustomerId: z.string().optional().nullable(),
+        qty,
+        lotNo: z.string().max(50).optional().nullable(),
+      }),
+    )
+    .max(200)
+    .optional(),
+})
+const batchSchema = z
+  .object({
+    sourceType: z.enum(INWARD_SOURCES),
+    sourceId: z.string().min(1),
+    groups: z.array(groupSchema).min(1, 'Choose at least one item to label').max(100),
+  })
+  .refine((d) => d.groups.reduce((s, g) => s + g.qtys.length, 0) <= 500, { message: 'Up to 500 stickers at a time', path: ['groups'] })
+/** Stock that went out: the document, and for an issue made more than once, what this one handed over. */
+const outwardSchema = z.object({
+  type: z.enum(OUTWARD_TYPES),
+  id: z.string().min(1),
+  q: z.string().max(4000).optional().nullable(),
+})
+const outwardApplySchema = outwardSchema.extend({
+  takes: z.array(z.object({ packageId: z.string().min(1), qty })).max(200),
 })
 const issueSchema = z.object({
   mrId: z.string().min(1, 'Choose the requisition'),
@@ -338,10 +395,17 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
   })
   const doneOf = new Map(labelled.map((l) => [l.grnLineId, Number(l._sum.initialQty ?? 0)]))
 
-  const rules = new Map<string, Awaited<ReturnType<typeof packageRule>>>()
-  const ruleOf = async (categoryId: string) => {
-    if (!rules.has(categoryId)) rules.set(categoryId, await packageRule(prisma, categoryId))
-    return rules.get(categoryId)!
+  // How each item's stickers start out: its remembered setting, or one per roll or box.
+  const defaults = new Map<string, Awaited<ReturnType<typeof stickerDefaults>>>()
+  const defaultsOf = async (itemId: string) => {
+    if (!defaults.has(itemId)) {
+      const item = await prisma.item.findUniqueOrThrow({
+        where: { id: itemId },
+        select: { categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+      })
+      defaults.set(itemId, await stickerDefaults(prisma, item))
+    }
+    return defaults.get(itemId)!
   }
 
   const lines = []
@@ -364,7 +428,8 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
       lotNo: l.batchNumber,
       accepted: Number(l.acceptedQty),
       toLabel: Math.max(0, Math.min(remaining, pos.loose)),
-      packType: (await ruleOf(l.item.categoryId)).packType ?? 'BOX',
+      packType: (await defaultsOf(l.itemId)).packType,
+      perPack: (await defaultsOf(l.itemId)).perPack,
     })
   }
 
@@ -392,7 +457,10 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
     ORDER BY i.name, w.name
   `
   const looseRows = []
-  for (const r of loose) looseRows.push({ ...r, qty: round3(r.qty), packType: (await ruleOf(r.categoryId)).packType ?? 'BOX' })
+  for (const r of loose) {
+    const d = await defaultsOf(r.itemId)
+    looseRows.push({ ...r, qty: round3(r.qty), packType: d.packType, perPack: d.perPack })
+  }
 
   const grns = [...new Map(lines.map((l) => [l.grnId, { id: l.grnId, grnNumber: l.grnNumber, grnDate: l.grnDate, supplier: l.supplier }])).values()]
   res.json({ success: true, data: { tracked: true, grns, lines, loose: looseRows } })
@@ -427,12 +495,207 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           store: r.warehouse.name,
           lotNo: r.lotNo,
           owner: r.ownerCustomer?.name ?? null,
-          grnNumber: g?.grnNumber ?? null,
+          // The document it came in on: a GRN, or a stock-in, a customer's receipt…
+          grnNumber: g?.grnNumber ?? r.sourceRef ?? null,
           supplier: g?.po?.supplier?.name ?? null,
           date: g?.grnDate ?? r.createdAt,
         }
       }),
     },
+  })
+})
+
+/**
+ * Labels for stock going out: one for each line of an issue, a job-work
+ * challan, a return or a transfer, with the document number as its QR, who it
+ * went to, and how much. Stuck on what leaves, so the floor, the job worker or
+ * the supplier can tell which document it came on.
+ */
+router.get('/outward-labels', requirePermission(MODULE, 'view'), async (req, res) => {
+  const type = z.enum(OUTWARD_TYPES).parse(req.query.type)
+  const id = z.string().min(1).parse(req.query.id)
+  const doc = await loadOutward(type, id, typeof req.query.q === 'string' ? req.query.q : null)
+  const company = await prisma.company.findFirst({ select: { name: true } })
+  res.json({
+    success: true,
+    data: {
+      company: company?.name ?? '',
+      labels: doc.lines.map((l) => ({
+        key: l.key,
+        tag: OUTWARD[type].tag,
+        docNumber: doc.number,
+        item: l.item,
+        itemCode: l.itemCode,
+        qty: round3(l.qty),
+        unit: l.unit,
+        to: doc.to,
+        from: l.from,
+        owner: l.owner,
+        date: new Date(),
+      })),
+    },
+  })
+})
+
+/** What went out, and — where it left labelled stock without a scan — the packages it could have come from. */
+async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
+  const seen = new Set<string>()
+  const spots = []
+  for (const l of doc.lines) {
+    const key = [l.itemId, l.warehouseId, l.ownership, l.ownerCustomerId ?? ''].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    const spot = { itemId: l.itemId, warehouseId: l.warehouseId, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId }
+    const pos = await positionOf(prisma, spot)
+    // Packages claiming more than the store now holds: what went out came from them.
+    if (pos.loose >= -0.0005) continue
+    const over = round3(-pos.loose)
+    const packages = await prisma.stockPackage.findMany({
+      where: { ...spot, status: 'IN_STOCK' },
+      select: { id: true, code: true, qty: true, lotNo: true, packType: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
+    })
+    // Stock below nothing with no stickers on it at all is a count to make, not a package to pick.
+    if (!packages.length) continue
+    // The oldest first, as a store issues: a suggestion the person can change.
+    let left = over
+    spots.push({
+      key,
+      itemId: l.itemId,
+      item: l.item,
+      itemCode: l.itemCode,
+      unit: l.unit,
+      warehouseId: l.warehouseId,
+      store: l.from,
+      ownership: l.ownership,
+      ownerCustomerId: l.ownerCustomerId,
+      over,
+      packages: packages.map((p) => {
+        const take = round3(Math.max(0, Math.min(Number(p.qty), left)))
+        left = round3(left - take)
+        return { id: p.id, code: p.code, qty: Number(p.qty), lotNo: p.lotNo, packType: p.packType, take }
+      }),
+    })
+  }
+  return spots
+}
+
+/**
+ * The window after stock goes out: its lines, for their labels, and the rolls
+ * or boxes it must have come from where it was not scanned out.
+ */
+router.post('/outward/plan', requirePermission(MODULE, 'view'), async (req, res) => {
+  const data = outwardSchema.parse(req.body)
+  const doc = await loadOutward(data.type, data.id, data.q)
+  res.json({
+    success: true,
+    data: {
+      type: data.type,
+      number: doc.number,
+      to: doc.to,
+      moves: OUTWARD[data.type].moves,
+      lines: doc.lines.map((l) => ({ key: l.key, item: l.item, itemCode: l.itemCode, qty: round3(l.qty), unit: l.unit, from: l.from, owner: l.owner })),
+      spots: await outwardSpots(doc),
+    },
+  })
+})
+
+/**
+ * Takes what went out off the packages it came from, so their stickers say
+ * what is really in them. Stock that left us empties or shrinks its package;
+ * stock that only moved takes its package along — a whole roll moves, part of
+ * one becomes a new roll in the other store. Returns the packages whose
+ * stickers have changed, to print fresh.
+ */
+router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = outwardApplySchema.parse(req.body)
+  const doc = await loadOutward(data.type, data.id, data.q)
+  const { moves } = OUTWARD[data.type]
+  if (moves && !doc.toWarehouseId) throw new AppError('Where it went is not on the document.', 400, 'NO_DESTINATION')
+  const spots = new Set(doc.lines.map((l) => [l.itemId, l.warehouseId, l.ownership, l.ownerCustomerId ?? ''].join('|')))
+
+  const result = await prisma.$transaction(
+    async (tx) => {
+      const reprint: string[] = []
+      const taken = new Map<string, number>()
+      for (const t of data.takes) {
+        const pkg = await lockPackage(tx, t.packageId)
+        const key = [pkg.itemId, pkg.warehouseId, pkg.ownership, pkg.ownerCustomerId ?? ''].join('|')
+        const unit = pkg.item.uom?.symbol ?? ''
+        if (!spots.has(key)) throw new AppError(`${pkg.code} is not stock that went out on ${doc.number}.`, 400, 'WRONG_PACKAGE')
+        if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is no longer in stock.`, 400, 'NOT_IN_STOCK')
+        if (t.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
+
+        // No more off the packages than left without a scan: the rest of the
+        // labelled stock is still on the rack.
+        if (!taken.has(key)) {
+          const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
+          taken.set(key, round3(Math.max(0, -pos.loose)))
+        }
+        const room = taken.get(key)!
+        if (t.qty > room + 1e-6) {
+          throw new AppError(`Only ${room} ${unit} of ${pkg.item.name} went out without a scan, so ${t.qty} cannot come off ${pkg.code}.`, 400, 'OVER_OUTWARD')
+        }
+        taken.set(key, round3(room - t.qty))
+
+        const left = round3(Number(pkg.qty) - t.qty)
+        const ref = { referenceType: OUTWARD[data.type].ledger, referenceId: doc.id, referenceNumber: doc.number, userId: req.user?.id ?? null }
+        if (!moves) {
+          await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'EMPTY' : 'IN_STOCK' } })
+          await recordPackageMove(tx, { packageId: pkg.id, type: 'ISSUED', qty: -t.qty, balanceAfter: left, warehouseId: pkg.warehouseId, notes: `To ${doc.to}`, ...ref })
+          if (left > 0) reprint.push(pkg.id)
+        } else if (left <= 0) {
+          // The whole roll went: it keeps its sticker, now in the other store.
+          await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: doc.toWarehouseId! } })
+          await recordPackageMove(tx, {
+            packageId: pkg.id,
+            type: 'TRANSFERRED',
+            qty: Number(pkg.qty),
+            balanceAfter: Number(pkg.qty),
+            warehouseId: pkg.warehouseId,
+            toWarehouseId: doc.toWarehouseId,
+            notes: `To ${doc.to}`,
+            ...ref,
+          })
+        } else {
+          // Part of it went: a new package in the other store, and the rest stays.
+          await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left } })
+          const [child] = await createPackages(tx, {
+            spot: { itemId: pkg.itemId, warehouseId: doc.toWarehouseId!, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
+            packType: pkg.packType,
+            qtys: [t.qty],
+            lotNo: pkg.lotNo,
+            sourceType: 'SPLIT',
+            sourceRef: doc.number,
+            parentId: pkg.id,
+            userId: req.user?.id ?? null,
+            fromPackage: true,
+            unit,
+            itemName: pkg.item.name,
+          })
+          await recordPackageMove(tx, {
+            packageId: pkg.id,
+            type: 'SPLIT',
+            qty: -t.qty,
+            balanceAfter: left,
+            warehouseId: pkg.warehouseId,
+            toWarehouseId: doc.toWarehouseId,
+            relatedPackageId: child.id,
+            notes: `${child.code} to ${doc.to}`,
+            ...ref,
+          })
+          reprint.push(pkg.id, child.id)
+        }
+      }
+      return reprint
+    },
+    { timeout: 60_000, maxWait: 20_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: data.takes[0]?.packageId ?? doc.id, after: { outward: doc.number, takes: data.takes } })
+  res.json({
+    success: true,
+    message: data.takes.length ? `Packages brought up to date with ${doc.number}.` : `Labels for ${doc.number}.`,
+    data: { reprint: result },
   })
 })
 
@@ -448,63 +711,262 @@ router.get('/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await detail(req.params.id) })
 })
 
+/**
+ * Labels one item's stock in one store: the checks every way of making
+ * stickers shares. A GRN line may not be labelled past what it brought in;
+ * anything else may not be labelled past what is loose.
+ */
+async function labelGroup(
+  tx: Prisma.TransactionClient,
+  g: z.infer<typeof groupSchema>,
+  source: { type: InwardSource | 'STOCK'; id: string | null; ref: string | null },
+  userId: string | null,
+) {
+  const item = await tx.item.findUnique({ where: { id: g.itemId }, select: { name: true, categoryId: true, uom: { select: { symbol: true } } } })
+  if (!item) throw new AppError('That item does not exist', 404, 'NOT_FOUND')
+  const rule = await packageRule(tx, item.categoryId)
+  if (!rule.tracked) {
+    throw new AppError(
+      `${item.name} is not kept in packages: "Track by package" is switched off for ${rule.category} in Masters → Item Categories.`,
+      400,
+      'NOT_TRACKED',
+    )
+  }
+  const spot = {
+    itemId: g.itemId,
+    warehouseId: g.warehouseId,
+    ownership: g.ownership,
+    ownerCustomerId: g.ownership === 'CUSTOMER_OWNED' ? (g.ownerCustomerId ?? null) : null,
+  }
+  let sourceType: PackageSource = source.type
+  let sourceId = source.id
+  let sourceRef = source.ref
+  if (g.grnLineId) {
+    const line = await tx.gRNLine.findUnique({
+      where: { id: g.grnLineId },
+      select: { grnId: true, itemId: true, warehouseId: true, acceptedQty: true, grn: { select: { grnNumber: true } } },
+    })
+    if (!line || line.itemId !== g.itemId || line.warehouseId !== g.warehouseId) {
+      throw new AppError('That GRN line is not for this item in this store.', 400, 'WRONG_LINE')
+    }
+    const done = await tx.stockPackage.aggregate({ where: { grnLineId: g.grnLineId, status: { not: 'VOID' } }, _sum: { initialQty: true } })
+    const left = round3(Number(line.acceptedQty) - Number(done._sum.initialQty ?? 0))
+    const total = round3(g.qtys.reduce((s, q) => s + q, 0))
+    if (total > left + 1e-9) {
+      throw new AppError(`Only ${left} ${item.uom?.symbol ?? ''} of ${item.name} on this GRN is still to be labelled, not ${total}.`, 400, 'OVER_GRN')
+    }
+    sourceType = 'GRN'
+    sourceId = line.grnId
+    sourceRef = line.grn.grnNumber
+  }
+  const created = await createPackages(tx, {
+    spot,
+    packType: g.packType,
+    qtys: g.qtys,
+    lotNo: g.lotNo,
+    notes: g.notes,
+    sourceType,
+    sourceId,
+    sourceRef,
+    grnLineId: g.grnLineId ?? null,
+    userId,
+    unit: item.uom?.symbol ?? '',
+    itemName: item.name,
+  })
+  // "Remember for this item": what one package is, and — when they were all
+  // the same, give or take a smaller last one — how much a sticker holds.
+  if (g.remember) {
+    const head = g.qtys.slice(0, -1)
+    const same = head.every((q) => q === g.qtys[0]) && g.qtys[g.qtys.length - 1] <= g.qtys[0]
+    await tx.item.update({ where: { id: g.itemId }, data: { packType: g.packType, packQty: same && g.qtys.length > 1 ? g.qtys[0] : null } })
+  }
+  return created
+}
+
+const labelledMessage = (created: Array<{ code: string }>) =>
+  `${created.length} ${created.length === 1 ? 'package' : 'packages'} labelled: ${created[0].code}${created.length > 1 ? ` to ${created[created.length - 1].code}` : ''}.`
+
 /** Labelling stock: one package per quantity given. */
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const data = createSchema.parse(req.body)
+  const data = groupSchema.parse(req.body)
+  const created = await prisma.$transaction((tx) => labelGroup(tx, data, { type: 'STOCK', id: null, ref: null }, req.user?.id ?? null), {
+    timeout: 60_000,
+    maxWait: 20_000,
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockPackage', entityId: created[0].id, after: { codes: created.map((c) => c.code) } })
+  res.status(201).json({ success: true, message: labelledMessage(created), data: created.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })) })
+})
+
+/** The number printed on a sticker for the document its stock came in on. */
+async function sourceRefOf(type: InwardSource, id: string): Promise<string | null> {
+  switch (type) {
+    case 'GRN':
+      return (await prisma.gRN.findUnique({ where: { id }, select: { grnNumber: true } }))?.grnNumber ?? null
+    case 'STOCK_IN':
+      return (await prisma.stockAdjustment.findUnique({ where: { id }, select: { adjustmentNumber: true } }))?.adjustmentNumber ?? null
+    case 'OPENING':
+      return 'Opening stock'
+    case 'CUSTOMER_GRN':
+      return (await prisma.customerGRN.findUnique({ where: { id }, select: { grnNumber: true } }))?.grnNumber ?? null
+    case 'JOB_WORK_RETURN':
+      return (await prisma.jobWorkReturn.findUnique({ where: { id }, select: { returnNumber: true } }))?.returnNumber ?? null
+    case 'MR_RETURN':
+      return (await prisma.materialRequisition.findUnique({ where: { id }, select: { mrNumber: true } }))?.mrNumber ?? null
+  }
+}
+
+type Came = {
+  itemId: string
+  warehouseId: string
+  ownership: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomerId: string | null
+  qty: number
+  lotNo: string | null
+  grnLineId: string | null
+}
+
+/** What came in on one inward document: its GRN lines, the lines given, or its rows on the stock ledger. */
+async function whatCameIn(data: z.infer<typeof planSchema>): Promise<Came[]> {
+  if (data.sourceType === 'GRN') {
+    const lines = await prisma.gRNLine.findMany({
+      where: { grnId: data.sourceId, acceptedQty: { gt: 0 } },
+      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true },
+      orderBy: { id: 'asc' },
+    })
+    return lines.map((l) => ({
+      itemId: l.itemId,
+      warehouseId: l.warehouseId,
+      ownership: 'OWNED' as const,
+      ownerCustomerId: null,
+      qty: Number(l.acceptedQty),
+      lotNo: l.batchNumber,
+      grnLineId: l.id,
+    }))
+  }
+  if (data.lines?.length) {
+    return data.lines.map((l) => ({ ...l, ownerCustomerId: l.ownerCustomerId ?? null, lotNo: l.lotNo ?? null, grnLineId: null }))
+  }
+  // Every inward writes its rows on the ledger, so that is where to read it.
+  const rows = await prisma.stockLedger.findMany({
+    where: { referenceType: LEDGER_REF[data.sourceType], referenceId: data.sourceId, inQty: { gt: 0 }, sizeId: null },
+    select: { itemId: true, warehouseId: true, ownership: true, ownerCustomerId: true, inQty: true, batchNumber: true },
+    orderBy: { createdAt: 'asc' },
+  })
+  const byKey = new Map<string, Came>()
+  for (const r of rows) {
+    const key = [r.itemId, r.warehouseId, r.ownership, r.ownerCustomerId ?? '', r.batchNumber ?? ''].join('|')
+    const had = byKey.get(key)
+    if (had) had.qty = round3(had.qty + Number(r.inQty))
+    else
+      byKey.set(key, {
+        itemId: r.itemId,
+        warehouseId: r.warehouseId,
+        ownership: r.ownership,
+        ownerCustomerId: r.ownerCustomerId,
+        qty: Number(r.inQty),
+        lotNo: r.batchNumber,
+        grnLineId: null,
+      })
+  }
+  return [...byKey.values()]
+}
+
+/**
+ * What came in on one inward document, as the sticker window should open:
+ * one row per item and store, with how much can still be labelled and the
+ * stickers it starts with — the item's remembered setting, or one per roll
+ * or box. Nothing is saved; the window does that when somebody prints.
+ */
+router.post('/plan', requirePermission(MODULE, 'view'), async (req, res) => {
+  const data = planSchema.parse(req.body)
+  const sourceRef = await sourceRefOf(data.sourceType, data.sourceId)
+  if (!sourceRef) throw new AppError('That document does not exist', 404, 'NOT_FOUND')
+  const came = await whatCameIn(data)
+
+  const [items, stores, owners] = await Promise.all([
+    prisma.item.findMany({
+      where: { id: { in: [...new Set(came.map((c) => c.itemId))] } },
+      select: { id: true, code: true, name: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+    }),
+    prisma.warehouse.findMany({ where: { id: { in: [...new Set(came.map((c) => c.warehouseId))] } }, select: { id: true, name: true } }),
+    prisma.customer.findMany({
+      where: { id: { in: came.map((c) => c.ownerCustomerId).filter((x): x is string => !!x) } },
+      select: { id: true, name: true },
+    }),
+  ])
+  const itemOf = new Map(items.map((i) => [i.id, i]))
+  const storeOf = new Map(stores.map((w) => [w.id, w.name]))
+  const ownerOf = new Map(owners.map((c) => [c.id, c.name]))
+
+  const targets = []
+  const untracked: Array<{ itemId: string; code: string; name: string; category: string }> = []
+  for (const c of came) {
+    const item = itemOf.get(c.itemId)
+    if (!item) continue
+    const d = await stickerDefaults(prisma, item)
+    if (!d.tracked) {
+      if (!untracked.some((u) => u.itemId === item.id)) untracked.push({ itemId: item.id, code: item.code, name: item.name, category: d.category })
+      continue
+    }
+    const spot = { itemId: c.itemId, warehouseId: c.warehouseId, ownership: c.ownership, ownerCustomerId: c.ownerCustomerId }
+    // Labelled from this document already: a second look at the same GRN
+    // offers only what is still without a sticker.
+    const done = await prisma.stockPackage.aggregate({
+      where: c.grnLineId
+        ? { grnLineId: c.grnLineId, status: { not: 'VOID' } }
+        : { ...spot, sourceType: data.sourceType, sourceId: data.sourceId, status: { not: 'VOID' } },
+      _sum: { initialQty: true },
+    })
+    const pos = await positionOf(prisma, spot)
+    const max = round3(Math.min(c.qty - Number(done._sum.initialQty ?? 0), pos.loose))
+    if (max <= 0.0005) continue
+    targets.push({
+      key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? ''].join('|'),
+      itemId: c.itemId,
+      itemCode: item.code,
+      item: item.name,
+      unit: item.uom?.symbol ?? '',
+      warehouseId: c.warehouseId,
+      store: storeOf.get(c.warehouseId) ?? '',
+      ownership: c.ownership,
+      ownerCustomerId: c.ownerCustomerId,
+      owner: c.ownerCustomerId ? (ownerOf.get(c.ownerCustomerId) ?? null) : null,
+      lotNo: c.lotNo,
+      grnLineId: c.grnLineId,
+      max,
+      packType: d.packType,
+      perPack: d.perPack,
+      remembered: item.packType != null || item.packQty != null,
+      qtys: suggestQtys(max, d.perPack),
+    })
+  }
+  res.json({ success: true, data: { sourceType: data.sourceType, sourceId: data.sourceId, sourceRef, targets, untracked } })
+})
+
+/**
+ * Every sticker from the window at once: one transaction, so a GRN of five
+ * items either gets all its stickers or none, and one print tab for them all.
+ */
+router.post('/batch', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = batchSchema.parse(req.body)
+  const sourceRef = await sourceRefOf(data.sourceType, data.sourceId)
+  if (!sourceRef) throw new AppError('That document does not exist', 404, 'NOT_FOUND')
   const created = await prisma.$transaction(
     async (tx) => {
-      const item = await tx.item.findUnique({ where: { id: data.itemId }, select: { name: true, categoryId: true, uom: { select: { symbol: true } } } })
-      if (!item) throw new AppError('That item does not exist', 404, 'NOT_FOUND')
-      const rule = await packageRule(tx, item.categoryId)
-      if (!rule.tracked) {
-        throw new AppError(
-          `${item.name} is not kept in packages. Switch on "Track by package" for ${rule.category} in Masters → Item Categories first.`,
-          400,
-          'NOT_TRACKED',
-        )
-      }
-      const spot = {
-        itemId: data.itemId,
-        warehouseId: data.warehouseId,
-        ownership: data.ownership,
-        ownerCustomerId: data.ownership === 'CUSTOMER_OWNED' ? (data.ownerCustomerId ?? null) : null,
-      }
-      let sourceId: string | null = null
-      if (data.grnLineId) {
-        const line = await tx.gRNLine.findUnique({ where: { id: data.grnLineId }, select: { grnId: true, itemId: true, warehouseId: true, acceptedQty: true } })
-        if (!line || line.itemId !== data.itemId || line.warehouseId !== data.warehouseId) {
-          throw new AppError('That GRN line is not for this item in this store.', 400, 'WRONG_LINE')
-        }
-        const done = await tx.stockPackage.aggregate({ where: { grnLineId: data.grnLineId, status: { not: 'VOID' } }, _sum: { initialQty: true } })
-        const left = round3(Number(line.acceptedQty) - Number(done._sum.initialQty ?? 0))
-        const total = round3(data.qtys.reduce((s, q) => s + q, 0))
-        if (total > left + 1e-9) {
-          throw new AppError(`Only ${left} ${item.uom?.symbol ?? ''} of this GRN line is still to be labelled, not ${total}.`, 400, 'OVER_GRN')
-        }
-        sourceId = line.grnId
-      }
-      return createPackages(tx, {
-        spot,
-        packType: data.packType,
-        qtys: data.qtys,
-        lotNo: data.lotNo,
-        notes: data.notes,
-        sourceType: data.grnLineId ? 'GRN' : 'STOCK',
-        sourceId,
-        grnLineId: data.grnLineId ?? null,
-        userId: req.user?.id ?? null,
-        unit: item.uom?.symbol ?? '',
-        itemName: item.name,
-      })
+      const all = []
+      for (const g of data.groups) all.push(...(await labelGroup(tx, g, { type: data.sourceType, id: data.sourceId, ref: sourceRef }, req.user?.id ?? null)))
+      return all
     },
-    { timeout: 60_000, maxWait: 20_000 },
+    { timeout: 120_000, maxWait: 20_000 },
   )
-  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockPackage', entityId: created[0].id, after: { codes: created.map((c) => c.code) } })
-  res.status(201).json({
-    success: true,
-    message: `${created.length} ${created.length === 1 ? 'package' : 'packages'} labelled: ${created[0].code}${created.length > 1 ? ` to ${created[created.length - 1].code}` : ''}.`,
-    data: created.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })),
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'StockPackage',
+    entityId: created[0].id,
+    after: { from: sourceRef, codes: created.map((c) => c.code) },
   })
+  res.status(201).json({ success: true, message: labelledMessage(created), data: created.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })) })
 })
 
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */

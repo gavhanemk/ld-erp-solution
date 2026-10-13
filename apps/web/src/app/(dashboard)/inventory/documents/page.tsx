@@ -21,6 +21,7 @@ import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { StickerNote, type StickerNews } from '@/components/inventory/StockInNext'
+import { InwardStickers } from '@/components/packages/InwardStickers'
 
 /**
  * The stock documents: what was moved between stores, and what was corrected
@@ -134,6 +135,9 @@ export default function StockDocumentsPage() {
   const [message, setMessage] = useState<string | null>(null)
   /** After a stock-in is approved: where its stickers are, or why there are none. */
   const [stickers, setStickers] = useState<StickerNews | null>(null)
+  /** The stock-in whose sticker window is open, and the last one approved, to open it again. */
+  const [stickersFor, setStickersFor] = useState<string | null>(null)
+  const [approvedId, setApprovedId] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
@@ -246,6 +250,11 @@ export default function StockDocumentsPage() {
       await load()
       if (res.message) setMessage(res.message)
       if (res.stickers) setStickers(res.stickers)
+      // A stock-in approved: its stickers, ready to print.
+      if (decision === 'approve' && res.stickers?.tracked.length) {
+        setApprovedId(a.id)
+        setStickersFor(a.id)
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not ${decision === 'approve' ? 'approve' : 'refuse'} it.`)
     } finally {
@@ -279,7 +288,7 @@ export default function StockDocumentsPage() {
       {message && (
         <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
-          {stickers && <StickerNote stickers={stickers} />}
+          {stickers && <StickerNote stickers={stickers} onMake={stickers.tracked.length && approvedId ? () => setStickersFor(approvedId) : undefined} />}
         </div>
       )}
 
@@ -656,6 +665,17 @@ export default function StockDocumentsPage() {
         )}
       </div>
 
+      {stickersFor && (
+        <InwardStickers
+          source={{ type: 'STOCK_IN', id: stickersFor }}
+          onClose={() => setStickersFor(null)}
+          onDone={(m) => {
+            setStickersFor(null)
+            setStickers(null)
+            setMessage(m)
+          }}
+        />
+      )}
       {approving && (
         <ReasonDialog
           title={`Approve ${approving.adjustmentNumber}?`}

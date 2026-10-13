@@ -167,6 +167,8 @@ export interface FormField {
   noneLabel?: string
   /** Value to open an edit with, when it is not simply the record's own field. */
   initial?: (record: Record<string, unknown>) => unknown
+  /** A tick-box that starts ticked on a new record, like Active. */
+  checkedForNew?: boolean
   /**
    * Saved under another name. Two boxes may share one: Category and Sub
    * Category both save `categoryId`, and a sub-category, when chosen, wins
@@ -330,7 +332,7 @@ export function MasterFormDialog<T extends { id: string }>({
         // A new record is added to be used. Starting "Active" unticked saved
         // every new item, customer and supplier as inactive, so it vanished
         // from the list and never appeared in a single dropdown.
-        seed[f.name] = !record && f.name === 'isActive'
+        seed[f.name] = !record && (f.name === 'isActive' || Boolean(f.checkedForNew))
       } else {
         seed[f.name] = ''
       }

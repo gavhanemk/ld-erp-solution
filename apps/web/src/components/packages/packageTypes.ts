@@ -46,6 +46,29 @@ export const printLabels = (ids: string[], tab?: Window | null) => {
   else window.open(url, '_blank')
 }
 
+/** Stock that went out on a document: an issue, a job-work challan, a return, a transfer. */
+export type OutwardType = 'MR' | 'JOB_WORK' | 'PURCHASE_RETURN' | 'CUSTOMER_RETURN' | 'TRANSFER'
+export interface OutwardRef {
+  type: OutwardType
+  id: string
+  /** For a requisition issued more than once: what this issue handed over, "line:qty:store,…". */
+  q?: string
+}
+
+/**
+ * Opens the labels for what went out on a document, and the fresh stickers
+ * for the packages it left part-used, in one tab.
+ */
+export const printOutward = (out: OutwardRef | null, ids: string[], tab?: Window | null) => {
+  if (!out) return printLabels(ids, tab)
+  const qs = new URLSearchParams({ out: `${out.type}:${out.id}` })
+  if (out.q) qs.set('q', out.q)
+  if (ids.length) qs.set('ids', ids.join(','))
+  const url = `/print/packages?${qs}`
+  if (tab && !tab.closed) tab.location.href = url
+  else window.open(url, '_blank')
+}
+
 export interface PackageMove {
   id: string
   type: string

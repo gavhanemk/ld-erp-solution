@@ -7,6 +7,7 @@ import {
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { formatDate } from '@/lib/utils'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * Working on an approved requisition: three forms in one window, one tab each.
@@ -116,7 +117,8 @@ export function ProcessDialog({
   startTab?: ProcessTab
   onClose: () => void
   /** After each save, so the list behind can refresh. The window stays open. */
-  onDone: (message: string) => void
+  /** `outward`: what an issue just handed over, for its labels. */
+  onDone: (message: string, outward?: OutwardRef) => void
 }) {
   const [tab, setTab] = useState<ProcessTab>(startTab)
   const [data, setData] = useState<Data | null>(null)
@@ -275,10 +277,13 @@ export function ProcessDialog({
     setSaving(true)
     try {
       let message = 'Saved.'
+      let outward: OutwardRef | undefined
       if (tab === 'issue') {
         const lines = check.work.flatMap(({ r, v }) => [...spread(r, v).entries()].map(([warehouseId, q]) => ({ lineId: r.l.id, warehouseId, issueQty: q })))
         const res = await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/issue`, { lines })
         message = res.message ?? 'Issued.'
+        // This issue's own lines: a requisition can be issued against more than once.
+        outward = { type: 'MR', id: mr.id, q: lines.map((l) => `${l.lineId}:${l.issueQty}:${l.warehouseId}`).join(',') }
       } else if (tab === 'reserve') {
         // The amount to hold in each store; 0 lets a store's reservation go.
         const lines = check.work.flatMap(({ r, v }) => {
@@ -295,7 +300,7 @@ export function ProcessDialog({
         message = res.message ?? 'Indent saved.'
       }
       setNotice(message)
-      onDone(message)
+      onDone(message, outward)
       await read()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')

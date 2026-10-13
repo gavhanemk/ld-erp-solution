@@ -27,6 +27,20 @@ interface Payload {
   company: string
   packages: Label[]
 }
+/** A label for stock going out: what left, on which document, to whom. */
+interface OutLabel {
+  key: string
+  tag: string
+  docNumber: string
+  item: string
+  itemCode: string
+  qty: number
+  unit: string
+  to: string
+  from: string
+  owner: string | null
+  date: string
+}
 
 type Layout = 'sheet' | 'roll' | 'small'
 
@@ -107,6 +121,51 @@ function Sticker({ p, company, layout }: { p: Label; company: string; layout: La
   )
 }
 
+/**
+ * The label stuck on stock as it leaves: the document number large, as its QR
+ * too, then what it is, how much, and where it is going. Same sizes and lines
+ * as a package sticker, so one sheet can carry both.
+ */
+function OutSticker({ o, company, layout }: { o: OutLabel; company: string; layout: Layout }) {
+  const d = DIM[layout]
+  const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
+  return (
+    <div className="sticker pk">
+      <div className="pk-head">
+        <span className="pk-id" style={{ fontSize: d.id }}>{o.docNumber}</span>
+        <span className="pk-tag" style={{ fontSize: d.tag }}>
+          {o.tag}
+        </span>
+      </div>
+      <div className="pk-body" style={{ gap: d.gap }}>
+        <div className="pk-qr" style={{ width: d.qr }}>
+          <QrCode text={o.docNumber} size={d.qr} />
+        </div>
+        <div className="pk-info">
+          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: layout === 'small' ? 1 : 2 }}>{o.item}</div>
+          <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{o.itemCode}</div>
+          <div className="pk-qty">
+            <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{qtyText(o.qty)}</span>
+            <span style={{ fontSize: d.unit, fontWeight: 700 }}>{o.unit}</span>
+          </div>
+          <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>To {o.to}</div>
+          {layout !== 'small' && (
+            <div style={{ fontSize: d.line, ...clip }}>
+              From {o.from} · {day(o.date)}
+            </div>
+          )}
+        </div>
+      </div>
+      {d.foot && (
+        <div className="pk-foot" style={{ fontSize: d.foot }}>
+          <span style={clip}>{company}</span>
+          <span style={{ ...clip, textAlign: 'right' }}>{o.owner ? `${o.owner}'s` : ''}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 const SIZES: Record<Layout, { label: string; page: string }> = {
   sheet: { label: 'A4 sheet, 24 a page (70 × 37 mm)', page: 'A4' },
   roll: { label: 'Label printer, 75 × 50 mm', page: '75mm 50mm' },
@@ -117,11 +176,18 @@ const SIZES: Record<Layout, { label: string; page: string }> = {
  * The QR stickers for labelled packages: on an A4 sheet of 24, or one a page
  * on a label printer, large (75 × 50) or small (50 × 25). The choice is
  * remembered on this computer, since each desk has the printer it has.
+ *
+ * With `out=TYPE:id` it also prints the labels for stock going out on that
+ * document — an issue, a challan, a return — ahead of the fresh stickers for
+ * what was left in the rolls and boxes it came from.
  */
 function Stickers() {
   const params = useSearchParams()
   const ids = params.get('ids') ?? ''
+  const out = params.get('out') ?? ''
+  const q = params.get('q') ?? ''
   const [data, setData] = useState<Payload | null>(null)
+  const [outward, setOutward] = useState<OutLabel[]>([])
   const [error, setError] = useState<string | null>(null)
   const [layout, setLayout] = useState<Layout>('sheet')
   const [copies, setCopies] = useState(1)
@@ -136,15 +202,21 @@ function Stickers() {
   }, [])
 
   useEffect(() => {
-    if (!ids) {
+    if (!ids && !out) {
       setError('Open the stickers from Packages & Stickers.')
       return
     }
-    api
-      .get<{ data: Payload }>(`/packages/labels?ids=${ids}`)
-      .then((res) => setData(res.data))
-      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the packages.'))
-  }, [ids])
+    const [type, id] = out.split(':')
+    Promise.all([
+      ids ? api.get<{ data: Payload }>(`/packages/labels?ids=${ids}`).then((r) => r.data) : null,
+      out ? api.get<{ data: { company: string; labels: OutLabel[] } }>(`/packages/outward-labels?${new URLSearchParams({ type, id, q })}`).then((r) => r.data) : null,
+    ])
+      .then(([pk, ow]) => {
+        setOutward(ow?.labels ?? [])
+        setData({ company: pk?.company || ow?.company || '', packages: pk?.packages ?? [] })
+      })
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the stickers.'))
+  }, [ids, out, q])
 
   const pick = (l: Layout) => {
     setLayout(l)
@@ -157,9 +229,15 @@ function Stickers() {
 
   if (error) return <p style={{ padding: 48, color: '#fff' }}>{error}</p>
   if (!data) return <p style={{ padding: 48, color: '#ddd' }}>Opening the stickers…</p>
-  if (!data.packages.length) return <p style={{ padding: 48, color: '#fff' }}>No packages to print.</p>
+  if (!data.packages.length && !outward.length) return <p style={{ padding: 48, color: '#fff' }}>No packages to print.</p>
 
-  const all = data.packages.flatMap((p) => Array.from({ length: copies }, (_, i) => ({ p, key: `${p.id}-${i}` })))
+  // Labels for what went out first, then the fresh stickers for what is left.
+  const all = [
+    ...outward.flatMap((o) => Array.from({ length: copies }, (_, i) => ({ o, p: null, key: `out-${o.key}-${i}` }))),
+    ...data.packages.flatMap((p) => Array.from({ length: copies }, (_, i) => ({ o: null, p, key: `${p.id}-${i}` }))),
+  ]
+  const one = ({ o, p, key }: (typeof all)[number]) =>
+    o ? <OutSticker key={key} o={o} company={data.company} layout={layout} /> : <Sticker key={key} p={p!} company={data.company} layout={layout} />
   const sheets: Array<typeof all> = []
   for (let i = 0; i < all.length; i += 24) sheets.push(all.slice(i, i + 24))
 
@@ -210,7 +288,7 @@ function Stickers() {
         }
         @page { size: ${SIZES[layout].page}; margin: 0; }
       `}</style>
-      <PrintToolbar backHref="/inventory/packages" backLabel="Packages" copies={1} fileName={`Stickers ${data.packages[0].code}`} />
+      <PrintToolbar backHref="/inventory/packages" backLabel="Packages" copies={1} fileName={`Stickers ${outward[0]?.docNumber ?? data.packages[0]?.code ?? ''}`} />
       <div className="no-print sticker-options">
         <label>
           Stickers on
@@ -223,29 +301,27 @@ function Stickers() {
           </select>
         </label>
         <label>
-          Per package
+          {outward.length ? 'Copies' : 'Per package'}
           <select value={copies} onChange={(e) => setCopies(Number(e.target.value))}>
             <option value={1}>One</option>
             <option value={2}>Two</option>
           </select>
         </label>
         <span style={{ color: '#5a6880', fontSize: 12 }}>
-          {data.packages.length} {data.packages.length === 1 ? 'package' : 'packages'} · {all.length} {all.length === 1 ? 'sticker' : 'stickers'}
+          {outward.length > 0 && `${outward.length} going out · `}
+          {data.packages.length > 0 && `${data.packages.length} ${data.packages.length === 1 ? 'package' : 'packages'} · `}
+          {all.length} {all.length === 1 ? 'sticker' : 'stickers'}
         </span>
       </div>
       {layout === 'sheet' ? (
         sheets.map((page, i) => (
           <div key={i} className="sheet">
-            {page.map(({ p, key }) => (
-              <Sticker key={key} p={p} company={data.company} layout={layout} />
-            ))}
+            {page.map(one)}
           </div>
         ))
       ) : (
         <div className={layout}>
-          {all.map(({ p, key }) => (
-            <Sticker key={key} p={p} company={data.company} layout={layout} />
-          ))}
+          {all.map(one)}
         </div>
       )}
     </>

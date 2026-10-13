@@ -42,6 +42,8 @@ import { RowPanel } from '@/components/tables/RowPanel'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { OutwardStickers } from '@/components/packages/OutwardStickers'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   UNPAID: { label: 'Unpaid', cls: 'badge-warning' },
@@ -361,6 +363,8 @@ function PurchaseBillsTable() {
   const [adjusting, setAdjusting] = useState<PurchaseBill | null>(null)
   /** The bill goods are being sent back against, on a return challan. */
   const [returning, setReturning] = useState<PurchaseBill | null>(null)
+  /** Stock that just went out: its labels, and the packages it came from. */
+  const [outward, setOutward] = useState<OutwardRef | null>(null)
 
   const billActions = (bill: PurchaseBill): RowAction[] => {
     const items: RowAction[] = [
@@ -1046,6 +1050,18 @@ function PurchaseBillsTable() {
             // The gate pass is what the vehicle leaves with, so it opens now
             // rather than being something to go and find afterwards.
             window.open('/print/purchase-return/' + id, '_blank', 'noopener')
+            // And the labels for what is going back, with the rolls it came from.
+            setOutward({ type: 'PURCHASE_RETURN', id })
+          }}
+        />
+      )}
+      {outward && (
+        <OutwardStickers
+          source={outward}
+          onClose={() => setOutward(null)}
+          onDone={(m) => {
+            setOutward(null)
+            setMessage(m)
           }}
         />
       )}

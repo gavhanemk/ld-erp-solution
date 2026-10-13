@@ -300,6 +300,13 @@ export const createItemSchema = z
     minStock: nonNegativeDecimal,
     maxStock: nonNegativeDecimal,
     standardRate: nonNegativeDecimal,
+    // Its stickers: what one package is, and how much one sticker holds.
+    // Empty falls back to the category and the unit.
+    packType: z.preprocess(
+      (v) => (v === '' ? null : v),
+      z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
+    ),
+    packQty: nonNegativeDecimal,
     imageUrl: z.string().url().optional().nullable(),
     // Which garment this is, for a finished good. Shape only, here — whether
     // the colour is actually one of the style's own colours needs a database

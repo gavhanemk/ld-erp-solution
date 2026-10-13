@@ -6,6 +6,7 @@ import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Bo
 import { api, ApiError, masterResource } from '@/lib/api'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { InwardRef } from '@/components/packages/InwardStickers'
 
 /**
  * Booking in a customer's own material.
@@ -73,7 +74,8 @@ export function CustomerMaterialDialog({
   onSaved,
 }: {
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `stickers`: the receipt just saved, for its sticker window. */
+  onSaved: (message: string, stickers?: InwardRef) => void
 }) {
   const [customers, setCustomers] = useState<Option[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
@@ -183,7 +185,7 @@ export function CustomerMaterialDialog({
 
     setSaving(true)
     try {
-      const res = await api.post<{ message?: string; data: { grnNumber: string } }>(
+      const res = await api.post<{ message?: string; data: { id: string; grnNumber: string } }>(
         '/inventory/customer-grn',
         {
           customerId,
@@ -208,7 +210,7 @@ export function CustomerMaterialDialog({
           })),
         }
       )
-      onSaved(res.message ?? `${res.data.grnNumber} saved.`)
+      onSaved(res.message ?? `${res.data.grnNumber} saved.`, { type: 'CUSTOMER_GRN', id: res.data.id })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {

@@ -629,8 +629,10 @@ model ItemCategory {
   department   Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   isActive Boolean        @default(true)
   /// Stock of these items is kept as labelled packages — rolls, boxes, cartons —
-  /// each with its own QR sticker, scanned to issue and move it.
-  trackPackages Boolean   @default(false)
+  /// each with its own QR sticker, scanned to issue and move it. On unless
+  /// switched off: stickers pop up after every inward without anyone having
+  /// to set a category up first.
+  trackPackages Boolean   @default(true)
   /// What one package of these items usually is: a roll of fabric, a box of tape.
   packType      PackType?
 
@@ -685,6 +687,12 @@ model Item {
   style        Style?       @relation(fields: [styleId], references: [id])
   color        String?
   imageUrl     String?
+  /// Its stickers, remembered from the last time somebody ticked "remember":
+  /// what one package is, and how much one sticker holds. Empty means the
+  /// category's pack type, and one sticker per unit for a unit that is itself
+  /// a package (roll, box) or one for the whole quantity otherwise.
+  packType     PackType?
+  packQty      Decimal?     @db.Decimal(10, 3)
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
@@ -5218,10 +5226,14 @@ model StockPackage {
   notes           String?
   status          PackageStatus  @default(IN_STOCK)
   /// Where it came from: GRN (labelled on receipt), STOCK (stock already on
-  /// the rack, labelled later) or SPLIT (cut from another package).
+  /// the rack, labelled later), SPLIT (cut from another package), or the
+  /// inward it was labelled straight after: STOCK_IN, OPENING, CUSTOMER_GRN,
+  /// JOB_WORK_RETURN, MR_RETURN.
   sourceType      String
-  /// The GRN, for one labelled on receipt.
+  /// The document it came in on: the GRN, the stock-in, the customer's receipt.
   sourceId        String?
+  /// That document's number, printed on the sticker: GRN-0004, ADJ-2627-0009.
+  sourceRef       String?
   grnLineId       String?
   parentId        String?
   parent          StockPackage?  @relation("PackageSplit", fields: [parentId], references: [id])

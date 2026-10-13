@@ -44,6 +44,7 @@ import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { shortCloseNoun, shortCloseVerb, wasNeverReceived } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { InwardStickers, type InwardRef } from '@/components/packages/InwardStickers'
 
 /**
  * What has actually turned up against the purchase orders.
@@ -374,6 +375,8 @@ export default function GoodsReceiptPage() {
    * is the plain "Receive goods" button with nothing chosen yet.
    */
   const [dialog, setDialog] = useState<string | null>(null)
+  /** A receipt just saved: its stickers, ready to print. */
+  const [inward, setInward] = useState<InwardRef | null>(null)
 
   /** The receipt being corrected, or null when the form above is closed. */
   const [editGrnId, setEditGrnId] = useState<string | null>(null)
@@ -2528,13 +2531,24 @@ export default function GoodsReceiptPage() {
         <ReceiveGoodsDialog
           poId={dialog || undefined}
           onClose={() => setDialog(null)}
-          onSaved={(msg) => {
+          onSaved={(msg, stickers) => {
             setDialog(null)
             setMessage(msg)
+            if (stickers) setInward(stickers)
             void load()
             // The order this came from may now be fully received, or may have
             // dropped to part received. Either way the list above is stale.
             void loadWaiting()
+          }}
+        />
+      )}
+      {inward && (
+        <InwardStickers
+          source={inward}
+          onClose={() => setInward(null)}
+          onDone={(m) => {
+            setInward(null)
+            setMessage(m)
           }}
         />
       )}
