@@ -5,7 +5,6 @@ import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertTriangle, Boxes, CheckCircle2, Printer, RefreshCw, ScanLine, Search, Tags, Warehouse, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
-import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { LabelDialog, type LabelTarget } from '@/components/packages/LabelDialog'
@@ -116,34 +115,29 @@ function PackagesScreen() {
   const creator = can('inventory', 'create')
 
   return (
-    <div className="space-y-5">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Packages & Stickers</h1>
-          <p className="page-subtitle">Every labelled box, roll and carton, and stock still waiting for a sticker</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
-            <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
-          </button>
-          <Link href="/inventory/scan" className="btn-primary">
-            <ScanLine size={15} /> Scan
-          </Link>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <KpiTile icon={Boxes} label="Packages in stock" value={summary.packages} sub={`of ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`} />
-        <KpiTile icon={Warehouse} tone={TONE.blue} label="Stores" value={summary.stores} sub="holding labelled stock" />
-        <KpiTile icon={Tags} tone={TONE.amber} label="Waiting for stickers" value={waiting} sub="GRN lines and loose stock" onClick={() => go('label')} active={tab === 'label'} />
-        <KpiTile
+    <div className="space-y-3">
+      {/* Title, the figures and the two buttons on one line: the tiles took a
+        third of the screen that the packages themselves need. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <h1 className="page-title mr-auto" title="Every labelled box, roll and carton, and stock still waiting for a sticker">
+          Packages & Stickers
+        </h1>
+        <Figure icon={Boxes} value={summary.packages} label={`in stock · ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`} />
+        <Figure icon={Warehouse} value={summary.stores} label={summary.stores === 1 ? 'store' : 'stores'} />
+        <Figure icon={Tags} value={waiting} label="waiting for stickers" tone={waiting ? 'warn' : undefined} onClick={() => go('label')} />
+        <Figure
           icon={AlertTriangle}
-          tone={TONE.rose}
-          label="Don't match the stock"
           value={summary.mismatches}
-          valueClass={summary.mismatches ? 'text-red-500' : 'text-foreground'}
-          sub="items issued without scanning"
+          label="don't match the stock"
+          tone={summary.mismatches ? 'bad' : undefined}
+          title="Items issued without scanning: scan their packages and correct the quantity"
         />
+        <button className="btn-ghost h-9" onClick={() => void load()} disabled={loading} title="Refresh">
+          <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
+        </button>
+        <Link href="/inventory/scan" className="btn-primary h-9">
+          <ScanLine size={15} /> Scan
+        </Link>
       </div>
 
       {message && (
@@ -169,52 +163,58 @@ function PackagesScreen() {
       )}
       {error && <p className="text-sm text-red-400">{error}</p>}
 
-      <div className="flex gap-1 border-b border-border">
-        {(
-          [
-            ['list', `Packages (${total})`],
-            ['label', `To label (${waiting})`],
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            onClick={() => go(key)}
-            className={`-mb-px border-b-2 px-4 py-2.5 text-sm font-semibold ${tab === key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'list' ? (
-        <div className="glass-card overflow-hidden p-0">
-          <div className="relative z-20 flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-            <div className="flex h-10 min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
-              <Search size={14} className="text-muted-foreground" />
-              <input
-                className="flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
-                placeholder="Search code, item or lot…"
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                aria-label="Search packages"
-              />
-            </div>
-            <SmartSelect className="form-input h-10 w-44" value={status} onChange={(e) => setStatus(e.target.value)}>
-              <option value="IN_STOCK">In stock</option>
-              <option value="EMPTY">Empty</option>
-              <option value="SPLIT">Split</option>
-              <option value="VOID">Withdrawn</option>
-              <option value="ALL">All</option>
-            </SmartSelect>
-            <SmartSelect className="form-input h-10 w-48" value={store} onChange={(e) => setStore(e.target.value)}>
-              <option value="">All stores</option>
-              {stores.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </SmartSelect>
+      {/* The tabs share the bar with the search, rather than taking a row of their own. */}
+      <div className="glass-card overflow-hidden p-0">
+        <div className="relative z-20 flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+          <div className="inline-flex shrink-0 rounded-lg border border-border bg-secondary p-0.5" role="tablist">
+            {(
+              [
+                ['list', `Packages (${total})`],
+                ['label', `To label (${waiting})`],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                role="tab"
+                aria-selected={tab === key}
+                onClick={() => go(key)}
+                className={`h-8 rounded-md px-3 text-sm font-semibold ${tab === key ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+          {tab === 'list' && (
+            <>
+              <div className="flex h-9 min-w-[200px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+                <Search size={14} className="text-muted-foreground" />
+                <input
+                  className="flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+                  placeholder="Search code, item or lot…"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  aria-label="Search packages"
+                />
+              </div>
+              <SmartSelect className="form-input h-9 w-40" value={status} onChange={(e) => setStatus(e.target.value)}>
+                <option value="IN_STOCK">In stock</option>
+                <option value="EMPTY">Empty</option>
+                <option value="SPLIT">Split</option>
+                <option value="VOID">Withdrawn</option>
+                <option value="ALL">All</option>
+              </SmartSelect>
+              <SmartSelect className="form-input h-9 w-44" value={store} onChange={(e) => setStore(e.target.value)}>
+                <option value="">All stores</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </SmartSelect>
+            </>
+          )}
+        </div>
+        {tab === 'list' && (
           <PackageGroups
             groups={groups}
             filters={{ q, status }}
@@ -226,8 +226,9 @@ function PackagesScreen() {
                   : 'No packages yet. Stock of the categories kept in packages shows under "To label" — make its stickers there.'
             }
           />
-        </div>
-      ) : (
+        )}
+      </div>
+      {tab === 'label' && (
         <ToLabelView todo={todo} loading={loading} grnFilter={grnFilter} creator={creator} onLabel={setLabelling} onClearGrn={() => go('label')} />
       )}
 
@@ -244,6 +245,42 @@ function PackagesScreen() {
         />
       )}
     </div>
+  )
+}
+
+/** One figure in the title line: an icon, the number, what it counts. */
+function Figure({
+  icon: Icon,
+  value,
+  label,
+  tone,
+  onClick,
+  title,
+}: {
+  icon: typeof Boxes
+  value: number
+  label: string
+  tone?: 'warn' | 'bad'
+  onClick?: () => void
+  title?: string
+}) {
+  const colour = tone === 'bad' ? 'text-red-500' : tone === 'warn' ? 'warn-text' : 'text-foreground'
+  const body = (
+    <>
+      <Icon size={15} className={tone ? colour : 'text-primary'} />
+      <span className={`font-bold tabular-nums ${colour}`}>{value}</span>
+      <span className="text-muted-foreground">{label}</span>
+    </>
+  )
+  const cls = 'inline-flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-sm'
+  return onClick ? (
+    <button type="button" className={`${cls} hover:border-primary/50`} onClick={onClick} title={title}>
+      {body}
+    </button>
+  ) : (
+    <span className={cls} title={title}>
+      {body}
+    </span>
   )
 }
 

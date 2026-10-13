@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { ChevronDown, ChevronRight, ChevronUp, Loader2, Printer } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
@@ -65,6 +65,31 @@ export function PackageGroups({
   const showLine = (key: string) =>
     requestAnimationFrame(() => lineRefs.current.get(key)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }))
 
+  /*
+   * The open item's box reaches down to the bottom of the screen: as many
+   * packages as fit, rather than eight and a strip of empty page below.
+   * Worked out when it opens and when the window changes size — not as the
+   * page scrolls, or the box would keep growing ahead of whatever is under it.
+   */
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  const [boxMax, setBoxMax] = useState(352)
+  const openKey = [...open][0] ?? null
+  const loaded = openKey ? Boolean(rows[openKey]) : false
+  useLayoutEffect(() => {
+    if (!openKey) return
+    const fit = () => {
+      const el = boxRef.current
+      if (!el) return
+      setBoxMax(Math.max(240, Math.floor(window.innerHeight - el.getBoundingClientRect().top - 20)))
+    }
+    // A line opened low on the screen is lifted first, so its box has room.
+    const line = lineRefs.current.get(openKey)
+    if (line && line.getBoundingClientRect().top > window.innerHeight * 0.45) line.scrollIntoView({ block: 'start' })
+    fit()
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [openKey, loaded])
+
   const fetchRows = useCallback(
     async (g: PackageGroup) => {
       const qs = new URLSearchParams({
@@ -101,7 +126,6 @@ export function PackageGroups({
       return
     }
     setOpen(new Set([g.key]))
-    showLine(g.key)
     if (rows[g.key]) return
     setLoadingKey(g.key)
     setError(null)
@@ -212,7 +236,7 @@ export function PackageGroups({
                         {/* Its own short box: fifty boxes open under one line must
                           not push the rest of the list, or this line, off the screen. */}
                         <div className="border-y border-primary/20 bg-secondary/30">
-                          <div className="flex flex-wrap items-center gap-3 px-4 py-2">
+                          <div className="flex flex-wrap items-center gap-3 px-4 py-1">
                             {list && (
                               <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-foreground">
                                 <input
@@ -227,7 +251,7 @@ export function PackageGroups({
                             <span className="text-sm text-muted-foreground">
                               {packCount(g.packages, g.packTypes[0] ?? 'OTHER')} of {g.item} in {g.store}
                             </span>
-                            <button type="button" className="btn-ghost ml-auto h-8" onClick={() => void toggle(g)}>
+                            <button type="button" className="btn-ghost ml-auto h-7" onClick={() => void toggle(g)}>
                               <ChevronUp size={15} /> Close
                             </button>
                           </div>
@@ -236,8 +260,9 @@ export function PackageGroups({
                               <Loader2 size={15} className="animate-spin" /> Loading the packages…
                             </p>
                           ) : (
-                            <div className="max-h-[22rem] overflow-auto border-t border-border bg-card">
-                              <table className="data-table table-compact w-full">
+                            <div ref={boxRef} className="overflow-auto border-t border-border bg-card" style={{ maxHeight: boxMax }}>
+                              {/* Tighter than the list above: these rows are read down, not across. */}
+                              <table className="data-table table-compact w-full [&>tbody>tr>td]:py-1 [&>thead>tr>th]:py-1.5">
                                 <thead className="sticky top-0 z-10">
                                   <tr className="bg-secondary">
                                     <th className="w-8" />
