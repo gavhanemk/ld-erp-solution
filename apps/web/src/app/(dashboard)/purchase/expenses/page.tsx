@@ -6,7 +6,6 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import {
   AlertCircle,
   Ban,
-  Banknote,
   ChevronDown,
   ChevronRight,
   Eye,
@@ -124,7 +123,7 @@ function ExpensesTable() {
     }
   }, [])
 
-  // "+ New Cash Expense" from elsewhere arrives as ?new=cash; a plain one as ?new=1.
+  // A new expense from elsewhere arrives as ?new=1; ?new=cash opens it with "Paid now" ticked.
   useEffect(() => {
     const n = searchParams.get('new')
     if (n) {
@@ -309,14 +308,6 @@ function ExpensesTable() {
           <Link href="/purchase/debit-notes" className="btn-secondary hidden md:inline-flex">
             <Undo2 size={15} /> Debit notes
           </Link>
-          <button
-            className="btn-secondary"
-            onClick={() => setDialog({ open: true, record: null, cash: true })}
-            title="Booked and paid in one go"
-            aria-label="New cash expense"
-          >
-            <Banknote size={15} /> <span className="hidden sm:inline">New Cash Expense</span>
-          </button>
           <button
             className="btn-primary"
             onClick={() => setDialog({ open: true, record: null })}

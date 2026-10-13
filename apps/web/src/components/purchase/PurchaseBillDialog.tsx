@@ -409,8 +409,8 @@ export function PurchaseBillDialog({
    */
   expense?: boolean
   /**
-   * A cash expense: the bill and its payment saved together, the old ERP's
-   * "New Cash Expense". An expense bill with a "Paid Now" section under it.
+   * Opens an expense with "Paid now" already ticked — the bill and its
+   * payment saved together. The tick is on the form either way.
    */
   cash?: boolean
   /**
@@ -481,7 +481,13 @@ export function PurchaseBillDialog({
    * the supplier and the expense heads; after, it is theirs.
    */
   const tdsChosen = useRef(false)
-  /** How a cash expense was paid. */
+  /**
+   * "Paid now": the expense was settled on the spot, so the payment is saved
+   * with the bill and it lands Paid. One form for both, rather than the old
+   * ERP's two buttons for the same bill.
+   */
+  const [payNow, setPayNow] = useState(false)
+  /** How it was paid, when it was paid now. */
   const [payment, setPayment] = useState<CashPayment>(() =>
     emptyCashPayment(new Date().toISOString().slice(0, 10))
   )
@@ -543,6 +549,7 @@ export function PurchaseBillDialog({
     setYearSoFar(null)
     setPayment(emptyCashPayment((record?.billDate ?? new Date().toISOString()).slice(0, 10)))
     setServiceOrderNo(null)
+    setPayNow(Boolean(cash) && !record)
     setRateVarianceReason('')
     setFilterPo('')
     setFilterChallan('')
@@ -724,8 +731,8 @@ export function PurchaseBillDialog({
 
   // A cash expense is paid the day it is booked, unless somebody says otherwise.
   useEffect(() => {
-    if (cash) setPayment((p) => ({ ...p, paymentDate: billDate }))
-  }, [cash, billDate])
+    if (payNow) setPayment((p) => ({ ...p, paymentDate: billDate }))
+  }, [payNow, billDate])
 
   const expenseCategoryIds = useMemo(() => {
     const named = new Set(categories.filter((c) => EXPENSE_NAME.test(c.name)).map((c) => c.id))
@@ -1650,7 +1657,7 @@ export function PurchaseBillDialog({
       let message: string | undefined
       if (isEdit && record) {
         await api.patch(`/purchase/bills/${record.id}`, payload)
-      } else if (cash) {
+      } else if (payNow && expenseMode) {
         const res = await api.post<{ message?: string }>('/purchase/expenses/cash', {
           ...payload,
           payment: cashPaymentPayload(payment),
@@ -1707,7 +1714,7 @@ export function PurchaseBillDialog({
   if (lines.some((l) => num(l.qty) <= 0)) missing.push({ what: 'a quantity on every line' })
   if (expenseMode && tdsChoice && !tdsAuto && tdsTyped.trim() === '')
     missing.push({ what: 'the TDS amount', focus: 'bill-tds-amount' })
-  if (cash && !isEdit) missing.push(...cashPaymentMissing(payment))
+  if (payNow && expenseMode && !isEdit) missing.push(...cashPaymentMissing(payment))
   if (undecidedRates.length > 0) {
     const n = undecidedRates.length
     missing.push({
@@ -1797,9 +1804,7 @@ export function PurchaseBillDialog({
               >
                 {isEdit
                   ? `Edit ${record?.billNumber}`
-                  : cash
-                    ? 'New Cash Expense'
-                    : fromServiceOrder
+                  : fromServiceOrder
                       ? `Bill ${serviceOrderNo ?? 'a Service Order'}`
                       : expenseMode
                         ? 'Book an Expense Bill'
@@ -1808,9 +1813,7 @@ export function PurchaseBillDialog({
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                 {isEdit
                   ? 'A bill can be changed until a payment is made against it'
-                  : cash
-                    ? 'Booked and paid in one go — for a spend settled on the spot.'
-                    : fromServiceOrder
+                  : fromServiceOrder
                       ? 'The order’s open lines are filled in. Bill what the supplier has charged for.'
                       : expenseMode
                         ? 'Electricity, rent, repairs, services — a bill with no order or receipt behind it.'
@@ -1829,7 +1832,7 @@ export function PurchaseBillDialog({
             <div className="hidden md:block">
               <button type="submit" form="bill-form" className="btn-primary" disabled={saving}>
                 {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
-                {isEdit ? 'Save changes' : cash ? 'Book & pay' : 'Book bill'}
+                {isEdit ? 'Save changes' : payNow && expenseMode ? 'Book & pay' : 'Book bill'}
               </button>
             </div>
             <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
@@ -3074,11 +3077,27 @@ export function PurchaseBillDialog({
                       </p>
                     </>
                   )}
+                  {expenseMode && !isEdit && (
+                    <label className="border-border flex cursor-pointer items-start gap-2 border-t pt-2.5">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={payNow}
+                        onChange={(e) => setPayNow(e.target.checked)}
+                      />
+                      <span>
+                        <span className="text-foreground font-medium">Paid now</span>
+                        <span className="text-muted-foreground block text-xs">
+                          Settled on the spot — the payment is saved with the bill and it shows as Paid.
+                        </span>
+                      </span>
+                    </label>
+                  )}
                 </div>
               </Section>
             </div>
 
-            {cash && !isEdit && (
+            {payNow && expenseMode && !isEdit && (
               <CashPaymentSection
                 value={payment}
                 onChange={(p) => setPayment((prev) => ({ ...prev, ...p }))}
@@ -3094,7 +3113,7 @@ export function PurchaseBillDialog({
             </button>
             <button type="submit" className="btn-primary" disabled={saving}>
               {saving && <Loader2 size={15} className="animate-spin" />}
-              {isEdit ? 'Save changes' : cash ? 'Book & pay' : 'Book bill'}
+              {isEdit ? 'Save changes' : payNow && expenseMode ? 'Book & pay' : 'Book bill'}
             </button>
           </div>
         </form>
