@@ -62,6 +62,8 @@ function PackagesScreen() {
   const router = useRouter()
   const tab = params.get('tab') === 'label' ? 'label' : 'list'
   const grnFilter = params.get('grn') ?? ''
+  // To label is two lists: what came in on GRNs, and what was already on the racks.
+  const fromParam = params.get('from')
 
   const [groups, setGroups] = useState<PackageGroup[]>([])
   const [summary, setSummary] = useState({ packages: 0, items: 0, stores: 0, mismatches: 0 })
@@ -76,8 +78,12 @@ function PackagesScreen() {
   // The packages just labelled, so a closed print tab is one click from coming back.
   const [lastBatch, setLastBatch] = useState<string[]>([])
   const [labelling, setLabelling] = useState<LabelTarget | null>(null)
+  // Finding one item among dozens waiting: searched and filtered here, without a reload.
+  const [lq, setLq] = useState('')
+  const [lstore, setLstore] = useState('')
 
-  const go = (next: 'list' | 'label') => router.replace(next === 'label' ? '/inventory/packages?tab=label' : '/inventory/packages', { scroll: false })
+  const go = (next: 'list' | 'label', from?: LabelFrom) =>
+    router.replace(next === 'label' ? `/inventory/packages?tab=label${from ? `&from=${from}` : ''}` : '/inventory/packages', { scroll: false })
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -115,6 +121,13 @@ function PackagesScreen() {
   const total = groups.reduce((s, g) => s + g.packages, 0)
   const waiting = (todo?.lines.filter((l) => l.toLabel > 0).length ?? 0) + (todo?.loose.length ?? 0)
   const creator = can('inventory', 'create')
+
+  const needle = lq.trim().toLowerCase()
+  const hit = (...v: Array<string | null | undefined>) => !needle || v.some((x) => (x ?? '').toLowerCase().includes(needle))
+  const grnRows = (todo?.lines ?? []).filter((l) => l.toLabel > 0 && (!lstore || l.warehouseId === lstore) && hit(l.item, l.itemCode, l.store, l.grnNumber, l.supplier, l.lotNo))
+  const rackRows = grnFilter ? [] : (todo?.loose ?? []).filter((l) => (!lstore || l.warehouseId === lstore) && hit(l.item, l.itemCode, l.store, l.owner))
+  // Opens on whichever list has something in it, unless one was chosen.
+  const from: LabelFrom = grnFilter ? 'grn' : fromParam === 'grn' || fromParam === 'racks' ? fromParam : grnRows.length || !rackRows.length ? 'grn' : 'racks'
 
   return (
     <div className="space-y-3">
@@ -215,7 +228,68 @@ function PackagesScreen() {
               </SmartSelect>
             </>
           )}
+          {tab === 'label' && (
+            <>
+              <div className="inline-flex shrink-0 rounded-lg border border-border p-0.5" role="tablist" aria-label="Which stock to label">
+                {(
+                  [
+                    ['grn', `Received on GRNs (${grnRows.length})`],
+                    ['racks', `On the racks (${rackRows.length})`],
+                  ] as const
+                )
+                  .filter(([key]) => !(grnFilter && key === 'racks'))
+                  .map(([key, label]) => (
+                    <button
+                      key={key}
+                      role="tab"
+                      aria-selected={from === key}
+                      onClick={() => go('label', key)}
+                      className={`h-8 rounded-md px-3 text-xs font-semibold ${from === key ? 'bg-primary text-white' : 'text-muted-foreground hover:text-foreground'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+              </div>
+              <div className="flex h-9 min-w-[200px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
+                <Search size={14} className="text-muted-foreground" />
+                <input
+                  className="flex-1 border-0 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+                  placeholder={from === 'grn' ? 'Search item, code, GRN, supplier or lot…' : 'Search item, code or store…'}
+                  value={lq}
+                  onChange={(e) => setLq(e.target.value)}
+                  aria-label="Search stock to label"
+                />
+                {lq && (
+                  <button onClick={() => setLq('')} aria-label="Clear the search" className="text-muted-foreground hover:text-foreground">
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              <SmartSelect className="form-input h-9 w-44" value={lstore} onChange={(e) => setLstore(e.target.value)}>
+                <option value="">All stores</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </SmartSelect>
+            </>
+          )}
         </div>
+        {tab === 'label' && (
+          <ToLabelView
+            todo={todo}
+            from={from}
+            grnRows={grnRows}
+            rackRows={rackRows}
+            searching={Boolean(needle || lstore)}
+            loading={loading}
+            grnFilter={grnFilter}
+            creator={creator}
+            onLabel={setLabelling}
+            onClearGrn={() => go('label', 'grn')}
+          />
+        )}
         {tab === 'list' && (
           <PackageGroups
             groups={groups}
@@ -230,9 +304,6 @@ function PackagesScreen() {
           />
         )}
       </div>
-      {tab === 'label' && (
-        <ToLabelView todo={todo} loading={loading} grnFilter={grnFilter} creator={creator} onLabel={setLabelling} onClearGrn={() => go('label')} />
-      )}
 
       {labelling && (
         <LabelDialog
@@ -286,8 +357,21 @@ function Figure({
   )
 }
 
+type LabelFrom = 'grn' | 'racks'
+type GrnRow = ToLabel['lines'][number]
+type RackRow = ToLabel['loose'][number]
+
+/**
+ * Stock waiting for stickers, one list at a time: what came in on a GRN, or
+ * what was already on the racks. Searched and filtered from the bar above, so
+ * one item among dozens is a few letters away rather than a long scroll.
+ */
 function ToLabelView({
   todo,
+  from,
+  grnRows,
+  rackRows,
+  searching,
   loading,
   grnFilter,
   creator,
@@ -295,16 +379,20 @@ function ToLabelView({
   onClearGrn,
 }: {
   todo: ToLabel | null
+  from: LabelFrom
+  grnRows: GrnRow[]
+  rackRows: RackRow[]
+  searching: boolean
   loading: boolean
   grnFilter: string
   creator: boolean
   onLabel: (t: LabelTarget) => void
   onClearGrn: () => void
 }) {
-  if (!todo) return <p className="text-sm text-muted-foreground">{loading ? 'Loading…' : ''}</p>
+  if (!todo) return <p className="p-6 text-center text-sm text-muted-foreground">{loading ? 'Loading…' : ''}</p>
   if (!todo.tracked) {
     return (
-      <div className="glass-card p-8 text-center text-muted-foreground">
+      <div className="p-8 text-center text-muted-foreground">
         No category is kept in packages yet. Open{' '}
         <Link href="/masters/item-categories" className="font-semibold text-primary hover:underline">
           Masters → Item Categories
@@ -313,25 +401,20 @@ function ToLabelView({
       </div>
     )
   }
-  const lines = todo.lines.filter((l) => l.toLabel > 0)
-  return (
-    <div className="space-y-5">
-      <div className="glass-card overflow-hidden p-0">
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <div>
-            <h3 className="font-semibold text-foreground">Received on GRNs</h3>
-            <p className="text-sm text-muted-foreground">
-              {grnFilter ? 'This GRN' : 'GRNs of the last 90 days'} with items kept in packages and not yet stickered
-            </p>
-          </div>
+
+  if (from === 'grn') {
+    return (
+      <>
+        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 text-xs text-muted-foreground">
+          <span>{grnFilter ? 'This GRN' : 'GRNs of the last 90 days'}: what came in and has no sticker yet.</span>
           {grnFilter && (
-            <button className="btn-ghost" onClick={onClearGrn}>
-              <X size={15} /> Show all GRNs
+            <button className="btn-ghost h-8" onClick={onClearGrn}>
+              <X size={14} /> Show all GRNs
             </button>
           )}
         </div>
-        {lines.length === 0 ? (
-          <p className="p-6 text-center text-sm text-muted-foreground">Everything received is labelled.</p>
+        {grnRows.length === 0 ? (
+          <p className="p-6 text-center text-sm text-muted-foreground">{searching ? 'Nothing received matches that.' : 'Everything received is labelled.'}</p>
         ) : (
           <ScrollableTable>
             <table className="data-table table-compact min-w-full">
@@ -347,7 +430,7 @@ function ToLabelView({
                 </tr>
               </thead>
               <tbody>
-                {lines.map((l) => (
+                {grnRows.map((l) => (
                   <tr key={l.grnLineId}>
                     <td className="whitespace-nowrap">
                       <div className="font-mono text-sm font-semibold text-foreground">{l.grnNumber}</div>
@@ -401,74 +484,73 @@ function ToLabelView({
             </table>
           </ScrollableTable>
         )}
-      </div>
+      </>
+    )
+  }
 
-      {!grnFilter && (
-        <div className="glass-card overflow-hidden p-0">
-          <div className="border-b border-border px-4 py-3">
-            <h3 className="font-semibold text-foreground">Already on the racks, not labelled</h3>
-            <p className="text-sm text-muted-foreground">Stock of these items with no sticker — from before packages were switched on, or left over</p>
-          </div>
-          {todo.loose.length === 0 ? (
-            <p className="p-6 text-center text-sm text-muted-foreground">All the stock of these items is in labelled packages.</p>
-          ) : (
-            <ScrollableTable>
-              <table className="data-table table-compact min-w-full">
-                <thead>
-                  <tr className="bg-secondary">
-                    <th>Item</th>
-                    <th>Store</th>
-                    <th>Owner</th>
-                    <th style={{ textAlign: 'right' }}>Without a sticker</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {todo.loose.map((l) => (
-                    <tr key={`${l.itemId}-${l.warehouseId}-${l.ownerCustomerId ?? ''}`}>
-                      <td>
-                        <div className="font-medium text-foreground">{l.item}</div>
-                        <div className="font-mono text-xs text-muted-foreground">{l.itemCode}</div>
-                      </td>
-                      <td className="whitespace-nowrap text-sm">{l.store}</td>
-                      <td className="whitespace-nowrap text-sm">{l.owner ?? 'Ours'}</td>
-                      <td className="whitespace-nowrap text-right font-semibold tabular-nums">
-                        {qtyText(l.qty)} {l.unit}
-                      </td>
-                      <td className="text-right">
-                        {creator && (
-                          <button
-                            className="btn-secondary h-9"
-                            onClick={() =>
-                              onLabel({
-                                itemId: l.itemId,
-                                item: l.item,
-                                itemCode: l.itemCode,
-                                unit: l.unit,
-                                warehouseId: l.warehouseId,
-                                store: l.store,
-                                ownership: l.ownership,
-                                ownerCustomerId: l.ownerCustomerId,
-                                owner: l.owner,
-                                packType: l.packType,
-                                perPack: l.perPack,
-                                max: l.qty,
-                              })
-                            }
-                          >
-                            <Tags size={14} /> Make stickers
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </ScrollableTable>
-          )}
-        </div>
+  return (
+    <>
+      <div className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
+        Stock on the racks with no sticker: from before stickers were switched on, or left over.
+      </div>
+      {rackRows.length === 0 ? (
+        <p className="p-6 text-center text-sm text-muted-foreground">{searching ? 'Nothing on the racks matches that.' : 'All the stock of these items is in labelled packages.'}</p>
+      ) : (
+        <ScrollableTable>
+          <table className="data-table table-compact min-w-full">
+            <thead>
+              <tr className="bg-secondary">
+                <th>Item</th>
+                <th>Store</th>
+                <th>Owner</th>
+                <th style={{ textAlign: 'right' }}>Without a sticker</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rackRows.map((l) => (
+                <tr key={`${l.itemId}-${l.warehouseId}-${l.ownerCustomerId ?? ''}`}>
+                  <td>
+                    <div className="font-medium text-foreground">{l.item}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{l.itemCode}</div>
+                  </td>
+                  <td className="whitespace-nowrap text-sm">{l.store}</td>
+                  <td className="whitespace-nowrap text-sm">{l.owner ?? 'Ours'}</td>
+                  <td className="whitespace-nowrap text-right font-semibold tabular-nums">
+                    {qtyText(l.qty)} {l.unit}
+                  </td>
+                  <td className="text-right">
+                    {creator && (
+                      <button
+                        className="btn-secondary h-9"
+                        onClick={() =>
+                          onLabel({
+                            itemId: l.itemId,
+                            item: l.item,
+                            itemCode: l.itemCode,
+                            unit: l.unit,
+                            warehouseId: l.warehouseId,
+                            store: l.store,
+                            ownership: l.ownership,
+                            ownerCustomerId: l.ownerCustomerId,
+                            owner: l.owner,
+                            packType: l.packType,
+                            perPack: l.perPack,
+                            max: l.qty,
+                          })
+                        }
+                      >
+                        <Tags size={14} /> Make stickers
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ScrollableTable>
       )}
-    </div>
+    </>
   )
 }
 

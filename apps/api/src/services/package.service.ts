@@ -87,6 +87,69 @@ export async function positionOf(tx: Prisma.TransactionClient, spot: StockSpot) 
   }
 }
 
+type PackageRule = { tracked: boolean; packType: PackType | null; category: string }
+
+/**
+ * Every category's rule from one read, for a screen that asks about dozens of
+ * items: one query rather than one an item.
+ */
+export async function packageRules(tx: Prisma.TransactionClient): Promise<(categoryId: string) => PackageRule> {
+  const all = await tx.itemCategory.findMany({ select: { id: true, name: true, parentId: true, trackPackages: true, packType: true } })
+  const byId = new Map(all.map((c) => [c.id, c]))
+  const memo = new Map<string, PackageRule>()
+  return (categoryId) => {
+    const had = memo.get(categoryId)
+    if (had) return had
+    let c = byId.get(categoryId)
+    const own = c?.name ?? ''
+    let packType: PackType | null = null
+    let rule: PackageRule = { tracked: false, packType: null, category: own }
+    for (let i = 0; c && i < 10; i++) {
+      packType ??= c.packType
+      if (c.trackPackages) {
+        rule = { tracked: true, packType: packType ?? null, category: own }
+        break
+      }
+      c = c.parentId ? byId.get(c.parentId) : undefined
+    }
+    if (!rule.tracked) rule = { tracked: false, packType, category: own }
+    memo.set(categoryId, rule)
+    return rule
+  }
+}
+
+const spotKey = (s: StockSpot) => [s.itemId, s.warehouseId, s.ownership, s.ownerCustomerId ?? ''].join('|')
+
+/**
+ * `positionOf` for many spots in two queries: the ledger and the packages,
+ * each summed per item, store and owner. The same figures — our own grade A
+ * stock with no size, as a package holds.
+ */
+export async function positionsOf(tx: Prisma.TransactionClient, spots: StockSpot[]) {
+  const itemIds = [...new Set(spots.map((s) => s.itemId))]
+  const [ledger, packed] = itemIds.length
+    ? await Promise.all([
+        tx.$queryRaw<Array<{ itemId: string; warehouseId: string; ownership: StockOwnership; ownerCustomerId: string | null; qty: number }>>`
+          SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId", COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
+          FROM ld_erp.stock_ledger
+          WHERE "itemId" = ANY(${itemIds}::text[]) AND "sizeId" IS NULL AND grade = 'A'
+          GROUP BY 1, 2, 3, 4`,
+        tx.stockPackage.groupBy({
+          by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
+          where: { itemId: { in: itemIds }, status: 'IN_STOCK' },
+          _sum: { qty: true },
+        }),
+      ])
+    : [[], []]
+  const inStore = new Map(ledger.map((r) => [spotKey(r), round3(Number(r.qty))]))
+  const inPackages = new Map(packed.map((r) => [spotKey(r), round3(Number(r._sum.qty ?? 0))]))
+  return (s: StockSpot) => {
+    const store = inStore.get(spotKey(s)) ?? 0
+    const pk = inPackages.get(spotKey(s)) ?? 0
+    return { inStore: store, inPackages: pk, loose: round3(store - pk) }
+  }
+}
+
 /**
  * Whether an item's stock is kept in packages, and what one usually is.
  *
@@ -130,11 +193,15 @@ const UNIT_PACK: Array<[RegExp, PackType]> = [
  * kilos, pieces — one sticker for the lot, which the person splits if it came
  * in several. The window always lets them change it.
  */
-export async function stickerDefaults(
-  tx: Prisma.TransactionClient,
-  item: { categoryId: string; packType: PackType | null; packQty: Prisma.Decimal | number | null; uom: { symbol: string; name?: string | null } | null },
-): Promise<{ packType: PackType; perPack: number | null; tracked: boolean; category: string }> {
-  const rule = await packageRule(tx, item.categoryId)
+type StickerItem = { categoryId: string; packType: PackType | null; packQty: Prisma.Decimal | number | null; uom: { symbol: string; name?: string | null } | null }
+export type StickerDefaults = { packType: PackType; perPack: number | null; tracked: boolean; category: string }
+
+export async function stickerDefaults(tx: Prisma.TransactionClient, item: StickerItem): Promise<StickerDefaults> {
+  return stickerDefaultsFrom(item, await packageRule(tx, item.categoryId))
+}
+
+/** The same, from a rule already in hand: see `packageRules`. */
+export function stickerDefaultsFrom(item: StickerItem, rule: PackageRule): StickerDefaults {
   const unit = [item.uom?.symbol, item.uom?.name].map((u) => (u ?? '').trim().toLowerCase())
   const byUnit = UNIT_PACK.find(([re]) => unit.some((u) => re.test(u)))?.[1] ?? null
   const remembered = item.packQty != null && Number(item.packQty) > 0 ? Number(item.packQty) : null

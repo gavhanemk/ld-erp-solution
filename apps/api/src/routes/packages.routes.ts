@@ -13,7 +13,9 @@ import {
   positionOf,
   recordPackageMove,
   round3,
-  stickerDefaults,
+  packageRules,
+  positionsOf,
+  stickerDefaultsFrom,
   suggestQtys,
   trackedCategoryIds,
   type PackageSource,
@@ -395,44 +397,6 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
   })
   const doneOf = new Map(labelled.map((l) => [l.grnLineId, Number(l._sum.initialQty ?? 0)]))
 
-  // How each item's stickers start out: its remembered setting, or one per roll or box.
-  const defaults = new Map<string, Awaited<ReturnType<typeof stickerDefaults>>>()
-  const defaultsOf = async (itemId: string) => {
-    if (!defaults.has(itemId)) {
-      const item = await prisma.item.findUniqueOrThrow({
-        where: { id: itemId },
-        select: { categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
-      })
-      defaults.set(itemId, await stickerDefaults(prisma, item))
-    }
-    return defaults.get(itemId)!
-  }
-
-  const lines = []
-  for (const l of grnLines) {
-    const remaining = round3(Number(l.acceptedQty) - (doneOf.get(l.id) ?? 0))
-    if (remaining <= 0) continue
-    const pos = await positionOf(prisma, { itemId: l.itemId, warehouseId: l.warehouseId, ownership: 'OWNED', ownerCustomerId: null })
-    lines.push({
-      grnLineId: l.id,
-      grnId: l.grn.id,
-      grnNumber: l.grn.grnNumber,
-      grnDate: l.grn.grnDate,
-      supplier: l.grn.po?.supplier?.name ?? '',
-      itemId: l.itemId,
-      itemCode: l.item.code,
-      item: l.item.name,
-      unit: l.item.uom?.symbol ?? '',
-      warehouseId: l.warehouseId,
-      store: l.warehouse.name,
-      lotNo: l.batchNumber,
-      accepted: Number(l.acceptedQty),
-      toLabel: Math.max(0, Math.min(remaining, pos.loose)),
-      packType: (await defaultsOf(l.itemId)).packType,
-      perPack: (await defaultsOf(l.itemId)).perPack,
-    })
-  }
-
   // Stock of packaged items on the racks with no sticker yet.
   const loose = await prisma.$queryRaw<
     Array<{ itemId: string; itemCode: string; item: string; categoryId: string; unit: string; warehouseId: string; store: string; ownership: string; ownerCustomerId: string | null; owner: string | null; qty: number }>
@@ -456,11 +420,50 @@ router.get('/to-label', requirePermission(MODULE, 'view'), async (req, res) => {
                 AND p."ownerCustomerId" IS NOT DISTINCT FROM s."ownerCustomerId" AND p.status = 'IN_STOCK'), 0) > 0.0005
     ORDER BY i.name, w.name
   `
-  const looseRows = []
-  for (const r of loose) {
-    const d = await defaultsOf(r.itemId)
-    looseRows.push({ ...r, qty: round3(r.qty), packType: d.packType, perPack: d.perPack })
+  // How each item's stickers start out — its remembered setting, or one per
+  // roll or box — and how much of each GRN line is still loose: read for all
+  // the items at once. One query an item made this list take half a minute.
+  const itemIds = [...new Set([...grnLines.map((l) => l.itemId), ...loose.map((r) => r.itemId)])]
+  const [ruleOf, items, positionOf] = await Promise.all([
+    packageRules(prisma),
+    prisma.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { id: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+    }),
+    positionsOf(
+      prisma,
+      grnLines.map((l) => ({ itemId: l.itemId, warehouseId: l.warehouseId, ownership: 'OWNED' as const, ownerCustomerId: null })),
+    ),
+  ])
+  const defaults = new Map(items.map((i) => [i.id, stickerDefaultsFrom(i, ruleOf(i.categoryId))]))
+  const defaultsOf = (itemId: string) => defaults.get(itemId) ?? { packType: 'BOX' as const, perPack: null }
+
+  const lines = []
+  for (const l of grnLines) {
+    const remaining = round3(Number(l.acceptedQty) - (doneOf.get(l.id) ?? 0))
+    if (remaining <= 0) continue
+    const pos = positionOf({ itemId: l.itemId, warehouseId: l.warehouseId, ownership: 'OWNED', ownerCustomerId: null })
+    lines.push({
+      grnLineId: l.id,
+      grnId: l.grn.id,
+      grnNumber: l.grn.grnNumber,
+      grnDate: l.grn.grnDate,
+      supplier: l.grn.po?.supplier?.name ?? '',
+      itemId: l.itemId,
+      itemCode: l.item.code,
+      item: l.item.name,
+      unit: l.item.uom?.symbol ?? '',
+      warehouseId: l.warehouseId,
+      store: l.warehouse.name,
+      lotNo: l.batchNumber,
+      accepted: Number(l.acceptedQty),
+      toLabel: Math.max(0, Math.min(remaining, pos.loose)),
+      packType: defaultsOf(l.itemId).packType,
+      perPack: defaultsOf(l.itemId).perPack,
+    })
   }
+
+  const looseRows = loose.map((r) => ({ ...r, qty: round3(r.qty), packType: defaultsOf(r.itemId).packType, perPack: defaultsOf(r.itemId).perPack }))
 
   const grns = [...new Map(lines.map((l) => [l.grnId, { id: l.grnId, grnNumber: l.grnNumber, grnDate: l.grnDate, supplier: l.supplier }])).values()]
   res.json({ success: true, data: { tracked: true, grns, lines, loose: looseRows } })
@@ -541,12 +544,16 @@ router.get('/outward-labels', requirePermission(MODULE, 'view'), async (req, res
 async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
   const seen = new Set<string>()
   const spots = []
+  const positionOf = await positionsOf(
+    prisma,
+    doc.lines.map((l) => ({ itemId: l.itemId, warehouseId: l.warehouseId, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId })),
+  )
   for (const l of doc.lines) {
     const key = [l.itemId, l.warehouseId, l.ownership, l.ownerCustomerId ?? ''].join('|')
     if (seen.has(key)) continue
     seen.add(key)
     const spot = { itemId: l.itemId, warehouseId: l.warehouseId, ownership: l.ownership, ownerCustomerId: l.ownerCustomerId }
-    const pos = await positionOf(prisma, spot)
+    const pos = positionOf(spot)
     // Packages claiming more than the store now holds: what went out came from them.
     if (pos.loose >= -0.0005) continue
     const over = round3(-pos.loose)
@@ -897,28 +904,41 @@ router.post('/plan', requirePermission(MODULE, 'view'), async (req, res) => {
   const itemOf = new Map(items.map((i) => [i.id, i]))
   const storeOf = new Map(stores.map((w) => [w.id, w.name]))
   const ownerOf = new Map(owners.map((c) => [c.id, c.name]))
+  const spotOf = (c: Came) => ({ itemId: c.itemId, warehouseId: c.warehouseId, ownership: c.ownership, ownerCustomerId: c.ownerCustomerId })
+  // Read for every line at once: rules, positions, and what this document has
+  // had labelled already — a second look at the same GRN offers only the rest.
+  const [ruleOf, positionOf, byLine, bySpot] = await Promise.all([
+    packageRules(prisma),
+    positionsOf(prisma, came.map(spotOf)),
+    prisma.stockPackage.groupBy({
+      by: ['grnLineId'],
+      where: { grnLineId: { in: came.map((c) => c.grnLineId).filter((x): x is string => !!x) }, status: { not: 'VOID' } },
+      _sum: { initialQty: true },
+    }),
+    prisma.stockPackage.groupBy({
+      by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
+      where: { sourceType: data.sourceType, sourceId: data.sourceId, status: { not: 'VOID' } },
+      _sum: { initialQty: true },
+    }),
+  ])
+  const doneByLine = new Map(byLine.map((r) => [r.grnLineId, Number(r._sum.initialQty ?? 0)]))
+  const spotKey = (x: { itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null }) =>
+    [x.itemId, x.warehouseId, x.ownership, x.ownerCustomerId ?? ''].join('|')
+  const doneBySpot = new Map(bySpot.map((r) => [spotKey(r), Number(r._sum.initialQty ?? 0)]))
 
   const targets = []
   const untracked: Array<{ itemId: string; code: string; name: string; category: string }> = []
   for (const c of came) {
     const item = itemOf.get(c.itemId)
     if (!item) continue
-    const d = await stickerDefaults(prisma, item)
+    const d = stickerDefaultsFrom(item, ruleOf(item.categoryId))
     if (!d.tracked) {
       if (!untracked.some((u) => u.itemId === item.id)) untracked.push({ itemId: item.id, code: item.code, name: item.name, category: d.category })
       continue
     }
-    const spot = { itemId: c.itemId, warehouseId: c.warehouseId, ownership: c.ownership, ownerCustomerId: c.ownerCustomerId }
-    // Labelled from this document already: a second look at the same GRN
-    // offers only what is still without a sticker.
-    const done = await prisma.stockPackage.aggregate({
-      where: c.grnLineId
-        ? { grnLineId: c.grnLineId, status: { not: 'VOID' } }
-        : { ...spot, sourceType: data.sourceType, sourceId: data.sourceId, status: { not: 'VOID' } },
-      _sum: { initialQty: true },
-    })
-    const pos = await positionOf(prisma, spot)
-    const max = round3(Math.min(c.qty - Number(done._sum.initialQty ?? 0), pos.loose))
+    const done = c.grnLineId ? (doneByLine.get(c.grnLineId) ?? 0) : (doneBySpot.get(spotKey(c)) ?? 0)
+    const pos = positionOf(spotOf(c))
+    const max = round3(Math.min(c.qty - done, pos.loose))
     if (max <= 0.0005) continue
     targets.push({
       key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? ''].join('|'),

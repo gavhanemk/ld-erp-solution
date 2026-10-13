@@ -56,11 +56,13 @@ export function LabelDialog({
   onDone: (message: string, ids: string[]) => void
 }) {
   const [packType, setPackType] = useState(target.packType || 'BOX')
-  // Starts from what one sticker usually holds: a roll a sticker, say.
+  // Starts from what one sticker usually holds: a roll a sticker, say. When
+  // that is more stickers than one go allows — 1,211 rolls on the rack — what
+  // each holds is still filled in, and only how many is left to say.
   const start = target.perPack && target.perPack > 0 ? Math.floor(target.max / target.perPack + 1e-9) : 0
   const [mode, setMode] = useState<'same' | 'each'>(start > 0 || target.packType !== 'ROLL' ? 'same' : 'each')
   const [count, setCount] = useState(start > 0 && start <= 500 ? String(start) : '')
-  const [each, setEach] = useState(start > 0 && start <= 500 ? String(target.perPack) : '')
+  const [each, setEach] = useState(start > 0 ? String(target.perPack) : '')
   const [remember, setRemember] = useState(false)
   const [rows, setRows] = useState<string[]>(['', '', ''])
   const [paste, setPaste] = useState<string | null>(null)
