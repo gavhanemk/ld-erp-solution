@@ -10,10 +10,10 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { pcs, type Stage, type StepFigures } from './types'
 
 /**
- * One stage's work: a row for each job card at that stage, saying in plain
- * words what is waiting there — pieces to count in, to work on, to send on,
- * to decide on — with its figures. A row opens the job card's sheet for the
- * stage, where the work is recorded.
+ * One stage's work: a table row for each job card at that stage — its order,
+ * its figures in columns, and in plain words what is waiting there (pieces to
+ * count in, to work on, to send on, to decide on). A row opens the job card's
+ * sheet for the stage, where the work is recorded. On a phone, a card each.
  */
 
 export interface StageRow {
@@ -67,6 +67,38 @@ export function whatWaits(r: StageRow): Array<{ text: string; tone: Tone }> {
   return out
 }
 
+/** The figure columns: what was made and moved at cutting, what came and went anywhere else. */
+function columnsOf(stage: Stage): Array<{ label: string; of: (r: StageRow) => number; warn?: boolean }> {
+  if (stage === 'CUTTING') {
+    return [
+      { label: 'To make', of: (r) => r.card.line.totalQty },
+      { label: 'With cutters', of: (r) => r.withCutters },
+      { label: 'Cut', of: (r) => r.figures.completed },
+      { label: 'Sent on', of: (r) => r.figures.sentOn },
+    ]
+  }
+  return [
+    { label: 'Received', of: (r) => r.figures.received },
+    { label: stage === 'QC' ? 'Passed' : 'Processed', of: (r) => r.figures.completed },
+    { label: 'Sent on', of: (r) => r.figures.sentOn + r.figures.packed },
+    { label: 'Damaged', of: (r) => r.figures.damaged + r.figures.rejected, warn: true },
+    { label: 'Here now', of: (r) => (r.step.execution === 'OUTSOURCED' ? r.figures.atVendor : r.figures.inHand + r.figures.waiting) },
+  ]
+}
+
+function Waits({ r }: { r: StageRow }) {
+  return (
+    <ul className="space-y-0.5">
+      {whatWaits(r).map((w) => (
+        <li key={w.text} className={`flex items-start gap-2 text-xs ${w.tone === 'act' ? 'text-foreground font-medium' : w.tone === 'warn' ? 'text-destructive' : 'text-muted-foreground'}`}>
+          <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${DOT[w.tone]}`} aria-hidden />
+          {w.text}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 export function StageList({ operationId, stage, onOpen, refreshKey }: { operationId: string; stage: Stage; onOpen: (row: StageRow) => void; refreshKey: number }) {
   const { rowsPerPage } = useAppSettings()
   const [rows, setRows] = useState<StageRow[]>([])
@@ -108,6 +140,7 @@ export function StageList({ operationId, stage, onOpen, refreshKey }: { operatio
   }, [load, refreshKey])
 
   const cutting = stage === 'CUTTING'
+  const columns = columnsOf(stage)
   return (
     <div className="glass-card overflow-hidden p-0">
       <div className="border-border flex flex-wrap items-center gap-2 border-b px-4 py-3">
@@ -154,72 +187,100 @@ export function StageList({ operationId, stage, onOpen, refreshKey }: { operatio
             : 'Nothing to show.'}
         </p>
       ) : (
-        <div className="divide-border/60 divide-y">
-          {rows.map((r) => {
-            const f = r.figures
-            const waits = whatWaits(r)
-            const figures: Array<[string, number]> = cutting
-              ? [
-                  ['To make', r.card.line.totalQty],
-                  ['With cutters', r.withCutters],
-                  ['Cut', f.completed],
-                  ['Sent on', f.sentOn],
-                ]
-              : [
-                  ['Received', f.received],
-                  [r.stage === 'QC' ? 'Passed' : 'Processed', f.completed],
-                  ['Sent on', f.sentOn + f.packed],
-                  ['Damaged', f.damaged + f.rejected],
-                  [r.step.execution === 'OUTSOURCED' ? 'With unit' : 'Here now', r.step.execution === 'OUTSOURCED' ? f.atVendor : f.inHand + f.waiting],
-                ]
-            return (
-              <button key={`${r.card.id}|${r.step.id}`} type="button" onClick={() => onOpen(r)} className="hover:bg-secondary/60 block w-full px-4 py-3 text-left">
-                <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-foreground text-sm">
-                      <span className="text-primary font-mono text-xs">{r.card.jobCardNumber}</span>{' '}
-                      <span className="font-semibold">
-                        {r.card.line.style.code} · {r.card.line.color}
-                      </span>
-                      {r.card.designNo ? <span className="text-muted-foreground"> · design {r.card.designNo}</span> : null}
+        <>
+          {/* Wide screens: a table, its column names kept in view while it scrolls. */}
+          <div className="hidden max-h-[65vh] overflow-auto md:block">
+            <table className="data-table table-compact w-full">
+              <thead className="sticky top-0 z-10 [&_th]:whitespace-nowrap [&_th]:bg-secondary">
+                <tr>
+                  <th>Job card</th>
+                  <th>Style · colour</th>
+                  <th>Order</th>
+                  <th>Due</th>
+                  <th style={{ minWidth: 200 }}>What to do now</th>
+                  {columns.map((c) => (
+                    <th key={c.label} style={{ textAlign: 'right' }}>
+                      {c.label}
+                    </th>
+                  ))}
+                  <th>{cutting ? 'Goes next' : 'From → next'}</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={`${r.card.id}|${r.step.id}`} className="cursor-pointer" onClick={() => onOpen(r)} title={`Open ${r.card.jobCardNumber} at ${r.step.name}`}>
+                    <td className="whitespace-nowrap">
+                      <span className="text-primary font-mono text-xs font-semibold">{r.card.jobCardNumber}</span>
+                      {r.card.designNo && <span className="text-muted-foreground block text-[11px]">design {r.card.designNo}</span>}
+                    </td>
+                    <td>
+                      <span className="text-foreground whitespace-nowrap text-sm font-semibold">{r.card.line.style.code}</span>
                       {r.card.mo.held && <span className="badge-warning ml-2">On hold</span>}
-                    </p>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      {r.card.mo.moNumber}
-                      {r.card.mo.so ? ` · ${r.card.mo.so.customer.name}` : ''} · {pcs(r.card.line.totalQty)} pcs
-                      {r.card.mo.due ? ` · due ${formatDate(r.card.mo.due)}` : ''}
-                    </p>
-                    <p className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-1 text-[11px]">
-                      {r.from.length ? r.from.join(' / ') : 'Start'} <ArrowRight size={10} /> <span className="text-foreground font-medium">{r.step.name}</span> <ArrowRight size={10} />{' '}
-                      {r.next?.name ?? 'Finished goods'}
-                    </p>
-                    <ul className="mt-1.5 space-y-0.5">
-                      {waits.map((w) => (
-                        <li key={w.text} className={`flex items-center gap-2 text-xs ${w.tone === 'act' ? 'text-foreground font-medium' : w.tone === 'warn' ? 'text-destructive' : 'text-muted-foreground'}`}>
-                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT[w.tone]}`} aria-hidden />
-                          {w.text}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <dl className="hidden gap-3 text-right sm:flex">
-                      {figures.map(([label, n]) => (
-                        <div key={label} className="min-w-[56px]">
-                          <dt className="text-muted-foreground text-[10px]">{label}</dt>
-                          <dd className={`text-sm font-semibold tabular-nums ${label === 'Damaged' && n ? 'text-destructive' : 'text-foreground'}`}>{n ? pcs(n) : '—'}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                    <span className="btn-secondary h-8 px-3 text-xs">
-                      Open <ChevronRight size={14} />
-                    </span>
-                  </div>
-                </div>
+                      <span className="text-muted-foreground block text-[11px]">{r.card.line.color}</span>
+                    </td>
+                    <td>
+                      <span className="whitespace-nowrap font-mono text-xs">{r.card.mo.moNumber}</span>
+                      <span className="text-muted-foreground block text-[11px]">
+                        {r.card.mo.so ? `${r.card.mo.so.customer.name} · ` : ''}
+                        {pcs(r.card.line.totalQty)} pcs
+                      </span>
+                    </td>
+                    <td className="whitespace-nowrap text-xs">{r.card.mo.due ? formatDate(r.card.mo.due) : '—'}</td>
+                    <td>
+                      <Waits r={r} />
+                    </td>
+                    {columns.map((c) => {
+                      const n = c.of(r)
+                      return (
+                        <td key={c.label} className="text-right tabular-nums">
+                          {n ? <span className={c.warn ? 'text-destructive font-semibold' : 'text-foreground'}>{pcs(n)}</span> : <span className="text-muted-foreground">—</span>}
+                        </td>
+                      )
+                    })}
+                    <td className="whitespace-nowrap text-xs">
+                      {!cutting && <span className="text-muted-foreground">{r.from.length ? r.from.join(' / ') : 'Start'}</span>}
+                      {!cutting && <ArrowRight size={10} className="text-muted-foreground mx-1 inline" />}
+                      <span className="text-foreground">{r.next?.name ?? 'Finished goods'}</span>
+                    </td>
+                    <td className="text-right">
+                      <ChevronRight size={16} className="text-muted-foreground inline" aria-label="Open" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Phones: a card each. */}
+          <div className="divide-border/60 divide-y md:hidden">
+            {rows.map((r) => (
+              <button key={`${r.card.id}|${r.step.id}`} type="button" onClick={() => onOpen(r)} className="hover:bg-secondary/60 block w-full space-y-1.5 px-4 py-3 text-left">
+                <p className="text-foreground text-sm">
+                  <span className="text-primary font-mono text-xs">{r.card.jobCardNumber}</span>{' '}
+                  <span className="font-semibold">
+                    {r.card.line.style.code} · {r.card.line.color}
+                  </span>
+                  {r.card.mo.held && <span className="badge-warning ml-2">On hold</span>}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  {r.card.mo.moNumber}
+                  {r.card.mo.so ? ` · ${r.card.mo.so.customer.name}` : ''} · {pcs(r.card.line.totalQty)} pcs
+                  {r.card.mo.due ? ` · due ${formatDate(r.card.mo.due)}` : ''}
+                </p>
+                <dl className="grid grid-cols-4 gap-2">
+                  {columns.slice(0, 4).map((c) => (
+                    <div key={c.label}>
+                      <dt className="text-muted-foreground text-[10px]">{c.label}</dt>
+                      <dd className="text-foreground text-sm font-semibold tabular-nums">{c.of(r) ? pcs(c.of(r)) : '—'}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <Waits r={r} />
               </button>
-            )
-          })}
-        </div>
+            ))}
+          </div>
+        </>
       )}
       <Pagination page={page} pages={Math.ceil(total / rowsPerPage) || 1} onPageChange={setPage} busy={loading} />
     </div>

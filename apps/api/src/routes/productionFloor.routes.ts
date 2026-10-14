@@ -311,12 +311,12 @@ router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async 
   })
 })
 
-/** Where a transfer not yet counted in could go instead. */
+/** Where a transfer could go instead, or why it cannot any more. */
 router.get('/transfers/:id/redirect-options', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await redirectOptions(prisma, req.params.id) })
 })
 
-/** A transfer not yet counted in, sent to another step instead. */
+/** A transfer sent to another step instead — taking back its count-in, if nobody there has worked on the pieces yet. */
 router.post('/transfers/:id/redirect', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = redirectSchema.parse(req.body)
   const out = await prisma.$transaction((tx) => redirectTransfer(tx, req.params.id, data, req.user!.id), T)

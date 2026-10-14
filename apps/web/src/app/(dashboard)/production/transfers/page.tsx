@@ -12,7 +12,7 @@ import { SettleDialog } from '@/components/production/floor/SettleDialog'
 import { NewTransferDialog } from '@/components/production/floor/NewTransferDialog'
 import { TransferDetailDialog, type TransferRow } from '@/components/production/floor/TransferDetailDialog'
 import { transferStatus } from '@/components/production/floor/transferStatus'
-import { RedirectDialog } from '@/components/production/floor/RedirectDialog'
+import { RedirectDialog, mayChangeWhere } from '@/components/production/floor/RedirectDialog'
 import { pcs, sheetHref, type FlowTransfer } from '@/components/production/floor/types'
 
 /**
@@ -305,8 +305,8 @@ export default function TransfersPage() {
                             <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => print(t)} aria-label={`Print ${t.transferNumber}`} title="Print the card">
                               <Printer size={14} />
                             </button>
-                            {can('production', 'edit') && t.status === 'DISPATCHED' && !got && !t.vendor && (
-                              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)} title="Not counted in yet: send it to another step instead">
+                            {can('production', 'edit') && mayChangeWhere(t) && t.status !== 'RECEIVED' && (
+                              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)} title="Send these pieces to another step instead">
                                 <Shuffle size={14} /> Change where it goes
                               </button>
                             )}
@@ -347,7 +347,7 @@ export default function TransfersPage() {
                       <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => print(t)}>
                         <Printer size={14} /> Print
                       </button>
-                      {can('production', 'edit') && t.status === 'DISPATCHED' && !t.vendor && !t.lines.some((l) => l.receivedQty > 0) && (
+                      {can('production', 'edit') && mayChangeWhere(t) && t.status !== 'RECEIVED' && (
                         <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)}>
                           <Shuffle size={14} /> Change where it goes
                         </button>
@@ -372,6 +372,10 @@ export default function TransfersPage() {
           }}
           onSettle={() => {
             setSettling(detail)
+            setDetail(null)
+          }}
+          onRedirect={() => {
+            setRedirecting(detail)
             setDetail(null)
           }}
         />

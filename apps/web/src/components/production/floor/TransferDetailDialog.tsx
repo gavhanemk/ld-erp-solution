@@ -1,11 +1,12 @@
 'use client'
 
-import { ArrowRight, ClipboardCheck, ExternalLink, Printer, Scale, Send } from 'lucide-react'
+import { ArrowRight, ClipboardCheck, ExternalLink, Printer, Scale, Send, Shuffle } from 'lucide-react'
 import { can } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { transferStatus } from './transferStatus'
+import { mayChangeWhere } from './RedirectDialog'
 import { pcs, sheetHref, type FlowTransfer } from './types'
 
 /**
@@ -28,11 +29,14 @@ export function TransferDetailDialog({
   onClose,
   onCountIn,
   onSettle,
+  onRedirect,
 }: {
   t: TransferRow
   onClose: () => void
   onCountIn: () => void
   onSettle: () => void
+  /** Send it to another step instead. */
+  onRedirect?: () => void
 }) {
   const st = transferStatus(t)
   const sent = t.lines.reduce((s, l) => s + l.dispatchedQty, 0)
@@ -84,6 +88,11 @@ export function TransferDetailDialog({
             <a className="btn-secondary" href={sheetHref(t.jobCard.id, t.toStep.id)}>
               <ExternalLink size={15} /> {t.toStep.name} sheet
             </a>
+          )}
+          {onRedirect && mayChangeWhere(t) && can('production', 'edit') && (
+            <button type="button" className="btn-secondary" onClick={onRedirect} title="Send these pieces to another step instead">
+              <Shuffle size={15} /> Change where it goes
+            </button>
           )}
           <button type="button" className="btn-secondary" onClick={onClose}>
             Close

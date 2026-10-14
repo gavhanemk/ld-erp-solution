@@ -132,10 +132,14 @@ export const redirectSchema = z.object({
 })
 
 export async function redirectTransfer(tx: Tx, transferId: string, d: z.infer<typeof redirectSchema>, userId: string) {
-  const t = await tx.processTransfer.findUnique({ where: { id: transferId }, include: { lines: true } })
+  const t = await tx.processTransfer.findUnique({ where: { id: transferId }, include: { lines: true, toStep: { select: { name: true } } } })
   if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
   if (t.vendorId) throw new AppError(`${t.transferNumber} went to an outside unit on a job-work challan: cancel it, then send the pieces again.`, 409, 'AT_A_UNIT')
   if (t.toStepId === d.toStepId) throw new AppError('They are already going there.', 400, 'SAME_STEP')
+  const stuck = cannotRedirect(t)
+  if (stuck) throw new AppError(stuck, 409, 'CANNOT_REDIRECT')
+  // Counted in, but nobody there has touched the pieces yet: the count-in is taken back first.
+  if (t.lines.some((l) => l.receivedQty > 0)) await takeBackCount(tx, t, d.reason, userId)
   await cancelTransfer(tx, t.id, `Sent somewhere else instead: ${d.reason}`, userId)
   const out = await dispatch(
     tx,
@@ -155,10 +159,65 @@ export async function redirectTransfer(tx: Tx, transferId: string, d: z.infer<ty
   return { old: t, transfer: out.transfer }
 }
 
-/** Where a transfer not yet counted in could go instead: the same rule, as if it had not been sent. */
+type RedirectFacts = {
+  transferNumber: string
+  status: string
+  vendorId: string | null
+  toStep: { name: string }
+  lines: Array<{ receivedQty: number; shortQty: number; excessQty: number }>
+}
+const workedOn = (t: Pick<RedirectFacts, 'transferNumber' | 'toStep'>) =>
+  `${t.toStep.name} has already worked on some of these pieces, so ${t.transferNumber} can no longer be sent somewhere else. Send the pieces on from ${t.toStep.name} instead.`
+
+/** Why a transfer must stand as it is, or null while it can still go somewhere else. */
+function cannotRedirect(t: RedirectFacts): string | null {
+  if (t.status === 'CANCELLED') return `${t.transferNumber} was cancelled.`
+  if (t.vendorId) return `${t.transferNumber} went to an outside unit on a job-work challan: cancel it, then send the pieces again.`
+  if (t.lines.some((l) => l.shortQty > 0 || l.excessQty > 0)) {
+    return `${t.transferNumber} was counted in with a difference, so it stands. Send the pieces on from ${t.toStep.name} instead.`
+  }
+  return null
+}
+
+/**
+ * A count-in taken back, so the transfer can go somewhere else — only while
+ * the pieces still sit at the step as they were counted in. Once that step
+ * has worked on any of them, undoing the count fails, and the transfer stands.
+ */
+async function takeBackCount(tx: Tx, t: { id: string } & RedirectFacts, reason: string, userId: string) {
+  const counts = await tx.wipEvent.findMany({ where: { transferId: t.id, type: 'RECEIVE', reversedAt: null }, select: { id: true }, orderBy: { createdAt: 'desc' } })
+  for (const ev of counts) {
+    try {
+      await reverseEvent(tx, ev.id, `Count-in taken back, to send ${t.transferNumber} somewhere else: ${reason}`, userId)
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'NOT_ENOUGH_PIECES') throw new AppError(workedOn(t), 409, 'WORKED_ON')
+      throw err
+    }
+  }
+  await tx.processTransferLine.updateMany({ where: { transferId: t.id }, data: { receivedQty: 0 } })
+  await tx.processTransfer.update({ where: { id: t.id }, data: { status: 'DISPATCHED', receivedBy: null, receivedAt: null } })
+}
+
+/**
+ * Where a transfer could go instead: the same rule, as if it had not been
+ * sent — and, when it cannot go anywhere else any more, why not.
+ */
 export async function redirectOptions(db: Tx | PrismaClient, transferId: string) {
-  const t = await db.processTransfer.findUnique({ where: { id: transferId }, include: { lines: { include: { bundle: { select: { code: true } } } } } })
+  const t = await db.processTransfer.findUnique({
+    where: { id: transferId },
+    include: { lines: { include: { bundle: { select: { code: true } } } }, toStep: { select: { name: true } } },
+  })
   if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
+  let blocked = cannotRedirect(t)
+  if (!blocked && t.lines.some((l) => l.receivedQty > 0)) {
+    // Counted in: still possible only while every counted piece sits there untouched.
+    const held = await balancesOf(db, t.moId)
+    const counted = new Map<string, number>()
+    for (const l of t.lines) counted.set(l.bundleId, (counted.get(l.bundleId) ?? 0) + l.receivedQty)
+    const untouched = (bundleId: string) =>
+      held.filter((r) => r.stepId === t.toStepId && r.bundleId === bundleId && r.bucket === 'WIP' && !r.vendorId && !r.reworkStepId).reduce((s, r) => s + r.qty, 0)
+    if ([...counted].some(([bundleId, n]) => untouched(bundleId) < n)) blocked = workedOn(t)
+  }
   const mo = await db.manufacturingOrder.findUniqueOrThrow({
     where: { id: t.moId },
     select: { id: true, steps: { orderBy: { sequence: 'asc' }, select: { id: true, sequence: true, name: true, kind: true, isQcStep: true, execution: true, skippedAt: true } } },
@@ -176,7 +235,7 @@ export async function redirectOptions(db: Tx | PrismaClient, transferId: string)
     bundles,
     sent.map((l) => ({ bundleId: l.bundleId, toStepId: l.transfer.toStepId, qty: l.dispatchedQty })),
   )
-  return choices
+  const options = choices
     .filter((c) => c.step.id !== t.toStepId)
     .map((c) => {
       const blocked = t.lines.find((l) => l.dispatchedQty > (c.caps[l.bundleId] ?? 0))
@@ -197,6 +256,7 @@ export async function redirectOptions(db: Tx | PrismaClient, transferId: string)
             : null,
       }
     })
+  return { blocked, counted: t.lines.some((l) => l.receivedQty > 0), options }
 }
 
 /**
