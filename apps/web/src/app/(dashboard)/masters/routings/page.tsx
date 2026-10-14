@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, ArrowRight, Ban, Lock, Pencil, Plus, RefreshCw, Search, Unlock } from 'lucide-react'
+import { AlertCircle, Ban, Lock, Pencil, Plus, RefreshCw, Search, Unlock } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
 import { Pagination } from '@/components/tables/Pagination'
@@ -84,7 +84,7 @@ export default function RoutingsPage() {
       <div className="page-header">
         <div>
           <h1 className="page-title text-xl sm:text-2xl">Routings</h1>
-          <p className="page-subtitle hidden sm:block">Decide here which processes a style goes through, and in what order</p>
+          <p className="page-subtitle hidden sm:block">Decide here which processes a style needs. The floor picks the order on each transfer; cutting is first and the last one goes into finished goods.</p>
         </div>
         <div className="flex items-center gap-2">
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} aria-label="Refresh">
@@ -192,22 +192,26 @@ export default function RoutingsPage() {
                     </div>
                   )}
                 </div>
+                {/* The processes it needs: cutting first, the last into finished goods, the rest in the order the work needs. */}
                 {r.steps && r.steps.length > 0 && (
-                  <ol className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1.5 text-xs">
+                  <ul className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
                     {[...r.steps]
                       .sort((a, b) => a.sequence - b.sequence)
-                      .map((s, i) => (
-                        <li key={s.id ?? s.sequence} className="flex items-center gap-1">
-                          {i > 0 && <ArrowRight size={12} className="text-muted-foreground shrink-0" aria-hidden />}
-                          <span className="border-border text-foreground whitespace-nowrap rounded-md border px-2 py-0.5" title={s.instructions ?? undefined}>
-                            <span className="text-muted-foreground tabular-nums">{s.sequence}.</span> {s.operation?.name ?? 'Process'}
-                            {s.isQcStep && <span className="text-primary"> (check)</span>}
-                            {s.execution === 'OUTSOURCED' && <span className="text-muted-foreground"> (outside unit)</span>}
-                            {s.skip === 'OPTIONAL' && <span className="text-muted-foreground"> (optional)</span>}
-                          </span>
+                      .map((s, i, all) => (
+                        <li
+                          key={s.id ?? s.sequence}
+                          className={`whitespace-nowrap rounded-md border px-2 py-0.5 ${s.isQcStep ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-border'} text-foreground`}
+                          title={s.instructions ?? undefined}
+                        >
+                          {s.operation?.name ?? 'Process'}
+                          {i === 0 && <span className="text-muted-foreground"> · first</span>}
+                          {i === all.length - 1 && <span className="text-muted-foreground"> · last, into finished goods</span>}
+                          {s.isQcStep && <span className="text-emerald-600"> · check</span>}
+                          {s.execution === 'OUTSOURCED' && <span className="text-muted-foreground"> · outside unit</span>}
+                          {s.skip === 'OPTIONAL' && <span className="text-muted-foreground"> · optional</span>}
                         </li>
                       ))}
-                  </ol>
+                  </ul>
                 )}
               </div>
             ))}

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowDown, ArrowUp, Info, ListOrdered, Loader2, Lock, Plus, Route, Save, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Info, ListOrdered, Loader2, Lock, Plus, Route, Save, ShieldCheck, Trash2 } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -9,7 +9,12 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 
 /**
- * A routing: the ordered path a garment takes through the factory.
+ * A routing: the processes a garment of a style goes through.
+ *
+ * Cutting comes first and the last process puts pieces into finished goods;
+ * in between, the floor sends bundles on in whatever order the work needs,
+ * picking from these processes on each transfer — the order here is only the
+ * usual one, offered first.
  *
  * For one style, for every style of a category (all formal shirts), or for
  * any style. Each step is a process done by its department — on our floor or
@@ -67,6 +72,7 @@ interface Operation {
   jobWorkRate: string | number | null
   smv: string | number | null
   instructions: string | null
+  isActive?: boolean
   department?: { name: string } | null
 }
 interface Unit {
@@ -120,6 +126,8 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
   const [rows, setRows] = useState<Row[]>([blank()])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A process's less-used settings — SMV, instructions, leaving it out — open on demand.
+  const [more, setMore] = useState<Record<string, boolean>>({})
 
   useEffect(() => {
     if (!open) return
@@ -154,7 +162,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
     if (!open) return
     let alive = true
     void Promise.all([
-      masterResource<Operation>('operations').list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' }),
+      masterResource<Operation>('operations').list({ limit: 300, sort: 'sortOrder', order: 'asc' }),
       masterResource<Unit>('workstations').list({ limit: 300, active: true }),
       masterResource<StyleOption>('styles').list({ limit: 500, active: true }),
     ])
@@ -209,11 +217,11 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
         : applies === 'CATEGORY' && !category.trim()
           ? 'Say which category of styles it is for.'
           : rows.some((r) => !r.operationId)
-            ? 'Pick a process on every step.'
+            ? 'Pick a process on every line.'
             : kinds[0] !== 'CUTTING'
               ? 'Start with cutting: that is where the pieces are made.'
               : kinds.filter((k) => k === 'CUTTING').length > 1
-                ? 'Cut once: only one cutting step.'
+                ? 'Cut once: only one cutting process.'
                 : null
   const noCheck = rows.length > 0 && !rows.some((r, i) => r.isQcStep || kinds[i] === 'QC')
 
@@ -264,7 +272,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
       subtitle={
         isEdit
           ? `Version ${record?.version}${record?._count?.mos ? ` · ${record._count.mos} ${record._count.mos === 1 ? 'order has' : 'orders have'} a copy of its steps, which a change here does not touch` : ''}`
-          : 'The steps a garment goes through, in order. Orders take a copy when they are planned.'
+          : 'The processes a garment of this style goes through. Orders take a copy when they are planned.'
       }
       width="max-w-6xl"
       primary={
@@ -277,7 +285,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
           Cancel
         </button>
       }
-      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${rows.length} ${rows.length === 1 ? 'step' : 'steps'}`}
+      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${rows.length} ${rows.length === 1 ? 'process' : 'processes'}`}
       error={error}
       onClose={onClose}
       busy={saving}
@@ -340,120 +348,123 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
 
       <Section
         icon={ListOrdered}
-        title="Steps, in the order the garment moves"
+        title="Processes this style needs"
         actions={
           <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={() => setRows((rs) => [...rs, blank()])}>
-            <Plus size={13} /> Add step
+            <Plus size={13} /> Add process
           </button>
         }
       >
-        <div className="space-y-2">
+        <p className="text-muted-foreground mb-3 text-xs">
+          List every process the garment must go through. Cutting comes first, and the last one puts the pieces into finished goods. In between, the
+          floor sends bundles on in whatever order the work needs, picking from these on each transfer — the order here is just the usual one.
+        </p>
+        {/* The column names once, not on every process. */}
+        <div className="text-muted-foreground mb-1 hidden grid-cols-[2rem_minmax(0,3fr)_minmax(0,1.6fr)_minmax(0,1.8fr)_6.5rem_6.5rem_10.5rem] gap-2 px-[9px] text-[11px] font-semibold uppercase tracking-wide md:grid">
+          <span />
+          <span>Process</span>
+          <span>Done at</span>
+          <span>Line or unit</span>
+          <span className="text-right">Rate / pc</span>
+          <span>QC check</span>
+          <span />
+        </div>
+        <div className="space-y-1.5">
           {rows.map((r, i) => {
             const o = opById.get(r.operationId)
             const isCut = o?.kind === 'CUTTING'
+            const last = i === rows.length - 1
+            const open = Boolean(more[r.key])
+            // Switched-off processes are offered only where a routing already has them.
+            const choices = ops.filter((op) => op.isActive !== false || op.id === r.operationId)
             return (
-              <div key={r.key} className="border-border bg-card rounded-lg border p-2.5">
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-12 sm:items-end">
-                  <div className="text-primary flex items-center gap-1 font-mono text-xs sm:col-span-1 sm:pb-2">
-                    {i + 1}
-                    <span className="ml-auto flex sm:hidden">
-                      <button type="button" className="btn-ghost p-1" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move step ${i + 1} earlier`}>
-                        <ArrowUp size={13} />
-                      </button>
-                      <button type="button" className="btn-ghost p-1" onClick={() => move(i, 1)} disabled={i === rows.length - 1} aria-label={`Move step ${i + 1} later`}>
-                        <ArrowDown size={13} />
-                      </button>
-                    </span>
-                  </div>
-                  <label className="col-span-2 block sm:col-span-3">
-                    <span className="form-label">Process</span>
-                    <SmartSelect className="form-input h-9" value={r.operationId} onChange={(e) => pick(r.key, e.target.value)} aria-label={`Step ${i + 1} process`}>
-                      <option value="">Select…</option>
-                      {ops.map((op) => (
-                        <option key={op.id} value={op.id} data-sub={op.department?.name ?? undefined}>
+              <div key={r.key} className="border-border bg-card rounded-lg border p-2">
+                <div className="grid grid-cols-2 items-center gap-2 md:grid-cols-[2rem_minmax(0,3fr)_minmax(0,1.6fr)_minmax(0,1.8fr)_6.5rem_6.5rem_10.5rem]">
+                  <span className="text-primary font-mono text-xs font-semibold">{i + 1}</span>
+                  <div className="col-span-2 md:col-span-1">
+                    <SmartSelect className="form-input h-9" value={r.operationId} onChange={(e) => pick(r.key, e.target.value)} aria-label={`Process ${i + 1}`}>
+                      <option value="">Pick a process…</option>
+                      {choices.map((op) => (
+                        <option key={op.id} value={op.id} data-sub={op.isActive === false ? 'Switched off in the Process master' : (op.department?.name ?? undefined)}>
                           {op.name}
                         </option>
                       ))}
                     </SmartSelect>
-                  </label>
-                  <label className="block sm:col-span-2">
-                    <span className="form-label">Done</span>
-                    <SmartSelect className="form-input h-9" value={r.execution} disabled={isCut} onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '' })} aria-label={`Step ${i + 1} where`}>
-                      <option value="IN_HOUSE">On our floor</option>
-                      <option value="OUTSOURCED">Outside</option>
-                    </SmartSelect>
-                  </label>
-                  <label className="block sm:col-span-2">
-                    <span className="form-label">{r.execution === 'OUTSOURCED' ? 'Usual unit' : 'Line'}</span>
-                    <SmartSelect className="form-input h-9" value={r.workstationId} onChange={(e) => set(r.key, { workstationId: e.target.value })} aria-label={`Step ${i + 1} unit`}>
-                      <option value="">{r.execution === 'OUTSOURCED' ? 'Picked when sent' : 'Any'}</option>
-                      {unitsFor(r).map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.name}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </label>
-                  <label className="block sm:col-span-2">
-                    <span className="form-label">Leaving it out</span>
-                    <SmartSelect
-                      className="form-input h-9"
-                      value={isCut ? 'NEVER' : r.skip}
-                      disabled={isCut}
-                      onChange={(e) => set(r.key, { skip: e.target.value as Skip })}
-                      aria-label={`Step ${i + 1} leaving out`}
-                    >
-                      {SKIPS.map((s) => (
-                        <option key={s.value} value={s.value} data-sub={s.help}>
-                          {s.label}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </label>
-                  <label className="block sm:col-span-1">
-                    <span className="form-label">Rate / pc</span>
-                    <StepInput decimals className="form-input h-9 text-right tabular-nums" value={r.ratePerPiece} placeholder="—" onValueChange={(v) => set(r.key, { ratePerPiece: v })} aria-label={`Step ${i + 1} rate per piece`} />
-                  </label>
-                  <div className="flex items-center justify-between gap-2 sm:col-span-1 sm:justify-end sm:pb-1.5">
-                    <label className="flex items-center gap-1 text-xs" title="A check: pieces are passed or failed here">
-                      <input type="checkbox" className="accent-primary" checked={r.isQcStep} onChange={(e) => set(r.key, { isQcStep: e.target.checked })} aria-label={`Step ${i + 1} is a check`} />
-                      Check
-                    </label>
-                    <span className="hidden sm:flex">
-                      <button type="button" className="btn-ghost p-1" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move step ${i + 1} earlier`}>
-                        <ArrowUp size={13} />
-                      </button>
-                      <button type="button" className="btn-ghost p-1" onClick={() => move(i, 1)} disabled={i === rows.length - 1} aria-label={`Move step ${i + 1} later`}>
-                        <ArrowDown size={13} />
-                      </button>
-                    </span>
+                  </div>
+                  <SmartSelect className="form-input h-9" value={r.execution} disabled={isCut} onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '' })} aria-label={`Process ${i + 1} done at`}>
+                    <option value="IN_HOUSE">Our floor</option>
+                    <option value="OUTSOURCED">Outside unit</option>
+                  </SmartSelect>
+                  <SmartSelect className="form-input h-9" value={r.workstationId} onChange={(e) => set(r.key, { workstationId: e.target.value })} aria-label={`Process ${i + 1} line or unit`}>
+                    <option value="">{r.execution === 'OUTSOURCED' ? 'Picked when sent' : 'Any line'}</option>
+                    {unitsFor(r).map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name}
+                      </option>
+                    ))}
+                  </SmartSelect>
+                  <StepInput decimals className="form-input h-9 text-right tabular-nums" value={r.ratePerPiece} placeholder="Rate" onValueChange={(v) => set(r.key, { ratePerPiece: v })} aria-label={`Process ${i + 1} rate per piece`} />
+                  <button
+                    type="button"
+                    onClick={() => set(r.key, { isQcStep: !r.isQcStep })}
+                    aria-pressed={r.isQcStep}
+                    title="A check: pieces are passed or failed here"
+                    className={`flex h-9 items-center justify-center gap-1 rounded-lg border px-2 text-xs font-medium ${r.isQcStep ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700' : 'border-border text-muted-foreground hover:text-foreground'}`}
+                  >
+                    <ShieldCheck size={13} /> {r.isQcStep ? 'Check' : 'No'}
+                  </button>
+                  <span className="col-span-2 flex items-center justify-end gap-0.5 md:col-span-1">
+                    <button type="button" className="btn-ghost h-8 px-1.5 text-xs" onClick={() => setMore((m) => ({ ...m, [r.key]: !open }))} aria-expanded={open} title="SMV, instructions, leaving it out">
+                      {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />} More
+                    </button>
+                    <button type="button" className="btn-ghost p-1" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move process ${i + 1} up`}>
+                      <ArrowUp size={13} />
+                    </button>
+                    <button type="button" className="btn-ghost p-1" onClick={() => move(i, 1)} disabled={last} aria-label={`Move process ${i + 1} down`}>
+                      <ArrowDown size={13} />
+                    </button>
                     <button
                       type="button"
                       className="btn-ghost text-muted-foreground hover:text-destructive p-1"
                       onClick={() => setRows((rs) => (rs.length === 1 ? rs : rs.filter((x) => x.key !== r.key)))}
                       disabled={rows.length === 1}
-                      aria-label={`Remove step ${i + 1}`}
+                      aria-label={`Remove process ${i + 1}`}
                     >
                       <Trash2 size={13} />
                     </button>
-                  </div>
-                </div>
-                <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-12">
-                  <label className="block sm:col-span-2 sm:col-start-2">
-                    <span className="form-label">SMV</span>
-                    <StepInput decimals className="form-input h-8 text-right text-xs tabular-nums" value={r.smv} placeholder="—" onValueChange={(v) => set(r.key, { smv: v })} aria-label={`Step ${i + 1} standard minutes`} />
-                  </label>
-                  <label className="block sm:col-span-9">
-                    <span className="form-label">Instructions for the floor</span>
-                    <input className="form-input h-8 text-xs" value={r.instructions} maxLength={500} placeholder={isCut ? 'Lay face up; check shade lot before cutting' : 'What the department must know for this style'} onChange={(e) => set(r.key, { instructions: e.target.value })} />
-                  </label>
+                  </span>
                 </div>
                 {o && (
-                  <p className="text-muted-foreground mt-1.5 text-[11px]">
+                  <p className="text-muted-foreground mt-1 pl-0 text-[11px] md:pl-10">
                     {o.department?.name ?? 'Its department'}
-                    {isCut ? ' · makes the pieces and the bundles' : o.kind === 'QC' || r.isQcStep ? ' · passes or fails pieces' : ''}
-                    {r.execution === 'OUTSOURCED' ? ' · goes out on a job work order and a job-work challan' : ''}
+                    {isCut ? ' · first: makes the pieces and the bundles' : last ? ' · last: puts the pieces into finished goods' : ''}
+                    {!isCut && (o.kind === 'QC' || r.isQcStep) ? ' · passes or fails pieces' : ''}
+                    {r.execution === 'OUTSOURCED' ? ' · goes out on a job-work challan' : ''}
+                    {o.isActive === false ? ' · switched off in the Process master' : ''}
                   </p>
+                )}
+                {open && (
+                  <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[2rem_8rem_minmax(0,1fr)_12rem] md:pl-0">
+                    <span className="hidden md:block" />
+                    <label className="block">
+                      <span className="form-label">SMV</span>
+                      <StepInput decimals className="form-input h-8 text-right text-xs tabular-nums" value={r.smv} placeholder="—" onValueChange={(v) => set(r.key, { smv: v })} aria-label={`Process ${i + 1} standard minutes`} />
+                    </label>
+                    <label className="block">
+                      <span className="form-label">Instructions for the floor</span>
+                      <input className="form-input h-8 text-xs" value={r.instructions} maxLength={500} placeholder={isCut ? 'Lay face up; check shade lot before cutting' : 'What the department must know for this style'} onChange={(e) => set(r.key, { instructions: e.target.value })} />
+                    </label>
+                    <label className="block">
+                      <span className="form-label">Leaving it out of an order</span>
+                      <SmartSelect className="form-input h-8" value={isCut ? 'NEVER' : r.skip} disabled={isCut} onChange={(e) => set(r.key, { skip: e.target.value as Skip })} aria-label={`Process ${i + 1} leaving out`}>
+                        {SKIPS.map((sk) => (
+                          <option key={sk.value} value={sk.value} data-sub={sk.help}>
+                            {sk.label}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </label>
+                  </div>
                 )}
               </div>
             )
@@ -461,7 +472,7 @@ export function RoutingFormDialog({ open, onClose, onSaved, record }: { open: bo
         </div>
         {noCheck && (
           <p className="warn-text mt-2 flex items-start gap-1.5 text-xs">
-            <Info size={13} className="mt-px shrink-0" /> There is no check on this route, so pieces reach finished goods without one.
+            <Info size={13} className="mt-px shrink-0" /> There is no check among these, so pieces reach finished goods without one.
           </p>
         )}
       </Section>

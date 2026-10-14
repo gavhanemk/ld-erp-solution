@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, ArrowRight, Ban, ClipboardCheck, ExternalLink, Plus, Printer, RefreshCw, Scale, Search } from 'lucide-react'
+import { AlertCircle, ArrowRight, Ban, ClipboardCheck, ExternalLink, Plus, Printer, RefreshCw, Scale, Search, Shuffle } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { useAppSettings } from '@/lib/appSettings'
@@ -12,6 +12,7 @@ import { SettleDialog } from '@/components/production/floor/SettleDialog'
 import { NewTransferDialog } from '@/components/production/floor/NewTransferDialog'
 import { TransferDetailDialog, type TransferRow } from '@/components/production/floor/TransferDetailDialog'
 import { transferStatus } from '@/components/production/floor/transferStatus'
+import { RedirectDialog } from '@/components/production/floor/RedirectDialog'
 import { pcs, sheetHref, type FlowTransfer } from '@/components/production/floor/types'
 
 /**
@@ -48,6 +49,8 @@ export default function TransfersPage() {
   const [counting, setCounting] = useState<TransferRow | null>(null)
   const [settling, setSettling] = useState<TransferRow | null>(null)
   const [cancelling, setCancelling] = useState<TransferRow | null>(null)
+  // Sent but not counted in: it can still go to another step.
+  const [redirecting, setRedirecting] = useState<TransferRow | null>(null)
   const [creating, setCreating] = useState(false)
   const [busy, setBusy] = useState(false)
   const latest = useRef(0)
@@ -302,6 +305,11 @@ export default function TransfersPage() {
                             <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => print(t)} aria-label={`Print ${t.transferNumber}`} title="Print the card">
                               <Printer size={14} />
                             </button>
+                            {can('production', 'edit') && t.status === 'DISPATCHED' && !got && !t.vendor && (
+                              <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)} title="Not counted in yet: send it to another step instead">
+                                <Shuffle size={14} /> Change where it goes
+                              </button>
+                            )}
                             {can('production', 'edit') && t.status === 'DISPATCHED' && !got && (
                               <button type="button" className="btn-ghost text-muted-foreground hover:text-destructive h-8 px-2" onClick={() => setCancelling(t)} aria-label={`Cancel ${t.transferNumber}`} title="Cancel">
                                 <Ban size={14} />
@@ -334,11 +342,16 @@ export default function TransfersPage() {
                     <p className="text-muted-foreground text-xs">
                       {t.jobCard ? `${t.jobCard.jobCardNumber} · ${t.jobCard.moLine.style.code} ${t.jobCard.moLine.color}` : t.mo.moNumber} · {pcs(sent)} pcs · {formatDate(t.dispatchDate)}
                     </p>
-                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       {actionOf(t)}
                       <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => print(t)}>
                         <Printer size={14} /> Print
                       </button>
+                      {can('production', 'edit') && t.status === 'DISPATCHED' && !t.vendor && !t.lines.some((l) => l.receivedQty > 0) && (
+                        <button type="button" className="btn-ghost h-8 px-2 text-xs" onClick={() => setRedirecting(t)}>
+                          <Shuffle size={14} /> Change where it goes
+                        </button>
+                      )}
                     </div>
                   </div>
                 )
@@ -371,6 +384,16 @@ export default function TransfersPage() {
           onSaved={(m, transferId) => {
             saved(m)
             window.open(`/print/transfer/${transferId}`, '_blank', 'noopener')
+          }}
+        />
+      )}
+      {redirecting && (
+        <RedirectDialog
+          transfer={redirecting}
+          onClose={() => setRedirecting(null)}
+          onDone={(m) => {
+            setRedirecting(null)
+            saved(m)
           }}
         />
       )}

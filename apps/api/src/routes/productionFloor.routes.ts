@@ -14,6 +14,9 @@ import {
   decide,
   decideSchema,
   destinationsOf,
+  redirectOptions,
+  redirectSchema,
+  redirectTransfer,
   dispatch,
   dispatchSchema,
   holdMo,
@@ -34,6 +37,7 @@ import {
   workSchema,
 } from '../services/floor.service'
 import { flowSummary } from '../services/floorView.service'
+import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { createCutting, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
 import { ensureJobCards, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
@@ -307,6 +311,24 @@ router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async 
   })
 })
 
+/** Where a transfer not yet counted in could go instead. */
+router.get('/transfers/:id/redirect-options', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await redirectOptions(prisma, req.params.id) })
+})
+
+/** A transfer not yet counted in, sent to another step instead. */
+router.post('/transfers/:id/redirect', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = redirectSchema.parse(req.body)
+  const out = await prisma.$transaction((tx) => redirectTransfer(tx, req.params.id, data, req.user!.id), T)
+  const t = await prisma.processTransfer.findUniqueOrThrow({ where: { id: out.transfer.id }, include: transferInclude })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ProcessTransfer', entityId: out.old.id, after: { redirectedTo: t.transferNumber, toStep: t.toStep.name, reason: data.reason } })
+  res.json({
+    success: true,
+    message: `${out.old.transferNumber} cancelled; the same pieces now go to ${t.toStep.name} on ${t.transferNumber}. Print the new card for them.`,
+    data: t,
+  })
+})
+
 router.post('/orders/:id/transfers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = dispatchSchema.parse(req.body)
   const out = await prisma.$transaction((tx) => dispatch(tx, req.params.id, data, req.user!.id), T)
@@ -546,6 +568,19 @@ router.patch('/job-cards/:id', requirePermission(MODULE, 'edit'), async (req: Au
 })
 
 /** GET /stage-tabs — the stages on open orders' routes, with the work waiting at each. */
+/**
+ * GET /stage-report?operationId=&from=&to=&moId= — everything that happened at
+ * one stage, entry by entry: in, done, sent on, damaged and why.
+ */
+router.get('/stage-report', requirePermission(MODULE, 'view'), async (req, res) => {
+  const s = (k: string) => (typeof req.query[k] === 'string' && req.query[k] ? (req.query[k] as string) : undefined)
+  const operationId = s('operationId')
+  if (!operationId) throw new AppError('Say which stage.', 400, 'NO_STAGE')
+  const from = s('from') ? new Date(`${s('from')}T00:00:00+05:30`) : undefined
+  const to = s('to') ? new Date(`${s('to')}T23:59:59.999+05:30`) : undefined
+  res.json({ success: true, data: await stageReport(prisma, { operationId, from, to, moId: s('moId') }) })
+})
+
 router.get('/stage-tabs', requirePermission(MODULE, 'view'), async (_req, res) => {
   res.json({ success: true, data: await stageTabs(prisma) })
 })

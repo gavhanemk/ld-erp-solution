@@ -121,6 +121,85 @@ export const dispatchSchema = z.object({
 export const sendsFromHand = (s: { kind: ProcessKind; isQcStep: boolean; execution: StepExecution }) => s.kind !== 'CUTTING' && !isCheck(s) && s.execution === 'IN_HOUSE'
 
 /**
+ * A transfer not yet counted in, sent somewhere else instead: what goes there
+ * is the same bundles and pieces, and every check a new transfer has applies.
+ * Done as the old one cancelled — the pieces back where they were sent from —
+ * and a new one made, in one go, so the paper trail says what happened.
+ */
+export const redirectSchema = z.object({
+  toStepId: z.string().min(1, 'Pick where they go instead'),
+  reason: z.string().trim().min(3, 'Say why they go somewhere else').max(500),
+})
+
+export async function redirectTransfer(tx: Tx, transferId: string, d: z.infer<typeof redirectSchema>, userId: string) {
+  const t = await tx.processTransfer.findUnique({ where: { id: transferId }, include: { lines: true } })
+  if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
+  if (t.vendorId) throw new AppError(`${t.transferNumber} went to an outside unit on a job-work challan: cancel it, then send the pieces again.`, 409, 'AT_A_UNIT')
+  if (t.toStepId === d.toStepId) throw new AppError('They are already going there.', 400, 'SAME_STEP')
+  await cancelTransfer(tx, t.id, `Sent somewhere else instead: ${d.reason}`, userId)
+  const out = await dispatch(
+    tx,
+    t.moId,
+    {
+      fromStepId: t.fromStepId,
+      toStepId: d.toStepId,
+      lines: t.lines.map((l) => ({ bundleId: l.bundleId, qty: l.dispatchedQty })),
+      issuedBy: t.issuedBy,
+      vehicleNo: t.vehicleNo,
+      notes: [t.notes, `In place of ${t.transferNumber}: ${d.reason}`].filter(Boolean).join(' · '),
+      dispatchDate: t.dispatchDate,
+      clientKey: null,
+    },
+    userId,
+  )
+  return { old: t, transfer: out.transfer }
+}
+
+/** Where a transfer not yet counted in could go instead: the same rule, as if it had not been sent. */
+export async function redirectOptions(db: Tx | PrismaClient, transferId: string) {
+  const t = await db.processTransfer.findUnique({ where: { id: transferId }, include: { lines: { include: { bundle: { select: { code: true } } } } } })
+  if (!t) throw new AppError('Transfer not found', 404, 'NOT_FOUND')
+  const mo = await db.manufacturingOrder.findUniqueOrThrow({
+    where: { id: t.moId },
+    select: { id: true, steps: { orderBy: { sequence: 'asc' }, select: { id: true, sequence: true, name: true, kind: true, isQcStep: true, execution: true, skippedAt: true } } },
+  })
+  const [bundles, sent] = await Promise.all([
+    db.productionBundle.findMany({ where: { moId: mo.id }, select: { id: true, qty: true, parentId: true } }),
+    db.processTransferLine.findMany({
+      where: { transfer: { moId: mo.id, isRework: false, status: { not: 'CANCELLED' }, id: { not: t.id } } },
+      select: { bundleId: true, dispatchedQty: true, transfer: { select: { toStepId: true } } },
+    }),
+  ])
+  const choices = destinationsFrom(
+    mo.steps,
+    t.fromStepId,
+    bundles,
+    sent.map((l) => ({ bundleId: l.bundleId, toStepId: l.transfer.toStepId, qty: l.dispatchedQty })),
+  )
+  return choices
+    .filter((c) => c.step.id !== t.toStepId)
+    .map((c) => {
+      const blocked = t.lines.find((l) => l.dispatchedQty > (c.caps[l.bundleId] ?? 0))
+      const missing = blocked ? c.missing[blocked.bundleId] : undefined
+      const outside = c.step.execution === 'OUTSOURCED'
+      return {
+        stepId: c.step.id,
+        name: c.step.name,
+        outside,
+        // An outside unit needs its unit and rate: that is a fresh transfer from the sheet.
+        ok: !blocked && !outside,
+        why: blocked
+          ? c.last && missing?.length
+            ? `${blocked.bundle.code} has still to go through ${missing.join(', ')}`
+            : `${blocked.bundle.code} has already been there`
+          : outside
+            ? 'Done at an outside unit: cancel this card, then send them out from the sheet'
+            : null,
+      }
+    })
+}
+
+/**
  * Where pieces at a step may go next, with how many of each bundle — read
  * fresh, for the transfer form and for the check when it is saved.
  */

@@ -1,10 +1,11 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { AlertCircle, Info, RefreshCw } from 'lucide-react'
+import { AlertCircle, BarChart3, Info, LayoutList, RefreshCw } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { StageList } from '@/components/production/floor/StageList'
 import { SheetView } from '@/components/production/floor/SheetView'
+import { StageReport } from '@/components/production/floor/StageReport'
 import type { Stage } from '@/components/production/floor/types'
 
 /**
@@ -36,6 +37,8 @@ export default function ProductionStagesPage() {
   const [message, setMessage] = useState<string | null>(null)
   const [opened, setOpened] = useState<{ jobCardId: string; stepId: string } | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
+  // Each stage two ways: its job cards to work on, or its report of what came, went and was damaged.
+  const [view, setView] = useState<'cards' | 'report'>('cards')
 
   const loadTabs = useCallback(async () => {
     try {
@@ -109,7 +112,7 @@ export default function ProductionStagesPage() {
       ) : (
         <>
           <div className="glass-card -mx-1 flex gap-1 overflow-x-auto p-1.5" role="tablist" aria-label="Stages">
-            {tabs.map((t, i) => {
+            {tabs.map((t) => {
               const on = t.operationId === current
               return (
                 <button
@@ -120,13 +123,14 @@ export default function ProductionStagesPage() {
                   onClick={() => choose(t.operationId)}
                   className={`flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${on ? 'bg-primary/10 text-primary font-semibold' : 'text-foreground hover:bg-secondary'}`}
                 >
-                  <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums ${on ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'}`}>
-                    {i + 1}
-                  </span>
                   {t.name}
+                  {/* Said in words, so a number is never taken for something else. */}
                   {t.active > 0 && (
-                    <span className={`rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${t.toCountIn ? 'bg-primary text-primary-foreground' : 'bg-secondary text-foreground'}`} title={`${t.active} job ${t.active === 1 ? 'card has' : 'cards have'} work here${t.toCountIn ? `, ${t.toCountIn} to count in` : ''}`}>
-                      {t.active}
+                    <span
+                      className={`whitespace-nowrap rounded-full px-2 text-[11px] font-semibold ${t.toCountIn ? 'bg-primary text-primary-foreground' : 'bg-amber-500/15 text-amber-700'}`}
+                      title={`${t.active} job ${t.active === 1 ? 'card has' : 'cards have'} work waiting here${t.toCountIn ? `, ${t.toCountIn} to count in` : ''}`}
+                    >
+                      {t.toCountIn ? `${t.toCountIn} to count in` : `${t.active} to do`}
                     </span>
                   )}
                 </button>
@@ -142,7 +146,30 @@ export default function ProductionStagesPage() {
                   <span className="text-foreground font-medium">{tab.name}:</span> {HOW[tab.stage]}
                 </span>
               </p>
-              <StageList operationId={tab.operationId} stage={tab.stage} refreshKey={refreshKey} onOpen={(r) => setOpened({ jobCardId: r.card.id, stepId: r.step.id })} />
+              <div className="border-border bg-secondary inline-flex rounded-lg border p-0.5" role="tablist" aria-label="Show">
+                {(
+                  [
+                    ['cards', 'Job cards', LayoutList],
+                    ['report', `${tab.name} report`, BarChart3],
+                  ] as const
+                ).map(([key, label, Icon]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={view === key}
+                    onClick={() => setView(key)}
+                    className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm ${view === key ? 'bg-card text-foreground font-semibold shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                  >
+                    <Icon size={14} /> {label}
+                  </button>
+                ))}
+              </div>
+              {view === 'cards' ? (
+                <StageList operationId={tab.operationId} stage={tab.stage} refreshKey={refreshKey} onOpen={(r) => setOpened({ jobCardId: r.card.id, stepId: r.step.id })} />
+              ) : (
+                <StageReport key={`${tab.operationId}-${refreshKey}`} operationId={tab.operationId} name={tab.name} check={tab.stage === 'QC'} />
+              )}
             </>
           )}
         </>
