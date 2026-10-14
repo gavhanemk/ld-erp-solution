@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balancesOf, flowsOf, keyOf, lockMo, postEvent, reverseEvent, type BalanceRow, type Move } from './wip.service'
 import { destinationsFrom, isCheck, isLastStep, nextStepAfter, type RouteStep } from './route.service'
+import { nextChallanNo } from './challanNo'
 
 /**
  * The floor: what happens to an order's pieces between cutting and packing.
@@ -372,9 +373,9 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
   })
 
   const when = d.dispatchDate ?? new Date()
-  const transferNumber = vendorId
-    ? await nextDocumentNumber(tx, 'JW', when)
-    : `${mo.moNumber}-T${(await tx.processTransfer.count({ where: { moId, vendorId: null } })) + 1}`
+  // Out to a unit: the job-work challan's own series, one run for GST. On our
+  // floor: the sending department's challan on this order, e.g. STI/2627-0001/01.
+  const transferNumber = vendorId ? await nextDocumentNumber(tx, 'JW', when) : await nextChallanNo(tx, mo, { stepId: from.id })
   const transfer = await tx.processTransfer.create({
     data: {
       transferNumber,

@@ -37,6 +37,7 @@ import {
   workSchema,
 } from '../services/floor.service'
 import { flowSummary } from '../services/floorView.service'
+import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { createCutting, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
@@ -557,7 +558,10 @@ router.get('/job-cards/:id/print', requirePermission(MODULE, 'view'), async (req
   const detail = await jobCardDetail(prisma, req.params.id)
   const step = detail.steps.find((s) => s.id === text(req.query.stepId))
   const header = await getPrintHeader(!step ? 'JC' : step.kind === 'CUTTING' ? 'CUT' : 'SHEET')
-  res.json({ success: true, data: { ...header, detail } })
+  // The department's challan run on this order, e.g. CUT/2627-0002: its challans are /01, /02 under it.
+  const op = step ? await prisma.operation.findUnique({ where: { id: step.operationId }, select: { code: true } }) : null
+  const series = step ? `${processCode(op?.code, processCode(step.name, 'GEN'))}/${detail.mo.moNumber.replace(/^MO-/, '')}` : null
+  res.json({ success: true, data: { ...header, detail, series } })
 })
 
 router.patch('/job-cards/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {

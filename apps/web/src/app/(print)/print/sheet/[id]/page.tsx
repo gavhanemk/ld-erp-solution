@@ -11,6 +11,8 @@ interface Payload {
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   detail: JobCardDetail
+  /** The department's challan run on this order, e.g. CUT/2627-0002. */
+  series: string | null
 }
 
 const day = (iso: string) => iso.slice(0, 10)
@@ -162,7 +164,7 @@ function Sheet() {
       <StoreSheet
         company={company}
         title={data.template.title}
-        number={refNo(c)}
+        number={data.series ?? refNo(c)}
         dateLabel="Department"
         date={`CUTTING · ${longDate(new Date()) ?? ''}`}
         backHref="/production/stages"
@@ -258,7 +260,7 @@ function Sheet() {
     <StoreSheet
       company={company}
       title={`${step.name.toUpperCase()} SHEET`}
-      number={refNo(c)}
+      number={data.series ?? refNo(c)}
       dateLabel="Department"
       date={`${step.department.name.toUpperCase()} · ${longDate(new Date()) ?? ''}`}
       backHref="/production/stages"
