@@ -20,6 +20,10 @@ import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
 import { FloorReturnDialog } from '@/components/inventory/FloorReturnDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
+import { OutwardStickers } from '@/components/packages/OutwardStickers'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * Material requisitions: asked for, allowed, handed over.
@@ -318,6 +322,10 @@ function RequisitionsScreen() {
   const [saved, setSaved] = useState(0)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
   const [returning, setReturning] = useState<Requisition | null>(null)
+  /** Stock that just went out: its labels, and the packages it came from. */
+  const [outward, setOutward] = useState<OutwardRef | null>(null)
+  /** A return from the floor just saved: stickers for what came back, ready to print. */
+  const [inward, setInward] = useState<InwardRef | null>(null)
 
   const today = dayKey(new Date())
 
@@ -1184,9 +1192,10 @@ function RequisitionsScreen() {
           startTab={processTab}
           onClose={() => setFulfilling(null)}
           // The window stays open after a save; the list and tabs behind refresh.
-          onDone={(msg) => {
+          onDone={(msg, out) => {
             setSaved((n) => n + 1)
             setMessage(msg)
+            if (out) setOutward(out)
             void load()
           }}
         />
@@ -1196,10 +1205,31 @@ function RequisitionsScreen() {
         <FloorReturnDialog
           mr={returning}
           onClose={() => setReturning(null)}
-          onSaved={(msg) => {
+          onSaved={(msg, stickers) => {
             setReturning(null)
             setMessage(msg)
+            if (stickers) setInward(stickers)
             void load()
+          }}
+        />
+      )}
+      {outward && (
+        <OutwardStickers
+          source={outward}
+          onClose={() => setOutward(null)}
+          onDone={(m) => {
+            setOutward(null)
+            setMessage(m)
+          }}
+        />
+      )}
+      {inward && (
+        <StickersReady
+          source={inward}
+          onClose={() => setInward(null)}
+          onDone={(m) => {
+            setInward(null)
+            setMessage(m)
           }}
         />
       )}

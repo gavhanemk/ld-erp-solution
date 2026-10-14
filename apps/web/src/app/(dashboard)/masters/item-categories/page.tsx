@@ -101,26 +101,47 @@ const columns: Column<ItemCategory>[] = [
 ]
 
 const formFields: FormField[] = [
-  // Category first, then the name. You decide where something belongs before
-  // you name it, and putting the parent second made the form read backwards.
+  // Where it sits first, then its name. The labels follow what is being
+  // edited: a main category such as "Buttons & Fasteners" read as a
+  // "Subcategory" with an empty "Category" above it, which looked broken.
   {
     name: 'parentId',
-    label: 'Category',
+    label: 'Main category',
     type: 'select',
     // Main categories only: there are two levels, and a sub-category cannot
     // hold another.
     optionsFrom: { resource: 'item-categories', filter: (row) => !row.parentId },
-    placeholder: 'None — I am adding a main category',
+    noneLabel: 'None — this is a main category',
     span: 2,
-    help: 'Which category this sits under. Leave it empty to add a main category instead.',
+    helpFor: (v) =>
+      v.parentId
+        ? 'This is a sub-category under the main category chosen here.'
+        : 'Empty: this is a main category, such as Fabric. Pick one to make this a sub-category under it.',
   },
   {
     name: 'name',
-    label: 'Subcategory',
+    label: 'Category name',
+    labelFor: (v) => (v.parentId ? 'Sub-category name' : 'Category name'),
     required: true,
-    placeholder: 'Cotton',
     span: 2,
-    help: 'The name. With Category left empty above, this becomes a main category — "Fabric" rather than "Cotton".',
+    helpFor: (v) => (v.parentId ? 'For example Cotton, under Fabric.' : 'For example Fabric, or Buttons & Fasteners.'),
+  },
+  // A main category's sub-categories, for reading. Each is changed on its own
+  // row, by choosing this as its main category.
+  {
+    name: 'subCategories',
+    label: 'Sub-categories under it',
+    type: 'readout',
+    span: 2,
+    showIf: (v) => !v.parentId,
+    readout: (_v, record) => {
+      const kids = (record?.children as Array<{ name: string }> | undefined) ?? []
+      return kids.length ? (
+        kids.map((k) => k.name).join(', ')
+      ) : (
+        <span className="text-muted-foreground">None yet. Add one with New Category, choosing this as its main category.</span>
+      )
+    },
   },
   {
     name: 'departmentId',
@@ -129,6 +150,36 @@ const formFields: FormField[] = [
     optionsFrom: { resource: 'departments' },
     span: 2,
     help: 'Who normally uses what is filed here. A new item in this category starts with it.',
+  },
+  // Stock of these items is labelled with QR stickers and issued by scanning.
+  // A sub-category follows its main category, so ticking Fabric covers them all.
+  // On for a new category: stickers pop up after every inward unless switched off.
+  {
+    name: 'trackPackages',
+    label: 'Track by package',
+    type: 'checkbox',
+    checkedForNew: true,
+    placeholder: 'QR sticker on each package',
+    helpFor: (v) =>
+      v.parentId
+        ? 'Follows its main category when that is ticked; tick here to track only this sub-category.'
+        : 'Ticked here, every sub-category under it is tracked too.',
+  },
+  {
+    name: 'packType',
+    label: 'Usual package',
+    type: 'select',
+    options: [
+      { value: 'ROLL', label: 'Roll' },
+      { value: 'BOX', label: 'Box' },
+      { value: 'CARTON', label: 'Carton' },
+      { value: 'BAG', label: 'Bag' },
+      { value: 'BUNDLE', label: 'Bundle' },
+      { value: 'PACKET', label: 'Packet' },
+      { value: 'OTHER', label: 'Other' },
+    ],
+    showIf: (v) => Boolean(v.trackPackages),
+    help: 'What one package of these items usually is. It can be changed when the stickers are made.',
   },
   {
     name: 'isActive',

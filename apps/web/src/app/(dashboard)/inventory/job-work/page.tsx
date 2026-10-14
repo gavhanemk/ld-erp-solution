@@ -20,6 +20,10 @@ import {
 } from '@/components/inventory/JobWorkCharts'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
+import { OutwardStickers } from '@/components/packages/OutwardStickers'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * Our own material out at an outside unit.
@@ -189,6 +193,10 @@ function JobWorkScreen() {
   const [exporting, setExporting] = useState(false)
   const [sending, setSending] = useState(false)
   const [receiving, setReceiving] = useState<string | null>(null)
+  /** Stock that just went out: its labels, and the packages it came from. */
+  const [outward, setOutward] = useState<OutwardRef | null>(null)
+  /** A return just saved: stickers for what came back, ready to print. */
+  const [inward, setInward] = useState<InwardRef | null>(null)
   const [charging, setCharging] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
@@ -1320,9 +1328,10 @@ function JobWorkScreen() {
       {sending && (
         <SendJobWorkDialog
           onClose={() => setSending(false)}
-          onSaved={(msg) => {
+          onSaved={(msg, out) => {
             setSending(false)
             setMessage(msg)
+            if (out) setOutward(out)
             void load()
           }}
         />
@@ -1344,10 +1353,31 @@ function JobWorkScreen() {
             })),
           }}
           onClose={() => setReceiving(null)}
-          onSaved={(msg) => {
+          onSaved={(msg, stickers) => {
             setReceiving(null)
             setMessage(msg)
+            if (stickers) setInward(stickers)
             void load()
+          }}
+        />
+      )}
+      {outward && (
+        <OutwardStickers
+          source={outward}
+          onClose={() => setOutward(null)}
+          onDone={(m) => {
+            setOutward(null)
+            setMessage(m)
+          }}
+        />
+      )}
+      {inward && (
+        <StickersReady
+          source={inward}
+          onClose={() => setInward(null)}
+          onDone={(m) => {
+            setInward(null)
+            setMessage(m)
           }}
         />
       )}

@@ -7,6 +7,8 @@ import {
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { formatDate } from '@/lib/utils'
+import type { OutwardRef } from '@/components/packages/packageTypes'
+import { ScanIssue } from '@/components/packages/ScanIssue'
 
 /**
  * Working on an approved requisition: three forms in one window, one tab each.
@@ -116,7 +118,8 @@ export function ProcessDialog({
   startTab?: ProcessTab
   onClose: () => void
   /** After each save, so the list behind can refresh. The window stays open. */
-  onDone: (message: string) => void
+  /** `outward`: what an issue just handed over, for its labels. */
+  onDone: (message: string, outward?: OutwardRef) => void
 }) {
   const [tab, setTab] = useState<ProcessTab>(startTab)
   const [data, setData] = useState<Data | null>(null)
@@ -275,10 +278,13 @@ export function ProcessDialog({
     setSaving(true)
     try {
       let message = 'Saved.'
+      let outward: OutwardRef | undefined
       if (tab === 'issue') {
         const lines = check.work.flatMap(({ r, v }) => [...spread(r, v).entries()].map(([warehouseId, q]) => ({ lineId: r.l.id, warehouseId, issueQty: q })))
         const res = await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/issue`, { lines })
         message = res.message ?? 'Issued.'
+        // This issue's own lines: a requisition can be issued against more than once.
+        outward = { type: 'MR', id: mr.id, q: lines.map((l) => `${l.lineId}:${l.issueQty}:${l.warehouseId}`).join(',') }
       } else if (tab === 'reserve') {
         // The amount to hold in each store; 0 lets a store's reservation go.
         const lines = check.work.flatMap(({ r, v }) => {
@@ -295,7 +301,7 @@ export function ProcessDialog({
         message = res.message ?? 'Indent saved.'
       }
       setNotice(message)
-      onDone(message)
+      onDone(message, outward)
       await read()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
@@ -426,6 +432,20 @@ export function ProcessDialog({
         <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-foreground">
           You raised or approved this requisition, so somebody else in the store issues it. You can still reserve and buy.
         </p>
+      )}
+
+      {/* Approved, so it can be handed over by scanning: stock comes down with each sticker. */}
+      {tab === 'issue' && canIssue && data && rows.some((r) => r.owed > 0) && (
+        <ScanIssue
+          mrId={mr.id}
+          mrNumber={mr.mrNumber}
+          itemIds={mr.lines.map((l) => l.item.id)}
+          onIssued={(message) => {
+            setNotice(message)
+            onDone(message)
+            void read()
+          }}
+        />
       )}
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">

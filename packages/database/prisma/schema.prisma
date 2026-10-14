@@ -364,6 +364,8 @@ model User {
   transfersCancelled   ProcessTransfer[]      @relation("TransferCancelledBy")
   jobWorkOrdersMade    JobWorkOrder[]         @relation("JobWorkOrderCreatedBy")
   jobCardsMade         JobCard[]              @relation("JobCardCreatedBy")
+  packageMoves StockPackageMove[] @relation("PackageMovesBy")
+  garmentEvents GarmentEvent[] @relation("GarmentEventBy")
 }
 
 model Role {
@@ -448,6 +450,15 @@ model Company {
   /// Printed at the top of every document. Stored inline so a mill PC with no
   /// file server still prints a letterhead.
   logoUrl        String?
+  /// GS1 India company prefix (7–10 digits, starting 890). Retail barcodes
+  /// are this, the next item reference, and a check digit.
+  gs1Prefix      String?
+  /// The next item reference to give out under the prefix; never reused.
+  gs1NextRef     Int       @default(1)
+  /// Printed on retail labels: "Country of origin: India".
+  countryOfOrigin String?  @default("India")
+  /// The customer-care line on retail labels; phone and email when empty.
+  customerCare   String?
   /// Printed above the signature line.
   signatureUrl   String?
   /// The account a customer is asked to pay into, printed on the invoice.
@@ -662,6 +673,13 @@ model ItemCategory {
   departmentId String?
   department   Department?    @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   isActive Boolean        @default(true)
+  /// Stock of these items is kept as labelled packages — rolls, boxes, cartons —
+  /// each with its own QR sticker, scanned to issue and move it. On unless
+  /// switched off: stickers pop up after every inward without anyone having
+  /// to set a category up first.
+  trackPackages Boolean   @default(true)
+  /// What one package of these items usually is: a roll of fabric, a box of tape.
+  packType      PackType?
 
   items Item[]
 
@@ -717,10 +735,22 @@ model Item {
   style        Style?       @relation(fields: [styleId], references: [id])
   color        String?
   imageUrl     String?
+  /// Its stickers, remembered from the last time somebody ticked "remember":
+  /// what one package is, and how much one sticker holds. Empty means the
+  /// category's pack type, and one sticker per unit for a unit that is itself
+  /// a package (roll, box) or one for the whole quantity otherwise.
+  packType     PackType?
+  packQty      Decimal?     @db.Decimal(10, 3)
+  /// What one unit of it holds, for its stickers: a box of buttons is 144
+  /// pcs, a roll of tape 65 m. Stock is still counted in the item's own unit;
+  /// this only says what is inside, so a sticker can read "1 box · 144 pcs".
+  contentQty   Decimal?     @db.Decimal(12, 3)
+  contentUnit  String?
   isActive     Boolean      @default(true)
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
+  barcodes      RetailBarcode[]           @relation("ItemBarcodes")
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
   enquiryLines  PurchaseEnquiryLine[]
@@ -752,6 +782,8 @@ model Item {
   fgReceiptLines      FinishedGoodsReceiptLine[] @relation("FGRLineItem")
   challanLines        DeliveryChallanLine[]      @relation("DCLineItem")
   quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
+  packages StockPackage[] @relation("ItemPackages")
+  garments Garment[] @relation("GarmentItem")
 }
 
 model Style {
@@ -773,6 +805,13 @@ model Style {
   colors      String[]
   techPackUrl String?
   imageUrl    String?
+  /// Maximum retail price, inclusive of all taxes, for the retail label. A
+  /// size can carry its own on its barcode.
+  mrp         Decimal?   @db.Decimal(10, 2)
+  /// "100% Cotton": printed on the retail label.
+  composition String?
+  /// Wash-care symbols for the label, as codes: WASH_30, NO_BLEACH, IRON_MED…
+  washCare    String[]   @default([])
   isActive    Boolean    @default(true)
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
@@ -1008,6 +1047,7 @@ model Customer {
   @@map("customers")
   deliveryChallans  DeliveryChallan[]  @relation("DCCustomer")
   quotations        SalesQuotation[]   @relation("QuoteCustomer")
+  ownedPackages StockPackage[] @relation("CustomerPackages")
 }
 
 /// One of the places a supplier bills from.
@@ -1138,6 +1178,8 @@ model Warehouse {
   fgReceipts               FinishedGoodsReceipt[] @relation("FGRWarehouse")
   deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
   creditNotes              CreditNote[]           @relation("CNWarehouse")
+  packages StockPackage[] @relation("WarehousePackages")
+  garments Garment[] @relation("GarmentStore")
 }
 
 model Department {
@@ -1509,6 +1551,7 @@ model DeliveryChallan {
   @@index([soId])
   @@index([customerId])
   @@map("delivery_challans")
+  garments Garment[] @relation("GarmentChallan")
 }
 
 model DeliveryChallanLine {
@@ -1584,6 +1627,7 @@ model FinishedGoodsReceipt {
 
   @@index([soId])
   @@map("finished_goods_receipts")
+  garments Garment[] @relation("GarmentReceipt")
 }
 
 model FinishedGoodsReceiptLine {
@@ -2342,6 +2386,11 @@ model GRNLine {
   batchDetails Json?
   unitRate     Decimal            @default(0) @db.Decimal(10, 2)
   amount       Decimal            @default(0) @db.Decimal(12, 2)
+  /// How the line came packed — 5 bundles, 12 rolls — with each package's
+  /// quantity in order. Its stickers are made one a package, from these.
+  /// Empty: the item's own sticker rule.
+  packType     PackType?
+  packQtys     Decimal[]          @default([]) @db.Decimal(10, 3)
 
   billLines PurchaseInvoiceLine[]
   noteLines PurchaseNoteLine[]
@@ -2781,6 +2830,12 @@ model StockAdjustment {
   approvedBy   User?     @relation("AdjustmentApprovedBy", fields: [approvedById], references: [id])
   approvedAt   DateTime?
   rejectReason String?
+  /// COUNT: a correction after counting the rack. STOCK_IN: stock that came in
+  /// without a purchase order — a sample, from another unit, a supplier's
+  /// replacement — at the rate given, approved the same way.
+  kind         String    @default("COUNT")
+  /// For a stock-in: where it came from.
+  source       String?
   @@index([adjustmentDate])
   @@map("stock_adjustments")
 }
@@ -3190,6 +3245,9 @@ model ManufacturingOrder {
   @@index([moNumber])
   @@index([status])
   @@map("manufacturing_orders")
+  /// This order's finished garments get a QR label each, piece by piece.
+  tagGarments Boolean @default(false)
+  garments    Garment[] @relation("GarmentMO")
 }
 
 model MOLine {
@@ -3517,6 +3575,7 @@ model ProductionBundle {
   @@unique([moId, bundleNo])
   @@index([cuttingOrderId])
   @@map("production_bundles")
+  garments Garment[] @relation("GarmentBundle")
 }
 
 /// Something that happened on the floor: a cutting, a transfer sent or
@@ -4246,6 +4305,8 @@ model Size {
   bundles         ProductionBundle[]    @relation("BundleSize")
   @@unique([sizeGroupId, code])
   @@map("sizes")
+  garments Garment[] @relation("GarmentSize")
+  barcodes RetailBarcode[] @relation("SizeBarcodes")
 }
 
 model SalesOrderLineSize {
@@ -5238,4 +5299,252 @@ enum ReservationStatus {
   ACTIVE
   CONSUMED
   RELEASED
+}
+
+/// What one labelled package of stock physically is.
+enum PackType {
+  BOX
+  ROLL
+  CARTON
+  BAG
+  BUNDLE
+  PACKET
+  OTHER
+}
+
+/// Where a labelled package is in its life.
+enum PackageStatus {
+  /// On the rack with something in it.
+  IN_STOCK
+  /// Everything in it has been issued or moved out.
+  EMPTY
+  /// Broken into smaller packages, each with its own label; nothing left in it.
+  SPLIT
+  /// Label withdrawn: printed by mistake, or the package is not on the rack.
+  VOID
+}
+
+enum PackageMoveType {
+  CREATED
+  ISSUED
+  TRANSFERRED
+  SPLIT
+  SPLIT_FROM
+  CORRECTED
+  VOIDED
+}
+
+/// One physical package of stock — a roll, a box, a carton — with the QR
+/// sticker on it.
+///
+/// The stock ledger stays the record of how much of an item a store holds.
+/// A package says how that stock sits on the rack: five boxes of ten, three
+/// rolls of 48.5, 51 and 50.2 metres. Packages of an item in a store never add
+/// up to more than the ledger holds there; what is not in a package is loose.
+///
+/// The same package keeps its code while it is the same physical thing. A new
+/// code is made only when it is split or repacked, and the new package points
+/// back at the one it came from.
+model StockPackage {
+  id              String         @id @default(cuid())
+  /// What the QR sticker carries, and what a person reads off it: PK-000123.
+  code            String         @unique
+  itemId          String
+  item            Item           @relation("ItemPackages", fields: [itemId], references: [id])
+  warehouseId     String
+  warehouse       Warehouse      @relation("WarehousePackages", fields: [warehouseId], references: [id])
+  ownership       StockOwnership @default(OWNED)
+  ownerCustomerId String?
+  ownerCustomer   Customer?      @relation("CustomerPackages", fields: [ownerCustomerId], references: [id])
+  packType        PackType       @default(BOX)
+  /// What it held when it was labelled, and what it holds now.
+  initialQty      Decimal        @db.Decimal(10, 3)
+  qty             Decimal        @db.Decimal(10, 3)
+  /// The supplier's lot or batch, from the GRN, or as typed.
+  lotNo           String?
+  notes           String?
+  status          PackageStatus  @default(IN_STOCK)
+  /// Where it came from: GRN (labelled on receipt), STOCK (stock already on
+  /// the rack, labelled later), SPLIT (cut from another package), or the
+  /// inward it was labelled straight after: STOCK_IN, OPENING, CUSTOMER_GRN,
+  /// JOB_WORK_RETURN, MR_RETURN.
+  sourceType      String
+  /// The document it came in on: the GRN, the stock-in, the customer's receipt.
+  sourceId        String?
+  /// That document's number, printed on the sticker: GRN-0004, ADJ-2627-0009.
+  sourceRef       String?
+  /// Stickers are made by themselves when stock comes in and printed later:
+  /// how often this one has been printed, and when last. Never printed puts it
+  /// on "Ready to print".
+  printCount      Int            @default(0)
+  lastPrintedAt   DateTime?
+  grnLineId       String?
+  parentId        String?
+  parent          StockPackage?  @relation("PackageSplit", fields: [parentId], references: [id])
+  children        StockPackage[] @relation("PackageSplit")
+  createdById     String?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  moves StockPackageMove[]
+
+  @@index([itemId, warehouseId, status])
+  @@index([sourceType, sourceId])
+  @@index([parentId])
+  @@map("stock_packages")
+}
+
+/// Everything that happened to one package, in order: labelled, issued from,
+/// moved, split, corrected. The stock ledger carries the item-level movement;
+/// this carries which package it came out of.
+model StockPackageMove {
+  id               String          @id @default(cuid())
+  packageId        String
+  package          StockPackage    @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  type             PackageMoveType
+  /// The change to the package, signed: −3 for three issued.
+  qty              Decimal         @db.Decimal(10, 3)
+  balanceAfter     Decimal         @db.Decimal(10, 3)
+  /// The store it was in, and for a move the store it went to.
+  warehouseId      String
+  toWarehouseId    String?
+  /// The document behind it — the requisition issued against, the transfer note.
+  referenceType    String?
+  referenceId      String?
+  referenceNumber  String?
+  /// The other package of a split: the new one, or the one it was cut from.
+  relatedPackageId String?
+  notes            String?
+  createdById      String?
+  createdBy        User?           @relation("PackageMovesBy", fields: [createdById], references: [id])
+  createdAt        DateTime        @default(now())
+
+  @@index([packageId, createdAt])
+  @@map("stock_package_moves")
+}
+
+/// Where one tagged garment is.
+enum GarmentStatus {
+  /// In the finished-goods store.
+  IN_STOCK
+  /// In a carton, still in the store.
+  PACKED
+  /// Gone out on a delivery challan.
+  DISPATCHED
+  /// Tag withdrawn: printed by mistake, or its receipt was cancelled.
+  VOID
+  /// Written off as damaged, once the write-off was approved.
+  SCRAPPED
+}
+
+enum GarmentEventType {
+  TAGGED
+  PACKED
+  UNPACKED
+  DISPATCHED
+  RETURNED
+  VOIDED
+  ON_CHALLAN
+  OFF_CHALLAN
+  TRANSFERRED
+  SCRAP_REQUESTED
+  SCRAP_REFUSED
+  SCRAPPED
+}
+
+/// One finished garment with its own QR label: a single T-shirt, not a
+/// bundle or a carton.
+///
+/// Made from a finished-goods receipt, one per piece received, so a garment
+/// only exists once it has passed the last check. The stock ledger still
+/// counts the pieces by item, size and grade; a garment says which piece is
+/// which, and where it came from: its order, its bundle, its receipt. The
+/// same code stays with the piece for life — a damaged label is reprinted,
+/// never re-numbered.
+model Garment {
+  id              String             @id @default(cuid())
+  /// What the QR carries and what is printed under it: G-00001234.
+  code            String             @unique
+  moId            String
+  mo              ManufacturingOrder @relation("GarmentMO", fields: [moId], references: [id])
+  moLineId        String?
+  /// The cutting bundle it was sewn in, for its production and QC history.
+  bundleId        String?
+  bundle          ProductionBundle?  @relation("GarmentBundle", fields: [bundleId], references: [id])
+  fgReceiptId     String
+  fgReceipt       FinishedGoodsReceipt @relation("GarmentReceipt", fields: [fgReceiptId], references: [id])
+  fgReceiptLineId String
+  /// The finished item: one per style and colour.
+  itemId          String
+  item            Item               @relation("GarmentItem", fields: [itemId], references: [id])
+  sizeId          String?
+  size            Size?              @relation("GarmentSize", fields: [sizeId], references: [id])
+  grade           String             @default("A")
+  warehouseId     String
+  warehouse       Warehouse          @relation("GarmentStore", fields: [warehouseId], references: [id])
+  ownership       StockOwnership     @default(OWNED)
+  ownerCustomerId String?
+  soId            String?
+  status          GarmentStatus      @default(IN_STOCK)
+  /// The delivery challan it is on. Held for it while the challan is a draft,
+  /// so no other challan can take the same piece; gone with it once dispatched.
+  dcId            String?
+  dc              DeliveryChallan?   @relation("GarmentChallan", fields: [dcId], references: [id])
+  /// A write-off waiting for approval, or approved. Held while it waits.
+  adjustmentId    String?
+  /// The credit note it last came back on.
+  creditNoteId    String?
+  /// How often its label has been printed. A reprint keeps the same code.
+  printCount      Int                @default(0)
+  lastPrintedAt   DateTime?
+  createdById     String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  events GarmentEvent[]
+
+  @@index([moId, status])
+  @@index([fgReceiptLineId])
+  @@index([itemId, sizeId, warehouseId, status])
+  @@index([bundleId])
+  @@index([dcId])
+  @@index([adjustmentId])
+  @@map("garments")
+}
+
+/// What happened to one garment after it was tagged, in order.
+model GarmentEvent {
+  id              String           @id @default(cuid())
+  garmentId       String
+  garment         Garment          @relation(fields: [garmentId], references: [id], onDelete: Cascade)
+  type            GarmentEventType
+  referenceType   String?
+  referenceId     String?
+  referenceNumber String?
+  notes           String?
+  createdById     String?
+  createdBy       User?            @relation("GarmentEventBy", fields: [createdById], references: [id])
+  createdAt       DateTime         @default(now())
+
+  @@index([garmentId, createdAt])
+  @@map("garment_events")
+}
+
+/// One retail barcode (EAN-13) per finished item — style and colour — and
+/// size: built from the company's GS1 prefix, given once and never reused.
+model RetailBarcode {
+  id          String   @id @default(cuid())
+  itemId      String
+  item        Item     @relation("ItemBarcodes", fields: [itemId], references: [id])
+  sizeId      String?
+  size        Size?    @relation("SizeBarcodes", fields: [sizeId], references: [id], onDelete: Restrict)
+  ean         String   @unique
+  /// This size's own MRP, when it differs from the style's.
+  mrp         Decimal? @db.Decimal(10, 2)
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([itemId, sizeId])
+  @@map("retail_barcodes")
 }

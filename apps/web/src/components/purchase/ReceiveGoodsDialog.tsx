@@ -33,6 +33,9 @@ import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase
 import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
+import { parseSizes, splitEvenly } from '@/components/packages/packageTypes'
+import type { InwardRef } from '@/components/packages/InwardStickers'
 
 /**
  * Booking in what arrived against an order.
@@ -81,6 +84,8 @@ interface OrderLine {
     uom: { symbol: string } | null
     category?: { id: string; name: string; parent?: { id: string; name: string } | null } | null
   }
+  /** Its stickers by the item's rule: whether it gets any, what one package is, how much one holds. */
+  pack?: { tracked: boolean; packType: string; perPack: number | null } | null
 }
 
 interface OrderDetail extends OrderOption {
@@ -99,6 +104,132 @@ interface Alloc {
   key: string
   warehouseId: string
   received: string
+  /** The supplier's lot or batch, printed on the stickers. */
+  lot?: string
+  /** How it came packed: "5" bundles, split evenly — or each one's size typed. */
+  packs?: string
+  packType?: string
+  exact?: boolean
+  sizes?: string
+}
+
+/** What one package is, as the receipt asks it. */
+const PACK_NOUNS: Array<{ value: string; label: string }> = [
+  { value: 'BUNDLE', label: 'Bundles' },
+  { value: 'ROLL', label: 'Rolls' },
+  { value: 'BOX', label: 'Boxes' },
+  { value: 'CARTON', label: 'Cartons' },
+  { value: 'BAG', label: 'Bags' },
+  { value: 'PACKET', label: 'Packets' },
+  { value: 'OTHER', label: 'Packages' },
+]
+
+const round3 = (n: number) => Math.round(n * 1000) / 1000
+const qtyFmt = (n: number) => String(round3(n))
+
+/**
+ * The packages a store row came in, as quantities — a sticker each. "5" of
+ * 500 is five of 100, the last taking what does not divide; typed sizes are
+ * taken as they are. Nothing said: none, and the item's own rule applies.
+ */
+function packQtysOf(a: Alloc): number[] {
+  if (a.exact) return parseSizes(a.sizes ?? '')
+  return splitEvenly(num(a.received), Math.floor(num(a.packs)))
+}
+
+/**
+ * "Packed as" on a receipt row: how many bundles, rolls or boxes it came in.
+ * One sticker is made for each, with its own quantity on it. Left empty, the
+ * item's own rule decides, and the line under it says what that will be.
+ */
+function PackedAs({
+  line,
+  alloc,
+  disabled,
+  onChange,
+}: {
+  line: OrderLine
+  alloc: Alloc
+  disabled: boolean
+  onChange: (patch: Partial<Alloc>) => void
+}) {
+  const pack = line.pack
+  if (pack && !pack.tracked) {
+    return <span className="text-muted-foreground text-xs">No stickers</span>
+  }
+  const unit = line.item.uom?.symbol ?? ''
+  const received = num(alloc.received)
+  const qtys = packQtysOf(alloc)
+  const total = round3(qtys.reduce((sum, q) => sum + q, 0))
+  const type = alloc.packType || pack?.packType || 'BUNDLE'
+  const noun = (PACK_NOUNS.find((n) => n.value === type)?.label ?? 'Packages').toLowerCase()
+  const mismatch = alloc.exact && qtys.length > 0 && Math.abs(total - received) > 0.0005
+
+  let hint: string | null = null
+  if (alloc.exact) {
+    hint = qtys.length ? `${qtys.length} ${noun}, ${qtyFmt(total)} of ${qtyFmt(received)} ${unit}` : 'Type each one, e.g. 100, 98.5, 101'
+  } else if (qtys.length) {
+    const last = qtys[qtys.length - 1]
+    hint = last === qtys[0] ? `${qtyFmt(qtys[0])} ${unit} each` : `${qtyFmt(qtys[0])} ${unit} each, last ${qtyFmt(last)}`
+  } else if (received > 0) {
+    hint = pack?.perPack ? `Empty: ${Math.ceil(received / pack.perPack)} stickers` : 'Empty: 1 sticker for all'
+  }
+
+  return (
+    <div>
+      {/* Sizes typed one by one get the whole width, the kind of package under them. */}
+      <div className={alloc.exact ? 'flex flex-col gap-1' : 'flex gap-1'}>
+        {alloc.exact ? (
+          <input
+            className="form-input h-9 w-full min-w-0 text-sm"
+            value={alloc.sizes ?? ''}
+            onChange={(e) => onChange({ sizes: e.target.value })}
+            disabled={disabled}
+            placeholder="100, 98.5, 101"
+            aria-label={`Size of each package of ${line.item.name}`}
+          />
+        ) : (
+          <StepInput
+            className="form-input h-9 w-14 shrink-0 text-right"
+            value={alloc.packs ?? ''}
+            onValueChange={(v) => onChange({ packs: v })}
+            disabled={disabled}
+            placeholder="—"
+            aria-label={`How many packages of ${line.item.name}`}
+          />
+        )}
+        <SmartSelect
+          className={alloc.exact ? 'form-input h-9 w-full' : 'form-input h-9 min-w-0 flex-1'}
+          value={type}
+          onChange={(e) => onChange({ packType: e.target.value })}
+          disabled={disabled}
+          aria-label={`What one package of ${line.item.name} is`}
+        >
+          {PACK_NOUNS.map((n) => (
+            <option key={n.value} value={n.value}>
+              {n.label}
+            </option>
+          ))}
+        </SmartSelect>
+      </div>
+      <div className={`mt-1 text-[11px] ${mismatch ? 'text-red-400' : 'text-muted-foreground'}`}>
+        {hint}
+        {!disabled && (received > 0 || alloc.exact) && (
+          <button
+            type="button"
+            className="text-primary ml-1.5 hover:underline"
+            onClick={() =>
+              alloc.exact
+                ? onChange({ exact: false, packs: qtys.length ? String(qtys.length) : '' })
+                : onChange({ exact: true, sizes: qtys.join(', ') })
+            }
+          >
+            {alloc.exact ? 'All the same' : 'Sizes differ?'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /** The delivery's own paperwork, all of it optional. */
@@ -179,6 +310,9 @@ interface EditingGrn {
     warehouseId: string
     receivedQty: string | number
     rejectedQty: string | number
+    batchNumber?: string | null
+    packType?: string | null
+    packQtys?: Array<string | number>
   }>
   po: {
     id: string
@@ -365,6 +499,20 @@ const ReceiptLineRows = memo(function ReceiptLineRows({
                   first ? '' : `, row ${i + 1}`
                 }`}
               />
+            </td>
+            <td>
+              <input
+                className="form-input h-9"
+                value={alloc.lot ?? ''}
+                onChange={(e) => setAlloc(line.id, alloc.key, { lot: e.target.value })}
+                disabled={done}
+                maxLength={50}
+                placeholder="Lot"
+                aria-label={`Lot number of ${line.item.name}${first ? '' : `, row ${i + 1}`}`}
+              />
+            </td>
+            <td>
+              <PackedAs line={line} alloc={alloc} disabled={done} onChange={(patch) => setAlloc(line.id, alloc.key, patch)} />
             </td>
             <td>
               <SmartSelect
@@ -557,6 +705,22 @@ const ReceiptLineCard = memo(function ReceiptLineCard({
                   }`}
                 />
               </div>
+              <div className="space-y-1">
+                <label className={fieldLabel}>Lot no</label>
+                <input
+                  className="form-input h-9 w-full"
+                  value={alloc.lot ?? ''}
+                  onChange={(e) => setAlloc(line.id, alloc.key, { lot: e.target.value })}
+                  disabled={done}
+                  maxLength={50}
+                  placeholder="Lot"
+                  aria-label={`Lot number of ${line.item.name}${first ? '' : `, row ${i + 1}`}`}
+                />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <label className={fieldLabel}>Packed as</label>
+              <PackedAs line={line} alloc={alloc} disabled={done} onChange={(patch) => setAlloc(line.id, alloc.key, patch)} />
             </div>
           </div>
         )
@@ -580,7 +744,8 @@ export function ReceiveGoodsDialog({
   grnId,
 }: {
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `stickers`: a new receipt, for its sticker window. A correction has none. */
+  onSaved: (message: string, stickers?: InwardRef) => void
   /**
    * The order to open on, when the screen already knows which one.
    *
@@ -853,10 +1018,20 @@ export function ReceiveGoodsDialog({
         for (const l of g.lines) {
           if (!l.poLineId) continue
           const arr = byPoLine[l.poLineId] ?? (byPoLine[l.poLineId] = [])
+          const received = String(l.receivedQty)
+          const packQtys = (l.packQtys ?? []).map((q) => round3(Number(q)))
+          // Split evenly, it reads back as a count; otherwise as the sizes typed.
+          const even = packQtysOf({ key: '', warehouseId: '', received, packs: String(packQtys.length) })
+          const exact = packQtys.length > 0 && even.join(',') !== packQtys.join(',')
           arr.push({
             key: makeKey(),
             warehouseId: l.warehouseId,
-            received: String(l.receivedQty),
+            received,
+            lot: l.batchNumber ?? '',
+            packType: l.packType ?? '',
+            packs: packQtys.length && !exact ? String(packQtys.length) : '',
+            exact,
+            sizes: exact ? packQtys.join(', ') : '',
           })
         }
         // A line this receipt never touched still gets a row — empty, same
@@ -1055,6 +1230,20 @@ export function ReceiveGoodsDialog({
       )
     }
 
+    const offPacks = rows.find(({ line, alloc }) => {
+      if (!alloc.exact || line.pack?.tracked === false) return false
+      const qtys = packQtysOf(alloc)
+      return !qtys.length || Math.abs(round3(qtys.reduce((sum, q) => sum + q, 0)) - num(alloc.received)) > 0.0005
+    })
+    if (offPacks) {
+      const qtys = packQtysOf(offPacks.alloc)
+      return setError(
+        qtys.length
+          ? `${offPacks.line.item.name}: the packages add up to ${qtyFmt(qtys.reduce((sum, q) => sum + q, 0))}, but ${qtyFmt(num(offPacks.alloc.received))} arrived. Make them match.`
+          : `${offPacks.line.item.name}: type the size of each package, or choose "All the same".`
+      )
+    }
+
     if (editing && !editReason.trim()) {
       return setError('Say why this receipt is being corrected — one line is enough.')
     }
@@ -1086,11 +1275,17 @@ export function ReceiveGoodsDialog({
       orderedBy: text(delivery.orderedBy),
       referenceNo: text(delivery.referenceNo),
 
-      lines: rows.map(({ line, alloc }) => ({
-        poLineId: line.id,
-        warehouseId: alloc.warehouseId,
-        receivedQty: num(alloc.received),
-      })),
+      lines: rows.map(({ line, alloc }) => {
+        // How it came packed: a sticker for each package, made on saving.
+        const packQtys = line.pack?.tracked === false ? [] : packQtysOf(alloc)
+        return {
+          poLineId: line.id,
+          warehouseId: alloc.warehouseId,
+          receivedQty: num(alloc.received),
+          batchNumber: text(alloc.lot ?? ''),
+          ...(packQtys.length ? { packType: alloc.packType || line.pack?.packType || 'BUNDLE', packQtys } : {}),
+        }
+      }),
     }
 
     setSaving(true)
@@ -1122,7 +1317,8 @@ export function ReceiveGoodsDialog({
       onSaved(
         failed.length
           ? `${base} ${failed.length === 1 ? 'A file' : `${failed.length} files`} did not attach: ${failed.join(', ')}.`
-          : base
+          : base,
+        editing ? undefined : { type: 'GRN', id: res.data.id }
       )
     } catch (err) {
       setError(apiErrorMessage(err))
@@ -1614,14 +1810,17 @@ export function ReceiveGoodsDialog({
                     G…" in a box the comment above says was widened to stop
                     exactly that. Seven cols now, one per header, and they add
                     up to 100. */}
-                <table className="data-table table-compact w-full min-w-[980px] table-fixed">
+                {/* Nine now: the lot and how it came packed, for its stickers. */}
+                <table className="data-table table-compact w-full min-w-[1180px] table-fixed">
                   <colgroup>
-                    <col style={{ width: '31%' }} />
+                    <col style={{ width: '22%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '8%' }} />
+                    <col style={{ width: '8%' }} />
                     <col style={{ width: '10%' }} />
-                    <col style={{ width: '10%' }} />
-                    <col style={{ width: '10%' }} />
-                    <col style={{ width: '15%' }} />
-                    <col style={{ width: '20%' }} />
+                    <col style={{ width: '9%' }} />
+                    <col style={{ width: '17%' }} />
+                    <col style={{ width: '14%' }} />
                     <col style={{ width: '4%' }} />
                   </colgroup>
                   <thead>
@@ -1631,6 +1830,8 @@ export function ReceiveGoodsDialog({
                       <th className="text-right">Received till now</th>
                       <th className="text-right">Still due</th>
                       <th className="text-right">Received qty</th>
+                      <th>Lot no</th>
+                      <th title="How many bundles, rolls or boxes it came in: a sticker for each">Packed as</th>
                       <th>Store</th>
                       <th>
                         <span className="sr-only">Split across stores</span>

@@ -100,7 +100,7 @@ const SPAN = {
   4: { 1: '', 2: 'sm:col-span-2', 3: 'sm:col-span-2 lg:col-span-3' },
 } as const
 
-export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags'
+export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags' | 'readout' | 'chips'
 
 export interface FormField {
   name: string
@@ -163,8 +163,12 @@ export interface FormField {
   showIf?: (values: Record<string, unknown>) => boolean
   /** Shown in place of "Select..." when a filtered list has nothing in it. */
   emptyLabel?: string
+  /** What the empty choice of a select says, in place of "Select...": "None — this is a main category". */
+  noneLabel?: string
   /** Value to open an edit with, when it is not simply the record's own field. */
   initial?: (record: Record<string, unknown>) => unknown
+  /** A tick-box that starts ticked on a new record, like Active. */
+  checkedForNew?: boolean
   /**
    * Saved under another name. Two boxes may share one: Category and Sub
    * Category both save `categoryId`, and a sub-category, when chosen, wins
@@ -205,6 +209,19 @@ export interface FormField {
    * department), and they must keep working.
    */
   mustFill?: boolean | 'ifOptions'
+  /**
+   * The label as it should read for what is on the form now: "Category name"
+   * for a main category, "Sub-category name" once a parent is picked.
+   */
+  labelFor?: (values: Record<string, unknown>) => string
+  /** The hint under the box, worded for what is on the form now. Wins over `help`. */
+  helpFor?: (values: Record<string, unknown>) => string | null
+  /**
+   * For a 'readout': what to show, from the form and the record being edited.
+   * Shown in a box like the others, never sent: the sub-categories under a
+   * category, which are changed on their own records.
+   */
+  readout?: (values: Record<string, unknown>, record: Record<string, unknown> | null) => React.ReactNode
   /** Short hint rendered under the input. */
   help?: string
   /**
@@ -316,11 +333,14 @@ export function MasterFormDialog<T extends { id: string }>({
         : undefined
       if (existing !== undefined && existing !== null) {
         seed[f.name] = f.type === 'tags' && Array.isArray(existing) ? existing.join(', ') : existing
+      } else if (f.type === 'chips') {
+        // Any number of fixed choices: none picked yet.
+        seed[f.name] = []
       } else if (f.type === 'checkbox') {
         // A new record is added to be used. Starting "Active" unticked saved
         // every new item, customer and supplier as inactive, so it vanished
         // from the list and never appeared in a single dropdown.
-        seed[f.name] = !record && f.name === 'isActive'
+        seed[f.name] = !record && (f.name === 'isActive' || Boolean(f.checkedForNew))
       } else {
         seed[f.name] = ''
       }
@@ -527,7 +547,7 @@ export function MasterFormDialog<T extends { id: string }>({
     for (const f of fields) {
       // Sending back a value nobody could have changed only risks a clash with
       // a code the server has since handed to somebody else.
-      if (f.generated) continue
+      if (f.generated || f.type === 'readout') continue
 
       // A hidden field must be sent as an explicit null, not left out —
       // leaving it out would let the server keep whatever it held before the
@@ -794,7 +814,12 @@ export function MasterFormDialog<T extends { id: string }>({
                   <Field
                     key={f.name}
                     id={`${uid}-${f.name}`}
-                    field={f}
+                    field={{
+                      ...f,
+                      label: f.labelFor?.(values) ?? f.label,
+                      help: f.helpFor?.(values) ?? f.help,
+                    }}
+                    readout={f.readout?.(values, (record as Record<string, unknown> | null) ?? null)}
                     value={values[f.name]}
                     error={fieldErrors[f.name]}
                     options={optionsFor(f)}
@@ -875,6 +900,7 @@ function Field({
   starred,
   onChange,
   onCreate,
+  readout,
 }: {
   /** The box's id, unique on the page even with a second form open over this one. */
   id: string
@@ -888,6 +914,8 @@ function Field({
   onChange: (v: unknown) => void
   /** Adds a missing choice from inside the list (see createFrom). */
   onCreate?: (typed: string) => void
+  /** What a 'readout' field shows. */
+  readout?: React.ReactNode
 }) {
   const type = field.type ?? 'text'
   // A description or an address is read as a paragraph, so it takes the whole
@@ -934,6 +962,31 @@ function Field({
         {starred && <span className="text-red-400 ml-0.5">*</span>}
       </label>
 
+      {type === 'readout' && <div className="form-readout min-h-[2.625rem] flex-wrap">{readout}</div>}
+
+      {/* Any number of fixed choices, each a chip to tick: wash-care symbols. */}
+      {type === 'chips' && (
+        <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby={id}>
+          {options?.map((o) => {
+            const list = Array.isArray(value) ? (value as string[]) : []
+            const on = list.includes(o.value)
+            return (
+              <button
+                key={o.value}
+                type="button"
+                aria-pressed={on}
+                onClick={() => onChange(on ? list.filter((v) => v !== o.value) : [...list, o.value])}
+                className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  on ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {o.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
       {type === 'textarea' && (
         <textarea
           id={id}
@@ -959,7 +1012,7 @@ function Field({
               ? 'Loading...'
               : options?.length === 0 && field.emptyLabel
                 ? field.emptyLabel
-                : 'Select...'}
+                : (field.noneLabel ?? 'Select...')}
           </option>
           {options?.map((o) => (
             <option key={o.value} value={o.value}>

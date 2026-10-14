@@ -10,6 +10,7 @@ import { api, ApiError, currentUser } from '@/lib/api'
 import { TONE, inr } from '@/components/dashboard/DashKit'
 import { HealthRing, MODULE, SLATE, moduleOf } from './HomeCharts'
 import type { Approval, Check, HomeData } from './types'
+import { StickersReady } from '@/components/packages/StickersReady'
 
 /**
  * The parts of the home dashboard that are not charts: the mill drawn as one
@@ -369,7 +370,7 @@ const TYPE: Record<Approval['type'], { label: string; colour: string; href: stri
   PO: { label: 'Purchase order', colour: MODULE.purchase.colour, href: '/purchase/orders' },
   SO: { label: 'Sales order', colour: MODULE.sales.colour, href: '/sales/orders' },
   MR: { label: 'Requisition', colour: MODULE.inventory.colour, href: '/inventory/requisitions' },
-  ADJ: { label: 'Stock count', colour: MODULE.inventory.colour, href: '/inventory/documents?tab=adjustments' },
+  ADJ: { label: 'Stock adjustment', colour: MODULE.inventory.colour, href: '/inventory/documents?tab=adjustments' },
 }
 
 /**
@@ -407,6 +408,9 @@ export function ApprovalsPanel({
   reload: () => Promise<void>
 }) {
   const [busyId, setBusyId] = useState<string | null>(null)
+  /** A stock-in approved here: its stickers, ready to print. A count has none, and the window does not open. */
+  const [stickersFor, setStickersFor] = useState<string | null>(null)
+  const [printed, setPrinted] = useState<string | null>(null)
   const me = currentUser()
 
   const decide = async (a: Approval, decision: 'approve' | 'reject') => {
@@ -434,6 +438,7 @@ export function ApprovalsPanel({
       await api.post(`/approvals/${a.type}/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
       // Refetch rather than splice: approving one document can change what else is waiting.
       await reload()
+      if (decision === 'approve' && a.type === 'ADJ') setStickersFor(a.id)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not ${decision} ${a.number}.`)
     } finally {
@@ -444,6 +449,17 @@ export function ApprovalsPanel({
   return (
     <div>
       {error && <p className="mb-3 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400">{error}</p>}
+      {printed && <p className="mb-3 rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-400">{printed}</p>}
+      {stickersFor && (
+        <StickersReady
+          source={{ type: 'STOCK_IN', id: stickersFor }}
+          onClose={() => setStickersFor(null)}
+          onDone={(m) => {
+            setStickersFor(null)
+            setPrinted(m)
+          }}
+        />
+      )}
       {!approvals && !error && <div className="skeleton h-32 w-full rounded-lg" />}
       {approvals && approvals.length === 0 && (
         <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">

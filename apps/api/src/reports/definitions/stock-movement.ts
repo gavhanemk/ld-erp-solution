@@ -46,6 +46,7 @@ export const stockMovement: ReportDefinition = {
     { key: 'jobwork', label: 'Job Work (net)', type: 'qty', total: 'sum' },
     { key: 'transfer', label: 'Transfers (net)', type: 'qty', total: 'sum' },
     { key: 'adjustment', label: 'Adjusted', type: 'qty', total: 'sum' },
+    { key: 'stockin', label: 'Stock in (no PO)', type: 'qty', total: 'sum' },
     { key: 'closing', label: 'Closing', type: 'qty', total: 'sum' },
     { key: 'openingValue', label: 'Opening Value', type: 'money', total: 'sum' },
     { key: 'inValue', label: 'Value In', type: 'money', total: 'sum' },
@@ -151,6 +152,7 @@ export const stockMovement: ReportDefinition = {
           jobwork: 0,
           transfer: 0,
           adjustment: 0,
+          stockin: 0,
           sale: 0,
         }
         byKey.set(key, r)
@@ -184,6 +186,7 @@ export const stockMovement: ReportDefinition = {
         jobwork: r3(r.jobwork),
         transfer: r3(r.transfer),
         adjustment: r3(r.adjustment),
+        stockin: r3(r.stockin),
         closing: r3(r.closing),
         openingValue: round2(r.openingValue),
         closingValue: round2(r.closingValue),
@@ -268,7 +271,7 @@ export const stockMovement: ReportDefinition = {
               title: 'Net value moved, by kind',
               question: 'comparison',
               format: 'money',
-              points: (['purchase', 'customer', 'issue', 'jobwork', 'transfer', 'adjustment', 'opening'] as Bucket[])
+              points: (['purchase', 'stockin', 'customer', 'issue', 'jobwork', 'transfer', 'adjustment', 'opening'] as Bucket[])
                 .map((b) => ({ label: BUCKET_LABEL[b], value: round2(Math.abs(valueByBucket.get(b) ?? 0)), tone: BUCKET_TONE[b] }))
                 .filter((p) => p.value > 0),
             },

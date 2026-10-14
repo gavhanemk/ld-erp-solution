@@ -329,6 +329,54 @@ const formFields: FormField[] = [
   },
   { name: 'minStock', label: 'Minimum Stock', type: 'number', section: 'Costing & Stock' },
   { name: 'maxStock', label: 'Maximum Stock', type: 'number', section: 'Costing & Stock' },
+  // How its QR stickers start out after an inward. The sticker window can
+  // change them, and its "Remember" tick saves the change back here.
+  {
+    name: 'packType',
+    label: 'Sticker package',
+    type: 'select',
+    options: [
+      { value: 'ROLL', label: 'Roll' },
+      { value: 'BOX', label: 'Box' },
+      { value: 'CARTON', label: 'Carton' },
+      { value: 'BAG', label: 'Bag' },
+      { value: 'BUNDLE', label: 'Bundle' },
+      { value: 'PACKET', label: 'Packet' },
+      { value: 'OTHER', label: 'Other' },
+    ],
+    noneLabel: 'As the category says',
+    section: 'Costing & Stock',
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'What one stickered package of it is',
+  },
+  {
+    name: 'packQty',
+    label: 'Qty per Sticker',
+    type: 'number',
+    section: 'Costing & Stock',
+    placeholder: '100',
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'Empty: a sticker per roll or box, else one for the lot',
+  },
+  // What is inside one unit, so a sticker on a box says how many pieces.
+  {
+    name: 'contentQty',
+    label: 'One Unit Holds',
+    type: 'number',
+    section: 'Costing & Stock',
+    placeholder: '144',
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'A box of 144 buttons: 144. Printed on its stickers',
+  },
+  {
+    name: 'contentUnit',
+    label: 'Of',
+    type: 'text',
+    section: 'Costing & Stock',
+    placeholder: 'pcs',
+    showIf: (v) => v.type !== 'FINISHED_GOOD',
+    help: 'pcs, m, gross… Empty means pcs',
+  },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new documents' },
 ]
 

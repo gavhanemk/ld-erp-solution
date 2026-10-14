@@ -24,6 +24,10 @@ import {
 } from '@/components/inventory/MaterialCharts'
 import { formatDate } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import { StickersReady } from '@/components/packages/StickersReady'
+import { OutwardStickers } from '@/components/packages/OutwardStickers'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * Material customers have sent in for us to work on.
@@ -231,6 +235,10 @@ function CustomerMaterialScreen() {
   const [busy, setBusy] = useState<string | null>(null)
   const [exporting, setExporting] = useState(false)
   const [dialog, setDialog] = useState(false)
+  /** A receipt just saved: its stickers, ready to print. */
+  const [inward, setInward] = useState<InwardRef | null>(null)
+  /** Stock that just went out: its labels, and the packages it came from. */
+  const [outward, setOutward] = useState<OutwardRef | null>(null)
   const [importing, setImporting] = useState(false)
 
   const [search, setSearch] = useState('')
@@ -1505,10 +1513,31 @@ function CustomerMaterialScreen() {
       {dialog && (
         <CustomerMaterialDialog
           onClose={() => setDialog(false)}
-          onSaved={(msg) => {
+          onSaved={(msg, stickers) => {
             setDialog(false)
             setMessage(msg)
+            if (stickers) setInward(stickers)
             void load()
+          }}
+        />
+      )}
+      {outward && (
+        <OutwardStickers
+          source={outward}
+          onClose={() => setOutward(null)}
+          onDone={(m) => {
+            setOutward(null)
+            setMessage(m)
+          }}
+        />
+      )}
+      {inward && (
+        <StickersReady
+          source={inward}
+          onClose={() => setInward(null)}
+          onDone={(m) => {
+            setInward(null)
+            setMessage(m)
           }}
         />
       )}
@@ -1518,9 +1547,10 @@ function CustomerMaterialScreen() {
           receipts={[...new Map(rows.filter((r) => !r.cancelledAt).map((r) => [r.receiptId, { id: r.receiptId, grnNumber: r.grnNumber, customerId: r.customerId, date: r.receiptDate }])).values()]}
           start={returning.customerId ? returning : undefined}
           onClose={() => setReturning(null)}
-          onSaved={(msg) => {
+          onSaved={(msg, out) => {
             setReturning(null)
             setMessage(msg)
+            if (out) setOutward(out)
             setView('returns')
             void load()
           }}

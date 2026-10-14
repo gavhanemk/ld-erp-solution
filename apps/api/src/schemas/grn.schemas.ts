@@ -32,6 +32,13 @@ const lineSchema = z.object({
    */
   rejectedQty: qty.optional(),
   batchNumber: z.string().max(50).optional().nullable(),
+  // How it came packed: 5 bundles of 100 — each package's quantity, in order.
+  // One sticker is made for each.
+  packType: z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
+  packQtys: z
+    .array(z.number().positive('A package cannot be empty').max(9_999_999))
+    .max(1000, 'That is more than 1,000 packages on one line')
+    .optional(),
 })
 
 /**
@@ -171,6 +178,19 @@ function refineGrnFields(data: { lines: z.infer<typeof lineSchema>[] }, ctx: z.R
       })
     }
     seen.add(key)
+  })
+
+  // The packages are what arrived, split up: they have to add up to it.
+  data.lines.forEach((line, i) => {
+    if (!line.packQtys?.length) return
+    const total = Math.round(line.packQtys.reduce((s, q) => s + q, 0) * 1000) / 1000
+    if (Math.abs(total - line.receivedQty) > 0.0005) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['lines', i, 'packQtys'],
+        message: `The packages add up to ${total}, but ${line.receivedQty} arrived. Make them match.`,
+      })
+    }
   })
 
   if (!data.lines.some((l) => l.receivedQty > 0)) {

@@ -302,6 +302,16 @@ export const createItemSchema = z
     minStock: nonNegativeDecimal,
     maxStock: nonNegativeDecimal,
     standardRate: nonNegativeDecimal,
+    // Its stickers: what one package is, and how much one sticker holds.
+    // Empty falls back to the category and the unit.
+    packType: z.preprocess(
+      (v) => (v === '' ? null : v),
+      z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
+    ),
+    packQty: nonNegativeDecimal,
+    // What one unit holds, printed on its stickers: a box of 144 pcs.
+    contentQty: nonNegativeDecimal,
+    contentUnit: z.preprocess((v) => (v === '' ? null : v), z.string().trim().max(20).optional().nullable()),
     imageUrl: z.string().url().optional().nullable(),
     // Which garment this is, for a finished good. Shape only, here — whether
     // the colour is actually one of the style's own colours needs a database
@@ -346,6 +356,24 @@ export const updateItemSchema = createItemSchema.innerType().partial()
 // Style
 // ─────────────────────────────────────────────────────────────
 
+/** The wash-care symbols a retail label can carry, in the order they are printed. */
+export const WASH_CARE = [
+  'WASH_30',
+  'WASH_40',
+  'HAND_WASH',
+  'NO_WASH',
+  'NO_BLEACH',
+  'TUMBLE_LOW',
+  'NO_TUMBLE',
+  'LINE_DRY',
+  'DRY_SHADE',
+  'IRON_LOW',
+  'IRON_MED',
+  'NO_IRON',
+  'DRY_CLEAN',
+  'NO_DRY_CLEAN',
+] as const
+
 export const createStyleSchema = z.object({
   code,
   name,
@@ -371,6 +399,11 @@ export const createStyleSchema = z.object({
     ),
   techPackUrl: z.string().url().optional().nullable(),
   imageUrl: z.string().url().optional().nullable(),
+  // The retail label: MRP inclusive of all taxes, what it is made of, and its
+  // wash-care symbols.
+  mrp: z.union([z.number().min(0).max(9_999_999), z.string().regex(/^\d+(\.\d+)?$/)]).optional().nullable(),
+  composition: z.string().trim().max(100).optional().nullable(),
+  washCare: z.array(z.enum(WASH_CARE)).default([]),
   isActive,
 })
 export const updateStyleSchema = createStyleSchema.partial()
@@ -699,6 +732,10 @@ export const createItemCategorySchema = z.object({
   parentId: z.string().optional().nullable(),
   // The department a new item in this category starts with. Null clears it.
   departmentId: z.string().min(1).optional().nullable(),
+  // Stock of these items is kept as labelled packages with QR stickers, and
+  // what one package usually is. A sub-category follows its main category.
+  trackPackages: z.boolean().optional(),
+  packType: z.enum(['BOX', 'ROLL', 'CARTON', 'BAG', 'BUNDLE', 'PACKET', 'OTHER']).optional().nullable(),
   isActive,
 })
 export const updateItemCategorySchema = createItemCategorySchema.partial()
@@ -734,6 +771,16 @@ export const updateCompanySchema = z.object({
   email,
   website: z.string().url().optional().nullable(),
   logoUrl: z.string().url().optional().nullable(),
+  // Retail labels: the GS1 company prefix their barcodes are built from, and
+  // the legal lines a retail label carries.
+  gs1Prefix: z
+    .string()
+    .trim()
+    .regex(/^\d{7,10}$/, 'A GS1 company prefix is 7 to 10 digits, as on the GS1 India certificate')
+    .optional()
+    .nullable(),
+  countryOfOrigin: z.string().trim().max(60).optional().nullable(),
+  customerCare: z.string().trim().max(200).optional().nullable(),
   currentFY: z
     .string()
     .regex(/^\d{4}$/, 'Financial year token looks like 2425')

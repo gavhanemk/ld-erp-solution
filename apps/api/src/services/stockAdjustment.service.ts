@@ -2,6 +2,8 @@ import { prisma } from '@ld-erp/database'
 import type { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement } from './stock.service'
+import { afterAdjustmentDecided } from './garmentHooks.service'
+import { autoStickers } from './stickers.service'
 
 /**
  * A stock adjustment is a count the store keeper made; it changes stock only
@@ -27,7 +29,11 @@ const include = {
 }
 
 export async function approveAdjustment(id: string, userId: string, admin = false) {
-  return prisma.$transaction((tx) => approveAdjustmentIn(tx, id, userId, admin), { timeout: 60_000, maxWait: 20_000 })
+  const result = await prisma.$transaction((tx) => approveAdjustmentIn(tx, id, userId, admin), { timeout: 60_000, maxWait: 20_000 })
+  // A stock-in brings stock in: its stickers are made now, ready to print,
+  // whichever screen it was approved from.
+  const stickers = result.after.kind === 'STOCK_IN' ? await autoStickers({ sourceType: 'STOCK_IN', sourceId: result.after.id }, userId) : null
+  return { ...result, stickers }
 }
 
 /** The approval inside the caller's transaction. */
@@ -65,7 +71,8 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
       qty: Math.abs(difference),
       // A customer's cloth carries no value of ours, found or lost.
       unitRate: difference > 0 ? (line.ownership === 'CUSTOMER_OWNED' ? 0 : Number(line.unitRate ?? 0)) : undefined,
-      referenceType: 'STOCK_ADJUSTMENT',
+      // A stock-in reads as one in the ledger and the reports, not as a count.
+      referenceType: before.kind === 'STOCK_IN' ? 'STOCK_IN' : 'STOCK_ADJUSTMENT',
       referenceId: before.id,
       transactionDate: before.adjustmentDate,
       notes: `${before.adjustmentNumber}${owner}: ${before.reason}`,
@@ -77,6 +84,8 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
     data: { status: 'APPROVED', approvedById: userId, approvedAt: new Date() },
     include,
   })
+  // Tagged garments waiting on this write-off are written off with it.
+  await afterAdjustmentDecided(tx, id, true, userId)
   return { before, after }
 }
 
@@ -94,6 +103,8 @@ export async function rejectAdjustment(id: string, userId: string, reason: strin
       'ALREADY_DECIDED',
     )
   }
+  // Tagged garments it was writing off are free again.
+  await prisma.$transaction((tx) => afterAdjustmentDecided(tx, id, false, userId))
   const after = await prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include })
   return { before, after }
 }

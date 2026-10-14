@@ -7,6 +7,7 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import type { InwardRef } from '@/components/packages/InwardStickers'
 
 /**
  * Material back from the floor unused: the leftover fabric after cutting,
@@ -19,9 +20,11 @@ interface ReturnLine {
   id: string
   issuedQty: string | number
   returnedQty?: string | number
-  item: { name: string; uom: { symbol: string } }
+  itemId?: string
+  item: { id?: string; name: string; uom: { symbol: string } }
   warehouse: { id: string; name: string }
   ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomerId?: string | null
   ownerCustomer?: { name: string } | null
 }
 
@@ -35,7 +38,8 @@ export function FloorReturnDialog({
 }: {
   mr: { id: string; mrNumber: string; department?: { name: string } | null; lines: ReturnLine[] }
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `stickers`: what came back, for its sticker window. */
+  onSaved: (message: string, stickers?: InwardRef) => void
 }) {
   const open = mr.lines.map((l) => ({ l, left: Math.round((Number(l.issuedQty) - Number(l.returnedQty ?? 0)) * 1000) / 1000 })).filter((x) => x.left > 0)
   const [qty, setQty] = useState<Record<string, string>>({})
@@ -64,7 +68,18 @@ export function FloorReturnDialog({
         reason: reason.trim() || null,
         lines: lines.map((x) => ({ lineId: x.l.id, qty: num(qty[x.l.id] ?? ''), warehouseId: store[x.l.id] || x.l.warehouse.id })),
       })
-      onSaved(res.message ?? 'Returned to the store.')
+      // What came back, line by line: a requisition can be returned to more
+      // than once, so the document alone cannot say what this return was.
+      const back = lines
+        .map((x) => ({
+          itemId: x.l.itemId ?? x.l.item.id ?? '',
+          warehouseId: store[x.l.id] || x.l.warehouse.id,
+          ownership: x.l.ownership ?? ('OWNED' as const),
+          ownerCustomerId: x.l.ownerCustomerId ?? null,
+          qty: num(qty[x.l.id] ?? ''),
+        }))
+        .filter((b) => b.itemId)
+      onSaved(res.message ?? 'Returned to the store.', back.length ? { type: 'MR_RETURN', id: mr.id, lines: back } : undefined)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not return it.')
     } finally {

@@ -9,6 +9,7 @@ import { nextDocumentNumber } from '../lib/docNumber'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { balanceOf, recordMovement } from '../services/stock.service'
 import { OPEN_ORDER_STATUSES } from '../services/salesOrder.service'
+import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
 
 /**
  * Delivery challans: the goods leaving for the buyer against a sales order.
@@ -476,6 +477,8 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
     where: { id: dc.id },
     data: { status: 'DISPATCHED', dispatchedAt: new Date(), dispatchedById: userId },
   })
+  // Tagged pieces scanned onto it are gone with it.
+  await afterChallanDispatched(tx, dc.id, userId)
 }
 
 /** Writes a challan's header and lines; the number is the caller's. */
@@ -694,6 +697,8 @@ export async function cancelChallan(tx: Prisma.TransactionClient, dcId: string, 
     }
   }
 
+  // Its tagged pieces are back in the store and free for another challan.
+  await afterChallanCancelled(tx, before.id, userId)
   const after = await tx.deliveryChallan.update({
     where: { id: before.id },
     data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },

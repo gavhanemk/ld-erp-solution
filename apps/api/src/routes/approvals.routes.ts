@@ -8,6 +8,7 @@ import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import { approveSalesOrder, rejectSalesOrder } from '../services/salesOrder.service'
 import { rejectAdjustmentSchema, rejectRequisitionSchema } from '../schemas/inventory.schemas'
+import { stickersNote } from '../services/stickers.service'
 
 const router = Router()
 
@@ -74,7 +75,7 @@ router.post('/:type/:id/approve', guard('approve'), async (req: AuthRequest, res
     after: result.after,
   })
 
-  res.json({ success: true, message: `${result.number} approved`, data: result.after })
+  res.json({ success: true, message: `${result.number} approved.${'note' in result ? (result.note ?? '') : ''}`, data: result.after })
 })
 
 // POST /api/approvals/:type/:id/reject
@@ -133,8 +134,8 @@ async function approve(
 
   if (type === 'ADJ') {
     // A stock count: approving posts its differences into stock.
-    const { before, after } = await approveAdjustment(id, userId, admin)
-    return { entityType: 'StockAdjustment', number: before.adjustmentNumber, before, after }
+    const { before, after, stickers } = await approveAdjustment(id, userId, admin)
+    return { entityType: 'StockAdjustment', number: before.adjustmentNumber, before, after, note: stickersNote(stickers?.count ?? 0) }
   }
 
   const before = await prisma.materialRequisition.findUnique({ where: { id } })

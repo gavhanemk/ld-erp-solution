@@ -6,6 +6,8 @@ import { api, ApiError, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import type { InwardRef } from '@/components/packages/InwardStickers'
+import type { OutwardRef } from '@/components/packages/packageTypes'
 
 /**
  * Sending material out to an outside unit, and taking it back.
@@ -105,7 +107,8 @@ export function SendJobWorkDialog({
   onSaved,
 }: {
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `outward`: the challan just saved, for its labels. */
+  onSaved: (message: string, outward?: OutwardRef) => void
 }) {
   const [workers, setWorkers] = useState<Option[]>([])
   const [items, setItems] = useState<ItemOption[]>([])
@@ -241,7 +244,7 @@ export function SendJobWorkDialog({
 
     setSaving(true)
     try {
-      const res = await api.post<{ message?: string; data: { challanNumber: string } }>('/inventory/job-work', {
+      const res = await api.post<{ message?: string; data: { id: string; challanNumber: string } }>('/inventory/job-work', {
         jobWorkerId,
         process: process.trim(),
         fromWarehouseId,
@@ -253,7 +256,7 @@ export function SendJobWorkDialog({
         soId: soId || null,
         lines: filled.map((l) => ({ itemId: l.itemId, qty: num(l.qty), ...parseWhose(l.whose) })),
       })
-      onSaved(res.message ?? `${res.data.challanNumber} saved.`)
+      onSaved(res.message ?? `${res.data.challanNumber} saved.`, { type: 'JOB_WORK', id: res.data.id })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {
@@ -572,7 +575,8 @@ export function ReceiveJobWorkDialog({
     lines: ChallanLine[]
   }
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `stickers`: the return just saved, for its sticker window. */
+  onSaved: (message: string, stickers?: InwardRef) => void
 }) {
   const [items, setItems] = useState<ItemOption[]>([])
   const [warehouses, setWarehouses] = useState<Option[]>([])
@@ -644,7 +648,7 @@ export function ReceiveJobWorkDialog({
 
     setSaving(true)
     try {
-      const res = await api.post<{ message?: string; data: { challanNumber: string } }>(`/inventory/job-work/${challan.id}/returns`, {
+      const res = await api.post<{ message?: string; data: { challanNumber: string }; returnId?: string }>(`/inventory/job-work/${challan.id}/returns`, {
         theirChallanNo: theirChallanNo || null,
         notes: notes || null,
         lines: lines.map(({ line, e }) => ({
@@ -657,7 +661,7 @@ export function ReceiveJobWorkDialog({
           warehouseId: e.warehouseId,
         })),
       })
-      onSaved(res.message ?? 'Return saved.')
+      onSaved(res.message ?? 'Return saved.', res.returnId ? { type: 'JOB_WORK_RETURN', id: res.returnId } : undefined)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {

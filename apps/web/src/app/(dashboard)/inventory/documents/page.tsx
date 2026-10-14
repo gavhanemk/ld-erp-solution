@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Search,
   RefreshCw,
@@ -13,13 +13,16 @@ import {
   FileText,
   CheckCircle2,
   XCircle,
+  Tags,
 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
-import { formatDate } from '@/lib/utils'
+import { formatDate, formatRupees } from '@/lib/utils'
+import { StickerNote, type StickerNews } from '@/components/inventory/StockInNext'
+import { StickersReady, printDocStickers } from '@/components/packages/StickersReady'
 
 /**
  * The stock documents: what was moved between stores, and what was corrected
@@ -57,6 +60,7 @@ interface AdjustmentLine extends Line {
   bookQty: string | number
   countedQty: string | number
   difference: string | number
+  unitRate?: string | number | null
 }
 
 interface Transfer {
@@ -84,6 +88,9 @@ interface Adjustment {
   approvedBy: { id: string; name: string } | null
   approvedAt: string | null
   rejectReason: string | null
+  /** COUNT for a physical count; STOCK_IN for stock that came in without a purchase order. */
+  kind?: string
+  source?: string | null
   lines: AdjustmentLine[]
 }
 
@@ -106,16 +113,31 @@ const ADJUSTMENT_COLS = [
   { label: 'Counted', width: '16%', numeric: true },
   { label: 'Difference', width: '16%', numeric: true },
 ]
+/** A stock-in is what is coming in and what it is worth, not a count. */
+const STOCK_IN_COLS = [
+  { label: 'Code', width: '14%' },
+  { label: 'Item', width: '34%' },
+  { label: 'In store now', width: '13%', numeric: true },
+  { label: 'Coming in', width: '13%', numeric: true },
+  { label: 'Rate', width: '12%', numeric: true },
+  { label: 'Worth', width: '14%', numeric: true },
+]
 
 export default function StockDocumentsPage() {
   const [kind, setKind] = useState<Kind>('transfers')
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [adjustments, setAdjustments] = useState<Adjustment[]>([])
   const [total, setTotal] = useState(0)
+  /** Counts and stock-ins waiting for a store manager, shown on the tab so they are not missed. */
+  const [waiting, setWaiting] = useState(0)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  /** After a stock-in is approved: where its stickers are, or why there are none. */
+  const [stickers, setStickers] = useState<StickerNews | null>(null)
+  /** A stock-in just approved: its stickers were made by themselves, ready to print. */
+  const [stickersFor, setStickersFor] = useState<{ id: string } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const [search, setSearch] = useState('')
@@ -126,9 +148,12 @@ export default function StockDocumentsPage() {
   const me = currentUser() as { id?: string } | null
   const mayApprove = can('inventory', 'approve')
 
-  // Arriving from the approvals inbox, which links to the counts.
+  // Arriving from the approvals inbox, which links to the counts, or from a
+  // stock-in just saved, which opens its own row.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('tab') === 'adjustments') setKind('adjustments')
+    const q = new URLSearchParams(window.location.search)
+    if (q.get('tab') === 'adjustments') setKind('adjustments')
+    if (q.get('open')) setOpen(q.get('open'))
   }, [])
 
   useEffect(() => {
@@ -136,23 +161,38 @@ export default function StockDocumentsPage() {
     return () => clearTimeout(t)
   }, [search])
 
+  // Only the latest load may fill the table. Arriving on the Adjustments tab
+  // starts a load of transfers first, and when that answer came back last its
+  // count of 5 transfers sat over the adjustments.
+  const loadSeq = useRef(0)
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
+    const current = () => seq === loadSeq.current
     setLoading(true)
     setError(null)
     try {
       const qs = new URLSearchParams({ limit: '50' })
       if (debounced) qs.set('q', debounced)
 
+      // Whichever tab is open, the Adjustments tab says how many are waiting.
+      void api
+        .get<Paginated<Adjustment>>('/inventory/adjustments?status=PENDING&limit=1')
+        .then((r) => setWaiting(r.pagination.total))
+        .catch(() => {})
+
       if (kind === 'transfers') {
         const res = await api.get<Paginated<Transfer>>(`/inventory/transfers?${qs}`)
+        if (!current()) return
         setTransfers(res.data)
         setTotal(res.pagination.total)
       } else {
         const res = await api.get<Paginated<Adjustment>>(`/inventory/adjustments?${qs}`)
+        if (!current()) return
         setAdjustments(res.data)
         setTotal(res.pagination.total)
       }
     } catch (err) {
+      if (!current()) return
       setError(
         err instanceof ApiError
           ? err.status === 403
@@ -163,7 +203,7 @@ export default function StockDocumentsPage() {
       setTransfers([])
       setAdjustments([])
     } finally {
-      setLoading(false)
+      if (current()) setLoading(false)
     }
   }, [debounced, kind])
 
@@ -180,6 +220,7 @@ export default function StockDocumentsPage() {
     setBusy(t.id)
     setError(null)
     setMessage(null)
+    setStickers(null)
     try {
       const res = await api.patch<{ message?: string }>(`/inventory/transfers/${t.id}/cancel`, {
         reason: reason.trim(),
@@ -198,12 +239,19 @@ export default function StockDocumentsPage() {
     setBusy(a.id)
     setError(null)
     setMessage(null)
+    setStickers(null)
     try {
-      const res = await api.post<{ message?: string }>(`/inventory/adjustments/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
+      const res = await api.post<{ message?: string; stickers?: StickerNews }>(
+        `/inventory/adjustments/${a.id}/${decision}`,
+        decision === 'reject' ? { reason } : {},
+      )
       setRefusing(null)
       setApproving(null)
       await load()
       if (res.message) setMessage(res.message)
+      if (res.stickers) setStickers(res.stickers)
+      // A stock-in approved: its stickers were made, ready to print.
+      if (decision === 'approve' && res.stickers?.tracked.length) setStickersFor({ id: a.id })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : `Could not ${decision === 'approve' ? 'approve' : 'refuse'} it.`)
     } finally {
@@ -220,7 +268,7 @@ export default function StockDocumentsPage() {
         <div>
           <h1 className="page-title">Stock Documents</h1>
           <p className="page-subtitle">
-            What was moved between stores, and what was corrected after a count
+            What was moved between stores, what was corrected after a count, and what came in without a purchase order
           </p>
         </div>
         <button className="btn-ghost" onClick={() => void load()} disabled={loading}>
@@ -237,6 +285,7 @@ export default function StockDocumentsPage() {
       {message && (
         <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
           <p className="text-sm text-emerald-400">{message}</p>
+          {stickers && <StickerNote stickers={stickers} />}
         </div>
       )}
 
@@ -257,6 +306,17 @@ export default function StockDocumentsPage() {
                 }}
               >
                 {k === 'transfers' ? 'Transfers' : 'Adjustments'}
+                {k === 'adjustments' && waiting > 0 && (
+                  <span
+                    className={
+                      k === kind
+                        ? 'bg-primary-foreground/20 text-primary-foreground ml-1.5 rounded-full px-1.5 text-[10px] font-semibold'
+                        : 'badge-warning ml-1.5 !px-1.5 !py-0 text-[10px]'
+                    }
+                  >
+                    {waiting} waiting
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -444,8 +504,18 @@ export default function StockDocumentsPage() {
                     const mine = !!a.madeBy && a.madeBy.id === me?.id
                     const actions: RowAction[] = []
                     if (a.status === 'PENDING' && mayApprove && busy !== a.id) {
-                      actions.push({ key: 'approve', label: mine ? 'Approve (you counted this)' : 'Approve and correct stock', icon: <CheckCircle2 size={14} />, onClick: () => setApproving(a) })
+                      const stockIn = a.kind === 'STOCK_IN'
+                      actions.push({
+                        key: 'approve',
+                        label: stockIn ? (mine ? 'Approve (you entered this)' : 'Approve and add to stock') : mine ? 'Approve (you counted this)' : 'Approve and correct stock',
+                        icon: <CheckCircle2 size={14} />,
+                        onClick: () => setApproving(a),
+                      })
                       actions.push({ key: 'reject', label: 'Refuse', icon: <XCircle size={14} />, onClick: () => setRefusing(a), danger: true })
+                    }
+                    // The stickers for what a stock-in brought in, any time after it is approved.
+                    if (a.kind === 'STOCK_IN' && a.status === 'APPROVED') {
+                      actions.push({ key: 'stickers', label: 'Print stickers', icon: <Tags size={14} />, onClick: () => void printDocStickers({ type: 'STOCK_IN', id: a.id }).then(setMessage) })
                     }
 
                     return (
@@ -464,6 +534,8 @@ export default function StockDocumentsPage() {
                           </td>
                           <td className="whitespace-nowrap">
                             <span className="font-mono text-xs font-semibold text-teal-400">{a.adjustmentNumber}</span>
+                            {/* A stock-in is approved here too, but it is stock arriving, not a count. */}
+                            {a.kind === 'STOCK_IN' && <div><span className="badge-info text-[10px]">Stock in</span></div>}
                           </td>
                           <td className="whitespace-nowrap text-xs">
                             {formatDate(a.adjustmentDate)}
@@ -477,7 +549,9 @@ export default function StockDocumentsPage() {
                           <td className="text-muted-foreground max-w-[260px] text-xs">{a.reason}</td>
                           <td className="text-right text-sm tabular-nums">{a.lines.length}</td>
                           <td className="whitespace-nowrap text-right">
-                            {changed > 0 ? (
+                            {a.kind === 'STOCK_IN' ? (
+                              <span className="badge-info">+{changed} in</span>
+                            ) : changed > 0 ? (
                               <span className="badge-warning">{changed}</span>
                             ) : (
                               <span className="badge-success">all matched</span>
@@ -493,7 +567,7 @@ export default function StockDocumentsPage() {
                               </>
                             ) : (
                               <>
-                                <span className="badge-success">{changed > 0 ? 'Stock corrected' : 'Matched'}</span>
+                                <span className="badge-success">{a.kind === 'STOCK_IN' ? 'Added to stock' : changed > 0 ? 'Stock corrected' : 'Matched'}</span>
                                 {a.approvedBy && <div className="text-muted-foreground text-[10px]">approved by {a.approvedBy.name}</div>}
                               </>
                             )}
@@ -516,7 +590,7 @@ export default function StockDocumentsPage() {
                                   <table className="subtable w-full table-fixed">
                                     <thead className="sticky top-0 z-10">
                                       <tr>
-                                        {ADJUSTMENT_COLS.map((c) => (
+                                        {(a.kind === 'STOCK_IN' ? STOCK_IN_COLS : ADJUSTMENT_COLS).map((c) => (
                                           <th key={c.label} style={{ width: c.width }} className={c.numeric ? 'text-right' : undefined}>
                                             {c.label}
                                           </th>
@@ -526,6 +600,25 @@ export default function StockDocumentsPage() {
                                     <tbody>
                                       {a.lines.map((l) => {
                                         const d = Number(l.difference)
+                                        if (a.kind === 'STOCK_IN') {
+                                          const rate = Number(l.unitRate ?? 0)
+                                          return (
+                                            <tr key={l.id}>
+                                              <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
+                                              <td>
+                                                <div className="text-foreground truncate text-xs" title={l.item.name}>
+                                                  {l.item.name}
+                                                </div>
+                                              </td>
+                                              <td className="whitespace-nowrap text-right text-xs tabular-nums">{qty(l.bookQty)}</td>
+                                              <td className="whitespace-nowrap text-right text-xs tabular-nums text-emerald-400">
+                                                +{qty(d)} {l.item.uom?.symbol ?? ''}
+                                              </td>
+                                              <td className="whitespace-nowrap text-right text-xs tabular-nums">{formatRupees(rate)}</td>
+                                              <td className="whitespace-nowrap text-right text-xs font-semibold tabular-nums">{formatRupees(d * rate)}</td>
+                                            </tr>
+                                          )
+                                        }
                                         return (
                                           <tr key={l.id}>
                                             <td className="text-muted-foreground whitespace-nowrap font-mono text-xs">{l.item.code}</td>
@@ -573,11 +666,28 @@ export default function StockDocumentsPage() {
         )}
       </div>
 
+      {stickersFor && (
+        <StickersReady
+          source={{ type: 'STOCK_IN', id: stickersFor.id }}
+          onClose={() => setStickersFor(null)}
+          onDone={(m) => {
+            setStickersFor(null)
+            setStickers(null)
+            setMessage(m)
+          }}
+        />
+      )}
       {approving && (
         <ReasonDialog
           title={`Approve ${approving.adjustmentNumber}?`}
-          description={`The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`}
-          confirmLabel="Approve and correct stock"
+          description={
+            approving.kind === 'STOCK_IN'
+              ? `${approving.lines.length} ${approving.lines.length === 1 ? 'item goes' : 'items go'} into stock in ${approving.warehouse.name} now, worth ${formatRupees(
+                  approving.lines.reduce((s, l) => s + Number(l.difference) * Number(l.unitRate ?? 0), 0),
+                )}. This cannot be undone except by a stock count.`
+              : `The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`
+          }
+          confirmLabel={approving.kind === 'STOCK_IN' ? 'Approve and add to stock' : 'Approve and correct stock'}
           requireReason={false}
           busy={busy === approving.id}
           onConfirm={() => void decide(approving, 'approve')}
@@ -587,8 +697,12 @@ export default function StockDocumentsPage() {
       {refusing && (
         <ReasonDialog
           title={`Refuse ${refusing.adjustmentNumber}?`}
-          description="Stock stays as it is. Say why, so whoever counted can recount or correct it."
-          confirmLabel="Refuse the count"
+          description={
+            refusing.kind === 'STOCK_IN'
+              ? 'Nothing is added to stock. Say why, so whoever entered it can correct it.'
+              : 'Stock stays as it is. Say why, so whoever counted can recount or correct it.'
+          }
+          confirmLabel={refusing.kind === 'STOCK_IN' ? 'Refuse the stock in' : 'Refuse the count'}
           danger
           busy={busy === refusing.id}
           onConfirm={(reason) => void decide(refusing, 'reject', reason)}

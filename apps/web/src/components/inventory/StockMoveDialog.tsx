@@ -28,6 +28,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
  *   opening    quantity + rate   what was on hand the day we started
  *   count      counted quantity  what is on the rack right now
  *   transfer   quantity          what is being carried across the yard
+ *   stockin    quantity + rate   what came in without a purchase order
  *
  * The count asks for what was counted, never for a plus-or-minus figure. A
  * store keeper working out "I have 40 more than the book, so +40" is a store
@@ -40,7 +41,17 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
  * store manager; stock changes once it is approved.
  */
 
-export type MoveMode = 'opening' | 'count' | 'transfer'
+export type MoveMode = 'opening' | 'count' | 'transfer' | 'stockin'
+
+/** Where stock that came in without a purchase order came from. */
+const SOURCES = [
+  ['SAMPLE', 'Sample'],
+  ['OTHER_UNIT', 'From another unit'],
+  ['SUPPLIER_REPLACEMENT', "Supplier's replacement"],
+  ['FREE_GOODS', 'Free goods'],
+  ['FOUND', 'Found in store'],
+  ['OTHER', 'Other'],
+] as const
 
 interface ItemOption {
   id: string
@@ -106,6 +117,13 @@ const COPY: Record<
     qtyLabel: 'Counted',
     action: 'Save the count',
   },
+  stockin: {
+    title: 'Stock in',
+    blurb:
+      'Stock that came in without a purchase order — a sample, material from another unit, a supplier\'s replacement. A store manager approves it before stock goes up.',
+    qtyLabel: 'Quantity',
+    action: 'Send for approval',
+  },
   transfer: {
     title: 'Move stock',
     blurb:
@@ -122,7 +140,8 @@ export function StockMoveDialog({
 }: {
   mode: MoveMode
   onClose: () => void
-  onSaved: (message: string) => void
+  /** `data` is the saved document, as the server returned it. */
+  onSaved: (message: string, data?: unknown) => void
 }) {
   const copy = COPY[mode]
 
@@ -133,6 +152,7 @@ export function StockMoveDialog({
   const [warehouseId, setWarehouseId] = useState('')
   const [toWarehouseId, setToWarehouseId] = useState('')
   const [reason, setReason] = useState('')
+  const [source, setSource] = useState('')
   const [notes, setNotes] = useState('')
   const [lines, setLines] = useState<Line[]>([emptyLine()])
 
@@ -142,7 +162,7 @@ export function StockMoveDialog({
   const [held, setHeld] = useState<Held[]>([])
 
   useEffect(() => {
-    if (mode === 'opening' || !warehouseId) {
+    if (mode === 'opening' || mode === 'stockin' || !warehouseId) {
       setHeld([])
       return
     }
@@ -215,6 +235,10 @@ export function StockMoveDialog({
     if (mode === 'transfer' && warehouseId === toWarehouseId) {
       return setError('The two stores are the same, so nothing would move.')
     }
+    if (mode === 'stockin' && !source) return setError('Say where it came from.')
+    if (mode === 'stockin' && source === 'OTHER' && notes.trim().length < 5) {
+      return setError('Say where it came from in the note, in a few words.')
+    }
     if (mode === 'count' && reason.trim().length < 5) {
       return setError('Say why the figure is being changed — one line is enough.')
     }
@@ -232,8 +256,8 @@ export function StockMoveDialog({
     }
 
     // Opening stock comes in at a rate or it is worth nothing. An empty box
-    // used to go through as ₹0 without a word.
-    if (mode === 'opening') {
+    // used to go through as ₹0 without a word. So does a stock-in.
+    if (mode === 'opening' || mode === 'stockin') {
       const unpriced = filled.find((l) => !(Number(l.rate) > 0))
       if (unpriced) {
         const it = itemsById.get(unpriced.itemId)
@@ -253,7 +277,7 @@ export function StockMoveDialog({
 
     setSaving(true)
     try {
-      let res: { message?: string }
+      let res: { message?: string; data?: unknown }
 
       if (mode === 'opening') {
         res = await api.post('/inventory/opening', {
@@ -264,6 +288,13 @@ export function StockMoveDialog({
             qty: Number(l.qty),
             unitRate: Number(l.rate),
           })),
+        })
+      } else if (mode === 'stockin') {
+        res = await api.post('/inventory/stock-in', {
+          warehouseId,
+          source,
+          notes: notes || null,
+          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), unitRate: Number(l.rate) })),
         })
       } else if (mode === 'count') {
         res = await api.post('/inventory/adjustments', {
@@ -286,7 +317,7 @@ export function StockMoveDialog({
         })
       }
 
-      onSaved(res.message ?? 'Saved.')
+      onSaved(res.message ?? 'Saved.', res.data)
     } catch (err) {
       setError(apiErrorMessage(err))
     } finally {
@@ -294,7 +325,7 @@ export function StockMoveDialog({
     }
   }
 
-  const Icon = mode === 'opening' ? PackagePlus : mode === 'count' ? ClipboardCheck : ArrowRightLeft
+  const Icon = mode === 'opening' || mode === 'stockin' ? PackagePlus : mode === 'count' ? ClipboardCheck : ArrowRightLeft
 
   const primary = (
     <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving}>
@@ -378,8 +409,24 @@ export function StockMoveDialog({
             </label>
           )}
 
+          {mode === 'stockin' && (
+            <label className="block min-w-0">
+              <span className="form-label">
+                Came from<span className="ml-0.5 text-red-500">*</span>
+              </span>
+              <SmartSelect className="form-input" value={source} onChange={(e) => setSource(e.target.value)}>
+                <option value="">Choose where it came from...</option>
+                {SOURCES.map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </SmartSelect>
+            </label>
+          )}
+
           {mode !== 'count' && (
-            <label className={`block min-w-0 ${mode === 'transfer' ? 'sm:col-span-2' : ''}`}>
+            <label className={`block min-w-0 ${mode === 'transfer' || mode === 'stockin' ? 'sm:col-span-2' : ''}`}>
               <span className="form-label">Note</span>
               <input
                 className="form-input placeholder:text-muted-foreground/60"
@@ -406,8 +453,8 @@ export function StockMoveDialog({
             <thead>
               <tr>
                 <th style={{ width: 36 }}>#</th>
-                <th style={{ width: mode === 'opening' ? '50%' : '36%' }}>Item</th>
-                {mode !== 'opening' && <th style={{ width: '26%' }}>Stock</th>}
+                <th style={{ width: mode === 'opening' || mode === 'stockin' ? '50%' : '36%' }}>Item</th>
+                {mode !== 'opening' && mode !== 'stockin' && <th style={{ width: '26%' }}>Stock</th>}
                 <th style={{ textAlign: 'right' }}>{copy.qtyLabel}</th>
                 {mode !== 'transfer' && <th style={{ textAlign: 'right' }}>Rate ₹</th>}
                 <th style={{ width: 40 }} />
@@ -438,7 +485,7 @@ export function StockMoveDialog({
                             // priced at the list rate would quietly revalue
                             // stock that is already carried at something else.
                             rate:
-                              mode === 'opening' && picked?.standardRate != null
+                              (mode === 'opening' || mode === 'stockin') && picked?.standardRate != null
                                 ? String(picked.standardRate)
                                 : line.rate,
                           })
@@ -454,7 +501,7 @@ export function StockMoveDialog({
                         ))}
                       </SmartSelect>
                     </td>
-                    {mode !== 'opening' && (
+                    {mode !== 'opening' && mode !== 'stockin' && (
                       <td className="px-3 py-2">
                         <SmartSelect
                           className="form-input h-9"

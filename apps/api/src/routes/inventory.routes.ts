@@ -16,11 +16,14 @@ import {
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
+import { packageRule } from '../services/package.service'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
 import * as customerMaterialImport from '../services/customerMaterialImport.service'
 import { inventoryDashboard } from '../services/inventoryDashboard.service'
 import {
+  stockInSchema,
+  STOCK_IN_SOURCES,
   adjustmentSchema,
   cancelCustomerGrnSchema,
   cancelCustomerReturnSchema,
@@ -44,6 +47,7 @@ import {
   releaseReservationSchema,
   transferSchema,
 } from '../schemas/inventory.schemas'
+import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
 
 const router = Router()
 const MODULE = 'inventory'
@@ -606,7 +610,7 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
           select: { name: true },
         })
         throw new AppError(
-          `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once — use a stock adjustment to correct it.`,
+          `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once. To add stock that came in without a purchase order, use Stock in.`,
           409,
           'OPENING_ALREADY_SET',
         )
@@ -640,10 +644,12 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
     after: result,
   })
 
+  const made = await autoStickers({ sourceType: 'OPENING', sourceId: result.reference }, req.user?.id ?? null)
   res.status(201).json({
     success: true,
-    message: `Opening stock recorded for ${result.lines.length} ${result.lines.length === 1 ? 'item' : 'items'}.`,
+    message: `Opening stock recorded for ${result.lines.length} ${result.lines.length === 1 ? 'item' : 'items'}.${stickersNote(made.count)}`,
     data: result,
+    made,
   })
 })
 
@@ -714,6 +720,63 @@ export async function createAdjustment(tx: Prisma.TransactionClient, data: z.inf
 }
 
 /**
+ * Stock that came in without a purchase order: a sample, material from
+ * another unit, a supplier's free replacement. Saved as an adjustment of its
+ * own kind, so it goes to the same store manager and the same approvals
+ * inbox as a count, and stock rises only when it is approved — at the rate
+ * given here, not the rate the store happens to carry.
+ */
+export async function createStockIn(tx: Prisma.TransactionClient, data: z.infer<typeof stockInSchema>, userId: string | null) {
+  const when = data.adjustmentDate ?? new Date()
+  const warehouse = await tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { name: true, isActive: true } })
+  if (!warehouse) throw new AppError('That store does not exist', 404, 'NOT_FOUND')
+  if (!warehouse.isActive) throw new AppError(`${warehouse.name} is switched off`, 400, 'INACTIVE')
+
+  const lines = []
+  for (const l of data.lines) {
+    const before = await lockedBalanceOf(tx, { itemId: l.itemId, warehouseId: data.warehouseId })
+    const qty = Number(l.qty.toFixed(3))
+    lines.push({
+      itemId: l.itemId,
+      ownership: 'OWNED' as const,
+      ownerCustomerId: null,
+      sizeId: null,
+      bookQty: before.qty,
+      countedQty: Number((before.qty + qty).toFixed(3)),
+      difference: qty,
+      unitRate: l.unitRate,
+    })
+  }
+  const label = STOCK_IN_SOURCES[data.source]
+  const adjustmentNumber = await nextDocumentNumber(tx, 'ADJ', when)
+  const created = await tx.stockAdjustment.create({
+    data: {
+      adjustmentNumber,
+      warehouseId: data.warehouseId,
+      adjustmentDate: when,
+      kind: 'STOCK_IN',
+      source: data.source,
+      reason: `Stock in, ${label.toLowerCase()}${data.notes?.trim() ? `: ${data.notes.trim()}` : ''}`,
+      madeById: userId,
+      status: 'PENDING',
+      lines: { create: lines },
+    },
+  })
+  return tx.stockAdjustment.findUniqueOrThrow({ where: { id: created.id }, include: adjustmentInclude })
+}
+
+router.post('/stock-in', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = stockInSchema.parse(req.body)
+  const adj = await prisma.$transaction((tx) => createStockIn(tx, data, req.user?.id ?? null), { timeout: 60_000, maxWait: 20_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'StockAdjustment', entityId: adj.id, after: adj })
+  res.status(201).json({
+    success: true,
+    message: `${adj.adjustmentNumber} saved: ${adj.lines.length} ${adj.lines.length === 1 ? 'item' : 'items'} waiting for a store manager's approval in Stock Documents → Adjustments. Stock goes up once it is approved.`,
+    data: adj,
+  })
+})
+
+/**
  * A correction after a physical count.
  *
  * The store keeper enters what is on the rack; the book figure and the
@@ -749,11 +812,40 @@ router.post('/adjustments', requirePermission(MODULE, 'create'), async (req: Aut
   })
 })
 
+/**
+ * After a stock-in is approved, which of its items are kept in packages — so
+ * their stickers are next — and which are not, so the screen can say why no
+ * sticker is waiting instead of leaving somebody to look for one.
+ */
+async function stickersFor(lines: Array<{ itemId: string; difference: Prisma.Decimal | number }>) {
+  const items = await prisma.item.findMany({
+    where: { id: { in: lines.map((l) => l.itemId) } },
+    select: { id: true, code: true, name: true, categoryId: true, category: { select: { name: true, parent: { select: { name: true } } } } },
+  })
+  const tracked: Array<{ itemId: string; code: string; name: string; qty: number }> = []
+  const untracked: Array<{ itemId: string; code: string; name: string; category: string }> = []
+  for (const it of items) {
+    const rule = await packageRule(prisma, it.categoryId)
+    const qty = Number(lines.find((l) => l.itemId === it.id)?.difference ?? 0)
+    if (rule.tracked) tracked.push({ itemId: it.id, code: it.code, name: it.name, qty })
+    // The main category is where "Track by package" is usually switched on.
+    else untracked.push({ itemId: it.id, code: it.code, name: it.name, category: it.category.parent?.name ?? it.category.name })
+  }
+  return { tracked, untracked }
+}
+
 /** A store manager accepting a count: the differences go into stock now. */
 router.post('/adjustments/:id/approve', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
-  const { before, after } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
+  const { before, after, stickers: made } = await approveAdjustment(req.params.id, req.user!.id, isAdmin(req.user))
   await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'StockAdjustment', entityId: after.id, before, after })
-  res.json({ success: true, message: `${after.adjustmentNumber} approved. Stock is corrected.`, data: after })
+  const stockIn = after.kind === 'STOCK_IN'
+  res.json({
+    success: true,
+    message: `${after.adjustmentNumber} approved. ${stockIn ? 'It is added to stock.' : 'Stock is corrected.'}${stickersNote(made?.count ?? 0)}`,
+    data: after,
+    made,
+    ...(stockIn ? { stickers: await stickersFor(after.lines) } : {}),
+  })
 })
 
 /** A store manager turning a count down, with why. Stock is not touched. */
@@ -1860,6 +1952,199 @@ async function lockRequisition(tx: Prisma.TransactionClient, id: string) {
 }
 
 /**
+ * The database half of the issue route below, so material can be issued by
+ * scanning a package through exactly the same rules: approved, not closed,
+ * not by whoever raised or approved it, not stock held for somebody else.
+ */
+export async function issueRequisition(
+  tx: Prisma.TransactionClient,
+  mrId: string,
+  body: z.infer<typeof issueRequisitionSchema>,
+  user: AuthRequest['user'],
+) {
+  const when = body.issueDate ?? new Date()
+
+  // Held before anything is read. Three clicks at once (a double-click,
+  // two tabs, a retried request) used to all read "not issued yet" and all
+  // take stock: 2 metres asked for, 6 left the store. Now the second waits
+  // here and then sees what the first issued.
+  await lockRequisition(tx, mrId)
+
+  const mr = await tx.materialRequisition.findUnique({
+    where: { id: mrId },
+    include: {
+      lines: {
+        include: { item: { select: { name: true, uom: { select: { symbol: true } } } } },
+      },
+      department: true,
+    },
+  })
+  if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+
+  if (mr.closedAt) {
+    throw new AppError(
+      `${mr.mrNumber} was closed on ${mr.closedAt.toLocaleDateString('en-IN')}, so nothing more can be issued against it.`,
+      400,
+      'CLOSED',
+    )
+  }
+  if (mr.status !== 'APPROVED') {
+    throw new AppError(
+      mr.status === 'PENDING'
+        ? 'This requisition has not been approved yet.'
+        : 'This requisition was refused, so nothing can be issued against it.',
+      400,
+      'NOT_APPROVED',
+    )
+  }
+  if (mr.issuedAt) {
+    throw new AppError(
+      `${mr.mrNumber} was issued in full on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
+      409,
+      'ALREADY_ISSUED',
+    )
+  }
+
+  // docs/04-business-rules.md, section 7: raised, approved and issued by
+  // three different people — except the Admin, as for approving; the
+  // audit entry says so.
+  const admin = isAdmin(user)
+  if (!admin && mr.raisedById && mr.raisedById === user!.id) {
+    throw new AppError(
+      'You raised this requisition, so somebody else in the store has to hand the material over.',
+      403,
+      'SELF_ISSUE',
+    )
+  }
+  if (!admin && mr.approvedById && mr.approvedById === user!.id) {
+    throw new AppError(
+      'You approved this requisition, so somebody else in the store has to hand the material over.',
+      403,
+      'SELF_ISSUE',
+    )
+  }
+
+  /*
+   * What to hand over, and from where. With no lines named, everything
+   * still owed, from each line's own store. Named, only what is named: a
+   * line may come once per store, to be made up from several racks.
+   */
+  const plan = new Map<string, Array<{ qty: number; warehouseId: string }>>()
+  if (body.lines) {
+    for (const a of body.lines) {
+      if (!(a.issueQty > 0)) continue
+      const line = mr.lines.find((l) => l.id === a.lineId)
+      if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
+      const list = plan.get(a.lineId) ?? []
+      list.push({ qty: a.issueQty, warehouseId: a.warehouseId || line.warehouseId })
+      plan.set(a.lineId, list)
+    }
+  } else {
+    for (const line of mr.lines) {
+      const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
+      if (owed > 0) plan.set(line.id, [{ qty: owed, warehouseId: line.warehouseId }])
+    }
+  }
+
+  const storeNames = new Map(
+    (await tx.warehouse.findMany({
+      where: { id: { in: [...new Set([...plan.values()].flat().map((a) => a.warehouseId))] } },
+      select: { id: true, name: true },
+    })).map((w) => [w.id, w.name]),
+  )
+  const handedOver: string[] = []
+
+  for (const line of mr.lines) {
+    const parts = plan.get(line.id)
+    if (!parts?.length) continue
+
+    // A line being bought is still owed to the department: what is bought
+    // comes into the store and is handed over from there like the rest.
+    const unit = line.item.uom?.symbol ?? ''
+    const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
+    const total = round3(parts.reduce((t, a) => t + a.qty, 0))
+    if (total > owed + 1e-9) {
+      throw new AppError(
+        `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(total)}. Raise a new requisition for more.`.replace(
+          /\s+/g,
+          ' ',
+        ),
+        400,
+        'OVER_ISSUE',
+      )
+    }
+    if (!storeNames.size || parts.some((a) => !storeNames.has(a.warehouseId))) {
+      throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
+    }
+
+    for (const a of parts) {
+      // Stock held for other requisitions is not ours to give here.
+      if (line.ownership !== 'CUSTOMER_OWNED') {
+        await refuseIfHeldForOthers(tx, {
+          itemId: line.itemId,
+          warehouseId: a.warehouseId,
+          mrLineId: line.id,
+          qty: a.qty,
+          what: `${line.item.name} in ${storeNames.get(a.warehouseId) ?? 'that store'}`,
+          unit,
+        })
+      }
+      // recordMovement refuses if that rack is short, and names the shortfall.
+      await recordMovement(tx, {
+        itemId: line.itemId,
+        warehouseId: a.warehouseId,
+        transactionType: 'ISSUE',
+        direction: 'OUT',
+        qty: a.qty,
+        // Hand the ownership straight through. The stock service keeps a
+        // customer's cloth and our own in separate balances, so issuing the
+        // wrong one would take stock nobody asked for.
+        ownership: line.ownership,
+        ownerCustomerId: line.ownerCustomerId,
+        referenceType: 'MATERIAL_REQUISITION',
+        referenceId: mr.id,
+        transactionDate: when,
+        notes: `${mr.mrNumber} → ${mr.department.name}${a.warehouseId !== line.warehouseId ? ` (from ${storeNames.get(a.warehouseId)})` : ''}`,
+      })
+      handedOver.push(`${qtyText(a.qty)} ${unit} ${line.item.name}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
+    }
+
+    await tx.materialRequisitionLine.update({
+      where: { id: line.id },
+      data: { issuedQty: { increment: total } },
+    })
+    // What was held for this line is used up by issuing it.
+    await useUpReservations(tx, line.id, parts, round3(owed - total) <= 1e-9)
+  }
+
+  if (handedOver.length === 0) {
+    throw new AppError(
+      'Nothing to hand over: enter a quantity on at least one line.',
+      400,
+      'NOTHING_TO_ISSUE',
+    )
+  }
+
+  // Complete once every line from the store has been handed over in full.
+  // issuedBy is whoever handed over the last of it; each part is in the
+  // stock ledger with its own date, and in the audit trail with its person.
+  const lines = await tx.materialRequisitionLine.findMany({ where: { mrId: mr.id } })
+  const stillOwed = lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty) - 1e-9).length
+  if (stillOwed === 0) {
+    await tx.materialRequisition.update({
+      where: { id: mr.id },
+      data: { issuedById: user!.id, issuedAt: when },
+    })
+  }
+
+  const after = await tx.materialRequisition.findUniqueOrThrow({
+    where: { id: mr.id },
+    include: mrInclude,
+  })
+  return { after, handedOver, stillOwed }
+}
+
+/**
  * Handing the material over. This is the moment stock actually leaves.
  *
  * The store can hand over part of it now and the rest later: 30 of the 50
@@ -1877,188 +2162,8 @@ router.post(
   requirePermission(MODULE, 'edit'),
   async (req: AuthRequest, res) => {
     const body = issueRequisitionSchema.parse(req.body ?? {})
-    const when = body.issueDate ?? new Date()
 
-    const result = await prisma.$transaction(async (tx) => {
-      // Held before anything is read. Three clicks at once (a double-click,
-      // two tabs, a retried request) used to all read "not issued yet" and all
-      // take stock: 2 metres asked for, 6 left the store. Now the second waits
-      // here and then sees what the first issued.
-      await lockRequisition(tx, req.params.id)
-
-      const mr = await tx.materialRequisition.findUnique({
-        where: { id: req.params.id },
-        include: {
-          lines: {
-            include: { item: { select: { name: true, uom: { select: { symbol: true } } } } },
-          },
-          department: true,
-        },
-      })
-      if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
-
-      if (mr.closedAt) {
-        throw new AppError(
-          `${mr.mrNumber} was closed on ${mr.closedAt.toLocaleDateString('en-IN')}, so nothing more can be issued against it.`,
-          400,
-          'CLOSED',
-        )
-      }
-      if (mr.status !== 'APPROVED') {
-        throw new AppError(
-          mr.status === 'PENDING'
-            ? 'This requisition has not been approved yet.'
-            : 'This requisition was refused, so nothing can be issued against it.',
-          400,
-          'NOT_APPROVED',
-        )
-      }
-      if (mr.issuedAt) {
-        throw new AppError(
-          `${mr.mrNumber} was issued in full on ${mr.issuedAt.toLocaleDateString('en-IN')}.`,
-          409,
-          'ALREADY_ISSUED',
-        )
-      }
-
-      // docs/04-business-rules.md, section 7: raised, approved and issued by
-      // three different people — except the Admin, as for approving; the
-      // audit entry says so.
-      const admin = isAdmin(req.user)
-      if (!admin && mr.raisedById && mr.raisedById === req.user!.id) {
-        throw new AppError(
-          'You raised this requisition, so somebody else in the store has to hand the material over.',
-          403,
-          'SELF_ISSUE',
-        )
-      }
-      if (!admin && mr.approvedById && mr.approvedById === req.user!.id) {
-        throw new AppError(
-          'You approved this requisition, so somebody else in the store has to hand the material over.',
-          403,
-          'SELF_ISSUE',
-        )
-      }
-
-      /*
-       * What to hand over, and from where. With no lines named, everything
-       * still owed, from each line's own store. Named, only what is named: a
-       * line may come once per store, to be made up from several racks.
-       */
-      const plan = new Map<string, Array<{ qty: number; warehouseId: string }>>()
-      if (body.lines) {
-        for (const a of body.lines) {
-          if (!(a.issueQty > 0)) continue
-          const line = mr.lines.find((l) => l.id === a.lineId)
-          if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}. Reopen it and try again.`, 400, 'WRONG_LINE')
-          const list = plan.get(a.lineId) ?? []
-          list.push({ qty: a.issueQty, warehouseId: a.warehouseId || line.warehouseId })
-          plan.set(a.lineId, list)
-        }
-      } else {
-        for (const line of mr.lines) {
-          const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
-          if (owed > 0) plan.set(line.id, [{ qty: owed, warehouseId: line.warehouseId }])
-        }
-      }
-
-      const storeNames = new Map(
-        (await tx.warehouse.findMany({
-          where: { id: { in: [...new Set([...plan.values()].flat().map((a) => a.warehouseId))] } },
-          select: { id: true, name: true },
-        })).map((w) => [w.id, w.name]),
-      )
-      const handedOver: string[] = []
-
-      for (const line of mr.lines) {
-        const parts = plan.get(line.id)
-        if (!parts?.length) continue
-
-        // A line being bought is still owed to the department: what is bought
-        // comes into the store and is handed over from there like the rest.
-        const unit = line.item.uom?.symbol ?? ''
-        const owed = Number((Number(line.requestedQty) - Number(line.issuedQty)).toFixed(3))
-        const total = round3(parts.reduce((t, a) => t + a.qty, 0))
-        if (total > owed + 1e-9) {
-          throw new AppError(
-            `${line.item.name}: only ${qtyText(owed)} ${unit} is still to be issued on this line, not ${qtyText(total)}. Raise a new requisition for more.`.replace(
-              /\s+/g,
-              ' ',
-            ),
-            400,
-            'OVER_ISSUE',
-          )
-        }
-        if (!storeNames.size || parts.some((a) => !storeNames.has(a.warehouseId))) {
-          throw new AppError('One of those stores does not exist', 404, 'NOT_FOUND')
-        }
-
-        for (const a of parts) {
-          // Stock held for other requisitions is not ours to give here.
-          if (line.ownership !== 'CUSTOMER_OWNED') {
-            await refuseIfHeldForOthers(tx, {
-              itemId: line.itemId,
-              warehouseId: a.warehouseId,
-              mrLineId: line.id,
-              qty: a.qty,
-              what: `${line.item.name} in ${storeNames.get(a.warehouseId) ?? 'that store'}`,
-              unit,
-            })
-          }
-          // recordMovement refuses if that rack is short, and names the shortfall.
-          await recordMovement(tx, {
-            itemId: line.itemId,
-            warehouseId: a.warehouseId,
-            transactionType: 'ISSUE',
-            direction: 'OUT',
-            qty: a.qty,
-            // Hand the ownership straight through. The stock service keeps a
-            // customer's cloth and our own in separate balances, so issuing the
-            // wrong one would take stock nobody asked for.
-            ownership: line.ownership,
-            ownerCustomerId: line.ownerCustomerId,
-            referenceType: 'MATERIAL_REQUISITION',
-            referenceId: mr.id,
-            transactionDate: when,
-            notes: `${mr.mrNumber} → ${mr.department.name}${a.warehouseId !== line.warehouseId ? ` (from ${storeNames.get(a.warehouseId)})` : ''}`,
-          })
-          handedOver.push(`${qtyText(a.qty)} ${unit} ${line.item.name}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
-        }
-
-        await tx.materialRequisitionLine.update({
-          where: { id: line.id },
-          data: { issuedQty: { increment: total } },
-        })
-        // What was held for this line is used up by issuing it.
-        await useUpReservations(tx, line.id, parts, round3(owed - total) <= 1e-9)
-      }
-
-      if (handedOver.length === 0) {
-        throw new AppError(
-          'Nothing to hand over: enter a quantity on at least one line.',
-          400,
-          'NOTHING_TO_ISSUE',
-        )
-      }
-
-      // Complete once every line from the store has been handed over in full.
-      // issuedBy is whoever handed over the last of it; each part is in the
-      // stock ledger with its own date, and in the audit trail with its person.
-      const lines = await tx.materialRequisitionLine.findMany({ where: { mrId: mr.id } })
-      const stillOwed = lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty) - 1e-9).length
-      if (stillOwed === 0) {
-        await tx.materialRequisition.update({
-          where: { id: mr.id },
-          data: { issuedById: req.user!.id, issuedAt: when },
-        })
-      }
-
-      const after = await tx.materialRequisition.findUniqueOrThrow({
-        where: { id: mr.id },
-        include: mrInclude,
-      })
-      return { after, handedOver, stillOwed }
-    })
+    const result = await prisma.$transaction((tx) => issueRequisition(tx, req.params.id, body, req.user))
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -2740,6 +2845,7 @@ export async function createCustomerGrn(
 router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerGrnSchema.parse(req.body)
   const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null))
+  const made = await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, req.user?.id ?? null)
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -2764,10 +2870,12 @@ router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: Au
       rejected
         ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material; it is in their stock until it goes back on a return challan.`
         : '',
+      stickersNote(made.count).trim(),
     ]
       .filter(Boolean)
       .join(' '),
     data: grn,
+    made,
   })
 })
 
@@ -3028,6 +3136,9 @@ router.patch(
           notes: `${before.grnNumber} cancelled: ${reason}`,
         })
       }
+
+      // Its stickers come off with it: the material went back.
+      await withdrawStickers(tx, { type: 'CUSTOMER_GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       return tx.customerGRN.update({
         where: { id: before.id },
@@ -3889,13 +4000,17 @@ router.post(
       after: result.challan,
     })
 
+    const made = await autoStickers({ sourceType: 'JOB_WORK_RETURN', sourceId: result.returnId }, req.user?.id ?? null)
     res.status(201).json({
       success: true,
       message:
-        result.challan.status === 'CLOSED'
+        (result.challan.status === 'CLOSED'
           ? `${result.returnNumber} saved. Everything sent on ${result.challan.challanNumber} is now back.`
-          : `${result.returnNumber} saved. Some of ${result.challan.challanNumber} is still out.`,
+          : `${result.returnNumber} saved. Some of ${result.challan.challanNumber} is still out.`) + stickersNote(made.count),
       data: result.challan,
+      made,
+      // So the screen can offer stickers for what came back.
+      returnId: result.returnId,
     })
   },
 )
@@ -3958,7 +4073,25 @@ router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), asy
   const data = floorReturnSchema.parse(req.body)
   const result = await prisma.$transaction((tx) => returnFromFloor(tx, req.params.id, data, req.user?.id ?? null), { timeout: 60_000 })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MaterialRequisition', entityId: req.params.id, after: result })
-  res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.`, data: result })
+  const mrLines = await prisma.materialRequisitionLine.findMany({
+    where: { id: { in: data.lines.map((l) => l.lineId) } },
+    select: { id: true, itemId: true, ownership: true, ownerCustomerId: true },
+  })
+  const lineOf = new Map(mrLines.map((l) => [l.id, l]))
+  const made = await autoStickers(
+    {
+      sourceType: 'MR_RETURN',
+      sourceId: req.params.id,
+      lines: data.lines
+        .filter((l) => lineOf.has(l.lineId))
+        .map((l) => {
+          const m = lineOf.get(l.lineId)!
+          return { itemId: m.itemId, warehouseId: l.warehouseId, ownership: m.ownership, ownerCustomerId: m.ownerCustomerId, qty: l.qty }
+        }),
+    },
+    req.user?.id ?? null,
+  )
+  res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.${stickersNote(made.count)}`, data: result, made })
 })
 
 /**

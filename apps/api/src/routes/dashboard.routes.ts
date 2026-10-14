@@ -338,11 +338,15 @@ router.get('/pending-approvals', async (req, res) => {
       include: { department: { select: { name: true } } },
     }),
     prisma.stockAdjustment.findMany({
-      // A stock count with differences, waiting for a store manager.
+      // A stock count with differences, or a stock-in, waiting for a store manager.
       where: { status: 'PENDING' },
       take: limit,
       orderBy: { createdAt: 'desc' },
-      include: { warehouse: { select: { name: true } }, _count: { select: { lines: { where: { difference: { not: 0 } } } } } },
+      include: {
+        warehouse: { select: { name: true } },
+        lines: { select: { difference: true, unitRate: true } },
+        _count: { select: { lines: { where: { difference: { not: 0 } } } } },
+      },
     }),
   ])
 
@@ -389,8 +393,12 @@ router.get('/pending-approvals', async (req, res) => {
       id: a.id,
       type: 'ADJ' as const,
       number: a.adjustmentNumber,
-      description: `Stock count, ${a.warehouse.name} · ${a._count.lines} ${a._count.lines === 1 ? 'difference' : 'differences'}`,
-      amount: null,
+      description:
+        a.kind === 'STOCK_IN'
+          ? `Stock in (no PO), ${a.warehouse.name} · ${a._count.lines} ${a._count.lines === 1 ? 'item' : 'items'}`
+          : `Stock count, ${a.warehouse.name} · ${a._count.lines} ${a._count.lines === 1 ? 'difference' : 'differences'}`,
+      // What a stock-in adds to the books; a count has no single figure.
+      amount: a.kind === 'STOCK_IN' ? a.lines.reduce((s, l) => s + Number(l.difference) * Number(l.unitRate ?? 0), 0) : null,
       date: a.createdAt,
       urgent: isUrgent(a.createdAt),
       raisedById: a.madeById,
