@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { QrCode } from '@/components/packages/QrCode'
+import { Code128 } from '@/components/packages/Code128'
 import { Ean13 } from '@/components/packages/Ean13'
 import { WashCareIcons } from '@/components/packages/WashCare'
 
@@ -39,6 +40,9 @@ interface Maker {
 
 type Layout = 'tag' | 'poly' | 'sheet' | 'retail'
 type TrackingLayout = Exclude<Layout, 'retail'>
+/** What a piece's own code is printed as: a QR for a phone camera, a barcode for a handheld scanner, or both. */
+type Codes = 'both' | 'qr' | 'bar'
+const CODES: Record<Codes, string> = { both: 'QR code and barcode', qr: 'QR code only', bar: 'Barcode only' }
 
 const SIZES: Record<Layout, { label: string; page: string }> = {
   retail: { label: 'Retail tag with MRP and barcode, 50 × 75 mm', page: '50mm 75mm' },
@@ -49,10 +53,15 @@ const SIZES: Record<Layout, { label: string; page: string }> = {
 
 const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
 
-const GDIM: Record<TrackingLayout, { qr: string; id: string; brand: string; style: string; size: string; line: string; desc: string; gap: string; rowGap: string }> = {
-  tag: { qr: '15.5mm', id: '8pt', brand: '5pt', style: '6.8pt', size: '11pt', line: '5.3pt', desc: '0', gap: '1.5mm', rowGap: '0.1mm' },
-  sheet: { qr: '23mm', id: '10pt', brand: '5.8pt', style: '7pt', size: '12pt', line: '5.6pt', desc: '6.4pt', gap: '2mm', rowGap: '0.15mm' },
-  poly: { qr: '31mm', id: '12.5pt', brand: '7pt', style: '8.6pt', size: '16pt', line: '6.5pt', desc: '7.8pt', gap: '2.5mm', rowGap: '0.1mm' },
+// `qrBoth` is the QR's size with a barcode under it; `bar` the barcode's height
+// beside a QR, `barOnly` without one.
+const GDIM: Record<
+  TrackingLayout,
+  { qr: string; qrBoth: string; bar: string; barOnly: string; id: string; brand: string; style: string; size: string; line: string; desc: string; gap: string; rowGap: string }
+> = {
+  tag: { qr: '15.5mm', qrBoth: '11.5mm', bar: '4.5mm', barOnly: '4.8mm', id: '8pt', brand: '5pt', style: '6.8pt', size: '11pt', line: '5.3pt', desc: '0', gap: '1.5mm', rowGap: '0.1mm' },
+  sheet: { qr: '23mm', qrBoth: '18mm', bar: '5.5mm', barOnly: '7mm', id: '10pt', brand: '5.8pt', style: '7pt', size: '12pt', line: '5.6pt', desc: '6.4pt', gap: '2mm', rowGap: '0.15mm' },
+  poly: { qr: '31mm', qrBoth: '23mm', bar: '7.5mm', barOnly: '10mm', id: '12.5pt', brand: '7pt', style: '8.6pt', size: '16pt', line: '6.5pt', desc: '7.8pt', gap: '2.5mm', rowGap: '0.1mm' },
 }
 
 /** A named field on a label: "Customer Rajmandir Garments", the name small and grey. */
@@ -66,15 +75,19 @@ function Field({ k, v, size, bold = false }: { k: string; v: string; size: strin
 }
 
 /**
- * One garment's label, in the same shape as the package stickers: its ID
- * large in the header (printed in full, so it can be typed if the QR will not
- * read), the QR at the left, and beside it every field named — style, size
- * and colour, customer, order, lot, and the delivery challan once the piece
- * is scanned onto one. The larger labels add the description, MO and SKU.
+ * One garment's label, in the same shape as the package stickers: its own ID
+ * large in the header (printed in full, so it can be typed if nothing will
+ * scan), the QR at the left, a barcode of the same ID along the bottom — or
+ * either alone — and beside them every field named: style, size, colour and
+ * grade, customer, order, lot and MO, and the delivery challan once the piece
+ * is scanned onto one. The larger labels add the description and the SKU.
  */
-function GarmentLabel({ g, layout }: { g: Label; layout: TrackingLayout }) {
+function GarmentLabel({ g, layout, codes }: { g: Label; layout: TrackingLayout; codes: Codes }) {
   const d = GDIM[layout]
+  const qrSize = codes === 'both' ? d.qrBoth : d.qr
   const order = g.poRef ? ['PO', g.poRef] : ['Order', g.soNumber ?? 'For stock']
+  // A barcode takes height: the hang tag folds its last lines into one.
+  const folded = layout === 'tag' && codes !== 'qr'
   return (
     <div className="sticker gm">
       <div className="gm-head">
@@ -82,12 +95,14 @@ function GarmentLabel({ g, layout }: { g: Label; layout: TrackingLayout }) {
         <span style={{ fontSize: d.brand, fontWeight: 600, ...clip }}>{g.brand}</span>
       </div>
       <div className="gm-body" style={{ gap: d.gap }}>
-        <div style={{ flexShrink: 0 }}>
-          <QrCode text={g.code} size={d.qr} />
-        </div>
+        {codes !== 'bar' && (
+          <div style={{ flexShrink: 0 }}>
+            <QrCode text={g.code} size={qrSize} />
+          </div>
+        )}
         <div className="gm-info" style={{ gap: d.rowGap }}>
           {layout !== 'tag' && (
-            <div className="gm-desc" style={{ fontSize: d.desc, WebkitLineClamp: layout === 'poly' ? 2 : 1 }}>
+            <div className="gm-desc" style={{ fontSize: d.desc, WebkitLineClamp: layout === 'poly' && codes !== 'both' ? 2 : 1 }}>
               {g.description}
             </div>
           )}
@@ -96,26 +111,40 @@ function GarmentLabel({ g, layout }: { g: Label; layout: TrackingLayout }) {
             <span style={{ fontSize: d.line, fontWeight: 600, color: '#555' }}>Size</span>
             <span style={{ fontSize: d.size, fontWeight: 800, lineHeight: 1 }}>{g.size || '—'}</span>
             <span style={{ fontSize: d.line, fontWeight: 700, marginLeft: '1mm', ...clip }}>{g.color}</span>
-            {g.grade === 'B' && <span className="gm-b" style={{ fontSize: d.line }}>B</span>}
+            {g.grade === 'B' ? (
+              <span className="gm-b" style={{ fontSize: d.line }}>B</span>
+            ) : (
+              layout !== 'tag' && <span style={{ fontSize: d.line, color: '#555', flexShrink: 0 }}>Grade {g.grade || 'A'}</span>
+            )}
           </div>
           {g.buyer && <Field k="Customer" v={g.buyer} size={d.line} bold />}
           {layout === 'tag' ? (
-            // The hang tag has room for one more line after the lot: the
-            // challan once the piece is on one, the order until then.
-            <>
-              <Field k="Lot" v={g.lot ?? '—'} size={d.line} />
-              {g.challan ? <Field k="Challan" v={g.challan} size={d.line} bold /> : <Field k={order[0]} v={order[1]} size={d.line} />}
-            </>
+            folded ? (
+              // One line for the rest: the lot, and the challan or the order.
+              <Field k="Lot" v={`${g.lot ?? '—'} · ${g.challan ? `Challan ${g.challan}` : `${order[0]} ${order[1]}`}`} size={d.line} />
+            ) : (
+              // The hang tag has room for one more line after the lot: the
+              // challan once the piece is on one, the order until then.
+              <>
+                <Field k="Lot" v={g.lot ?? '—'} size={d.line} />
+                {g.challan ? <Field k="Challan" v={g.challan} size={d.line} bold /> : <Field k={order[0]} v={order[1]} size={d.line} />}
+              </>
+            )
           ) : (
             <>
-              <Field k={order[0]} v={order[1]} size={d.line} />
+              <Field k={order[0]} v={g.poRef && g.soNumber ? `${order[1]} · ${g.soNumber}` : order[1]} size={d.line} />
               <Field k="Lot" v={`${g.lot ?? '—'} · ${g.moNumber}`} size={d.line} />
               {g.challan && <Field k="Challan" v={g.challan} size={d.line} bold />}
+              {layout === 'poly' && <Field k="SKU" v={g.sku} size={d.line} />}
             </>
           )}
-          {layout === 'poly' && <Field k="SKU" v={g.sku} size={d.line} />}
         </div>
       </div>
+      {codes !== 'qr' && (
+        <div className="gm-bar" style={{ height: codes === 'bar' ? d.barOnly : d.bar }}>
+          <Code128 text={g.code} />
+        </div>
+      )}
     </div>
   )
 }
@@ -206,6 +235,7 @@ function Labels() {
   const [data, setData] = useState<{ company: string; maker: Maker | null; garments: Label[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [layout, setLayout] = useState<Layout>('tag')
+  const [codes, setCodes] = useState<Codes>('both')
   const marked = useRef(false)
 
   const qs = params.toString()
@@ -228,8 +258,10 @@ function Labels() {
     try {
       const saved = localStorage.getItem('garment-label-layout') as Layout | null
       if (saved && saved in SIZES) setLayout(saved)
+      const savedCodes = localStorage.getItem('garment-label-codes') as Codes | null
+      if (savedCodes && savedCodes in CODES) setCodes(savedCodes)
     } catch {
-      /* keep the hang tag */
+      /* keep the hang tag, with both codes */
     }
   }, [])
 
@@ -249,6 +281,14 @@ function Labels() {
     setLayout(l)
     try {
       localStorage.setItem('garment-label-layout', l)
+    } catch {
+      /* fine without it */
+    }
+  }
+  const pickCodes = (c: Codes) => {
+    setCodes(c)
+    try {
+      localStorage.setItem('garment-label-codes', c)
     } catch {
       /* fine without it */
     }
@@ -290,8 +330,10 @@ function Labels() {
         .gm-head { display: flex; align-items: center; justify-content: space-between; gap: 1.5mm;
                    border-bottom: 0.3mm solid #000; padding-bottom: 0.5mm; margin-bottom: 0.8mm; }
         .gm-id { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-weight: 800; letter-spacing: .02em; line-height: 1; flex-shrink: 0; }
-        .gm-body { display: flex; flex: 1; min-height: 0; align-items: center; }
-        .gm-info { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 0.4mm; }
+        .gm-body { display: flex; flex: 1; min-height: 0; align-items: center; overflow: hidden; }
+        .gm-info { min-width: 0; max-height: 100%; flex: 1; display: flex; flex-direction: column; justify-content: safe center; gap: 0.4mm; }
+        .gm-info > * { flex-shrink: 0; }
+        .gm-bar { flex-shrink: 0; margin-top: 0.7mm; }
         .gm-desc { font-weight: 700; line-height: 1.15; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
         .gm-size { display: flex; align-items: baseline; gap: 1mm; }
         .gm-b { border: 0.25mm solid #000; padding: 0 0.6mm; font-weight: 800; }
@@ -332,6 +374,19 @@ function Labels() {
             ))}
           </select>
         </label>
+        {/* The retail tag has its own barcode, the EAN-13 the billing counter scans. */}
+        {!retail && (
+          <label>
+            Codes
+            <select value={codes} onChange={(e) => pickCodes(e.target.value as Codes)}>
+              {(Object.keys(CODES) as Codes[]).map((c) => (
+                <option key={c} value={c}>
+                  {CODES[c]}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <span style={{ color: '#5a6880', fontSize: 12 }}>
           {data.garments.length} {data.garments.length === 1 ? 'label' : 'labels'}, {data.garments[0].code} to {data.garments[data.garments.length - 1].code}
           {reprints ? ` · ${reprints} printed before (same codes)` : ''}
@@ -342,7 +397,7 @@ function Labels() {
         sheets.map((page, i) => (
           <div key={i} className="sheet">
             {page.map((g) => (
-              <GarmentLabel key={g.id} g={g} layout="sheet" />
+              <GarmentLabel key={g.id} g={g} layout="sheet" codes={codes} />
             ))}
           </div>
         ))
@@ -355,7 +410,7 @@ function Labels() {
       ) : (
         <div className={`roll ${layout}`}>
           {data.garments.map((g) => (
-            <GarmentLabel key={g.id} g={g} layout={layout} />
+            <GarmentLabel key={g.id} g={g} layout={layout} codes={codes} />
           ))}
         </div>
       )}
