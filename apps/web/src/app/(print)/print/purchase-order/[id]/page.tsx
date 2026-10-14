@@ -108,6 +108,8 @@ interface PrintPayload {
     poNumber: string
     poDate: string
     poType: string | null
+    /** A service order prints under its own name. */
+    isService?: boolean
     /// The supplier's own quotation this order answers. First thing anyone
     /// reaches for when a price is queried months later, and the reason the
     /// field was added to the form.
@@ -1246,7 +1248,9 @@ export default function PrintPurchaseOrder() {
     return termLines.length
   })()
 
-  const footerLeft = `${company.name} — ${template.title} ${order.poNumber}`
+  // A service order is still printed on the purchase order sheet, under its own name.
+  const docTitle = order.isService ? 'Service Purchase Order' : template.title
+  const footerLeft = `${company.name} — ${docTitle} ${order.poNumber}`
   const stamp = (n: number) => `Page ${n} of ${pageCount}`
 
   /* ── Blocks, so the two sheets share them ───────────────────────────────── */
@@ -1667,7 +1671,7 @@ export default function PrintPurchaseOrder() {
                     lineHeight: 1.1,
                   }}
                 >
-                  {template.title}
+                  {docTitle}
                 </div>
               </div>
               {/* The number and the date have moved down into the block
@@ -1827,7 +1831,7 @@ export default function PrintPurchaseOrder() {
                 </div>
                 <div style={{ display: 'flex', gap: '16px', fontSize: '10.5px', color: GREY }}>
                   <span>
-                    {template.title}{' '}
+                    {docTitle}{' '}
                     <strong style={{ color: INK, ...CODE }}>{order.poNumber}</strong>
                   </span>
                   <span>

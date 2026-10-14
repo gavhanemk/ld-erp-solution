@@ -186,6 +186,11 @@ export interface FormField {
   /** Height of a textarea, in lines. */
   rows?: number
   /**
+   * Sends an emptied box as null rather than leaving it out, so clearing an
+   * optional link on an edit actually clears it.
+   */
+  nullWhenEmpty?: boolean
+  /**
    * Limits on a number box, the same as the server's. A number box starts at
    * nought: a negative GST rate, stock level or credit limit means nothing,
    * so the minus sign is not taken at all unless `allowNegative` is set (an
@@ -563,6 +568,7 @@ export function MasterFormDialog<T extends { id: string }>({
 
       if (raw === '' || raw === undefined || raw === null) {
         if (f.required && payload[key] === undefined) payload[key] = raw
+        else if (f.nullWhenEmpty && payload[key] === undefined) payload[key] = null
         continue
       }
 

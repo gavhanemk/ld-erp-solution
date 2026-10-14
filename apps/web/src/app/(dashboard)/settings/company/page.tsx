@@ -1,17 +1,19 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
-import { Plus, Pencil, X, Check, Ban } from 'lucide-react'
+import { Suspense, useCallback, useEffect, useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Plus, Pencil, X, Check, Ban, Building2, Hash, Percent, Receipt } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { cn } from '@/lib/utils'
 import {
   settingsApi,
   type Company,
   type NumberSeries,
   type TaxRate,
-  type TdsSection,
 } from '@/lib/settingsApi'
 import { Field, LoadingRow, Notice, SaveButton, SettingsCard, Toggle } from '@/components/settings/ui'
 import { SmartSelect } from '@/components/ui/SmartSelect'
+import { TdsSections } from '@/components/settings/TdsSections'
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -27,14 +29,92 @@ function describeFY(fy: string | null, startMonth: number): string {
   return `${MONTHS[startMonth - 1]} ${from} – ${MONTHS[endMonth - 1]} ${to}`
 }
 
-export default function CompanySettingsPage() {
+/**
+ * The four parts of this page, one at a time.
+ *
+ * They were stacked, and reaching TDS at the bottom meant scrolling past the
+ * whole company profile and every number series first. The open tab is in the
+ * address (`?tab=tds`), so a link can land on the right one and a refresh
+ * stays put.
+ */
+const SECTIONS = [
+  { key: 'profile', label: 'Company Profile', icon: Building2 },
+  { key: 'numbering', label: 'Document Numbering', icon: Hash },
+  { key: 'gst', label: 'GST Rates', icon: Percent },
+  { key: 'tds', label: 'TDS Sections', icon: Receipt },
+] as const
+
+type SectionKey = (typeof SECTIONS)[number]['key']
+
+function CompanySettings() {
+  const router = useRouter()
+  const params = useSearchParams()
+  const current: SectionKey = SECTIONS.find((s) => s.key === params.get('tab'))?.key ?? 'profile'
+
+  const open = (key: SectionKey) =>
+    router.replace(key === 'profile' ? '/settings/company' : `/settings/company?tab=${key}`, {
+      scroll: false,
+    })
+
   return (
-    <div className="space-y-6">
-      <CompanyProfile />
-      <DocumentNumbering />
-      <TaxRates />
-      <TdsSections />
+    <div className="space-y-5">
+      <div
+        role="tablist"
+        aria-label="Company settings"
+        className="border-border flex gap-1 overflow-x-auto border-b"
+      >
+        {SECTIONS.map((s) => {
+          const Icon = s.icon
+          const on = s.key === current
+          return (
+            <button
+              key={s.key}
+              type="button"
+              role="tab"
+              id={`company-tab-${s.key}`}
+              aria-selected={on}
+              aria-controls={`company-panel-${s.key}`}
+              onClick={() => open(s.key)}
+              className={cn(
+                '-mb-px flex shrink-0 items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
+                on
+                  ? 'border-teal-500 text-teal-400'
+                  : 'text-muted-foreground hover:text-foreground border-transparent'
+              )}
+            >
+              <Icon size={15} />
+              {s.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* All four stay mounted and only the open one shows, so a half-typed
+        company profile survives a look at the GST rates. */}
+      {SECTIONS.map((s) => (
+        <div
+          key={s.key}
+          role="tabpanel"
+          id={`company-panel-${s.key}`}
+          aria-labelledby={`company-tab-${s.key}`}
+          hidden={s.key !== current}
+        >
+          {s.key === 'profile' && <CompanyProfile />}
+          {s.key === 'numbering' && <DocumentNumbering />}
+          {s.key === 'gst' && <TaxRates />}
+          {s.key === 'tds' && <TdsSections />}
+        </div>
+      ))}
     </div>
+  )
+}
+
+export default function CompanySettingsPage() {
+  // useSearchParams needs a Suspense boundary or the route opts out of static rendering.
+  return (
+    <Suspense fallback={<LoadingRow />}>
+      <CompanySettings />
+    </Suspense>
   )
 }
 
@@ -892,185 +972,6 @@ function TaxRates() {
       {retired.length > 0 && (
         <p className="text-xs text-muted-foreground mt-4">
           No longer offered: {retired.map((r) => r.name).join(', ')}
-        </p>
-      )}
-    </SettingsCard>
-  )
-}
-
-// ── TDS sections ─────────────────────────────────────────────────────────────
-
-function TdsSections() {
-  const [sections, setSections] = useState<TdsSection[]>([])
-  const [loading, setLoading] = useState(true)
-  const [adding, setAdding] = useState(false)
-  const [draft, setDraft] = useState({ section: '', label: '', rate: '' })
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const res = await settingsApi.tdsSections.list()
-      setSections(res.data)
-    } catch (err) {
-      setMessage({
-        kind: 'error',
-        text: err instanceof ApiError ? err.message : 'Could not load TDS sections.',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-  }, [load])
-
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setBusy(true)
-    setMessage(null)
-    try {
-      await settingsApi.tdsSections.create({
-        section: draft.section.trim(),
-        label: draft.label.trim(),
-        rate: Number(draft.rate),
-      })
-      setDraft({ section: '', label: '', rate: '' })
-      setAdding(false)
-      await load()
-      setMessage({ kind: 'success', text: 'Section added.' })
-    } catch (err) {
-      setMessage({ kind: 'error', text: err instanceof ApiError ? err.message : 'Could not add the section.' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const retire = async (s: TdsSection) => {
-    if (!confirm(`Stop offering ${s.section} — ${s.label} on new bills? Existing bills keep it.`)) return
-    setBusy(true)
-    try {
-      const res = await settingsApi.tdsSections.remove(s.id)
-      await load()
-      setMessage({ kind: 'success', text: res.message })
-    } catch (err) {
-      setMessage({ kind: 'error', text: err instanceof ApiError ? err.message : 'Could not save.' })
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const active = sections.filter((s) => s.isActive)
-  const retired = sections.filter((s) => !s.isActive)
-
-  return (
-    <SettingsCard
-      title="TDS sections"
-      description="The Income Tax sections offered on a purchase bill, so nobody has to remember a rate by heart."
-      actions={
-        !adding && (
-          <button className="btn-secondary text-xs" onClick={() => setAdding(true)}>
-            <Plus size={14} /> Add section
-          </button>
-        )
-      }
-    >
-      {message && (
-        <div className="mb-4">
-          <Notice kind={message.kind}>{message.text}</Notice>
-        </div>
-      )}
-
-      {adding && (
-        <form onSubmit={add} className="mb-5 p-4 rounded-lg border border-border bg-secondary/40">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-            <Field label="Section" htmlFor="tds-section" required>
-              <input
-                id="tds-section"
-                className="form-input"
-                placeholder="194C"
-                value={draft.section}
-                onChange={(e) => setDraft((d) => ({ ...d, section: e.target.value }))}
-              />
-            </Field>
-            <Field label="Description" htmlFor="tds-label" required>
-              <input
-                id="tds-label"
-                className="form-input"
-                placeholder="Contractor payments"
-                value={draft.label}
-                onChange={(e) => setDraft((d) => ({ ...d, label: e.target.value }))}
-              />
-            </Field>
-            <Field label="Rate (%)" htmlFor="tds-rate" required>
-              <input
-                id="tds-rate"
-                type="number"
-                step="0.01"
-                min={0}
-                max={100}
-                className="form-input"
-                placeholder="2"
-                value={draft.rate}
-                onChange={(e) => setDraft((d) => ({ ...d, rate: e.target.value }))}
-              />
-            </Field>
-            <div className="flex gap-2">
-              <SaveButton saving={busy} disabled={!draft.section.trim() || !draft.label.trim() || draft.rate === ''}>
-                Add
-              </SaveButton>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => {
-                  setAdding(false)
-                  setDraft({ section: '', label: '', rate: '' })
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </form>
-      )}
-
-      {loading ? (
-        <LoadingRow />
-      ) : active.length === 0 ? (
-        <p className="text-sm text-muted-foreground py-4">No sections yet. Add the ones you deduct TDS under.</p>
-      ) : (
-        <div className="flex flex-wrap gap-3">
-          {active.map((s) => (
-            <div
-              key={s.id}
-              className="flex items-center gap-3 px-4 py-3 rounded-lg border border-border bg-secondary/30"
-            >
-              <div>
-                <p className="text-sm font-medium text-foreground">
-                  {s.section} — {s.label}
-                </p>
-                <p className="text-xs text-muted-foreground">{s.rate}%</p>
-              </div>
-
-              <button
-                className="btn-ghost p-1.5 text-muted-foreground hover:text-red-400"
-                onClick={() => void retire(s)}
-                disabled={busy}
-                title="Stop offering this section"
-                aria-label={`Stop offering ${s.section} — ${s.label}`}
-              >
-                <Ban size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {retired.length > 0 && (
-        <p className="text-xs text-muted-foreground mt-4">
-          No longer offered: {retired.map((s) => `${s.section} — ${s.label}`).join(', ')}
         </p>
       )}
     </SettingsCard>

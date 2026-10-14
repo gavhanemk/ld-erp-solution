@@ -23,7 +23,7 @@ const tabs = [
     href: '/settings/company',
     label: 'Company',
     icon: Building2,
-    description: 'Your details, financial year, document numbers and GST rates',
+    description: 'Your details, financial year, document numbers, GST rates and TDS sections',
   },
   {
     href: '/settings/people',

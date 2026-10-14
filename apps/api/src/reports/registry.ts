@@ -4,12 +4,10 @@ import { supplierOutstanding } from './definitions/supplier-outstanding'
 import { goodsReceiptRegister } from './definitions/goods-receipt-register'
 import { purchaseOrderStatus } from './definitions/purchase-order-status'
 import { noteRegister } from './definitions/note-register'
-import { pendingPoItems } from './definitions/pending-po-items'
 import { indentAgainstPo } from './definitions/indent-against-po'
-import { grnAgainstBill } from './definitions/grn-against-bill'
 import { purchasesByItem } from './definitions/purchases-by-item'
-import { expenseRegister } from './definitions/expense-register'
-import { grnQcRegister, qcRejections } from './definitions/grn-qc'
+import { grnQcRegister } from './definitions/grn-qc'
+import { tdsRegister } from './definitions/tds-register'
 import { SALES_REPORTS } from './definitions/sales'
 import { stockSummary } from './definitions/stock-summary'
 import { stockMovement } from './definitions/stock-movement'
@@ -29,18 +27,21 @@ import { stockCountVariance } from './definitions/stock-count-variance'
  * permission, the CSV and the workbook all read the definition.
  */
 export const REPORTS: ReportDefinition[] = [
+  // Purchase — eight, none repeating another. Four more were folded in:
+  // GRN Against Bill (Goods Receipt Register), Rejected on QC (GRN QC
+  // Register), Pending PO Items (Purchase Order Status) and the Expenses
+  // Booking Register (Purchases by Item); old links to them land on these.
+  // The TDS Register is the one addition since: nothing else lists the tax
+  // kept back from suppliers.
   purchaseRegister,
   purchasesByItem,
-  expenseRegister,
   goodsReceiptRegister,
-  grnAgainstBill,
   grnQcRegister,
-  qcRejections,
   purchaseOrderStatus,
-  pendingPoItems,
   indentAgainstPo,
   supplierOutstanding,
   noteRegister,
+  tdsRegister,
   // Inventory
   stockSummary,
   stockMovement,
@@ -55,6 +56,15 @@ export const REPORTS: ReportDefinition[] = [
   ...SALES_REPORTS,
 ]
 
+/** Reports folded into another, so a saved link or bookmark still opens. */
+const FOLDED_INTO: Record<string, string> = {
+  'grn-against-bill': 'goods-receipt-register',
+  'qc-rejections': 'grn-qc-register',
+  'pending-po-items': 'purchase-order-status',
+  'expense-register': 'purchases-by-item',
+}
+
 export function findReport(id: string): ReportDefinition | undefined {
-  return REPORTS.find((r) => r.id === id)
+  const wanted = FOLDED_INTO[id] ?? id
+  return REPORTS.find((r) => r.id === wanted)
 }

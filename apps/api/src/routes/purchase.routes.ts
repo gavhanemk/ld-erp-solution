@@ -20,6 +20,7 @@ import {
   storagePathFor,
 } from '../lib/storage'
 import { recordMovement } from '../services/stock.service'
+import { rateFor, sectionTermsOn, tdsOn } from '../services/tds.service'
 import { withHsnRates } from '../lib/hsn'
 import { qcSummaryOf, refuseIfInspected } from '../services/grnQc.service'
 import {
@@ -30,6 +31,7 @@ import {
 } from '../schemas/grn.schemas'
 import {
   createBillSchema,
+  cashExpenseSchema,
   updateBillSchema,
   type BillChargeInput,
   type BillLineInput,
@@ -108,6 +110,12 @@ const createSchema = z.object({
    * migration.
    */
   poType: z.enum(['ITEM_LEVEL', 'ORDER_LEVEL', 'NONE']).optional(),
+  /*
+   * A service order rather than goods. Set when it is raised and never
+   * changed: a goods order already received against cannot become a service,
+   * and a service billed against cannot start being received.
+   */
+  isService: z.boolean().optional(),
   // Ship straight to a customer instead of to one of our warehouses.
   deliveryCustomerId: z.string().optional().nullable(),
   /*
@@ -824,6 +832,14 @@ router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
   // Binned orders are not in any list. The recycle bin has a route of its
   // own, so no screen can show them by forgetting to pass something.
   const where: Prisma.PurchaseOrderWhereInput = { deletedAt: null }
+  /*
+   * Goods orders unless asked otherwise. Every goods screen — the order list,
+   * the receiving queue, the bill's order filter — reads this route, and a
+   * service order turning up in the receiving queue would invite somebody to
+   * receive labour at the gate. `service=true` is the service order list.
+   */
+  if (req.query.service === 'true') where.isService = true
+  else if (req.query.service !== 'all') where.isService = false
   if (typeof req.query.status === 'string' && req.query.status) {
     where.status = req.query.status as Prisma.PurchaseOrderWhereInput['status']
   }
@@ -1144,6 +1160,7 @@ router.post('/orders', requirePermission(MODULE, 'create'), async (req: AuthRequ
         poNumber,
         supplierId: data.supplierId,
         poType: data.poType ?? 'ITEM_LEVEL',
+        isService: data.isService ?? false,
         poDate: data.poDate ?? new Date(),
         deliveryDate: data.deliveryDate ?? undefined,
         deliveryWarehouseId: data.deliveryWarehouseId || null,
@@ -1290,6 +1307,19 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       'Goods have been booked against this order, so its lines can no longer be changed. Correct the receipt instead, or raise a fresh order for the difference.',
       400,
       'PO_HAS_RECEIPTS'
+    )
+  }
+
+  // The same for a service order, whose bills point at its lines the way a
+  // receipt does: a bill cancelled since leaves the order open, not editable.
+  const billedLines = await prisma.purchaseInvoiceLine.count({
+    where: { poLine: { poId: before.id }, bill: { status: { not: 'CANCELLED' } } },
+  })
+  if (billedLines > 0) {
+    throw new AppError(
+      'Bills have been booked against this order, so its lines can no longer be changed. Cancel the bill first, or raise a fresh order for the difference.',
+      400,
+      'PO_HAS_BILLS'
     )
   }
 
@@ -2387,6 +2417,120 @@ async function receivedByPoLine(
 }
 
 /**
+ * How much of each service order line has been billed, on bills that are not
+ * cancelled. A service is never received at the gate, so this is the measure
+ * of work done against the order.
+ */
+async function billedByPoLine(
+  tx: Prisma.TransactionClient,
+  poLineIds: string[],
+  excludeBillId?: string
+): Promise<Map<string, number>> {
+  if (poLineIds.length === 0) return new Map()
+
+  const sums = await tx.purchaseInvoiceLine.groupBy({
+    by: ['poLineId'],
+    where: {
+      poLineId: { in: poLineIds },
+      bill: { status: { not: 'CANCELLED' } },
+      ...(excludeBillId ? { billId: { not: excludeBillId } } : {}),
+    },
+    _sum: { qty: true },
+  })
+
+  return new Map(sums.map((s) => [s.poLineId as string, Number(s._sum.qty ?? 0)]))
+}
+
+/**
+ * Checks bill lines made from a service order against that order, and says
+ * which orders they touch so they can be brought up to date after saving.
+ *
+ * The order has to be this supplier's and still open, and a line cannot bill
+ * more than the order left to bill — the same rule a goods bill meets against
+ * its receipt. Extra work agreed later is added to the order first.
+ */
+async function checkServiceLines(
+  tx: Prisma.TransactionClient,
+  lines: Array<{ poLineId?: string | null; qty: number }>,
+  supplierId: string,
+  excludeBillId?: string
+): Promise<string[]> {
+  const ids = [...new Set(lines.map((l) => l.poLineId).filter((id): id is string => Boolean(id)))]
+  if (ids.length === 0) return []
+
+  const orderLines = await tx.purchaseOrderLine.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      qty: true,
+      shortClosed: true,
+      item: { select: { name: true } },
+      po: {
+        select: {
+          id: true,
+          poNumber: true,
+          supplierId: true,
+          status: true,
+          deletedAt: true,
+          isService: true,
+        },
+      },
+    },
+  })
+  if (orderLines.length !== ids.length) {
+    throw new AppError('A line on that service order no longer exists', 400, 'BAD_PO_LINE')
+  }
+
+  const billed = await billedByPoLine(tx, ids, excludeBillId)
+  const wanted = new Map<string, number>()
+  for (const l of lines) {
+    if (l.poLineId) wanted.set(l.poLineId, (wanted.get(l.poLineId) ?? 0) + l.qty)
+  }
+
+  for (const ol of orderLines) {
+    // A goods order is billed against its receipts, where the quantity is
+    // checked against what came in. Billing it here would skip that check.
+    if (!ol.po.isService) {
+      throw new AppError(
+        `${ol.po.poNumber} is a goods order. Bill it against its goods receipt instead.`,
+        409,
+        'PO_NOT_SERVICE'
+      )
+    }
+    if (ol.po.status === 'DRAFT') {
+      throw new AppError(
+        `${ol.po.poNumber} has not been sent to the supplier yet. Send it first, then bill against it.`,
+        409,
+        'PO_NOT_SENT'
+      )
+    }
+    if (ol.po.deletedAt || ol.po.status === 'CANCELLED') {
+      throw new AppError(`${ol.po.poNumber} is cancelled, so nothing on it can be billed.`, 409, 'PO_CANCELLED')
+    }
+    if (ol.po.supplierId !== supplierId) {
+      throw new AppError(
+        `${ol.po.poNumber} is with a different supplier. A bill can only cover this supplier's own orders.`,
+        409,
+        'PO_SUPPLIER_MISMATCH'
+      )
+    }
+    const room = round3(Number(ol.qty) - (billed.get(ol.id) ?? 0))
+    const want = round3(wanted.get(ol.id) ?? 0)
+    if (want > room + 0.0005) {
+      throw new AppError(
+        room > 0
+          ? `The bill claims ${want} of ${ol.item.name}, but only ${room} is left to bill on ${ol.po.poNumber}. Add the extra to the order first if it was agreed.`
+          : `${ol.item.name} on ${ol.po.poNumber} is already billed in full.`,
+        409,
+        'BILLED_MORE_THAN_ORDERED'
+      )
+    }
+  }
+
+  return [...new Set(orderLines.map((ol) => ol.po.id))]
+}
+
+/**
  * How much of each order line has been rejected on the receipts against it.
  *
  * Rejected stock never becomes `PurchaseOrderLine.receivedQty` — that field
@@ -2592,10 +2736,17 @@ async function syncOrderFromReceipts(tx: Prisma.TransactionClient, poId: string)
   const po = await tx.purchaseOrder.findUnique({ where: { id: poId }, include: { lines: true } })
   if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
 
-  const received = await receivedByPoLine(
-    tx,
-    po.lines.map((l) => l.id)
-  )
+  // A service has no goods receipt: what it has billed is what is done.
+  const received =
+    po.isService
+      ? await billedByPoLine(
+          tx,
+          po.lines.map((l) => l.id)
+        )
+      : await receivedByPoLine(
+          tx,
+          po.lines.map((l) => l.id)
+        )
 
   let anyReceived = false
   let allComplete = true
@@ -2958,6 +3109,13 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
     if (!po || po.deletedAt)
       throw new AppError('That purchase order does not exist', 404, 'NOT_FOUND')
 
+    if (po.isService) {
+      throw new AppError(
+        `${po.poNumber} is a service order. A service is not received at the gate — bill it from Expenses.`,
+        400,
+        'PO_IS_SERVICE'
+      )
+    }
     if (po.status === 'DRAFT') {
       throw new AppError(
         `${po.poNumber} has not been sent to the supplier yet. Send it first, then receive against it.`,
@@ -3785,9 +3943,12 @@ const billInclude = {
     },
   },
   createdBy: { select: { id: true, name: true } },
+  tdsSectionRef: { select: { id: true, section: true, label: true } },
+  warehouse: { select: { id: true, name: true, code: true } },
   lines: {
     orderBy: { sortOrder: 'asc' as const },
     include: {
+      poLine: { select: { id: true, poId: true, qty: true } },
       item: {
         select: {
           id: true,
@@ -3903,6 +4064,8 @@ function priceBill(opts: {
   chargeTax: boolean
   isReverseCharge: boolean
   tdsRate: number
+  /** TDS typed by hand. Left out, it is worked out from the rate. */
+  tdsAmount?: number | null
 }) {
   const { lines, charges, isIntraState, chargeTax, isReverseCharge } = opts
 
@@ -3950,8 +4113,17 @@ function priceBill(opts: {
   const payable = isReverseCharge ? taxable : taxable + cgst + sgst + igst
   const { rounded, roundOff } = applyRoundOff(payable)
 
-  // TDS is worked out on the taxable value, not on the tax.
-  const tdsAmount = round2(taxable * (opts.tdsRate / 100))
+  // TDS is worked out on the taxable value, not on the tax, and to the
+  // rupee — unless it was typed by hand, which stands as typed.
+  const tdsAmount =
+    opts.tdsAmount != null ? round2(opts.tdsAmount) : tdsOn(taxable, opts.tdsRate)
+  if (tdsAmount > rounded) {
+    throw new AppError(
+      `TDS of ₹${tdsAmount.toFixed(2)} is more than the bill's ₹${rounded.toFixed(2)}. Check the amount.`,
+      400,
+      'TDS_OVER_TOTAL'
+    )
+  }
 
   return {
     pricedLines,
@@ -4190,6 +4362,25 @@ router.get('/bills', requirePermission(MODULE, 'view'), async (req, res) => {
     if (to) range.lte = new Date(`${to}T23:59:59.999`)
     where.billDate = range
   }
+
+  /*
+   * Goods bills or expense bills. An expense bill is one with nothing
+   * received against any line — a service, rent, a service order's bill —
+   * which is what puts it on the Expenses screen rather than Purchase Bills.
+   * In AND, because the item filter above already speaks for `lines`.
+   */
+  const kind = typeof req.query.kind === 'string' ? req.query.kind : ''
+  if (kind === 'expense' || kind === 'goods') {
+    where.AND = [
+      kind === 'expense'
+        ? { lines: { none: { grnLineId: { not: null } } } }
+        : { lines: { some: { grnLineId: { not: null } } } },
+    ]
+  }
+  // Location: an id, or "none" for head office.
+  const location = typeof req.query.warehouseId === 'string' ? req.query.warehouseId : ''
+  if (location) where.warehouseId = location === 'none' ? null : location
+  if (typeof req.query.poId === 'string' && req.query.poId) where.poId = req.query.poId
 
   const sort = typeof req.query.sort === 'string' ? req.query.sort : 'billDate'
   const order = req.query.order === 'asc' ? 'asc' : 'desc'
@@ -4482,230 +4673,305 @@ function resolveRateVariances(
   return { effectiveRates, toDebitNote }
 }
 
-router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const data = createBillSchema.parse(req.body)
-
-  const bill = await prisma.$transaction(async (tx) => {
-    const billDate = data.billDate ?? new Date()
-
-    // The same supplier bill booked twice claims the input credit twice. The
-    // unique index is the real guard; this is the message the clerk should see
-    // instead of a constraint error.
-    if (data.supplierInvoiceNo) {
-      const existing = await tx.purchaseInvoice.findFirst({
-        where: { supplierId: data.supplierId, supplierInvoiceNo: data.supplierInvoiceNo },
-        select: { billNumber: true },
-      })
-      if (existing) {
-        throw new AppError(
-          `Invoice ${data.supplierInvoiceNo} from this supplier is already booked as ${existing.billNumber}.`,
-          409,
-          'DUPLICATE_SUPPLIER_INVOICE'
-        )
-      }
+/**
+ * The TDS a bill is booked with.
+ *
+ * With a section, the rate is the one Settings holds for the bill's own date —
+ * and the no-PAN rate when the supplier has given no PAN — whatever the screen
+ * sent. Auto works the amount out from that rate; with it off, the typed
+ * amount stands, as the old ERP's "Auto cal" box did. Without a section an
+ * older bill keeps the code and rate it was booked with.
+ */
+async function resolveBillTds(
+  tx: Prisma.TransactionClient,
+  input: {
+    tdsSectionId?: string | null
+    tdsAuto?: boolean
+    tdsAmount?: number | null
+    tdsSection?: string | null
+    tdsRate?: number | null
+  },
+  supplierId: string,
+  billDate: Date
+) {
+  if (!input.tdsSectionId) {
+    return {
+      tdsSectionId: null,
+      tdsSection: input.tdsSection ?? null,
+      tdsRate: input.tdsRate ?? 0,
+      tdsAuto: true,
+      typed: null as number | null,
     }
+  }
+  const [terms, supplier] = await Promise.all([
+    sectionTermsOn(tx, input.tdsSectionId, billDate),
+    tx.supplier.findUnique({ where: { id: supplierId }, select: { pan: true } }),
+  ])
+  const auto = input.tdsAuto ?? true
+  return {
+    tdsSectionId: terms.sectionId,
+    tdsSection: terms.section,
+    tdsRate: rateFor(terms, Boolean(supplier?.pan?.trim())),
+    tdsAuto: auto,
+    typed: auto ? null : (input.tdsAmount ?? 0),
+  }
+}
 
-    await checkAgainstReceipts(tx, data.lines, data.supplierId)
+/** A location that still exists, or a sentence saying it does not. */
+async function checkLocation(tx: Prisma.TransactionClient, warehouseId?: string | null) {
+  if (!warehouseId) return
+  const found = await tx.warehouse.findUnique({ where: { id: warehouseId }, select: { id: true } })
+  if (!found) throw new AppError('That location no longer exists', 400, 'BAD_LOCATION')
+}
 
-    // The rate half of the match. Quantity was already checked above; this is
-    // what stops a supplier billing the goods that did arrive at their own
-    // price.
-    const variances = await findRateVariances(tx, data.lines)
-    const { effectiveRates, toDebitNote } = resolveRateVariances(
-      variances,
-      data.lines,
-      data.rateVarianceReason
-    )
+/**
+ * Books one supplier bill, inside the caller's transaction.
+ *
+ * Its own function so a cash expense can book the bill and pay it in one
+ * transaction — the two succeed together or not at all, and a cash bill is
+ * never left unpaid because the payment half failed.
+ */
+async function bookBill(
+  tx: Prisma.TransactionClient,
+  data: z.infer<typeof createBillSchema>,
+  userId: string
+) {
+  const billDate = data.billDate ?? new Date()
 
-    // Lines taken back to the order's rate are priced at it, so the bill's
-    // own total, its tax and what the supplier is paid all agree.
-    const effectiveLines = data.lines.map((l, i) =>
-      effectiveRates.has(i) ? { ...l, unitPrice: effectiveRates.get(i)! } : l
-    )
-
-    const tax = await purchaseTaxContext(tx, data.supplierId)
-    const billNumber = await nextDocumentNumber(tx, 'PB', billDate)
-
-    const items = await tx.item.findMany({
-      where: { id: { in: data.lines.map((l) => l.itemId) } },
-      select: { id: true, hsnCode: true },
+  // The same supplier bill booked twice claims the input credit twice. The
+  // unique index is the real guard; this is the message the clerk should see
+  // instead of a constraint error.
+  if (data.supplierInvoiceNo) {
+    const existing = await tx.purchaseInvoice.findFirst({
+      where: { supplierId: data.supplierId, supplierInvoiceNo: data.supplierInvoiceNo },
+      select: { billNumber: true },
     })
-    if (items.length !== new Set(data.lines.map((l) => l.itemId)).size) {
-      throw new AppError('One of those items no longer exists', 400, 'INVALID_ITEM')
+    if (existing) {
+      throw new AppError(
+        `Invoice ${data.supplierInvoiceNo} from this supplier is already booked as ${existing.billNumber}.`,
+        409,
+        'DUPLICATE_SUPPLIER_INVOICE'
+      )
     }
-    const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
+  }
 
-    const charges = data.charges ?? []
-    const priced = priceBill({
-      lines: effectiveLines,
-      charges,
-      discountAmount: data.discountAmount ?? 0,
-      isIntraState: tax.isIntraState,
-      chargeTax: !tax.supplierIsUnregistered || (data.isReverseCharge ?? false),
+  await checkAgainstReceipts(tx, data.lines, data.supplierId)
+
+  // The rate half of the match. Quantity was already checked above; this is
+  // what stops a supplier billing the goods that did arrive at their own
+  // price.
+  const variances = await findRateVariances(tx, data.lines)
+  const { effectiveRates, toDebitNote } = resolveRateVariances(
+    variances,
+    data.lines,
+    data.rateVarianceReason
+  )
+
+  // Lines taken back to the order's rate are priced at it, so the bill's
+  // own total, its tax and what the supplier is paid all agree.
+  const effectiveLines = data.lines.map((l, i) =>
+    effectiveRates.has(i) ? { ...l, unitPrice: effectiveRates.get(i)! } : l
+  )
+
+  const tax = await purchaseTaxContext(tx, data.supplierId)
+  const tds = await resolveBillTds(tx, data, data.supplierId, billDate)
+  await checkLocation(tx, data.warehouseId)
+  const servicePos = await checkServiceLines(tx, data.lines, data.supplierId)
+  const billNumber = await nextDocumentNumber(tx, 'PB', billDate)
+
+  const items = await tx.item.findMany({
+    where: { id: { in: data.lines.map((l) => l.itemId) } },
+    select: { id: true, hsnCode: true },
+  })
+  if (items.length !== new Set(data.lines.map((l) => l.itemId)).size) {
+    throw new AppError('One of those items no longer exists', 400, 'INVALID_ITEM')
+  }
+  const hsnById = new Map(items.map((i) => [i.id, i.hsnCode]))
+
+  const charges = data.charges ?? []
+  const priced = priceBill({
+    lines: effectiveLines,
+    charges,
+    discountAmount: data.discountAmount ?? 0,
+    isIntraState: tax.isIntraState,
+    chargeTax: !tax.supplierIsUnregistered || (data.isReverseCharge ?? false),
+    isReverseCharge: data.isReverseCharge ?? false,
+    tdsRate: tds.tdsRate,
+    tdsAmount: tds.typed,
+  })
+
+  const created = await tx.purchaseInvoice.create({
+    data: {
+      billNumber,
+      supplierId: data.supplierId,
+      poId: data.poId || null,
+      supplierInvoiceNo: data.supplierInvoiceNo ?? null,
+      supplierInvoiceDate: data.supplierInvoiceDate ?? null,
+      billDate,
+      dueDate: data.dueDate ?? null,
+      subtotal: priced.subtotal,
+      discountAmount: priced.discount,
+      taxableAmount: priced.taxable,
+      cgst: priced.cgst,
+      sgst: priced.sgst,
+      igst: priced.igst,
+      tdsSection: tds.tdsSection,
+      tdsRate: tds.tdsRate || null,
+      tdsAmount: priced.tdsAmount,
+      tdsSectionId: tds.tdsSectionId,
+      tdsAuto: tds.tdsAuto,
+      warehouseId: data.warehouseId || null,
       isReverseCharge: data.isReverseCharge ?? false,
-      tdsRate: data.tdsRate ?? 0,
+      roundOff: priced.roundOff,
+      totalAmount: priced.total,
+      paidAmount: 0,
+      balanceAmount: priced.balance,
+      // The reason a higher rate was agreed belongs on the bill itself. It
+      // is the only place it survives — the line stores the figure that was
+      // booked, not the argument behind it.
+      notes:
+        variances.length && data.rateVarianceReason?.trim()
+          ? `${data.notes ? data.notes + '\n' : ''}Rate agreed: ${data.rateVarianceReason.trim()}`
+          : (data.notes ?? null),
+      createdById: userId,
+      lines: {
+        create: effectiveLines.map((l, i) => ({
+          itemId: l.itemId,
+          grnLineId: l.grnLineId || null,
+          poLineId: l.poLineId || null,
+          description: l.description ?? null,
+          // Frozen at booking, so correcting the item master later cannot
+          // change a bill that has already been claimed.
+          hsnCode: hsnById.get(l.itemId) ?? null,
+          qty: l.qty,
+          unitPrice: l.unitPrice,
+          discount: l.discount ?? 0,
+          taxableValue: priced.pricedLines[i].taxableValue,
+          gstRate: priced.pricedLines[i].gstRate,
+          cgst: priced.pricedLines[i].cgst,
+          sgst: priced.pricedLines[i].sgst,
+          igst: priced.pricedLines[i].igst,
+          amount: priced.pricedLines[i].amount,
+          sortOrder: i,
+        })),
+      },
+      charges: {
+        create: charges.map((c, i) => ({
+          chargeTypeId: c.chargeTypeId,
+          amount: priced.pricedCharges[i].amount,
+          gstRate: priced.pricedCharges[i].gstRate,
+          cgst: priced.pricedCharges[i].cgst,
+          sgst: priced.pricedCharges[i].sgst,
+          igst: priced.pricedCharges[i].igst,
+        })),
+      },
+    },
+    include: billInclude,
+  })
+
+  /*
+   * The claim back, for every line booked at the order's rate rather than
+   * the supplier's.
+   *
+   * Raised as a draft, never sent. A debit note is a demand for money from
+   * somebody the mill trades with, and it should leave the building because
+   * a person decided it should — not because a rate comparison did. It still
+   * has to be submitted, approved and posted by hand like any other.
+   *
+   * Its own tax follows the goods it corrects: the difference is a change
+   * to what was supplied, so it carries the line's GST rate and the same
+   * intra- or inter-state split the bill was worked out on.
+   *
+   * Every line points at the bill line it corrects, which is what lets a
+   * later return against the same line know that this much of it is already
+   * claimed. `sortOrder` is the link: bill lines are written in the order
+   * they arrived, and `RateVariance.lineIndex` is a position in that same
+   * list.
+   */
+  if (toDebitNote.length) {
+    const noteNumber = await nextDocumentNumber(tx, 'DN', billDate)
+
+    const billLines = await tx.purchaseInvoiceLine.findMany({
+      where: { billId: created.id },
+      select: { id: true, sortOrder: true },
+    })
+    const billLineAt = new Map(billLines.map((l) => [l.sortOrder, l.id]))
+
+    const priced = priceNote({
+      isIntraState: tax.isIntraState,
+      lines: toDebitNote.map((v) => ({
+        itemId: v.itemId,
+        billLineId: billLineAt.get(v.lineIndex) ?? null,
+        description: `Billed at ${v.billedRate.toFixed(2)} against ${v.poRate.toFixed(2)} on the order`,
+        hsnCode: hsnById.get(v.itemId) ?? null,
+        originalQty: v.qty,
+        originalRate: v.billedRate,
+        qty: v.qty,
+        unitPrice: v.difference,
+        gstRate: v.gstRate,
+      })),
     })
 
-    const created = await tx.purchaseInvoice.create({
+    await tx.purchaseNote.create({
       data: {
-        billNumber,
+        noteNumber,
+        status: 'DRAFT',
+        reason: 'WRONG_RATE',
+        /* Raised by us, as our own commercial claim, because that is what
+           it is: we spotted the rate on their bill and we are claiming the
+           difference. Whether the supplier answers with a credit note — and
+           whether any of it becomes a GST document — is not known at this
+           moment and is deliberately not guessed at. The note lands at
+           NOT_REVIEWED and cannot be posted until accounts has said. */
+        issuedBy: 'OUR_COMPANY',
+        docType: 'OUR_DEBIT_NOTE',
+        effect: 'REDUCES_PAYABLE',
         supplierId: data.supplierId,
-        poId: data.poId || null,
-        supplierInvoiceNo: data.supplierInvoiceNo ?? null,
-        supplierInvoiceDate: data.supplierInvoiceDate ?? null,
-        billDate,
-        dueDate: data.dueDate ?? null,
-        subtotal: priced.subtotal,
-        discountAmount: priced.discount,
-        taxableAmount: priced.taxable,
+        billId: created.id,
+        poId: created.poId,
+        noteDate: billDate,
+        reasonNote: `Rate difference on ${created.billNumber}`,
+        isIntraState: tax.isIntraState,
+        taxableAmount: priced.taxableAmount,
         cgst: priced.cgst,
         sgst: priced.sgst,
         igst: priced.igst,
-        tdsSection: data.tdsSection ?? null,
-        tdsRate: data.tdsRate ?? null,
-        tdsAmount: priced.tdsAmount,
-        isReverseCharge: data.isReverseCharge ?? false,
         roundOff: priced.roundOff,
-        totalAmount: priced.total,
-        paidAmount: 0,
-        balanceAmount: priced.balance,
-        // The reason a higher rate was agreed belongs on the bill itself. It
-        // is the only place it survives — the line stores the figure that was
-        // booked, not the argument behind it.
-        notes:
-          variances.length && data.rateVarianceReason?.trim()
-            ? `${data.notes ? data.notes + '\n' : ''}Rate agreed: ${data.rateVarianceReason.trim()}`
-            : (data.notes ?? null),
-        createdById: req.user!.id,
+        totalAmount: priced.totalAmount,
+        createdById: userId,
         lines: {
-          create: effectiveLines.map((l, i) => ({
+          create: priced.lines.map((l, i) => ({
             itemId: l.itemId,
-            grnLineId: l.grnLineId || null,
+            billLineId: l.billLineId ?? null,
             description: l.description ?? null,
-            // Frozen at booking, so correcting the item master later cannot
-            // change a bill that has already been claimed.
-            hsnCode: hsnById.get(l.itemId) ?? null,
+            hsnCode: l.hsnCode ?? null,
+            originalQty: l.originalQty ?? null,
+            originalRate: l.originalRate ?? null,
             qty: l.qty,
             unitPrice: l.unitPrice,
-            discount: l.discount ?? 0,
-            taxableValue: priced.pricedLines[i].taxableValue,
-            gstRate: priced.pricedLines[i].gstRate,
-            cgst: priced.pricedLines[i].cgst,
-            sgst: priced.pricedLines[i].sgst,
-            igst: priced.pricedLines[i].igst,
-            amount: priced.pricedLines[i].amount,
+            taxableValue: l.taxableValue,
+            gstRate: l.gstRate,
+            cgst: l.cgst,
+            sgst: l.sgst,
+            igst: l.igst,
+            amount: l.amount,
             sortOrder: i,
           })),
         },
-        charges: {
-          create: charges.map((c, i) => ({
-            chargeTypeId: c.chargeTypeId,
-            amount: priced.pricedCharges[i].amount,
-            gstRate: priced.pricedCharges[i].gstRate,
-            cgst: priced.pricedCharges[i].cgst,
-            sgst: priced.pricedCharges[i].sgst,
-            igst: priced.pricedCharges[i].igst,
-          })),
-        },
       },
-      include: billInclude,
     })
+  }
 
-    /*
-     * The claim back, for every line booked at the order's rate rather than
-     * the supplier's.
-     *
-     * Raised as a draft, never sent. A debit note is a demand for money from
-     * somebody the mill trades with, and it should leave the building because
-     * a person decided it should — not because a rate comparison did. It still
-     * has to be submitted, approved and posted by hand like any other.
-     *
-     * Its own tax follows the goods it corrects: the difference is a change
-     * to what was supplied, so it carries the line's GST rate and the same
-     * intra- or inter-state split the bill was worked out on.
-     *
-     * Every line points at the bill line it corrects, which is what lets a
-     * later return against the same line know that this much of it is already
-     * claimed. `sortOrder` is the link: bill lines are written in the order
-     * they arrived, and `RateVariance.lineIndex` is a position in that same
-     * list.
-     */
-    if (toDebitNote.length) {
-      const noteNumber = await nextDocumentNumber(tx, 'DN', billDate)
+  // A service order is done as far as it has been billed.
+  for (const poId of servicePos) await syncOrderFromReceipts(tx, poId)
 
-      const billLines = await tx.purchaseInvoiceLine.findMany({
-        where: { billId: created.id },
-        select: { id: true, sortOrder: true },
-      })
-      const billLineAt = new Map(billLines.map((l) => [l.sortOrder, l.id]))
+  return { bill: created, debitNoteRaised: toDebitNote.length > 0 }
+}
 
-      const priced = priceNote({
-        isIntraState: tax.isIntraState,
-        lines: toDebitNote.map((v) => ({
-          itemId: v.itemId,
-          billLineId: billLineAt.get(v.lineIndex) ?? null,
-          description: `Billed at ${v.billedRate.toFixed(2)} against ${v.poRate.toFixed(2)} on the order`,
-          hsnCode: hsnById.get(v.itemId) ?? null,
-          originalQty: v.qty,
-          originalRate: v.billedRate,
-          qty: v.qty,
-          unitPrice: v.difference,
-          gstRate: v.gstRate,
-        })),
-      })
+router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createBillSchema.parse(req.body)
 
-      await tx.purchaseNote.create({
-        data: {
-          noteNumber,
-          status: 'DRAFT',
-          reason: 'WRONG_RATE',
-          /* Raised by us, as our own commercial claim, because that is what
-             it is: we spotted the rate on their bill and we are claiming the
-             difference. Whether the supplier answers with a credit note — and
-             whether any of it becomes a GST document — is not known at this
-             moment and is deliberately not guessed at. The note lands at
-             NOT_REVIEWED and cannot be posted until accounts has said. */
-          issuedBy: 'OUR_COMPANY',
-          docType: 'OUR_DEBIT_NOTE',
-          effect: 'REDUCES_PAYABLE',
-          supplierId: data.supplierId,
-          billId: created.id,
-          poId: created.poId,
-          noteDate: billDate,
-          reasonNote: `Rate difference on ${created.billNumber}`,
-          isIntraState: tax.isIntraState,
-          taxableAmount: priced.taxableAmount,
-          cgst: priced.cgst,
-          sgst: priced.sgst,
-          igst: priced.igst,
-          roundOff: priced.roundOff,
-          totalAmount: priced.totalAmount,
-          createdById: req.user!.id,
-          lines: {
-            create: priced.lines.map((l, i) => ({
-              itemId: l.itemId,
-              billLineId: l.billLineId ?? null,
-              description: l.description ?? null,
-              hsnCode: l.hsnCode ?? null,
-              originalQty: l.originalQty ?? null,
-              originalRate: l.originalRate ?? null,
-              qty: l.qty,
-              unitPrice: l.unitPrice,
-              taxableValue: l.taxableValue,
-              gstRate: l.gstRate,
-              cgst: l.cgst,
-              sgst: l.sgst,
-              igst: l.igst,
-              amount: l.amount,
-              sortOrder: i,
-            })),
-          },
-        },
-      })
-    }
-
-    return { bill: created, debitNoteRaised: toDebitNote.length > 0 }
-  })
+  const bill = await prisma.$transaction((tx) => bookBill(tx, data, req.user!.id))
 
   await writeAuditLog(req, {
     module: MODULE,
@@ -4724,6 +4990,61 @@ router.post('/bills', requirePermission(MODULE, 'create'), async (req: AuthReque
   })
 })
 
+/**
+ * A cash expense: the bill and its payment in one go — the old ERP's
+ * "New Cash Expense".
+ *
+ * The payment is always for what the bill leaves to pay after TDS, worked out
+ * here, so the bill lands Paid. One transaction: if the payment is refused
+ * (a cheque with no number, a closed account) the bill is not booked either.
+ */
+router.post('/expenses/cash', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const { payment: pay, ...billData } = cashExpenseSchema.parse(req.body)
+
+  const result = await prisma.$transaction(async (tx) => {
+    const booked = await bookBill(tx, billData, req.user!.id)
+    const owing = round2(Number(booked.bill.totalAmount) - Number(booked.bill.tdsAmount))
+    const payment = await recordPayment(
+      tx,
+      createPaymentSchema.parse({
+        ...pay,
+        billId: booked.bill.id,
+        warehouseId: billData.warehouseId ?? null,
+        amount: owing,
+        // Paid the day it was booked unless somebody says otherwise.
+        paymentDate: pay.paymentDate ?? booked.bill.billDate,
+      }),
+      req.user!.id
+    )
+    const bill = await tx.purchaseInvoice.findUniqueOrThrow({
+      where: { id: booked.bill.id },
+      include: billInclude,
+    })
+    return { bill, payment }
+  })
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'PurchaseInvoice',
+    entityId: result.bill.id,
+    after: result.bill,
+  })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'CREATE',
+    entityType: 'SupplierPayment',
+    entityId: result.payment.id,
+    after: result.payment,
+  })
+
+  res.status(201).json({
+    success: true,
+    data: result.bill,
+    message: `${result.bill.billNumber} booked and paid — ${result.payment.paymentNumber}.`,
+  })
+})
+
 router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateBillSchema.parse(req.body)
 
@@ -4735,6 +5056,10 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
   // Held on its own so the work inside the transaction below does not depend
   // on the narrowing surviving all the way down this handler.
   const billId = before.id
+  // The service orders it bills now, to give back their quantity if it moves.
+  const priorServicePos = before.lines
+    .map((l) => l.poLine?.poId)
+    .filter((id): id is string => Boolean(id))
 
   if (before.status === 'CANCELLED') {
     throw new AppError('A cancelled bill cannot be edited', 409, 'BILL_CANCELLED')
@@ -4759,6 +5084,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
       before.lines.map((l) => ({
         itemId: l.itemId,
         grnLineId: l.grnLineId,
+        poLineId: l.poLineId,
         description: l.description,
         qty: Number(l.qty),
         unitPrice: Number(l.unitPrice),
@@ -4799,7 +5125,28 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
       }))
 
     const isReverseCharge = data.isReverseCharge ?? before.isReverseCharge
-    const tdsRate = data.tdsRate !== undefined ? (data.tdsRate ?? 0) : Number(before.tdsRate ?? 0)
+    // What the edit leaves out stays as it was: the section, whether the TDS
+    // was worked out or typed, and the typed figure itself.
+    const tds = await resolveBillTds(
+      tx,
+      {
+        tdsSectionId: data.tdsSectionId !== undefined ? data.tdsSectionId : before.tdsSectionId,
+        tdsAuto: data.tdsAuto ?? before.tdsAuto,
+        tdsAmount:
+          data.tdsAmount !== undefined
+            ? data.tdsAmount
+            : before.tdsAuto
+              ? null
+              : Number(before.tdsAmount),
+        tdsSection: data.tdsSection !== undefined ? data.tdsSection : before.tdsSection,
+        tdsRate: data.tdsRate !== undefined ? data.tdsRate : Number(before.tdsRate ?? 0),
+      },
+      supplierId,
+      data.billDate ?? before.billDate
+    )
+    const warehouseId = data.warehouseId !== undefined ? data.warehouseId || null : before.warehouseId
+    await checkLocation(tx, warehouseId)
+    const servicePos = await checkServiceLines(tx, lines, supplierId, before.id)
 
     const priced = priceBill({
       lines,
@@ -4808,7 +5155,8 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
       isIntraState: tax.isIntraState,
       chargeTax: !tax.supplierIsUnregistered || isReverseCharge,
       isReverseCharge,
-      tdsRate,
+      tdsRate: tds.tdsRate,
+      tdsAmount: tds.typed,
     })
 
     const items = await tx.item.findMany({
@@ -4841,9 +5189,12 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
         cgst: priced.cgst,
         sgst: priced.sgst,
         igst: priced.igst,
-        tdsSection: data.tdsSection !== undefined ? (data.tdsSection ?? null) : before.tdsSection,
-        tdsRate: tdsRate || null,
+        tdsSection: tds.tdsSection,
+        tdsRate: tds.tdsRate || null,
         tdsAmount: priced.tdsAmount,
+        tdsSectionId: tds.tdsSectionId,
+        tdsAuto: tds.tdsAuto,
+        warehouseId,
         isReverseCharge,
         roundOff: priced.roundOff,
         totalAmount: priced.total,
@@ -4852,6 +5203,7 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
           create: lines.map((l, i) => ({
             itemId: l.itemId,
             grnLineId: l.grnLineId || null,
+            poLineId: l.poLineId || null,
             description: l.description ?? null,
             hsnCode: hsnById.get(l.itemId) ?? null,
             qty: l.qty,
@@ -4898,6 +5250,14 @@ router.patch('/bills/:id', requirePermission(MODULE, 'edit'), async (req: AuthRe
      * relax that guard should not have to find this line first.
      */
     await syncBillAdjustments(tx, billId)
+
+    // Both the orders it billed before and the ones it bills now: a line moved
+    // off one service order gives that order its quantity back.
+    const touched = new Set([
+      ...servicePos,
+      ...priorServicePos,
+    ])
+    for (const poId of touched) await syncOrderFromReceipts(tx, poId)
 
     return tx.purchaseInvoice.findUniqueOrThrow({
       where: { id: billId },
@@ -4958,6 +5318,12 @@ router.patch(
       },
       include: billInclude,
     })
+
+    // A cancelled bill no longer counts against its service order.
+    const servicePos = new Set(
+      after.lines.map((l) => l.poLine?.poId).filter((id): id is string => Boolean(id))
+    )
+    for (const poId of servicePos) await syncOrderFromReceipts(prisma, poId)
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -5249,160 +5615,170 @@ router.get('/payments/:id', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: payment })
 })
 
+/**
+ * Records one payment against a bill, inside the caller's transaction. Shared
+ * by the payment screen and the cash expense, which pays as it books.
+ */
+async function recordPayment(
+  tx: Prisma.TransactionClient,
+  data: z.infer<typeof createPaymentSchema>,
+  userId: string
+) {
+  const bill = await tx.purchaseInvoice.findUnique({
+    where: { id: data.billId },
+    select: {
+      id: true,
+      billNumber: true,
+      supplierId: true,
+      status: true,
+      totalAmount: true,
+      tdsAmount: true,
+      noteAdjustment: true,
+      billDate: true,
+      supplier: { select: { name: true } },
+    },
+  })
+  if (!bill) throw new AppError('That bill no longer exists', 404, 'NOT_FOUND')
+
+  if (bill.status === 'CANCELLED') {
+    throw new AppError(
+      `${bill.billNumber} is cancelled. Nothing is owed on it.`,
+      409,
+      'BILL_CANCELLED'
+    )
+  }
+
+  const when = data.paymentDate ?? new Date()
+
+  // Paying before the bill was raised is somebody typing the wrong year, and
+  // it puts the two documents in different periods.
+  if (
+    when <
+    new Date(bill.billDate.getFullYear(), bill.billDate.getMonth(), bill.billDate.getDate())
+  ) {
+    throw new AppError(
+      `${bill.billNumber} is dated after this payment. Check the date.`,
+      400,
+      'PAYMENT_BEFORE_BILL'
+    )
+  }
+
+  const tds = round2(data.tdsAmount ?? 0)
+
+  // TDS is deducted once. A bill records it when the deduction is known at
+  // booking; a payment records it when it was not. Both together would pay
+  // the supplier twice short and claim the same deduction twice.
+  if (tds > 0 && Number(bill.tdsAmount) > 0) {
+    throw new AppError(
+      `${bill.billNumber} already has ₹${Number(bill.tdsAmount).toFixed(2)} of tax deducted on it. It comes off once — correct the bill if that figure is wrong.`,
+      400,
+      'TDS_ALREADY_ON_BILL'
+    )
+  }
+
+  // Checked here rather than left to the foreign key, which would surface as
+  // a database error nobody outside this file can read.
+  if (data.warehouseId) {
+    const where = await tx.warehouse.findUnique({
+      where: { id: data.warehouseId },
+      select: { id: true },
+    })
+    if (!where) throw new AppError('That location no longer exists', 400, 'BAD_LOCATION')
+  }
+
+  if (data.bankAccountId) {
+    const account = await tx.bankAccount.findUnique({
+      where: { id: data.bankAccountId },
+      select: { id: true, accountName: true, isActive: true },
+    })
+    if (!account) throw new AppError('That account no longer exists', 400, 'BAD_ACCOUNT')
+    if (!account.isActive) {
+      throw new AppError(
+        `${account.accountName} is closed. Pick the account the money really left.`,
+        400,
+        'ACCOUNT_CLOSED'
+      )
+    }
+  }
+
+  // What earlier payments already settled. Summed rather than read off the
+  // bill so two clerks paying at the same moment cannot both pass the check
+  // against a stale figure. Tax withheld counts: it left the bill even
+  // though it never reached the supplier.
+  const paid = await tx.supplierPayment.aggregate({
+    where: { invoiceId: bill.id, status: 'POSTED' },
+    _sum: { amount: true, tdsAmount: true },
+  })
+  const alreadyPaid = round2(Number(paid._sum.amount ?? 0) + Number(paid._sum.tdsAmount ?? 0))
+  /*
+   * Posted notes come off before the ceiling is worked out, exactly as they
+   * do in `syncBillFromPayments`. The two have to subtract the same things
+   * or this guard defends a number the bill does not agree with: the check
+   * used to allow the whole bill total against a bill a debit note had
+   * already reduced, and the excess then vanished into that function's
+   * `Math.max(0, …)` — the supplier overpaid, the bill read PAID, and
+   * nothing on the screen said where the difference went.
+   */
+  const settleable = round2(
+    Number(bill.totalAmount) - Number(bill.tdsAmount) - Number(bill.noteAdjustment)
+  )
+  const owing = round2(settleable - alreadyPaid)
+
+  if (owing <= 0) {
+    // Nothing left to pay is not always "paid" — notes can settle a bill on
+    // their own, and telling a clerk it was paid would send them looking for
+    // a payment that was never made.
+    throw new AppError(
+      alreadyPaid > 0
+        ? `${bill.billNumber} is already paid in full.`
+        : `Nothing is owed on ${bill.billNumber} — the notes against it cover the whole bill.`,
+      409,
+      'BILL_ALREADY_PAID'
+    )
+  }
+
+  const settles = round2(data.amount + tds)
+  if (settles > owing) {
+    throw new AppError(
+      tds > 0
+        ? `₹${data.amount.toFixed(2)} and ₹${tds.toFixed(2)} deducted comes to ₹${settles.toFixed(2)} — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`
+        : `That is more than is owed — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`,
+      400,
+      'OVERPAYMENT'
+    )
+  }
+
+  const paymentNumber = await nextDocumentNumber(tx, 'SP', when)
+
+  const created = await tx.supplierPayment.create({
+    data: {
+      paymentNumber,
+      supplierId: bill.supplierId,
+      invoiceId: bill.id,
+      warehouseId: data.warehouseId || null,
+      bankAccountId: data.bankAccountId || null,
+      paymentDate: when,
+      amount: round2(data.amount),
+      tdsAmount: tds,
+      mode: data.mode,
+      referenceNo: data.referenceNo?.trim() || null,
+      chequeNo: data.chequeNo?.trim() || null,
+      chequeDate: data.chequeDate ?? null,
+      notes: data.notes ?? null,
+      createdById: userId,
+    },
+    include: paymentInclude,
+  })
+
+  await syncBillFromPayments(tx, bill.id)
+
+  return created
+}
+
 router.post('/payments', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createPaymentSchema.parse(req.body)
 
-  const payment = await prisma.$transaction(async (tx) => {
-    const bill = await tx.purchaseInvoice.findUnique({
-      where: { id: data.billId },
-      select: {
-        id: true,
-        billNumber: true,
-        supplierId: true,
-        status: true,
-        totalAmount: true,
-        tdsAmount: true,
-        noteAdjustment: true,
-        billDate: true,
-        supplier: { select: { name: true } },
-      },
-    })
-    if (!bill) throw new AppError('That bill no longer exists', 404, 'NOT_FOUND')
-
-    if (bill.status === 'CANCELLED') {
-      throw new AppError(
-        `${bill.billNumber} is cancelled. Nothing is owed on it.`,
-        409,
-        'BILL_CANCELLED'
-      )
-    }
-
-    const when = data.paymentDate ?? new Date()
-
-    // Paying before the bill was raised is somebody typing the wrong year, and
-    // it puts the two documents in different periods.
-    if (
-      when <
-      new Date(bill.billDate.getFullYear(), bill.billDate.getMonth(), bill.billDate.getDate())
-    ) {
-      throw new AppError(
-        `${bill.billNumber} is dated after this payment. Check the date.`,
-        400,
-        'PAYMENT_BEFORE_BILL'
-      )
-    }
-
-    const tds = round2(data.tdsAmount ?? 0)
-
-    // TDS is deducted once. A bill records it when the deduction is known at
-    // booking; a payment records it when it was not. Both together would pay
-    // the supplier twice short and claim the same deduction twice.
-    if (tds > 0 && Number(bill.tdsAmount) > 0) {
-      throw new AppError(
-        `${bill.billNumber} already has ₹${Number(bill.tdsAmount).toFixed(2)} of tax deducted on it. It comes off once — correct the bill if that figure is wrong.`,
-        400,
-        'TDS_ALREADY_ON_BILL'
-      )
-    }
-
-    // Checked here rather than left to the foreign key, which would surface as
-    // a database error nobody outside this file can read.
-    if (data.warehouseId) {
-      const where = await tx.warehouse.findUnique({
-        where: { id: data.warehouseId },
-        select: { id: true },
-      })
-      if (!where) throw new AppError('That location no longer exists', 400, 'BAD_LOCATION')
-    }
-
-    if (data.bankAccountId) {
-      const account = await tx.bankAccount.findUnique({
-        where: { id: data.bankAccountId },
-        select: { id: true, accountName: true, isActive: true },
-      })
-      if (!account) throw new AppError('That account no longer exists', 400, 'BAD_ACCOUNT')
-      if (!account.isActive) {
-        throw new AppError(
-          `${account.accountName} is closed. Pick the account the money really left.`,
-          400,
-          'ACCOUNT_CLOSED'
-        )
-      }
-    }
-
-    // What earlier payments already settled. Summed rather than read off the
-    // bill so two clerks paying at the same moment cannot both pass the check
-    // against a stale figure. Tax withheld counts: it left the bill even
-    // though it never reached the supplier.
-    const paid = await tx.supplierPayment.aggregate({
-      where: { invoiceId: bill.id, status: 'POSTED' },
-      _sum: { amount: true, tdsAmount: true },
-    })
-    const alreadyPaid = round2(Number(paid._sum.amount ?? 0) + Number(paid._sum.tdsAmount ?? 0))
-    /*
-     * Posted notes come off before the ceiling is worked out, exactly as they
-     * do in `syncBillFromPayments`. The two have to subtract the same things
-     * or this guard defends a number the bill does not agree with: the check
-     * used to allow the whole bill total against a bill a debit note had
-     * already reduced, and the excess then vanished into that function's
-     * `Math.max(0, …)` — the supplier overpaid, the bill read PAID, and
-     * nothing on the screen said where the difference went.
-     */
-    const settleable = round2(
-      Number(bill.totalAmount) - Number(bill.tdsAmount) - Number(bill.noteAdjustment)
-    )
-    const owing = round2(settleable - alreadyPaid)
-
-    if (owing <= 0) {
-      // Nothing left to pay is not always "paid" — notes can settle a bill on
-      // their own, and telling a clerk it was paid would send them looking for
-      // a payment that was never made.
-      throw new AppError(
-        alreadyPaid > 0
-          ? `${bill.billNumber} is already paid in full.`
-          : `Nothing is owed on ${bill.billNumber} — the notes against it cover the whole bill.`,
-        409,
-        'BILL_ALREADY_PAID'
-      )
-    }
-
-    const settles = round2(data.amount + tds)
-    if (settles > owing) {
-      throw new AppError(
-        tds > 0
-          ? `₹${data.amount.toFixed(2)} and ₹${tds.toFixed(2)} deducted comes to ₹${settles.toFixed(2)} — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`
-          : `That is more than is owed — only ₹${owing.toFixed(2)} is left on ${bill.billNumber}.`,
-        400,
-        'OVERPAYMENT'
-      )
-    }
-
-    const paymentNumber = await nextDocumentNumber(tx, 'SP', when)
-
-    const created = await tx.supplierPayment.create({
-      data: {
-        paymentNumber,
-        supplierId: bill.supplierId,
-        invoiceId: bill.id,
-        warehouseId: data.warehouseId || null,
-        bankAccountId: data.bankAccountId || null,
-        paymentDate: when,
-        amount: round2(data.amount),
-        tdsAmount: tds,
-        mode: data.mode,
-        referenceNo: data.referenceNo?.trim() || null,
-        chequeNo: data.chequeNo?.trim() || null,
-        chequeDate: data.chequeDate ?? null,
-        notes: data.notes ?? null,
-        createdById: req.user!.id,
-      },
-      include: paymentInclude,
-    })
-
-    await syncBillFromPayments(tx, bill.id)
-
-    return created
-  })
+  const payment = await prisma.$transaction((tx) => recordPayment(tx, data, req.user!.id))
 
   await writeAuditLog(req, {
     module: MODULE,

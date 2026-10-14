@@ -14,6 +14,7 @@ dotenv.config()
 import authRoutes from './routes/auth.routes'
 import dashboardRoutes from './routes/dashboard.routes'
 import masterRoutes from './routes/master.routes'
+import styleTrackingRoutes from './routes/styleTracking.routes'
 import salesRoutes from './routes/sales.routes'
 import challanRoutes from './routes/challan.routes'
 import invoiceRoutes from './routes/invoice.routes'
@@ -27,6 +28,7 @@ import purchaseEnquiryRoutes from './routes/purchase-enquiries.routes'
 import purchaseReturnRoutes from './routes/purchase-returns.routes'
 import grnQcRoutes from './routes/grn-qc.routes'
 import purchaseDashboardRoutes from './routes/purchase-dashboard.routes'
+import purchaseTdsRoutes from './routes/purchase-tds.routes'
 import reportsRoutes from './routes/reports.routes'
 import inventoryRoutes from './routes/inventory.routes'
 import packageRoutes from './routes/packages.routes'
@@ -274,6 +276,8 @@ app.use('/api/webhooks', webhookRoutes)
 
 // Protected Routes
 app.use('/api/dashboard', authMiddleware, dashboardRoutes)
+// Ahead of the masters router, whose own paths it would otherwise fall through.
+app.use('/api/masters/style-tracking', authMiddleware, styleTrackingRoutes)
 app.use('/api/masters', authMiddleware, masterRoutes)
 // Delivery challans, ahead of the rest of /api/sales so their paths are theirs.
 app.use('/api/sales/challans', authMiddleware, challanRoutes)
@@ -289,6 +293,7 @@ app.use('/api/purchase/notes', authMiddleware, purchaseNoteRoutes)
 app.use('/api/purchase/returns', authMiddleware, purchaseReturnRoutes)
 app.use('/api/purchase/qc', authMiddleware, grnQcRoutes)
 app.use('/api/purchase/orders-dashboard', authMiddleware, purchaseDashboardRoutes)
+app.use('/api/purchase/tds', authMiddleware, purchaseTdsRoutes)
 app.use('/api/purchase', authMiddleware, purchaseRoutes)
 app.use('/api/reports', authMiddleware, reportsRoutes)
 app.use('/api/inventory', authMiddleware, inventoryRoutes)

@@ -45,6 +45,18 @@ const columns: Column<ExpenseHead>[] = [
     className: 'font-mono text-xs text-muted-foreground',
   },
   {
+    key: 'tdsSection',
+    header: 'TDS',
+    render: (h) =>
+      h.tdsSection ? (
+        <span className="text-xs" title={h.tdsSection.label}>
+          {h.tdsSection.section}
+        </span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
+  },
+  {
     key: 'description',
     header: 'Note',
     render: (h) =>

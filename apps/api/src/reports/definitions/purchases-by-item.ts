@@ -12,8 +12,18 @@ import {
   topWithRest,
 } from './shared'
 
+/** Goods came in on a receipt; an expense — power, rent, a repair — did not. */
+const KIND_WORDS: Record<string, string> = {
+  GOODS: 'Goods',
+  EXPENSE: 'Expense',
+}
+
 /**
  * What was bought, item by item, at what rate and from whom.
+ *
+ * Expenses included: a bill line with no goods receipt behind it is an
+ * expense (electricity, rent, repairs), and the Bought filter shows those
+ * alone — what the separate Expenses Booking Register used to list.
  *
  * One row per bill line, so the pivot can fold it by item, by supplier or by
  * both. Built off the bills rather than the receipts: this is what the mill
@@ -25,11 +35,17 @@ export const purchasesByItem: ReportDefinition = {
   module: 'purchase',
   title: 'Purchases by Item',
   description:
-    'Every item on a supplier bill in the period — quantity, rate, taxable value and GST — so purchases can be read item by item and rate against rate.',
+    'Every line on a supplier bill in the period — goods and expenses — with quantity, rate, taxable value and GST, so purchases can be read item by item and rate against rate.',
   filters: [
     ...dateRangeFilters,
     supplierFilter,
     itemFilter,
+    {
+      key: 'kind',
+      label: 'Bought',
+      type: 'select',
+      options: Object.entries(KIND_WORDS).map(([value, label]) => ({ value, label })),
+    },
     { ...searchFilter, help: 'Our bill ref, their bill number or supplier name' },
   ],
   columns: [
@@ -37,6 +53,7 @@ export const purchasesByItem: ReportDefinition = {
     { key: 'billNumber', label: 'Our Ref', type: 'text', width: 16 },
     { key: 'supplierInvoiceNo', label: 'Their Bill No.', type: 'text', width: 18 },
     { key: 'supplier', label: 'Supplier', type: 'text', width: 28 },
+    { key: 'kind', label: 'Kind', type: 'text', width: 10 },
     { key: 'category', label: 'Category', type: 'text', width: 18 },
     { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
     { key: 'item', label: 'Item', type: 'text', width: 30 },
@@ -88,6 +105,8 @@ export const purchasesByItem: ReportDefinition = {
     const where: Prisma.PurchaseInvoiceLineWhereInput = {
       bill: billWhere,
       ...(params.itemId ? { itemId: params.itemId } : {}),
+      ...(params.kind === 'GOODS' ? { grnLineId: { not: null } } : {}),
+      ...(params.kind === 'EXPENSE' ? { grnLineId: null } : {}),
     }
 
     const cancelled = await tx.purchaseInvoice.count({
@@ -145,6 +164,7 @@ export const purchasesByItem: ReportDefinition = {
         billNumber: l.bill.billNumber,
         supplierInvoiceNo: l.bill.supplierInvoiceNo ?? '',
         supplier: l.bill.supplier?.name ?? '',
+        kind: KIND_WORDS[l.grnLine ? 'GOODS' : 'EXPENSE'],
         category: l.item.category?.name ?? '',
         itemCode: l.item.code,
         item: l.item.name,
@@ -231,7 +251,9 @@ export const purchasesByItem: ReportDefinition = {
       analysis: {
         headline:
           rows.length === 0
-            ? 'No supplier bills were booked in this period.'
+            ? params.kind === 'EXPENSE'
+              ? 'No expense bills were booked in this period.'
+              : 'No supplier bills were booked in this period.'
             : `${byItem.size} items bought on ${bills} bills, ₹${taxable.toLocaleString('en-IN')} before tax.`,
         kpis: [
           {
@@ -306,6 +328,7 @@ export const purchasesByItem: ReportDefinition = {
             : 'No cancelled bills fell in this period.',
           'Values are as billed. Debit and credit notes against these bills are not netted off — see the Purchase Adjustment Register.',
           'Charges on a bill (freight, packing) and bill-level discounts are not spread across its items.',
+          'A line with no goods receipt behind it is counted as an expense.',
           'Quantities are in each item’s own unit. Read a quantity total per item, not down the whole sheet.',
         ],
       },

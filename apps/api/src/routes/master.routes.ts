@@ -618,7 +618,33 @@ const itemInclude = {
   taxRate: true,
   department: { select: { id: true, name: true, code: true } },
   style: { select: { id: true, code: true, name: true, colors: true } },
+  tdsSection: { select: { id: true, section: true, label: true } },
 }
+
+/*
+ * The TDS sections, for the "usual TDS section" box on a supplier or an
+ * expense head. Read-only here — they are set up in Settings — and shaped like
+ * any other master list so the master forms can pick from it.
+ */
+router.get('/tds-sections', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const rows = await prisma.tdsSection.findMany({
+    where: { isActive: true },
+    orderBy: [{ section: 'asc' }, { label: 'asc' }],
+  })
+  const data = rows.map((s) => ({
+    id: s.id,
+    section: s.section,
+    label: s.label,
+    rate: Number(s.rate),
+    name: `${s.section} — ${s.label} (${Number(s.rate)}%)`,
+    isActive: s.isActive,
+  }))
+  res.json({
+    success: true,
+    data,
+    pagination: { page: 1, limit: data.length, total: data.length, pages: 1 },
+  })
+})
 
 /*
  * Items from a spreadsheet: the template to fill, and the filled sheet read

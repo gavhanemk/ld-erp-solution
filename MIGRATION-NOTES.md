@@ -7,6 +7,31 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 12 Oct 2026 — routings by style: start and stop each step
+
+**Migration:** `20261012200000_style_step_runs`
+**Branch:** `feat/masters-routing-style-tracker`
+**Status: applied to the shared database on 12 Oct.** Nobody needs to apply it.
+Dry-run first inside a transaction that was rolled back, then applied with
+`prisma migrate deploy`.
+
+### What changed
+
+| Table | Change |
+|---|---|
+| `style_step_runs` | New. One row per style per process on its routing: when the step was started and stopped, and by whom; left out, with why; a note. `occurrence` tells apart a process that appears twice on one route. The routing, its version, and the step's name and place when first touched are kept for the record |
+
+Keyed by process rather than by routing step on purpose: saving a routing
+writes its steps afresh, so a link to a step would be lost on the next edit.
+Nothing existing changes, and no rows were written.
+
+### What you have to do
+
+Nothing, unless your branch has no copy of this folder. Then `prisma migrate
+dev` will offer to drop the table. Say no; `prisma migrate deploy` is safe.
+
+---
+
 ## 12 Oct 2026 — production: routings, the floor's ledger, job cards
 
 **Migrations:**

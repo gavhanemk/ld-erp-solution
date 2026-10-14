@@ -15,6 +15,9 @@ import {
   FileText,
   Package,
   Calculator,
+  MapPin,
+  Percent,
+  Tag,
 } from 'lucide-react'
 import { api, apiErrorMessage, ApiError, masterResource, type Paginated } from '@/lib/api'
 // The same panel the order and receipt forms are built from, so all three
@@ -25,6 +28,15 @@ import type { NewItem } from '@/components/purchase/NewItemDialog'
 import { ExpenseHeadDialog } from '@/components/purchase/ExpenseHeadDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
+import { StepInput } from '@/components/ui/StepInput'
+import { ExpenseTdsPanel, type TdsChoice } from '@/components/purchase/ExpenseTdsPanel'
+import {
+  CashPaymentSection,
+  cashPaymentMissing,
+  cashPaymentPayload,
+  emptyCashPayment,
+  type CashPayment,
+} from '@/components/purchase/CashPaymentSection'
 
 export interface BillLine {
   itemId: string
@@ -52,6 +64,10 @@ export interface BillLine {
    */
   rateAction?: 'ACCEPT' | 'DEBIT_NOTE' | null
   grnNumber?: string
+  /** The service order line this bills, when it came from a service order. */
+  poLineId?: string | null
+  /** That order's number, for the hint under the line. */
+  poNumber?: string
 }
 
 export interface BillCharge {
@@ -87,6 +103,13 @@ export interface PurchaseBill {
   tdsSection: string | null
   tdsRate: string | number | null
   tdsAmount: string | number
+  tdsSectionId?: string | null
+  /** Worked out from the rate (true) or typed by hand. */
+  tdsAuto?: boolean
+  /** Which of our places booked it. Empty is head office. */
+  warehouseId?: string | null
+  tdsSectionRef?: { id: string; section: string; label: string } | null
+  warehouse?: { id: string; name: string; code: string } | null
   isReverseCharge: boolean
   roundOff: string | number
   totalAmount: string | number
@@ -197,6 +220,28 @@ interface Option {
   creditDays?: number | null
   /** An item's category, nested as the master sends it — what marks an expense head. */
   category?: { id: string; name: string; parentId: string | null } | null
+  /** A supplier's PAN — without one, the no-PAN TDS rate applies. */
+  pan?: string | null
+  /** The TDS section a supplier's or an expense head's bills usually fall under. */
+  tdsSectionId?: string | null
+}
+
+/** A service purchase order, as much of it as a bill is filled from. */
+interface ServiceOrder {
+  id: string
+  poNumber: string
+  supplierId: string
+  deliveryWarehouseId: string | null
+  lines: Array<{
+    id: string
+    itemId: string
+    description: string | null
+    unitRate: string | number
+    discount: string | number | null
+    gstRate: string | number | null
+    pendingQty: string | number
+    shortClosed: boolean
+  }>
 }
 
 interface Category {
@@ -333,10 +378,13 @@ export function PurchaseBillDialog({
   record,
   initialGrnIds,
   expense,
+  cash,
+  fromServiceOrder,
 }: {
   open: boolean
   onClose: () => void
-  onSaved: () => void
+  /** Saved; with the server's own sentence when it has one. */
+  onSaved: (message?: string) => void
   record?: PurchaseBill | null
   /**
    * Receipts to gather onto the bill the moment the form opens, for the
@@ -360,12 +408,24 @@ export function PurchaseBillDialog({
    * description, because "Electricity" alone does not say which month.
    */
   expense?: boolean
+  /**
+   * Opens an expense with "Paid now" already ticked — the bill and its
+   * payment saved together. The tick is on the form either way.
+   */
+  cash?: boolean
+  /**
+   * A service purchase order to bill. Its open lines fill the bill, each tied
+   * to its order line so the order counts the work as done.
+   */
+  fromServiceOrder?: string | null
 }) {
   const isEdit = Boolean(record)
   // An existing bill with no receipt on any line was booked as an expense,
   // and opens that way again for editing.
   const expenseMode =
     Boolean(expense) ||
+    Boolean(cash) ||
+    Boolean(fromServiceOrder) ||
     Boolean(isEdit && record?.lines?.length && record.lines.every((l) => !l.grnLineId))
 
   const [suppliers, setSuppliers] = useState<Option[]>([])
@@ -386,7 +446,8 @@ export function PurchaseBillDialog({
   const [discountAmount, setDiscountAmount] = useState('')
   const [isReverseCharge, setIsReverseCharge] = useState(false)
   /*
-   * TDS and the notes box have no controls on the form any more.
+   * On a goods bill, TDS and the notes box have no controls on the form any
+   * more. An expense bill has its own TDS box — see `tdsSectionId` below.
    *
    * The state stays, and so does the round trip: a bill already carrying a
    * section, a rate or a note is opened with them, sends them back unchanged
@@ -401,6 +462,37 @@ export function PurchaseBillDialog({
   const [rateVarianceReason, setRateVarianceReason] = useState('')
   const [lines, setLines] = useState<BillLine[]>([emptyLine()])
   const [charges, setCharges] = useState<BillCharge[]>([])
+  /** Which of our places booked it — "Location" on the old expense form. */
+  const [warehouseId, setWarehouseId] = useState('')
+  const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([])
+  /*
+   * TDS on an expense bill: the section, whether the amount is worked out
+   * from its rate (the old form's "Auto cal") or typed, and the typed figure.
+   */
+  const [tdsSectionId, setTdsSectionId] = useState('')
+  const [tdsAuto, setTdsAuto] = useState(true)
+  const [tdsTyped, setTdsTyped] = useState('')
+  const [tdsSections, setTdsSections] = useState<TdsChoice[]>([])
+  const [yearSoFar, setYearSoFar] = useState<{ taxable: number; bills: number; year: string } | null>(
+    null
+  )
+  /**
+   * Whether somebody chose the TDS section themselves. Until they do it follows
+   * the supplier and the expense heads; after, it is theirs.
+   */
+  const tdsChosen = useRef(false)
+  /**
+   * "Paid now": the expense was settled on the spot, so the payment is saved
+   * with the bill and it lands Paid. One form for both, rather than the old
+   * ERP's two buttons for the same bill.
+   */
+  const [payNow, setPayNow] = useState(false)
+  /** How it was paid, when it was paid now. */
+  const [payment, setPayment] = useState<CashPayment>(() =>
+    emptyCashPayment(new Date().toISOString().slice(0, 10))
+  )
+  /** The service order being billed, by number, for the title. */
+  const [serviceOrderNo, setServiceOrderNo] = useState<string | null>(null)
 
   /*
    * The three boxes over the delivery list, and the only state they keep.
@@ -448,6 +540,16 @@ export function PurchaseBillDialog({
     setTdsSection(record?.tdsSection ?? '')
     setTdsRate(num(record?.tdsRate) > 0 ? String(record?.tdsRate) : '')
     setNotes(record?.notes ?? '')
+    setWarehouseId(record?.warehouseId ?? '')
+    setTdsSectionId(record?.tdsSectionId ?? '')
+    setTdsAuto(record?.tdsAuto ?? true)
+    setTdsTyped(record && record.tdsAuto === false ? String(record.tdsAmount) : '')
+    // A saved bill's section was somebody's choice; a new one follows the supplier.
+    tdsChosen.current = Boolean(record)
+    setYearSoFar(null)
+    setPayment(emptyCashPayment((record?.billDate ?? new Date().toISOString()).slice(0, 10)))
+    setServiceOrderNo(null)
+    setPayNow(Boolean(cash) && !record)
     setRateVarianceReason('')
     setFilterPo('')
     setFilterChallan('')
@@ -459,6 +561,7 @@ export function PurchaseBillDialog({
         ? record.lines.map((l) => ({
             itemId: l.itemId,
             grnLineId: l.grnLineId ?? null,
+            poLineId: l.poLineId ?? null,
             description: l.description ?? '',
             qty: String(l.qty),
             unitPrice: String(l.unitPrice),
@@ -587,6 +690,49 @@ export function PurchaseBillDialog({
       cancelled = true
     }
   }, [open, expenseMode])
+
+  // Locations, for the expense bill's "Location" box.
+  useEffect(() => {
+    if (!open || !expenseMode) return
+    let cancelled = false
+    masterResource<{ id: string; name: string }>('warehouses')
+      .list({ limit: 100, active: true })
+      .then((r) => {
+        if (!cancelled) setWarehouses(r.data)
+      })
+      .catch(() => {
+        // Head office alone is still an answer.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, expenseMode])
+
+  /*
+   * The TDS sections with the rate in force on the bill's date — asked again
+   * when the date moves, because a rate changes from a date and the bill is
+   * worked out at the one that applied on its own day.
+   */
+  useEffect(() => {
+    if (!open || !expenseMode) return
+    let cancelled = false
+    api
+      .get<{ data: TdsChoice[] }>(`/purchase/tds/sections?date=${billDate}`)
+      .then((r) => {
+        if (!cancelled) setTdsSections(r.data)
+      })
+      .catch(() => {
+        if (!cancelled) setTdsSections([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, expenseMode, billDate])
+
+  // A cash expense is paid the day it is booked, unless somebody says otherwise.
+  useEffect(() => {
+    if (payNow) setPayment((p) => ({ ...p, paymentDate: billDate }))
+  }, [payNow, billDate])
 
   const expenseCategoryIds = useMemo(() => {
     const named = new Set(categories.filter((c) => EXPENSE_NAME.test(c.name)).map((c) => c.id))
@@ -791,6 +937,91 @@ export function PurchaseBillDialog({
     if (!supplierId || !dueFrom) return
     setDueDate(addDays(dueFrom, termDays))
   }, [open, supplierId, dueFrom, termDays])
+
+  /*
+   * The TDS section follows the bill until somebody picks one: the supplier's
+   * usual section first — it is what tells a company from an individual —
+   * then the first expense head that has one.
+   */
+  const headSection =
+    lines.map((l) => itemById.get(l.itemId)?.tdsSectionId).find((id): id is string => Boolean(id)) ?? ''
+  useEffect(() => {
+    if (!open || !expenseMode || tdsChosen.current) return
+    const pick = supplier?.tdsSectionId || headSection || ''
+    // A usual section that has since been retired is not offered.
+    if (pick && !tdsSections.some((s) => s.id === pick)) return
+    setTdsSectionId(pick)
+  }, [open, expenseMode, supplier?.tdsSectionId, headSection, tdsSections])
+
+  // What this supplier has billed so far this year, for the TDS limits.
+  useEffect(() => {
+    if (!open || !expenseMode || !supplierId) {
+      setYearSoFar(null)
+      return
+    }
+    let cancelled = false
+    const qs = new URLSearchParams({ supplierId, date: billDate })
+    if (tdsSectionId) qs.set('sectionId', tdsSectionId)
+    if (record?.id) qs.set('excludeBillId', record.id)
+    api
+      .get<{ data: { taxable: number; bills: number; year: string } }>(
+        `/purchase/tds/year-to-date?${qs}`
+      )
+      .then((r) => {
+        if (!cancelled) setYearSoFar(r.data)
+      })
+      .catch(() => {
+        if (!cancelled) setYearSoFar(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, expenseMode, supplierId, billDate, tdsSectionId, record?.id])
+
+  /*
+   * Billing a service order: its open lines fill the bill, each tied to its
+   * order line so the order counts the work as done. Once per opening.
+   */
+  const pulledOrder = useRef<string | null>(null)
+  useEffect(() => {
+    if (!open) {
+      pulledOrder.current = null
+      return
+    }
+    if (record || !fromServiceOrder || pulledOrder.current === fromServiceOrder) return
+    pulledOrder.current = fromServiceOrder
+    void (async () => {
+      try {
+        const res = await api.get<{ data: ServiceOrder }>(`/purchase/orders/${fromServiceOrder}`)
+        const po = res.data
+        setServiceOrderNo(po.poNumber)
+        setSupplierId(po.supplierId)
+        setPoId(po.id)
+        if (po.deliveryWarehouseId) setWarehouseId(po.deliveryWarehouseId)
+        const left = po.lines.filter((l) => !l.shortClosed && Number(l.pendingQty) > 0)
+        if (!left.length) {
+          setError(`Everything on ${po.poNumber} has already been billed.`)
+          return
+        }
+        setLines(
+          left.map((l) => ({
+            itemId: l.itemId,
+            grnLineId: null,
+            poLineId: l.id,
+            poNumber: po.poNumber,
+            description: l.description ?? '',
+            qty: String(Number(l.pendingQty)),
+            unitPrice: String(l.unitRate),
+            discount: String(l.discount ?? 0),
+            gstRate: String(l.gstRate ?? ''),
+            pendingQty: Number(l.pendingQty),
+          }))
+        )
+      } catch (err) {
+        setError(apiErrorMessage(err, 'Could not read that service order.'))
+      }
+    })()
+  }, [open, record, fromServiceOrder])
 
   /**
    * The receipts already gathered onto this bill, in order, without repeats.
@@ -1133,6 +1364,16 @@ export function PurchaseBillDialog({
         ? 'CGST_SGST'
         : 'IGST'
 
+  /** The chosen TDS section with its rate on the bill's date. */
+  const tdsChoice = tdsSections.find((s) => s.id === tdsSectionId) ?? null
+  const panMissing = Boolean(supplier) && !supplier?.pan?.trim()
+  /** The rate deducted at: the no-PAN rate when there is no PAN and one is set. */
+  const tdsRateInUse = tdsChoice
+    ? panMissing && tdsChoice.noPanRate != null
+      ? tdsChoice.noPanRate
+      : tdsChoice.rate
+    : 0
+
   /** Mirrors priceBill on the API, so the screen and the saved bill agree. */
   const totals = useMemo(() => {
     const lineGross = lines.map((l) => num(l.qty) * num(l.unitPrice) * (1 - num(l.discount) / 100))
@@ -1159,7 +1400,14 @@ export function PurchaseBillDialog({
     // government, so it must not swell what they are paid.
     const payable = isReverseCharge ? taxable : taxable + tax
     const total = Math.round(payable)
-    const tds = taxable * (num(tdsRate) / 100)
+    // On the value before GST and to the rupee, as the server books it: from
+    // the section's rate on the bill's date, or as typed with Auto off. An
+    // older bill with no section keeps the rate it was booked at.
+    const tds = tdsChoice
+      ? tdsAuto
+        ? Math.round((taxable * tdsRateInUse) / 100)
+        : num(tdsTyped)
+      : Math.round((taxable * num(tdsRate)) / 100)
 
     return {
       lineGross,
@@ -1173,7 +1421,18 @@ export function PurchaseBillDialog({
       tds,
       balance: total - tds,
     }
-  }, [lines, charges, discountAmount, taxMode, isReverseCharge, tdsRate])
+  }, [
+    lines,
+    charges,
+    discountAmount,
+    taxMode,
+    isReverseCharge,
+    tdsRate,
+    tdsChoice,
+    tdsAuto,
+    tdsTyped,
+    tdsRateInUse,
+  ])
 
   if (!open) return null
 
@@ -1198,8 +1457,10 @@ export function PurchaseBillDialog({
     const item = itemById.get(itemId)
     setLine(index, {
       itemId,
-      // A manually added line is not matched to a receipt.
+      // A manually added line is not matched to a receipt, or to an order.
       grnLineId: null,
+      poLineId: null,
+      poNumber: undefined,
       acceptedQty: undefined,
       pendingQty: undefined,
       orderedRate: undefined,
@@ -1366,10 +1627,15 @@ export function PurchaseBillDialog({
       isReverseCharge,
       tdsSection: tdsSection.trim() || null,
       tdsRate: num(tdsRate) || null,
+      tdsSectionId: tdsSectionId || null,
+      tdsAuto,
+      tdsAmount: tdsSectionId && !tdsAuto ? num(tdsTyped) : null,
+      warehouseId: warehouseId || null,
       notes: notes.trim() || null,
       lines: lines.map((l) => ({
         itemId: l.itemId,
         grnLineId: l.grnLineId || null,
+        poLineId: l.poLineId || null,
         description: (l.description as string)?.trim() || null,
         qty: num(l.qty),
         unitPrice: num(l.unitPrice),
@@ -1388,12 +1654,20 @@ export function PurchaseBillDialog({
     }
 
     try {
+      let message: string | undefined
       if (isEdit && record) {
         await api.patch(`/purchase/bills/${record.id}`, payload)
+      } else if (payNow && expenseMode) {
+        const res = await api.post<{ message?: string }>('/purchase/expenses/cash', {
+          ...payload,
+          payment: cashPaymentPayload(payment),
+        })
+        message = res.message
       } else {
-        await api.post('/purchase/bills', payload)
+        const res = await api.post<{ message?: string }>('/purchase/bills', payload)
+        message = res.message
       }
-      onSaved()
+      onSaved(message)
       onClose()
     } catch (err) {
       setError(apiErrorMessage(err, 'Could not save. Is the API running?'))
@@ -1438,6 +1712,9 @@ export function PurchaseBillDialog({
     missing.push({ what: 'the date on their bill', focus: 'bill-supplier-date' })
   if (lines.some((l) => !l.itemId)) missing.push({ what: 'an item on every line' })
   if (lines.some((l) => num(l.qty) <= 0)) missing.push({ what: 'a quantity on every line' })
+  if (expenseMode && tdsChoice && !tdsAuto && tdsTyped.trim() === '')
+    missing.push({ what: 'the TDS amount', focus: 'bill-tds-amount' })
+  if (payNow && expenseMode && !isEdit) missing.push(...cashPaymentMissing(payment))
   if (undecidedRates.length > 0) {
     const n = undecidedRates.length
     missing.push({
@@ -1469,7 +1746,13 @@ export function PurchaseBillDialog({
         top of this one. Filling the height makes the margin the padding and
         nothing else. */}
       <div
-        className="glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden"
+        // An expense bill has a handful of fields and one short table, so on a
+        // wide screen it is held to a readable width and centred rather than
+        // stretched edge to edge. A goods bill keeps the full width for its
+        // deliveries table.
+        className={`glass-card po-form flex h-full max-h-full w-full flex-col overflow-hidden ${
+          expenseMode ? 'max-w-6xl' : ''
+        }`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="bill-dialog-title"
@@ -1521,15 +1804,19 @@ export function PurchaseBillDialog({
               >
                 {isEdit
                   ? `Edit ${record?.billNumber}`
-                  : expenseMode
-                    ? 'Book an Expense Bill'
-                    : 'Book a Supplier Bill'}
+                  : fromServiceOrder
+                      ? `Bill ${serviceOrderNo ?? 'a Service Order'}`
+                      : expenseMode
+                        ? 'Book an Expense Bill'
+                        : 'Book a Supplier Bill'}
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                 {isEdit
                   ? 'A bill can be changed until a payment is made against it'
-                  : expenseMode
-                    ? 'Electricity, rent, repairs, services — a bill with no order or receipt behind it.'
+                  : fromServiceOrder
+                      ? 'The order’s open lines are filled in. Bill what the supplier has charged for.'
+                      : expenseMode
+                        ? 'Electricity, rent, repairs, services — a bill with no order or receipt behind it.'
                     : 'Our reference number is given when you save. Type the supplier’s own number below.'}
               </p>
             </div>
@@ -1545,7 +1832,7 @@ export function PurchaseBillDialog({
             <div className="hidden md:block">
               <button type="submit" form="bill-form" className="btn-primary" disabled={saving}>
                 {saving ? <Loader2 size={15} className="animate-spin" /> : <Receipt size={15} />}
-                {isEdit ? 'Save changes' : 'Book bill'}
+                {isEdit ? 'Save changes' : payNow && expenseMode ? 'Book & pay' : 'Book bill'}
               </button>
             </div>
             <button onClick={onClose} className="btn-ghost p-1.5" aria-label="Close">
@@ -1924,7 +2211,14 @@ export function PurchaseBillDialog({
                 one carries a GSTIN line under it and the other a
                 paragraph, and either beside a lone date field would read
                 as unbalanced. */}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 md:grid-cols-4 xl:grid-cols-8">
+              <div
+                className={`grid grid-cols-[repeat(auto-fit,minmax(105px,1fr))] gap-2.5 md:grid-cols-4 ${
+                  // Six on an expense bill, whose form is held narrower: eight
+                  // left the date boxes too tight for their own calendar icon.
+                  // Location and reverse charge then share the second row.
+                  expenseMode ? 'xl:grid-cols-6' : 'xl:grid-cols-8'
+                }`}
+              >
                 <div className="col-span-full md:col-span-2">
                   <label className="form-label" htmlFor="bill-supplier">
                     Supplier<span className="ml-0.5 text-red-400">*</span>
@@ -2045,20 +2339,50 @@ export function PurchaseBillDialog({
                     longer explains itself here. */}
                 </div>
 
-                <div className="col-span-full flex items-end md:col-span-2">
-                  <label className="text-foreground flex cursor-pointer items-start gap-2 text-sm">
+                {expenseMode && (
+                  <div className="col-span-full md:col-span-2">
+                    <label className="form-label" htmlFor="bill-location">
+                      Location
+                    </label>
+                    <div className="relative">
+                      <MapPin
+                        size={15}
+                        className="text-muted-foreground pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2"
+                      />
+                      <SmartSelect
+                        id="bill-location"
+                        className="form-input pl-9"
+                        value={warehouseId}
+                        onChange={(e) => setWarehouseId(e.target.value)}
+                      >
+                        <option value="">Head office</option>
+                        {warehouses.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </div>
+                  </div>
+                )}
+
+                <div
+                  className={
+                    expenseMode ? 'col-span-full flex items-end pb-2.5 md:col-span-2 xl:col-span-4' : 'col-span-full'
+                  }
+                >
+                  <label
+                    className="text-foreground inline-flex cursor-pointer items-center gap-2 text-sm"
+                    title="Common on transport and on bills from unregistered parties"
+                  >
                     <input
                       type="checkbox"
-                      className="mt-0.5"
                       checked={isReverseCharge}
                       onChange={(e) => setIsReverseCharge(e.target.checked)}
                     />
-                    <span>
-                      Reverse charge
-                      <span className="text-muted-foreground block text-xs">
-                        We pay the GST to the government, not to the supplier. Common on transport
-                        and on bills from unregistered parties.
-                      </span>
+                    Reverse charge
+                    <span className="text-muted-foreground text-xs">
+                      — we pay this bill’s GST to the government, not the supplier
                     </span>
                   </label>
                 </div>
@@ -2072,7 +2396,7 @@ export function PurchaseBillDialog({
                   {overBilled.map((l, i) => (
                     <p key={`o${i}`}>
                       {itemById.get(l.itemId)?.name ?? 'A line'}: the bill claims {num(l.qty)} but
-                      only {l.pendingQty} is left to bill on {l.grnNumber}. Saving this will be
+                      only {l.pendingQty} is left to bill on {l.grnNumber ?? l.poNumber}. Saving this will be
                       refused.
                     </p>
                   ))}
@@ -2263,13 +2587,21 @@ export function PurchaseBillDialog({
                           </td>
                           <td className="min-w-[130px] px-3 py-1.5">
                             {expenseMode ? (
-                              <input
-                                className="form-input h-8"
-                                value={line.description ?? ''}
-                                onChange={(e) => setLine(i, { description: e.target.value })}
-                                placeholder="e.g. Sept 2026, meter 40231"
-                                aria-label={`Line ${i + 1} description`}
-                              />
+                              <>
+                                <input
+                                  className="form-input h-8"
+                                  value={line.description ?? ''}
+                                  onChange={(e) => setLine(i, { description: e.target.value })}
+                                  placeholder="e.g. Sept 2026, meter 40231"
+                                  aria-label={`Line ${i + 1} description`}
+                                />
+                                {line.poNumber && (
+                                  <p className="text-muted-foreground mt-0.5 text-[10px]">
+                                    {line.poNumber}
+                                    {line.pendingQty != null ? ` · ${line.pendingQty} left to bill` : ''}
+                                  </p>
+                                )}
+                              </>
                             ) : line.grnNumber ? (
                               <>
                                 <span className="badge-info">{line.grnNumber}</span>
@@ -2537,168 +2869,241 @@ export function PurchaseBillDialog({
               </div>
             </Section>
 
-            {/* TDS and the notes box used to sit to the left of this.
-              Taken off the form on request. Nothing was dropped from the
-              document: a bill already carrying a TDS section or a note keeps
-              both — the form still holds them and still sends them back
-              untouched — there is simply no longer anywhere to type a new
-              one. */}
-            <Section icon={Calculator} title="Totals">
-              <div className="border-border bg-secondary/40 h-fit space-y-1.5 rounded-lg border p-2.5 text-sm">
-                <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
-                <div className="flex items-center justify-between gap-4">
-                  <label htmlFor="bill-discount" className="text-muted-foreground">
-                    Discount on the whole bill
-                  </label>
-                  <input
-                    id="bill-discount"
-                    type="number"
-                    step="0.01"
-                    min={0}
-                    className="form-input h-8 w-32 text-right"
-                    value={discountAmount}
-                    onChange={(e) => setDiscountAmount(e.target.value)}
-                  />
-                </div>
-                {chargeTypes.length > 0 && (
-                  <div className="space-y-1.5 py-0.5">
-                    {charges.map((c, i) => (
-                      <div key={i} className="flex items-center gap-1.5">
-                        <SmartSelect
-                          className="form-input h-8 min-w-0 flex-1 text-xs"
-                          value={c.chargeTypeId}
-                          onChange={(e) => {
-                            const ct = chargeById.get(e.target.value)
-                            setCharges((p) =>
-                              p.map((x, y) =>
-                                y === i
-                                  ? {
-                                      ...x,
-                                      chargeTypeId: e.target.value,
-                                      gstRate:
-                                        x.gstRate ||
-                                        (ct?.defaultGstRate != null
-                                          ? String(ct.defaultGstRate)
-                                          : ''),
-                                    }
-                                  : x
-                              )
-                            )
-                          }}
-                          aria-label={`Charge ${i + 1} type`}
-                        >
-                          <option value="">Charge type…</option>
-                          {chargeTypes.map((ct) => (
-                            <option key={ct.id} value={ct.id}>
-                              {ct.name}
-                            </option>
-                          ))}
-                        </SmartSelect>
-                        <input
-                          type="number"
-                          step="0.01"
-                          min={0}
-                          className="form-input h-8 w-24 shrink-0 text-right text-xs"
-                          placeholder="Amount"
-                          value={String(c.amount)}
-                          onChange={(e) =>
-                            setCharges((p) =>
-                              p.map((x, y) => (y === i ? { ...x, amount: e.target.value } : x))
-                            )
-                          }
-                          aria-label={`Charge ${i + 1} amount`}
-                        />
-                        <input
-                          type="number"
-                          step="0.01"
-                          min={0}
-                          max={100}
-                          className="form-input h-8 w-16 shrink-0 text-right text-xs"
-                          placeholder="GST%"
-                          disabled={taxMode === 'NONE'}
-                          value={taxMode === 'NONE' ? '' : String(c.gstRate)}
-                          onChange={(e) =>
-                            setCharges((p) =>
-                              p.map((x, y) => (y === i ? { ...x, gstRate: e.target.value } : x))
-                            )
-                          }
-                          aria-label={`Charge ${i + 1} GST rate`}
-                        />
+            {/* The money, in two columns as on the purchase order: what can be
+              changed on the left — the discount, the charges and, on an expense
+              bill, the TDS — and the sum on the right, ending in what the
+              supplier is actually paid. A goods bill has no TDS card; one
+              already carrying TDS keeps it, and the sum still shows it. */}
+            <div className="grid items-start gap-2.5 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)]">
+              <div className="space-y-2.5">
+                <Section icon={Tag} title="Discount & Charges">
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <label htmlFor="bill-discount" className="text-muted-foreground text-sm">
+                        Discount on the whole bill (₹)
+                      </label>
+                      <StepInput
+                        id="bill-discount"
+                        className="form-input h-8 w-36 text-right"
+                        decimals
+                        placeholder="0"
+                        value={discountAmount}
+                        onValueChange={setDiscountAmount}
+                      />
+                    </div>
+                    {chargeTypes.length > 0 && (
+                      <div className="space-y-1.5">
+                        {charges.length > 0 && (
+                          <div className="text-muted-foreground grid grid-cols-[minmax(0,22rem)_7rem_4.5rem_1.75rem] gap-1.5 text-[10px] font-semibold uppercase tracking-wider">
+                            <span>Charge</span>
+                            <span className="text-right">Amount (₹)</span>
+                            <span className="text-right">GST %</span>
+                            <span />
+                          </div>
+                        )}
+                        {charges.map((c, i) => (
+                          <div
+                            key={i}
+                            className="grid grid-cols-[minmax(0,22rem)_7rem_4.5rem_1.75rem] items-center gap-1.5"
+                          >
+                            <SmartSelect
+                              className="form-input h-8 min-w-0 text-xs"
+                              value={c.chargeTypeId}
+                              onChange={(e) => {
+                                const ct = chargeById.get(e.target.value)
+                                setCharges((p) =>
+                                  p.map((x, y) =>
+                                    y === i
+                                      ? {
+                                          ...x,
+                                          chargeTypeId: e.target.value,
+                                          gstRate:
+                                            x.gstRate ||
+                                            (ct?.defaultGstRate != null
+                                              ? String(ct.defaultGstRate)
+                                              : ''),
+                                        }
+                                      : x
+                                  )
+                                )
+                              }}
+                              aria-label={`Charge ${i + 1} type`}
+                            >
+                              <option value="">Pick a charge…</option>
+                              {chargeTypes.map((ct) => (
+                                <option key={ct.id} value={ct.id}>
+                                  {ct.name}
+                                </option>
+                              ))}
+                            </SmartSelect>
+                            <StepInput
+                              className="form-input h-8 text-right text-xs"
+                              decimals
+                              placeholder="0"
+                              value={String(c.amount)}
+                              onValueChange={(v) =>
+                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, amount: v } : x)))
+                              }
+                              aria-label={`Charge ${i + 1} amount`}
+                            />
+                            <StepInput
+                              className="form-input h-8 text-right text-xs"
+                              decimals
+                              max={100}
+                              placeholder="0"
+                              disabled={taxMode === 'NONE'}
+                              value={taxMode === 'NONE' ? '' : String(c.gstRate)}
+                              onValueChange={(v) =>
+                                setCharges((p) => p.map((x, y) => (y === i ? { ...x, gstRate: v } : x)))
+                              }
+                              aria-label={`Charge ${i + 1} GST rate`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
+                              className="btn-ghost text-muted-foreground p-1 hover:text-red-400"
+                              aria-label={`Remove charge ${i + 1}`}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        ))}
                         <button
                           type="button"
-                          onClick={() => setCharges((p) => p.filter((_, y) => y !== i))}
-                          className="btn-ghost text-muted-foreground shrink-0 p-1 hover:text-red-400"
-                          aria-label={`Remove charge ${i + 1}`}
+                          onClick={() =>
+                            setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
+                          }
+                          className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
                         >
-                          <Trash2 size={12} />
+                          <Plus size={12} /> Add a charge — freight, transport, packing
                         </button>
                       </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setCharges((p) => [...p, { chargeTypeId: '', amount: '', gstRate: '' }])
-                      }
-                      className="text-muted-foreground flex items-center gap-1 text-xs transition-colors hover:text-teal-400"
-                    >
-                      <Plus size={12} /> Add charge
-                    </button>
+                    )}
                   </div>
-                )}
-                <Row label="Taxable value" value={totals.taxable} />
-                {taxMode === 'CGST_SGST' && (
-                  <>
-                    <Row label="CGST" value={totals.tax / 2} />
-                    <Row label="SGST" value={totals.tax / 2} />
-                  </>
-                )}
-                {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
-                {taxMode === 'NONE' && (
-                  <p className="text-muted-foreground py-1 text-xs">
-                    No GST — this supplier is not registered.
-                  </p>
-                )}
-                {taxMode === null && (
-                  <>
-                    <Row label="GST" value={totals.tax} />
-                    <p className="text-muted-foreground py-1 text-xs">
-                      Choose a supplier to see whether this splits into CGST + SGST or is IGST.
-                    </p>
-                  </>
-                )}
-                {isReverseCharge && totals.tax > 0 && (
-                  <p className="py-1 text-xs text-amber-400">
-                    Reverse charge — the ₹{inr(totals.tax)} of GST above is payable by us to the
-                    government and is not part of what the supplier is paid.
-                  </p>
-                )}
-                <Row label="Rounding" value={totals.roundOff} />
-                <div className="border-border flex items-center justify-between border-t pt-2">
-                  <span className="text-foreground font-semibold">Bill total</span>
-                  <span className="text-foreground text-lg font-semibold tabular-nums">
-                    ₹{inr(totals.total)}
-                  </span>
-                </div>
-                {totals.tds > 0 && (
-                  <>
-                    <Row
-                      label={`TDS withheld${tdsSection ? ` (${tdsSection})` : ''}`}
-                      value={-totals.tds}
+                </Section>
+
+                {expenseMode && (
+                  <Section icon={Percent} title="TDS">
+                    <ExpenseTdsPanel
+                      sections={tdsSections}
+                      sectionId={tdsSectionId}
+                      onSection={(id) => {
+                        tdsChosen.current = true
+                        setTdsSectionId(id)
+                        if (!id) {
+                          setTdsAuto(true)
+                          setTdsTyped('')
+                        }
+                      }}
+                      auto={tdsAuto}
+                      onAuto={(a) => {
+                        setTdsAuto(a)
+                        // The typed box starts from the worked-out figure.
+                        if (!a && !tdsTyped) setTdsTyped(String(totals.tds))
+                      }}
+                      typed={tdsTyped}
+                      onTyped={setTdsTyped}
+                      computed={Math.round((totals.taxable * tdsRateInUse) / 100)}
+                      rate={tdsChoice ? tdsRateInUse : null}
+                      panMissing={panMissing}
+                      taxable={totals.taxable}
+                      yearSoFar={yearSoFar}
+                      onSectionAdded={(id) => {
+                        tdsChosen.current = true
+                        void api
+                          .get<{ data: TdsChoice[] }>(`/purchase/tds/sections?date=${billDate}`)
+                          .then((r) => {
+                            setTdsSections(r.data)
+                            setTdsSectionId(id)
+                          })
+                          .catch(() => setTdsSectionId(id))
+                      }}
                     />
-                    <div className="border-border flex items-center justify-between border-t pt-2">
-                      <span className="text-foreground font-medium">Payable to supplier</span>
-                      <span className="text-foreground font-semibold tabular-nums">
-                        ₹{inr(totals.balance)}
-                      </span>
-                    </div>
-                    <p className="text-muted-foreground text-xs">
-                      Paying this smaller amount settles the bill in full — the TDS is accounted for
-                      rather than left outstanding against them.
-                    </p>
-                  </>
+                  </Section>
                 )}
               </div>
-            </Section>
+
+              <Section icon={Calculator} title="Totals">
+                <div className="space-y-1.5 text-sm">
+                  <Row label={expenseMode ? 'Subtotal' : 'Goods subtotal'} value={totals.subtotal} />
+                  {totals.discount > 0 && <Row label="Less discount" value={-totals.discount} />}
+                  {totals.chargeTotal > 0 && <Row label="Add charges" value={totals.chargeTotal} />}
+                  <Row label="Taxable value" value={totals.taxable} />
+                  {taxMode === 'CGST_SGST' && (
+                    <>
+                      <Row label="CGST" value={totals.tax / 2} />
+                      <Row label="SGST" value={totals.tax / 2} />
+                    </>
+                  )}
+                  {taxMode === 'IGST' && <Row label="IGST" value={totals.tax} />}
+                  {taxMode === 'NONE' && (
+                    <p className="text-muted-foreground text-xs">No GST — the supplier is not registered.</p>
+                  )}
+                  {taxMode === null && (
+                    <>
+                      <Row label="GST" value={totals.tax} />
+                      <p className="text-muted-foreground text-xs">
+                        Pick the supplier to split this into CGST + SGST or IGST.
+                      </p>
+                    </>
+                  )}
+                  {isReverseCharge && totals.tax > 0 && (
+                    <p className="text-xs text-amber-400">
+                      Reverse charge: the ₹{inr(totals.tax)} of GST is ours to pay, not part of what
+                      the supplier is paid.
+                    </p>
+                  )}
+                  <Row label="Rounding" value={totals.roundOff} />
+                  <div className="border-border flex items-center justify-between border-t pt-2">
+                    <span className="text-foreground font-semibold">Bill total</span>
+                    <span className="text-foreground text-lg font-semibold tabular-nums">
+                      ₹{inr(totals.total)}
+                    </span>
+                  </div>
+                  {(totals.tds > 0 || (expenseMode && tdsChoice)) && (
+                    <>
+                      <Row
+                        label={`Less TDS${(tdsChoice?.section ?? tdsSection) ? ` · ${tdsChoice?.section ?? tdsSection}` : ''}`}
+                        value={-totals.tds}
+                      />
+                      <div className="border-primary/25 bg-primary/10 flex items-center justify-between rounded-lg border px-3 py-2">
+                        <span className="text-foreground font-semibold">Net payable</span>
+                        <span className="text-primary text-lg font-semibold tabular-nums">
+                          ₹{inr(totals.balance)}
+                        </span>
+                      </div>
+                      <p className="text-muted-foreground text-xs">
+                        Paying this settles the bill in full — the TDS goes to the government.
+                      </p>
+                    </>
+                  )}
+                  {expenseMode && !isEdit && (
+                    <label className="border-border flex cursor-pointer items-start gap-2 border-t pt-2.5">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={payNow}
+                        onChange={(e) => setPayNow(e.target.checked)}
+                      />
+                      <span>
+                        <span className="text-foreground font-medium">Paid now</span>
+                        <span className="text-muted-foreground block text-xs">
+                          Settled on the spot — the payment is saved with the bill and it shows as Paid.
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                </div>
+              </Section>
+            </div>
+
+            {payNow && expenseMode && !isEdit && (
+              <CashPaymentSection
+                value={payment}
+                onChange={(p) => setPayment((prev) => ({ ...prev, ...p }))}
+                amount={totals.balance}
+              />
+            )}
           </div>
 
           {/* Footer — stays put, so Save is always one press away. */}
@@ -2708,7 +3113,7 @@ export function PurchaseBillDialog({
             </button>
             <button type="submit" className="btn-primary" disabled={saving}>
               {saving && <Loader2 size={15} className="animate-spin" />}
-              {isEdit ? 'Save changes' : 'Book bill'}
+              {isEdit ? 'Save changes' : payNow && expenseMode ? 'Book & pay' : 'Book bill'}
             </button>
           </div>
         </form>
