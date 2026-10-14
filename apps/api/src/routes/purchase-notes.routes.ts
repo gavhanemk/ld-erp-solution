@@ -530,6 +530,130 @@ async function assertWithinBill(
   }
 }
 
+/** The database half of POST / below, so another screen (a job-work receipt) can raise a note in its own transaction. */
+export async function createPurchaseNoteIn(tx: Prisma.TransactionClient, data: z.infer<typeof createNoteSchema>, userId: string) {
+
+  // The supplier comes from the bill when there is one, and from the
+  // receipt when there is not — a note whose supplier disagrees with the
+  // document it adjusts is a note that reduces the wrong party's payable,
+  // so it is derived and not taken on trust either way.
+  let supplierId = data.supplierId
+  if (data.billId) {
+    const bill = await tx.purchaseInvoice.findUnique({
+      where: { id: data.billId },
+      select: { id: true, supplierId: true, billNumber: true, status: true },
+    })
+    if (!bill) throw new AppError('That purchase bill no longer exists', 404, 'NOT_FOUND')
+    if (bill.status === 'CANCELLED') {
+      throw new AppError(
+        `${bill.billNumber} is cancelled. There is nothing left on it to adjust.`,
+        400,
+        'BILL_CANCELLED'
+      )
+    }
+    supplierId = bill.supplierId
+  } else if (data.grnId) {
+    supplierId = await supplierFromGrn(tx, data.grnId)
+  }
+
+  const isIntraState = await taxContextFor(tx, supplierId, data.billId)
+  const priced = priceNote({
+    lines: data.lines,
+    isIntraState,
+    otherCharges: data.otherCharges,
+    discountAmount: data.discountAmount,
+  })
+
+  if (priced.totalAmount <= 0) {
+    throw new AppError(
+      'This note comes to nothing. Enter a quantity and a rate on at least one line.',
+      400,
+      'NOTHING_CLAIMED'
+    )
+  }
+
+  /* The direction comes from the document, never from the event. For
+     every kind but OTHER it is a definition and `data.effect` is ignored;
+     for OTHER it is the explicit choice the form was made to ask for. */
+  assertIssuerMatches(data.docType, data.issuedBy)
+  const effect = effectFor(data.docType, data.effect ?? null)
+
+  if (data.billId) {
+    await assertWithinBill(tx, {
+      billId: data.billId,
+      reason: data.reason,
+      effect,
+      lines: data.lines,
+      pricedLines: priced.lines,
+    })
+  }
+
+  /* Each kind draws from its own series. Sharing one between our claims and
+     the supplier's documents would put holes in a run that has to be
+     unbroken, and make "DN-2627-0007" ambiguous about whose it is. */
+  const noteNumber = await nextDocumentNumber(tx, DOC_RULES[data.docType].series, data.noteDate)
+
+  return tx.purchaseNote.create({
+    data: {
+      noteNumber,
+      reason: data.reason,
+      reasonNote: data.reasonNote ?? null,
+      gstTreatment: data.gstTreatment ?? 'NOT_REVIEWED',
+      ...(data.gstTreatment && data.gstTreatment !== 'NOT_REVIEWED'
+        ? { gstTreatedById: userId, gstTreatedAt: new Date() }
+        : {}),
+      issuedBy: data.issuedBy,
+      docType: data.docType,
+      effect,
+      supplierId,
+      billId: data.billId ?? null,
+      withoutBillReason: data.billId ? null : (data.withoutBillReason ?? null),
+      poId: data.poId ?? null,
+      grnId: data.grnId ?? null,
+      noteDate: data.noteDate,
+      supplierDocNo: data.supplierDocNo ?? null,
+      supplierDocDate: data.supplierDocDate ?? null,
+      warehouseId: data.warehouseId ?? null,
+      lrNumber: data.lrNumber ?? null,
+      vehicleNo: data.vehicleNo ?? null,
+      otherRef: data.otherRef ?? null,
+      isIntraState,
+      taxableAmount: priced.taxableAmount,
+      discountAmount: priced.discountAmount,
+      cgst: priced.cgst,
+      sgst: priced.sgst,
+      igst: priced.igst,
+      otherCharges: priced.otherCharges,
+      roundOff: priced.roundOff,
+      totalAmount: priced.totalAmount,
+      notes: data.notes ?? null,
+      createdById: userId,
+      lines: {
+        create: priced.lines.map((l, i) => ({
+          itemId: l.itemId,
+          billLineId: l.billLineId ?? null,
+          grnLineId: l.grnLineId ?? null,
+          description: l.description ?? null,
+          hsnCode: l.hsnCode ?? null,
+          originalQty: l.originalQty ?? null,
+          originalRate: l.originalRate ?? null,
+          qty: l.qty,
+          unitPrice: l.unitPrice,
+          taxableValue: l.taxableValue,
+          gstRate: l.gstRate,
+          cgst: l.cgst,
+          sgst: l.sgst,
+          igst: l.igst,
+          amount: l.amount,
+          remarks: l.remarks ?? null,
+          sortOrder: i,
+        })),
+      },
+    },
+    include: noteInclude,
+  })
+}
+
 /**
  * The supplier a receipt was received against, for a note raised off it with
  * no bill behind it — the same derivation as `supplierId = bill.supplierId`
@@ -549,127 +673,7 @@ async function supplierFromGrn(tx: Prisma.TransactionClient, grnId: string): Pro
 router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createNoteSchema.parse(req.body)
 
-  const note = await prisma.$transaction(async (tx) => {
-    // The supplier comes from the bill when there is one, and from the
-    // receipt when there is not — a note whose supplier disagrees with the
-    // document it adjusts is a note that reduces the wrong party's payable,
-    // so it is derived and not taken on trust either way.
-    let supplierId = data.supplierId
-    if (data.billId) {
-      const bill = await tx.purchaseInvoice.findUnique({
-        where: { id: data.billId },
-        select: { id: true, supplierId: true, billNumber: true, status: true },
-      })
-      if (!bill) throw new AppError('That purchase bill no longer exists', 404, 'NOT_FOUND')
-      if (bill.status === 'CANCELLED') {
-        throw new AppError(
-          `${bill.billNumber} is cancelled. There is nothing left on it to adjust.`,
-          400,
-          'BILL_CANCELLED'
-        )
-      }
-      supplierId = bill.supplierId
-    } else if (data.grnId) {
-      supplierId = await supplierFromGrn(tx, data.grnId)
-    }
-
-    const isIntraState = await taxContextFor(tx, supplierId, data.billId)
-    const priced = priceNote({
-      lines: data.lines,
-      isIntraState,
-      otherCharges: data.otherCharges,
-      discountAmount: data.discountAmount,
-    })
-
-    if (priced.totalAmount <= 0) {
-      throw new AppError(
-        'This note comes to nothing. Enter a quantity and a rate on at least one line.',
-        400,
-        'NOTHING_CLAIMED'
-      )
-    }
-
-    /* The direction comes from the document, never from the event. For
-       every kind but OTHER it is a definition and `data.effect` is ignored;
-       for OTHER it is the explicit choice the form was made to ask for. */
-    assertIssuerMatches(data.docType, data.issuedBy)
-    const effect = effectFor(data.docType, data.effect ?? null)
-
-    if (data.billId) {
-      await assertWithinBill(tx, {
-        billId: data.billId,
-        reason: data.reason,
-        effect,
-        lines: data.lines,
-        pricedLines: priced.lines,
-      })
-    }
-
-    /* Each kind draws from its own series. Sharing one between our claims and
-       the supplier's documents would put holes in a run that has to be
-       unbroken, and make "DN-2627-0007" ambiguous about whose it is. */
-    const noteNumber = await nextDocumentNumber(tx, DOC_RULES[data.docType].series, data.noteDate)
-
-    return tx.purchaseNote.create({
-      data: {
-        noteNumber,
-        reason: data.reason,
-        reasonNote: data.reasonNote ?? null,
-        gstTreatment: data.gstTreatment ?? 'NOT_REVIEWED',
-        ...(data.gstTreatment && data.gstTreatment !== 'NOT_REVIEWED'
-          ? { gstTreatedById: req.user!.id, gstTreatedAt: new Date() }
-          : {}),
-        issuedBy: data.issuedBy,
-        docType: data.docType,
-        effect,
-        supplierId,
-        billId: data.billId ?? null,
-        withoutBillReason: data.billId ? null : (data.withoutBillReason ?? null),
-        poId: data.poId ?? null,
-        grnId: data.grnId ?? null,
-        noteDate: data.noteDate,
-        supplierDocNo: data.supplierDocNo ?? null,
-        supplierDocDate: data.supplierDocDate ?? null,
-        warehouseId: data.warehouseId ?? null,
-        lrNumber: data.lrNumber ?? null,
-        vehicleNo: data.vehicleNo ?? null,
-        otherRef: data.otherRef ?? null,
-        isIntraState,
-        taxableAmount: priced.taxableAmount,
-        discountAmount: priced.discountAmount,
-        cgst: priced.cgst,
-        sgst: priced.sgst,
-        igst: priced.igst,
-        otherCharges: priced.otherCharges,
-        roundOff: priced.roundOff,
-        totalAmount: priced.totalAmount,
-        notes: data.notes ?? null,
-        createdById: req.user!.id,
-        lines: {
-          create: priced.lines.map((l, i) => ({
-            itemId: l.itemId,
-            billLineId: l.billLineId ?? null,
-            grnLineId: l.grnLineId ?? null,
-            description: l.description ?? null,
-            hsnCode: l.hsnCode ?? null,
-            originalQty: l.originalQty ?? null,
-            originalRate: l.originalRate ?? null,
-            qty: l.qty,
-            unitPrice: l.unitPrice,
-            taxableValue: l.taxableValue,
-            gstRate: l.gstRate,
-            cgst: l.cgst,
-            sgst: l.sgst,
-            igst: l.igst,
-            amount: l.amount,
-            remarks: l.remarks ?? null,
-            sortOrder: i,
-          })),
-        },
-      },
-      include: noteInclude,
-    })
-  })
+  const note = await prisma.$transaction((tx) => createPurchaseNoteIn(tx, data, req.user!.id))
 
   await writeAuditLog(req, {
     module: MODULE,

@@ -1,6 +1,9 @@
 import { prisma, Prisma } from '@ld-erp/database'
 import { onHand, reorderStatus } from './stock.service'
 
+/** A date as its day on the Indian calendar, YYYY-MM-DD, for comparing days rather than instants. */
+const istDay = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+
 /**
  * Everything the inventory dashboard shows, in one call.
  *
@@ -324,7 +327,9 @@ export async function inventoryDashboard(opts: { warehouseId?: string; days: num
       challanDate: c.challanDate,
       expectedBackOn: c.expectedBackOn,
       daysOut,
-      overdue: Boolean(c.expectedBackOn && c.expectedBackOn.getTime() < now),
+      // Late from the day after it was due, on the Indian calendar: due on the
+      // 14th is not late at 05:30 on the 14th.
+      overdue: Boolean(c.expectedBackOn && istDay(c.expectedBackOn) < istDay(new Date(now))),
       gstDaysLeft: Math.ceil((gstDue.getTime() - now) / DAY),
       outLines,
       outValue: round2(outValue),

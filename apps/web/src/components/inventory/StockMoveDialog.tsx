@@ -32,6 +32,12 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
  * The count asks for what was counted, never for a plus-or-minus figure. A
  * store keeper working out "I have 40 more than the book, so +40" is a store
  * keeper who will one day type −40.
+ *
+ * A count or a move also says whose stock each line is — ours, or a
+ * customer's cloth held in our store — and its size for a sized garment. The
+ * choices are what the store actually holds, so a customer's leftover fabric
+ * is moved or counted as theirs and never taken for ours. A count goes to a
+ * store manager; stock changes once it is approved.
  */
 
 export type MoveMode = 'opening' | 'count' | 'transfer'
@@ -54,9 +60,33 @@ interface Line {
   itemId: string
   qty: string
   rate: string
+  /** Whose stock and which size: "OWNED||" for our own, unsized. */
+  whose: string
 }
 
-const emptyLine = (): Line => ({ itemId: '', qty: '', rate: '' })
+/** One balance a store holds: an item, whose it is, its size. */
+interface Held {
+  itemId: string
+  ownership: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomerId: string | null
+  ownerName: string | null
+  sizeId: string | null
+  sizeCode: string | null
+  qty: number
+}
+
+const OURS = 'OWNED||'
+const heldKey = (h: Pick<Held, 'ownership' | 'ownerCustomerId' | 'sizeId'>) => `${h.ownership}|${h.ownerCustomerId ?? ''}|${h.sizeId ?? ''}`
+const parseWhose = (k: string) => {
+  const [ownership, ownerCustomerId, sizeId] = k.split('|')
+  return {
+    ownership: (ownership || 'OWNED') as 'OWNED' | 'CUSTOMER_OWNED',
+    ownerCustomerId: ownerCustomerId || null,
+    sizeId: sizeId || null,
+  }
+}
+
+const emptyLine = (): Line => ({ itemId: '', qty: '', rate: '', whose: OURS })
 
 const COPY: Record<
   MoveMode,
@@ -72,14 +102,14 @@ const COPY: Record<
   count: {
     title: 'Stock count',
     blurb:
-      'Type what you counted on the rack. The difference against the book is worked out here, and every change is written to the ledger with your reason.',
+      'Type what you counted on the rack. The difference against the book is worked out here; a store manager approves it before stock changes.',
     qtyLabel: 'Counted',
     action: 'Save the count',
   },
   transfer: {
     title: 'Move stock',
     blurb:
-      'Between two of our own stores. What it is worth travels with it — moving cloth across the yard does not change its value.',
+      'Between two of our own stores. What it is worth and whose it is travel with it — a customer\'s cloth stays theirs.',
     qtyLabel: 'Quantity',
     action: 'Move it',
   },
@@ -108,6 +138,37 @@ export function StockMoveDialog({
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // What the chosen store holds, by item, owner and size.
+  const [held, setHeld] = useState<Held[]>([])
+
+  useEffect(() => {
+    if (mode === 'opening' || !warehouseId) {
+      setHeld([])
+      return
+    }
+    let cancelled = false
+    api
+      .get<{ data: Held[] }>(`/inventory/held?warehouseId=${warehouseId}`)
+      .then((res) => {
+        if (cancelled) return
+        setHeld(res.data)
+        // A line whose item the store holds only as one customer's (or one
+        // size) starts on that, rather than on "ours" with nothing there.
+        setLines((ls) =>
+          ls.map((l) => {
+            const choices = res.data.filter((h) => h.itemId === l.itemId)
+            if (!l.itemId || choices.some((h) => heldKey(h) === l.whose)) return l
+            return { ...l, whose: choices.length === 1 ? heldKey(choices[0]) : OURS }
+          })
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setHeld([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [mode, warehouseId])
 
   useEffect(() => {
     let cancelled = false
@@ -161,11 +222,11 @@ export function StockMoveDialog({
     // A count or an opening sets each line against the book once, so an item
     // entered on two lines would be applied twice. Moves may repeat an item.
     if (mode !== 'transfer') {
-      const ids = filled.map((l) => l.itemId)
-      const twice = ids.find((id, i) => ids.indexOf(id) !== i)
+      const keys = filled.map((l) => `${l.itemId}|${l.whose}`)
+      const twice = filled.find((l, i) => keys.indexOf(`${l.itemId}|${l.whose}`) !== i)
       if (twice) {
         return setError(
-          `${itemsById.get(twice)?.name ?? 'An item'} is on the list twice. Enter it once, with the total.`,
+          `${itemsById.get(twice.itemId)?.name ?? 'An item'} is on the list twice for the same stock. Enter it once, with the total.`,
         )
       }
     }
@@ -182,7 +243,7 @@ export function StockMoveDialog({
       }
     }
     if (mode === 'count') {
-      const zero = filled.find((l) => l.rate !== '' && !(Number(l.rate) > 0))
+      const zero = filled.find((l) => parseWhose(l.whose).ownership === 'OWNED' && l.rate !== '' && !(Number(l.rate) > 0))
       if (zero) {
         return setError(
           `${itemsById.get(zero.itemId)?.name ?? 'An item'}: a rate of ₹0 would value the stock found at nothing. Enter what it cost, or leave the rate empty.`,
@@ -211,7 +272,9 @@ export function StockMoveDialog({
           lines: filled.map((l) => ({
             itemId: l.itemId,
             countedQty: Number(l.qty),
-            ...(l.rate ? { unitRate: Number(l.rate) } : {}),
+            ...parseWhose(l.whose),
+            // A customer's cloth carries no value of ours, so no rate goes with it.
+            ...(l.rate && parseWhose(l.whose).ownership === 'OWNED' ? { unitRate: Number(l.rate) } : {}),
           })),
         })
       } else {
@@ -219,7 +282,7 @@ export function StockMoveDialog({
           fromWarehouseId: warehouseId,
           toWarehouseId,
           notes: notes || null,
-          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty) })),
+          lines: filled.map((l) => ({ itemId: l.itemId, qty: Number(l.qty), ...parseWhose(l.whose) })),
         })
       }
 
@@ -339,11 +402,12 @@ export function StockMoveDialog({
         }
       >
         <div className="overflow-x-auto">
-          <table className="line-table w-full min-w-[620px] text-sm">
+          <table className="line-table w-full min-w-[760px] text-sm">
             <thead>
               <tr>
                 <th style={{ width: 36 }}>#</th>
-                <th style={{ width: '50%' }}>Item</th>
+                <th style={{ width: mode === 'opening' ? '50%' : '36%' }}>Item</th>
+                {mode !== 'opening' && <th style={{ width: '26%' }}>Stock</th>}
                 <th style={{ textAlign: 'right' }}>{copy.qtyLabel}</th>
                 {mode !== 'transfer' && <th style={{ textAlign: 'right' }}>Rate ₹</th>}
                 <th style={{ width: 40 }} />
@@ -352,6 +416,9 @@ export function StockMoveDialog({
             <tbody>
               {lines.map((line, i) => {
                 const item = itemsById.get(line.itemId)
+                const choices = held.filter((h) => h.itemId === line.itemId)
+                const ours = choices.find((h) => heldKey(h) === OURS)
+                const customers = parseWhose(line.whose).ownership === 'CUSTOMER_OWNED'
                 return (
                   <tr key={i}>
                     <td className="text-muted-foreground px-3 py-2 text-xs">{i + 1}</td>
@@ -361,8 +428,11 @@ export function StockMoveDialog({
                         value={line.itemId}
                         onChange={(e) => {
                           const picked = itemsById.get(e.target.value)
+                          const offered = held.filter((h) => h.itemId === e.target.value)
                           setLine(i, {
                             itemId: e.target.value,
+                            // Held only as one customer's, or one size: start on that.
+                            whose: offered.length === 1 ? heldKey(offered[0]) : OURS,
                             // The item's standard rate is a starting point for
                             // an opening balance, not for a count — a count
                             // priced at the list rate would quietly revalue
@@ -384,6 +454,29 @@ export function StockMoveDialog({
                         ))}
                       </SmartSelect>
                     </td>
+                    {mode !== 'opening' && (
+                      <td className="px-3 py-2">
+                        <SmartSelect
+                          className="form-input h-9"
+                          value={line.whose}
+                          onChange={(e) => setLine(i, { whose: e.target.value })}
+                          disabled={!line.itemId}
+                          aria-label={`Whose stock on line ${i + 1}`}
+                        >
+                          {!ours && (
+                            <option value={OURS}>
+                              Ours{warehouseId && line.itemId ? ' · none here' : ''}
+                            </option>
+                          )}
+                          {choices.map((h) => (
+                            <option key={heldKey(h)} value={heldKey(h)}>
+                              {h.ownership === 'CUSTOMER_OWNED' ? `${h.ownerName ?? 'Customer'}'s` : 'Ours'}
+                              {h.sizeCode ? ` · size ${h.sizeCode}` : ''} · {h.qty.toLocaleString('en-IN')} {item?.uom?.symbol ?? ''}
+                            </option>
+                          ))}
+                        </SmartSelect>
+                      </td>
+                    )}
                     <td className="px-3 py-2 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <input
@@ -409,7 +502,9 @@ export function StockMoveDialog({
                           className="form-input h-9 w-28 text-right tabular-nums placeholder:text-muted-foreground/60"
                           value={line.rate}
                           onChange={(e) => setLine(i, { rate: e.target.value })}
-                          placeholder={mode === 'count' ? 'only if new' : ''}
+                          placeholder={customers ? 'customer’s' : mode === 'count' ? 'only if new' : ''}
+                          disabled={customers}
+                          title={customers ? "A customer's cloth carries no value of ours" : undefined}
                           aria-label={`Rate on line ${i + 1}`}
                         />
                       </td>

@@ -70,6 +70,8 @@ interface Prepared {
     description: string | null
     hsnCode: string | null
     taxExempt: boolean
+    /** "B" for B-grade pieces, billed at the order line's B-grade rate. */
+    grade?: string
     qty: number
     unitPrice: number
     discount: number
@@ -512,9 +514,10 @@ export function SalesInvoiceDialog({
                     </thead>
                     <tbody>
                       {totals.lines.map((l) => (
-                        <tr key={l.soLineId}>
+                        <tr key={`${l.soLineId}|${l.grade ?? 'A'}`}>
                           <td>
                             <div className="text-foreground text-sm font-medium">
+                              {l.grade === 'B' && <span className="badge-warning mr-1.5">B-grade</span>}
                               {l.item?.name}
                               {(l.color || l.item?.color) && <span className="text-muted-foreground font-normal"> · {l.color || l.item?.color}</span>}
                             </div>

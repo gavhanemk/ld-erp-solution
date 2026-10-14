@@ -134,7 +134,16 @@ interface LineDraft {
   printName: string
   description: string
   taxExempt: boolean
+  /** On a job-work order: the SAC/HSN and GST rate the job charge is billed under. */
+  jobHsn: string
+  jobGst: string
+  /** What a B-grade piece is billed at; empty bills it at the line's rate. */
+  bGradeRate: string
 }
+
+/** Job work is a service: SAC 9988, at 5% unless typed otherwise (or set in the HSN master). */
+const JOB_WORK_SAC = '9988'
+const JOB_WORK_GST = 5
 
 interface ChargeDraft {
   key: string
@@ -183,6 +192,9 @@ interface SavedOrder {
     totalQty: string | number
     unitPrice: string | number
     discount: string | number
+    hsnCode?: string | null
+    gstRate?: string | number
+    bGradeRate?: string | number | null
     sizes: Array<{ sizeId: string; qty: string | number }>
   }>
 }
@@ -214,6 +226,9 @@ const blankLine = (): LineDraft => ({
   printName: '',
   description: '',
   taxExempt: false,
+  jobHsn: '',
+  jobGst: '',
+  bGradeRate: '',
 })
 const blankCharge = (): ChargeDraft => ({ key: `c${++lineKey}`, chargeTypeId: '', amount: '', gstRate: '' })
 
@@ -584,6 +599,9 @@ export function SalesOrderDialog({
                     printName: l.printName ?? '',
                     description: l.description ?? '',
                     taxExempt: l.taxExempt,
+                    jobHsn: o.isJobWork ? (l.hsnCode ?? '') : '',
+                    jobGst: o.isJobWork && l.gstRate != null ? String(Number(l.gstRate)) : '',
+                    bGradeRate: l.bGradeRate != null ? String(Number(l.bGradeRate)) : '',
                   }
                 })
               : [blankLine()]
@@ -849,6 +867,9 @@ export function SalesOrderDialog({
       let gst: number | null = null
       if (p.line.taxExempt) {
         gst = 0
+      } else if (isJobWork) {
+        // A job charge is a service, taxed at its own SAC's rate.
+        gst = p.line.jobGst !== '' ? Number(p.line.jobGst) || 0 : JOB_WORK_GST
       } else if (p.item?.hsn) {
         const perPiece = p.rate * (1 - p.disc / 100) * factor
         const { gstRate, priceLimit, rateAbove } = p.item.hsn
@@ -1003,6 +1024,9 @@ export function SalesOrderDialog({
         printName: p.line.printName.trim() || null,
         description: p.line.description.trim() || null,
         taxExempt: p.line.taxExempt,
+        jobHsnCode: isJobWork ? p.line.jobHsn.trim() || null : null,
+        jobGstRate: isJobWork && p.line.jobGst !== '' ? Number(p.line.jobGst) : null,
+        bGradeRate: p.line.bGradeRate !== '' ? Number(p.line.bGradeRate) : null,
         totalQty: p.qty,
         unitPrice: p.rate,
         discount: p.disc,
@@ -1297,6 +1321,39 @@ export function SalesOrderDialog({
           placeholder="Anything else about this line: labels, packing, wash"
           onChange={(e) => setLine(line.key, { description: e.target.value })}
           aria-label={`Row ${i + 1} description`}
+        />
+      ),
+      jobHsn: (
+        <input
+          className={`${cell} font-mono`}
+          value={line.jobHsn}
+          maxLength={20}
+          placeholder={JOB_WORK_SAC}
+          onChange={(e) => setLine(line.key, { jobHsn: e.target.value.replace(/[^\d]/g, '') })}
+          aria-label={`Row ${i + 1} SAC or HSN for the job charge`}
+          title="Job work is billed as a service. Leave empty for SAC 9988."
+        />
+      ),
+      jobGst: (
+        <StepInput
+          decimals
+          max={28}
+          className={`${cell} text-right tabular-nums`}
+          value={line.jobGst}
+          placeholder={String(JOB_WORK_GST)}
+          onValueChange={(v) => setLine(line.key, { jobGst: v })}
+          aria-label={`Row ${i + 1} GST % on the job charge`}
+        />
+      ),
+      bRate: (
+        <StepInput
+          decimals
+          className={`${cell} text-right tabular-nums`}
+          value={line.bGradeRate}
+          placeholder={line.unitPrice || 'same'}
+          onValueChange={(v) => setLine(line.key, { bGradeRate: v })}
+          aria-label={`Row ${i + 1} B-grade rate`}
+          title="What a B-grade piece is billed at. Empty bills it at the line's rate."
         />
       ),
       exempt: (
@@ -1736,6 +1793,19 @@ export function SalesOrderDialog({
                                       <Mini label="Description" className="min-w-[14rem] flex-1">
                                         {f.description}
                                       </Mini>
+                                      {isJobWork && (
+                                        <>
+                                          <Mini label="SAC / HSN" className="w-24">
+                                            {f.jobHsn}
+                                          </Mini>
+                                          <Mini label="GST %" className="w-20">
+                                            {f.jobGst}
+                                          </Mini>
+                                        </>
+                                      )}
+                                      <Mini label="B-grade rate" className="w-28">
+                                        {f.bRate}
+                                      </Mini>
                                       {f.exempt}
                                       {f.sketch}
                                     </div>
@@ -1808,6 +1878,11 @@ export function SalesOrderDialog({
                               <Mini label="Print name">{f.printName}</Mini>
                             </div>
                             <Mini label="Description">{f.description}</Mini>
+                            <div className="grid grid-cols-3 gap-2">
+                              {isJobWork && <Mini label="SAC / HSN">{f.jobHsn}</Mini>}
+                              {isJobWork && <Mini label="GST %">{f.jobGst}</Mini>}
+                              <Mini label="B-grade rate">{f.bRate}</Mini>
+                            </div>
                             <div className="flex items-center justify-between">
                               {f.exempt}
                               {f.sketch}

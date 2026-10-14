@@ -11,8 +11,11 @@ import {
   ArrowRight,
   Printer,
   FileText,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react'
-import { api, ApiError, type Paginated } from '@/lib/api'
+import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
+import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
@@ -25,12 +28,25 @@ import { formatDate } from '@/lib/utils'
  * Both used to leave nothing behind but ledger rows tagged with the clock, so
  * "what did we move last month" and "who changed that figure, and why" had no
  * answer anywhere in the system. This screen is that answer.
+ *
+ * A count changes stock only once a store manager approves it, here or from
+ * the approvals inbox; until then it waits as Pending. Every line says whose
+ * stock it is — ours, or a customer's cloth in our store — and its size.
  */
 
 interface Line {
   id: string
   item: { id: string; code: string; name: string; uom: { symbol: string } | null }
+  ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomer?: { id: string; name: string } | null
+  size?: { id: string; code: string } | null
 }
+
+/** "Cotton County Retail's · size 40", or nothing for our own unsized stock. */
+const whoseLabel = (l: Line) =>
+  [l.ownership === 'CUSTOMER_OWNED' ? `${l.ownerCustomer?.name ?? 'Customer'}'s` : null, l.size ? `size ${l.size.code}` : null]
+    .filter(Boolean)
+    .join(' · ')
 
 interface TransferLine extends Line {
   qty: string | number
@@ -64,6 +80,10 @@ interface Adjustment {
   reason: string
   warehouse: { id: string; name: string }
   madeBy: { id: string; name: string } | null
+  status: 'PENDING' | 'APPROVED' | 'REJECTED'
+  approvedBy: { id: string; name: string } | null
+  approvedAt: string | null
+  rejectReason: string | null
   lines: AdjustmentLine[]
 }
 
@@ -101,6 +121,15 @@ export default function StockDocumentsPage() {
   const [search, setSearch] = useState('')
   const [debounced, setDebounced] = useState('')
   const [open, setOpen] = useState<string | null>(null)
+  const [refusing, setRefusing] = useState<Adjustment | null>(null)
+  const [approving, setApproving] = useState<Adjustment | null>(null)
+  const me = currentUser() as { id?: string } | null
+  const mayApprove = can('inventory', 'approve')
+
+  // Arriving from the approvals inbox, which links to the counts.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tab') === 'adjustments') setKind('adjustments')
+  }, [])
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 350)
@@ -159,6 +188,24 @@ export default function StockDocumentsPage() {
       if (res.message) setMessage(res.message)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not cancel it.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /** Approve (stock changes now) or refuse (with why) a count that is waiting. */
+  const decide = async (a: Adjustment, decision: 'approve' | 'reject', reason?: string) => {
+    setBusy(a.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.post<{ message?: string }>(`/inventory/adjustments/${a.id}/${decision}`, decision === 'reject' ? { reason } : {})
+      setRefusing(null)
+      setApproving(null)
+      await load()
+      if (res.message) setMessage(res.message)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : `Could not ${decision === 'approve' ? 'approve' : 'refuse'} it.`)
     } finally {
       setBusy(null)
     }
@@ -346,6 +393,7 @@ export default function StockDocumentsPage() {
                                             <div className="text-foreground truncate text-xs" title={l.item.name}>
                                               {l.item.name}
                                             </div>
+                                            {whoseLabel(l) && <div className="text-muted-foreground truncate text-[10px]">{whoseLabel(l)}</div>}
                                           </td>
                                           <td className="whitespace-nowrap text-right text-xs tabular-nums">
                                             {qty(l.qty)} {l.item.uom?.symbol ?? ''}
@@ -384,13 +432,21 @@ export default function StockDocumentsPage() {
                     <th className="whitespace-nowrap">Store</th>
                     <th className="whitespace-nowrap">Why</th>
                     <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Counted</th>
-                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Corrected</th>
+                    <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>Differences</th>
+                    <th className="whitespace-nowrap">Status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
                   {adjustments.map((a) => {
                     const expanded = open === a.id
                     const changed = a.lines.filter((l) => Number(l.difference) !== 0).length
+                    const mine = !!a.madeBy && a.madeBy.id === me?.id
+                    const actions: RowAction[] = []
+                    if (a.status === 'PENDING' && mayApprove && busy !== a.id) {
+                      actions.push({ key: 'approve', label: mine ? 'Approve (you counted this)' : 'Approve and correct stock', icon: <CheckCircle2 size={14} />, onClick: () => setApproving(a) })
+                      actions.push({ key: 'reject', label: 'Refuse', icon: <XCircle size={14} />, onClick: () => setRefusing(a), danger: true })
+                    }
 
                     return (
                       <Fragment key={a.id}>
@@ -427,11 +483,29 @@ export default function StockDocumentsPage() {
                               <span className="badge-success">all matched</span>
                             )}
                           </td>
+                          <td className="whitespace-nowrap">
+                            {a.status === 'PENDING' ? (
+                              <span className="badge-warning">Waiting for approval</span>
+                            ) : a.status === 'REJECTED' ? (
+                              <>
+                                <span className="badge-neutral">Refused</span>
+                                {a.rejectReason && <div className="text-muted-foreground max-w-[200px] truncate text-[10px]" title={a.rejectReason}>{a.rejectReason}</div>}
+                              </>
+                            ) : (
+                              <>
+                                <span className="badge-success">{changed > 0 ? 'Stock corrected' : 'Matched'}</span>
+                                {a.approvedBy && <div className="text-muted-foreground text-[10px]">approved by {a.approvedBy.name}</div>}
+                              </>
+                            )}
+                          </td>
+                          <td className="whitespace-nowrap text-right">
+                            {actions.length > 0 && <ActionMenu label={`Actions for ${a.adjustmentNumber}`} items={actions} />}
+                          </td>
                         </tr>
 
                         {expanded && (
                           <tr>
-                            <td colSpan={7} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                            <td colSpan={9} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
                               {/* Sized to the visible row, not the scrolling table. */}
                               <div className="w-[100cqw]">
                                 <RowPanel
@@ -459,6 +533,7 @@ export default function StockDocumentsPage() {
                                               <div className="text-foreground truncate text-xs" title={l.item.name}>
                                                 {l.item.name}
                                               </div>
+                                              {whoseLabel(l) && <div className="text-muted-foreground truncate text-[10px]">{whoseLabel(l)}</div>}
                                             </td>
                                             <td className="whitespace-nowrap text-right text-xs tabular-nums">
                                               {qty(l.bookQty)}
@@ -497,6 +572,29 @@ export default function StockDocumentsPage() {
           </div>
         )}
       </div>
+
+      {approving && (
+        <ReasonDialog
+          title={`Approve ${approving.adjustmentNumber}?`}
+          description={`The ${approving.lines.filter((l) => Number(l.difference) !== 0).length} counted difference(s) in ${approving.warehouse.name} go into stock now. This cannot be undone except by another count.`}
+          confirmLabel="Approve and correct stock"
+          requireReason={false}
+          busy={busy === approving.id}
+          onConfirm={() => void decide(approving, 'approve')}
+          onCancel={() => setApproving(null)}
+        />
+      )}
+      {refusing && (
+        <ReasonDialog
+          title={`Refuse ${refusing.adjustmentNumber}?`}
+          description="Stock stays as it is. Say why, so whoever counted can recount or correct it."
+          confirmLabel="Refuse the count"
+          danger
+          busy={busy === refusing.id}
+          onConfirm={(reason) => void decide(refusing, 'reject', reason)}
+          onCancel={() => setRefusing(null)}
+        />
+      )}
     </div>
   )
 }

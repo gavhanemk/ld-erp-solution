@@ -32,6 +32,8 @@ interface PrepSize {
   sent: number
   pending: number
   inStock: number
+  /** B-grade pieces of this size in the store. */
+  inStockB: number
 }
 
 interface PrepLine {
@@ -45,6 +47,9 @@ interface PrepLine {
   sent: number
   pending: number
   inStock: number
+  inStockB: number
+  /** What a B-grade piece bills at; empty means the line's own rate. */
+  bGradeRate: number | null
   sizes: PrepSize[] | null
 }
 
@@ -82,14 +87,19 @@ interface SavedChallan {
   notes: string | null
   lines: Array<{
     soLineId: string | null
+    grade?: string
     qty: string | number
     overNote: string | null
     sizes: Array<{ sizeId: string; qty: string | number }>
   }>
 }
 
-/** What is typed per line: pieces by size, or one figure, and the over note. */
-type SendDraft = Record<string, { sizes: Record<string, string>; qty: string; overNote: string }>
+/**
+ * What is typed per line: pieces by size, or one figure, and the over note —
+ * and the same again for B-grade pieces, which go on a line of their own.
+ */
+type SendDraft = Record<string, { sizes: Record<string, string>; qty: string; overNote: string; bSizes: Record<string, string>; bQty: string }>
+const emptyDraft = (): SendDraft[string] => ({ sizes: {}, qty: '', overNote: '', bSizes: {}, bQty: '' })
 
 const today = () => new Date().toISOString().slice(0, 10)
 const pcs = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
@@ -236,11 +246,13 @@ export function DeliveryChallanDialog({
           const next: SendDraft = {}
           for (const l of draft.lines) {
             if (!l.soLineId) continue
-            next[l.soLineId] = {
-              sizes: Object.fromEntries(l.sizes.map((s) => [s.sizeId, String(Number(s.qty))])),
-              qty: l.sizes.length ? '' : String(Number(l.qty)),
-              overNote: l.overNote ?? '',
-            }
+            const d = next[l.soLineId] ?? emptyDraft()
+            const sizes = Object.fromEntries(l.sizes.map((s) => [s.sizeId, String(Number(s.qty))]))
+            const qty = l.sizes.length ? '' : String(Number(l.qty))
+            next[l.soLineId] =
+              l.grade === 'B'
+                ? { ...d, bSizes: sizes, bQty: qty, overNote: d.overNote || (l.overNote ?? '') }
+                : { ...d, sizes, qty, overNote: l.overNote ?? d.overNote }
           }
           setSend(next)
         } else {
@@ -268,7 +280,7 @@ export function DeliveryChallanDialog({
     }
   }
 
-  const draftOf = (soLineId: string) => send[soLineId] ?? { sizes: {}, qty: '', overNote: '' }
+  const draftOf = (soLineId: string) => send[soLineId] ?? emptyDraft()
   const setDraft = (soLineId: string, patch: Partial<SendDraft[string]>) =>
     setSend((s) => ({ ...s, [soLineId]: { ...draftOf(soLineId), ...patch } }))
 
@@ -277,15 +289,17 @@ export function DeliveryChallanDialog({
     if (!prep) return
     const next: SendDraft = {}
     for (const l of prep.lines) {
+      // Good pieces only: B-grade goes when somebody decides to send it.
+      const keep = draftOf(l.soLineId)
       next[l.soLineId] = l.sizes
         ? {
+            ...keep,
             sizes: Object.fromEntries(
               l.sizes.map((s) => [s.sizeId, String(Math.max(0, Math.min(s.pending, s.inStock)) || '')])
             ),
             qty: '',
-            overNote: draftOf(l.soLineId).overNote,
           }
-        : { sizes: {}, qty: String(Math.max(0, Math.min(l.pending, l.inStock)) || ''), overNote: draftOf(l.soLineId).overNote }
+        : { ...keep, sizes: {}, qty: String(Math.max(0, Math.min(l.pending, l.inStock)) || '') }
     }
     setSend(next)
   }
@@ -294,16 +308,22 @@ export function DeliveryChallanDialog({
   const rows = useMemo(() => {
     if (!prep) return []
     return prep.lines.map((l) => {
-      const d = send[l.soLineId] ?? { sizes: {}, qty: '', overNote: '' }
+      const d = send[l.soLineId] ?? emptyDraft()
+      // Good and B-grade pieces of a size count together against what the order still wants.
       const sizes = (l.sizes ?? []).map((s) => {
-        const now = Number(d.sizes[s.sizeId]) || 0
-        return { ...s, now, over: now > s.pending, short: now > s.inStock }
+        const nowA = Number(d.sizes[s.sizeId]) || 0
+        const nowB = Number(d.bSizes[s.sizeId]) || 0
+        return { ...s, now: nowA, nowB, over: nowA + nowB > s.pending, short: nowA > s.inStock, shortB: nowB > s.inStockB }
       })
-      const now = l.sizes ? sizes.reduce((t, s) => t + s.now, 0) : Number(d.qty) || 0
+      const nowA = l.sizes ? sizes.reduce((t, s) => t + s.now, 0) : Number(d.qty) || 0
+      const nowB = l.sizes ? sizes.reduce((t, s) => t + s.nowB, 0) : Number(d.bQty) || 0
+      const now = nowA + nowB
       const over = l.sizes ? sizes.some((s) => s.over) : now > l.pending
-      const short = l.sizes ? sizes.some((s) => s.short) : now > l.inStock
-      const value = now * l.unitPrice * (1 - l.discount / 100)
-      return { l, d, sizes, now, over, short, value, gst: value * (l.gstRate / 100) }
+      const short = l.sizes ? sizes.some((s) => s.short || s.shortB) : nowA > l.inStock || nowB > l.inStockB
+      const bRate = l.bGradeRate ?? l.unitPrice
+      const value = nowA * l.unitPrice * (1 - l.discount / 100) + nowB * bRate * (1 - l.discount / 100)
+      const showB = l.inStockB > 0 || nowB > 0
+      return { l, d, sizes, now, nowA, nowB, showB, over, short, value, gst: value * (l.gstRate / 100) }
     })
   }, [prep, send])
 
@@ -342,14 +362,30 @@ export function DeliveryChallanDialog({
       packingNote: packingNote.trim() || null,
       notes: notes.trim() || null,
       dispatch,
-      lines: rows
-        .filter((r) => r.now > 0)
-        .map((r) => ({
-          soLineId: r.l.soLineId,
-          sizes: r.l.sizes ? r.sizes.filter((s) => s.now > 0).map((s) => ({ sizeId: s.sizeId, qty: s.now })) : undefined,
-          qty: r.l.sizes ? undefined : r.now,
-          overNote: r.d.overNote.trim() || null,
-        })),
+      lines: rows.flatMap((r) => [
+        ...(r.nowA > 0
+          ? [
+              {
+                soLineId: r.l.soLineId,
+                sizes: r.l.sizes ? r.sizes.filter((s) => s.now > 0).map((s) => ({ sizeId: s.sizeId, qty: s.now })) : undefined,
+                qty: r.l.sizes ? undefined : r.nowA,
+                overNote: r.d.overNote.trim() || null,
+              },
+            ]
+          : []),
+        // B-grade pieces on a line of their own, billed at the B-grade rate.
+        ...(r.nowB > 0
+          ? [
+              {
+                soLineId: r.l.soLineId,
+                grade: 'B' as const,
+                sizes: r.l.sizes ? r.sizes.filter((s) => s.nowB > 0).map((s) => ({ sizeId: s.sizeId, qty: s.nowB })) : undefined,
+                qty: r.l.sizes ? undefined : r.nowB,
+                overNote: r.d.overNote.trim() || null,
+              },
+            ]
+          : []),
+      ]),
     }
     try {
       const res = saved
@@ -476,7 +512,7 @@ export function DeliveryChallanDialog({
                   can go&quot; puts the smaller of the two in every box.
                 </p>
                 <div className="space-y-3">
-                  {rows.map(({ l, d, sizes, now, over, short: lineShort }) => (
+                  {rows.map(({ l, d, sizes, now, nowB, showB, over, short: lineShort }) => (
                     <div key={l.soLineId} className="border-border bg-card rounded-lg border p-3">
                       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                         <p className="text-foreground text-sm font-medium">
@@ -559,8 +595,54 @@ export function DeliveryChallanDialog({
                                   />
                                 </td>
                               )}
-                              <td className="text-foreground text-right text-xs font-semibold tabular-nums">{pcs(now)}</td>
+                              <td className="text-foreground text-right text-xs font-semibold tabular-nums">{pcs(now - nowB)}</td>
                             </tr>
+                            {showB && (
+                              <>
+                                <tr className="border-border border-t">
+                                  <td className="text-muted-foreground pr-4 text-xs">B-grade in stock</td>
+                                  {l.sizes ? (
+                                    sizes.map((s) => (
+                                      <td key={s.sizeId} className="text-center text-xs tabular-nums">
+                                        {pcs(s.inStockB)}
+                                      </td>
+                                    ))
+                                  ) : (
+                                    <td className="text-center text-xs tabular-nums">{pcs(l.inStockB)}</td>
+                                  )}
+                                  <td className="text-right text-xs tabular-nums">{pcs(l.inStockB)}</td>
+                                </tr>
+                                <tr>
+                                  <td className="pr-4 text-xs font-medium text-amber-600" title={`Billed at ₹${(l.bGradeRate ?? l.unitPrice).toLocaleString('en-IN')} a piece`}>
+                                    Send B-grade
+                                  </td>
+                                  {l.sizes ? (
+                                    sizes.map((s) => (
+                                      <td key={s.sizeId} className="px-1 py-1">
+                                        <StepInput
+                                          className={`form-input h-8 w-14 px-1 text-center text-xs tabular-nums ${s.shortB ? 'border-destructive/60' : ''}`}
+                                          value={d.bSizes[s.sizeId] ?? ''}
+                                          placeholder="0"
+                                          aria-label={`${l.item.code} size ${s.code}, B-grade to send`}
+                                          onValueChange={(v) => setDraft(l.soLineId, { bSizes: { ...d.bSizes, [s.sizeId]: v } })}
+                                        />
+                                      </td>
+                                    ))
+                                  ) : (
+                                    <td className="px-1 py-1">
+                                      <StepInput
+                                        className="form-input h-8 w-20 px-1 text-center text-xs tabular-nums"
+                                        value={d.bQty}
+                                        placeholder="0"
+                                        aria-label={`${l.item.code}, B-grade to send`}
+                                        onValueChange={(v) => setDraft(l.soLineId, { bQty: v })}
+                                      />
+                                    </td>
+                                  )}
+                                  <td className="text-right text-xs font-semibold tabular-nums text-amber-600">{pcs(nowB)}</td>
+                                </tr>
+                              </>
+                            )}
                           </tbody>
                         </table>
                       </div>

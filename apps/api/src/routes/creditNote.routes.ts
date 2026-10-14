@@ -75,7 +75,8 @@ type CreditNoteInput = z.infer<typeof creditNoteSchema>
 
 const invoiceForCredit = {
   customer: { select: { id: true, name: true } },
-  dc: { select: { dcNumber: true, warehouseId: true, lines: { select: { soLineId: true, sizes: { select: { sizeId: true, qty: true, size: { select: { code: true, sequence: true } } } } } } } },
+  so: { select: { isJobWork: true, customerId: true } },
+  dc: { select: { dcNumber: true, warehouseId: true, lines: { select: { soLineId: true, grade: true, sizes: { select: { sizeId: true, qty: true, size: { select: { code: true, sequence: true } } } } } } } },
   lines: {
     orderBy: { sortOrder: 'asc' },
     include: {
@@ -94,7 +95,8 @@ type InvoiceForCredit = Prisma.SalesInvoiceGetPayload<{ include: typeof invoiceF
 function lineState(inv: InvoiceForCredit) {
   return inv.lines.map((l) => {
     const qty = Number(l.qty)
-    const sentSizes = inv.dc?.lines.find((d) => d.soLineId === l.soLineId)?.sizes ?? []
+    // Good and B-grade pieces of one order line are separate challan lines.
+    const sentSizes = inv.dc?.lines.find((d) => d.soLineId === l.soLineId && d.grade === l.grade)?.sizes ?? []
     const returnedBySize = new Map<string, number>()
     let returned = 0
     let credited = 0
@@ -281,10 +283,14 @@ export async function createCreditNote(tx: Prisma.TransactionClient, data: Credi
           itemId: l.s.line.itemId,
           warehouseId: data.warehouseId!,
           sizeId: p.sizeId,
+          // Back as what it went out as: its grade, and on a job-work order
+          // the customer's garments at no value of ours.
+          grade: l.s.line.grade,
+          ...(inv.so?.isJobWork ? { ownership: 'CUSTOMER_OWNED' as const, ownerCustomerId: inv.so.customerId } : {}),
           transactionType: 'RETURN',
           direction: 'IN',
           qty: p.qty,
-          unitRate: round2(rate),
+          unitRate: inv.so?.isJobWork ? 0 : round2(rate),
           referenceType: 'CREDIT_NOTE',
           referenceId: note.id,
           transactionDate: noteDate,
@@ -335,21 +341,23 @@ export async function cancelCreditNote(tx: Prisma.TransactionClient, id: string,
   if (before.status === 'CANCELLED') throw new AppError(`${before.noteNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
   // Returned goods leave the store again — refused if they have already gone on.
   if (before.type === 'RETURN' && before.warehouseId) {
-    for (const l of before.lines) {
-      const parts = l.sizes.length ? l.sizes.map((z) => ({ sizeId: z.sizeId as string | null, qty: Number(z.qty) })) : [{ sizeId: null, qty: Number(l.qty) }]
-      for (const p of parts) {
-        await recordMovement(tx, {
-          itemId: l.itemId,
-          warehouseId: before.warehouseId,
-          sizeId: p.sizeId,
-          transactionType: 'ADJUSTMENT',
-          direction: 'OUT',
-          qty: p.qty,
-          referenceType: 'CREDIT_NOTE_CANCEL',
-          referenceId: before.id,
-          notes: `Cancelled ${before.noteNumber}: ${reason}`,
-        })
-      }
+    // Exactly what came back goes out again: same size, grade and owner.
+    const ins = await tx.stockLedger.findMany({ where: { referenceType: 'CREDIT_NOTE', referenceId: before.id, inQty: { gt: 0 } } })
+    for (const row of ins) {
+      await recordMovement(tx, {
+        itemId: row.itemId,
+        warehouseId: row.warehouseId,
+        sizeId: row.sizeId,
+        grade: row.grade,
+        ownership: row.ownership,
+        ownerCustomerId: row.ownerCustomerId,
+        transactionType: 'ADJUSTMENT',
+        direction: 'OUT',
+        qty: Number(row.inQty),
+        referenceType: 'CREDIT_NOTE_CANCEL',
+        referenceId: before.id,
+        notes: `Cancelled ${before.noteNumber}: ${reason}`,
+      })
     }
   }
   const after = await tx.creditNote.update({

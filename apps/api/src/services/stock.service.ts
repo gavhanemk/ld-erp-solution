@@ -45,6 +45,11 @@ export interface StockKey {
   ownerCustomerId?: string | null
   /** A finished garment's size; left out for anything that has no size. */
   sizeId?: string | null
+  /**
+   * "A" (first quality) unless said otherwise; "B" for B-grade finished goods,
+   * which are counted apart from good ones and never sent in their place.
+   */
+  grade?: 'A' | 'B' | string | null
 }
 
 export interface Movement extends StockKey {
@@ -90,6 +95,7 @@ async function lockBalance(tx: Prisma.TransactionClient, key: StockKey): Promise
     key.ownership ?? 'OWNED',
     key.ownerCustomerId ?? '',
     key.sizeId ?? '',
+    key.grade ?? 'A',
   ].join('|')
 
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${token})::bigint)`
@@ -119,6 +125,7 @@ export async function balanceOf(
       AND "ownership" = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
       AND "sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
+      AND "grade" = ${key.grade ?? 'A'}
   `
 
   const qty = round3(rows[0]?.qty ?? 0)
@@ -197,6 +204,7 @@ async function settleDate(
       AND "ownership" = ${key.ownership ?? 'OWNED'}::ld_erp."StockOwnership"
       AND "ownerCustomerId" IS NOT DISTINCT FROM ${key.ownerCustomerId ?? null}::text
       AND "sizeId" IS NOT DISTINCT FROM ${key.sizeId ?? null}::text
+      AND "grade" = ${key.grade ?? 'A'}
   `
   const last = rows[0]?.last ?? null
   if (!last) return asked
@@ -281,7 +289,7 @@ export async function recordMovement(
         ? await tx.size.findUnique({ where: { id: m.sizeId }, select: { code: true } })
         : null
       const unit = item?.uom?.symbol ?? ''
-      const what = `${item?.name ?? 'that item'}${size ? ` in size ${size.code}` : ''}`
+      const what = `${m.grade === 'B' ? 'B-grade ' : ''}${item?.name ?? 'that item'}${size ? ` in size ${size.code}` : ''}`
 
       throw new AppError(
         `Only ${before.qty} ${unit} of ${what} in ${warehouse?.name ?? 'that warehouse'}. You are trying to take out ${qty}.`.replace(
@@ -310,6 +318,7 @@ export async function recordMovement(
       ownership: m.ownership ?? 'OWNED',
       ownerCustomerId: m.ownerCustomerId ?? null,
       sizeId: m.sizeId ?? null,
+      grade: m.grade ?? 'A',
       inQty: m.direction === 'IN' ? qty : 0,
       outQty: m.direction === 'OUT' ? qty : 0,
       // A snapshot for the ledger view to print, so a printed statement does
@@ -346,6 +355,7 @@ export async function transferStock(
     ownerCustomerId?: string | null
     /** A finished garment's size: it moves as that size, and arrives as it. */
     sizeId?: string | null
+    grade?: string | null
     transactionDate?: Date
     notes?: string | null
   },
@@ -369,6 +379,7 @@ export async function transferStock(
     ownership: args.ownership,
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
+    grade: args.grade,
     transactionDate: args.transactionDate,
     notes: args.notes,
   })
@@ -391,6 +402,7 @@ export async function transferStock(
               ownership: args.ownership,
               ownerCustomerId: args.ownerCustomerId,
               sizeId: args.sizeId,
+              grade: args.grade,
             })
           ).avgRate,
     referenceType: args.referenceType,
@@ -398,6 +410,7 @@ export async function transferStock(
     ownership: args.ownership,
     ownerCustomerId: args.ownerCustomerId,
     sizeId: args.sizeId,
+    grade: args.grade,
     transactionDate: args.transactionDate,
     notes: args.notes,
   })

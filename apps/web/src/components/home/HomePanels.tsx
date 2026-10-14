@@ -369,6 +369,7 @@ const TYPE: Record<Approval['type'], { label: string; colour: string; href: stri
   PO: { label: 'Purchase order', colour: MODULE.purchase.colour, href: '/purchase/orders' },
   SO: { label: 'Sales order', colour: MODULE.sales.colour, href: '/sales/orders' },
   MR: { label: 'Requisition', colour: MODULE.inventory.colour, href: '/inventory/requisitions' },
+  ADJ: { label: 'Stock count', colour: MODULE.inventory.colour, href: '/inventory/documents?tab=adjustments' },
 }
 
 /**
@@ -420,7 +421,7 @@ export function ApprovalsPanel({
       }
       // The requisition screen asks for a reason somebody can act on, and the
       // server holds this door to the same bar.
-      if (a.type === 'MR' && reason.length < 5) {
+      if ((a.type === 'MR' || a.type === 'ADJ') && reason.length < 5) {
         setError('Say why it is being refused, in a few words.')
         return
       }

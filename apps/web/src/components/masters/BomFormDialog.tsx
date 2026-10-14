@@ -169,6 +169,14 @@ interface Props {
   onClose: () => void
   onSaved: (message?: string) => void
   record?: Bom | null
+  /**
+   * The step to open on. A quotation opens a BOM straight on Pricing, since
+   * the price is what it came to change. Only for people who may cost; anyone
+   * else always starts on the materials.
+   */
+  startStep?: 1 | 2 | 3
+  /** Opened over another dialog (a quotation), so it has to sit above that one. */
+  stacked?: boolean
 }
 
 /** Every BOM save answers with the BOM as it now stands, and sometimes a word about it. */
@@ -298,7 +306,7 @@ const STEPS: Array<{ id: Step; label: string }> = [
  * a fact about how the garment is made, price is a commercial call that moves
  * with each buyer.
  */
-export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
+export function BomFormDialog({ open, onClose, onSaved, record, startStep = 1, stacked = false }: Props) {
   const canCost = can('masters', 'approve')
 
   const [styles, setStyles] = useState<StyleOption[]>([])
@@ -340,7 +348,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
     if (!open) return
 
     setCurrent(record ?? null)
-    setStep(1)
+    setStep(canCost ? startStep : 1)
     setStyleId(record?.styleId ?? '')
     setColor(record?.color ?? '')
     setNotes(record?.notes ?? '')
@@ -404,7 +412,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
         })
         .catch(() => setGstRate(null))
     }
-  }, [open, record, canCost])
+  }, [open, record, canCost, startStep])
 
   // The style's routings, fetched when costing is reached, for "Fill from routing".
   useEffect(() => {
@@ -1561,7 +1569,7 @@ export function BomFormDialog({ open, onClose, onSaved, record }: Props) {
   const primaryMoves = primaryLabel === 'Next' || primaryLabel === 'Save and continue'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8">
+    <div className={cn('fixed inset-0 flex items-start justify-center overflow-y-auto bg-black/60 backdrop-blur-sm p-4 sm:p-8', stacked ? 'z-[60]' : 'z-50')}>
       {/*
         Solid rather than see-through glass: the form's panels are tinted, and
         over a dimmed page the glass turned the whole body the same grey.

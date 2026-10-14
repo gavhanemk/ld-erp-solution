@@ -4,8 +4,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import {
   Plus, Search, RefreshCw, AlertCircle, Check, X, PackageCheck, ChevronDown, ChevronRight, Ban, Printer, FileText,
-  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock,
-} from 'lucide-react'
+  Download, Loader2, CalendarDays, Hourglass, ShoppingCart, AlarmClock, List, Lock, Undo2 } from 'lucide-react'
 import { api, ApiError, can, currentUser, type Paginated } from '@/lib/api'
 import { RequisitionDialog } from '@/components/inventory/RequisitionDialog'
 import { ProcessDialog, type ProcessTab } from '@/components/inventory/ProcessDialog'
@@ -18,6 +17,7 @@ import { Pagination } from '@/components/tables/Pagination'
 import { RowPanel } from '@/components/tables/RowPanel'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { FloorReturnDialog } from '@/components/inventory/FloorReturnDialog'
 import { formatDate, itemsPreview } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -37,6 +37,8 @@ interface Line {
   id: string
   requestedQty: string | number
   issuedQty: string | number
+  /** Came back from the floor unused. */
+  returnedQty?: string | number
   /** Off the rack, or to be bought. Absent on rows written before the choice
       existed, which all meant the rack. */
   fulfilment?: 'FROM_STOCK' | 'PURCHASE'
@@ -315,6 +317,7 @@ function RequisitionsScreen() {
   // Bumped after a save, so the Indents and Reservations tabs read again.
   const [saved, setSaved] = useState(0)
   const [asking, setAsking] = useState<{ mr: Requisition; kind: 'reject' | 'close' } | null>(null)
+  const [returning, setReturning] = useState<Requisition | null>(null)
 
   const today = dayKey(new Date())
 
@@ -615,6 +618,9 @@ function RequisitionsScreen() {
       actions.push({ key: 'refuse', label: 'Refuse', icon: <X size={14} />, onClick: () => setAsking({ mr, kind: 'reject' }), danger: true })
     if (mr.status === 'APPROVED')
       actions.push({ key: 'slip', label: 'Print issue slip', icon: <Printer size={14} />, href: `/print/material-issue/${mr.id}`, newTab: true })
+    // Leftover from the floor goes back against the requisition it was issued on.
+    if (can('inventory', 'create') && mr.lines.some((l) => Number(l.issuedQty) - Number(l.returnedQty ?? 0) > 1e-9))
+      actions.push({ key: 'return', label: 'Return unused to store', icon: <Undo2 size={14} />, onClick: () => setReturning(mr) })
     if (mayClose(mr, isMine))
       actions.push({
         key: 'close',
@@ -1186,6 +1192,17 @@ function RequisitionsScreen() {
         />
       )}
 
+      {returning && (
+        <FloorReturnDialog
+          mr={returning}
+          onClose={() => setReturning(null)}
+          onSaved={(msg) => {
+            setReturning(null)
+            setMessage(msg)
+            void load()
+          }}
+        />
+      )}
       {asking && (
         <ReasonDialog
           title={

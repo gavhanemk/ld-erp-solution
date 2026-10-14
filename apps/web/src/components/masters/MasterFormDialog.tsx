@@ -39,6 +39,7 @@ import { ApiError, can, masterResource, type Paginated, type Single } from '@/li
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { SuggestInput } from '@/components/ui/SuggestInput'
+import { StepInput } from '@/components/ui/StepInput'
 
 /** The tile in the form's title bar, by master. */
 const RESOURCE_ICONS: Record<string, LucideIcon> = {
@@ -991,6 +992,18 @@ function Field({
           value={String(value ?? '')}
           onValueChange={(v) => onChange(v)}
           suggestions={(options ?? []).map((o) => ({ value: o.value, label: o.label }))}
+        />
+      ) : type === 'number' && !field.allowNegative ? (
+        // The wheel and the arrow keys step it, and it never goes below its floor.
+        <StepInput
+          id={id}
+          decimals
+          className={inputClass}
+          placeholder={hint}
+          value={String(value ?? '')}
+          min={field.min ?? 0}
+          max={field.max}
+          onValueChange={(v) => onChange(v)}
         />
       ) : (
         (type === 'text' || type === 'number' || type === 'date' || type === 'tags') && (

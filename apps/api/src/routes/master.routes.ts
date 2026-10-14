@@ -1,7 +1,9 @@
 import { Router } from 'express'
+import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
+import { checkRouteSteps } from '../services/route.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
@@ -61,6 +63,7 @@ import {
   updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
+  routingStepSchema,
   gstin,
   stateCode,
 } from '../schemas/master.schemas'
@@ -1088,9 +1091,10 @@ router.use(
     createSchema: createOperationSchema,
     updateSchema: updateOperationSchema,
     searchFields: ['name', 'code'],
-    sortableFields: ['name', 'code', 'smv'],
-    defaultSort: { field: 'name', order: 'asc' },
-    include: { department: true },
+    sortableFields: ['name', 'code', 'smv', 'sortOrder', 'kind'],
+    defaultSort: { field: 'sortOrder', order: 'asc' },
+    // Where each process is used, so nobody switches off one a routing needs.
+    include: { department: true, _count: { select: { routingSteps: true, moSteps: true } } },
   }),
 )
 
@@ -1883,11 +1887,12 @@ const routingInclude = {
   steps: {
     orderBy: { sequence: 'asc' as const },
     include: {
-      operation: { select: { id: true, name: true, code: true } },
+      operation: { select: { id: true, name: true, code: true, kind: true } },
       department: { select: { id: true, name: true } },
       workstation: { select: { id: true, name: true, type: true } },
     },
   },
+  _count: { select: { mos: true } },
 }
 
 router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -1895,17 +1900,27 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
   const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
 
-  const where: Record<string, unknown> = {}
+  const where: Prisma.RoutingWhereInput = {}
+  const and: Prisma.RoutingWhereInput[] = []
   if (req.query.active === 'true') where.isActive = true
   else if (req.query.active === 'false') where.isActive = false
   if (typeof req.query.styleId === 'string' && req.query.styleId) where.styleId = req.query.styleId
+  // STYLE: for one style; CATEGORY: for a category; ANY: for any style.
+  if (req.query.applies === 'STYLE') and.push({ styleId: { not: null } })
+  else if (req.query.applies === 'CATEGORY') and.push({ styleId: null, category: { not: null } })
+  else if (req.query.applies === 'ANY') and.push({ styleId: null, category: null })
   if (q) {
-    where.OR = [
-      { name: { contains: q, mode: 'insensitive' } },
-      { code: { contains: q, mode: 'insensitive' } },
-      { style: { name: { contains: q, mode: 'insensitive' } } },
-    ]
+    and.push({
+      OR: [
+        { name: { contains: q, mode: 'insensitive' } },
+        { code: { contains: q, mode: 'insensitive' } },
+        { category: { contains: q, mode: 'insensitive' } },
+        { style: { name: { contains: q, mode: 'insensitive' } } },
+        { style: { code: { contains: q, mode: 'insensitive' } } },
+      ],
+    })
   }
+  if (and.length) where.AND = and
 
   const [rows, total] = await Promise.all([
     prisma.routing.findMany({
@@ -1931,18 +1946,42 @@ router.get('/routings/:id', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: row })
 })
 
+/** A step as saved: what the database takes. */
+const stepRow = (s: z.infer<typeof routingStepSchema>) => ({
+  sequence: s.sequence,
+  operationId: s.operationId,
+  departmentId: s.departmentId,
+  workstationId: s.workstationId ?? null,
+  smv: s.smv ?? null,
+  ratePerPiece: s.ratePerPiece ?? null,
+  isQcStep: s.isQcStep,
+  execution: s.execution,
+  skip: s.skip,
+  instructions: s.instructions?.trim() || null,
+})
+
+/** The steps as a comparable string, so a save that changes nothing keeps the version. */
+const stepsSignature = (steps: Array<ReturnType<typeof stepRow>>) =>
+  JSON.stringify(
+    [...steps]
+      .sort((a, b) => a.sequence - b.sequence)
+      .map((s) => [s.operationId, s.departmentId, s.workstationId, s.smv == null ? null : Number(s.smv), s.ratePerPiece == null ? null : Number(s.ratePerPiece), s.isQcStep, s.execution, s.skip, s.instructions]),
+  )
+
 router.post('/routings', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createRoutingSchema.parse(req.body)
-  await assertRoutingRefsExist(data.steps, data.styleId)
+  await assertRoutingRefsExist(data.steps, data.styleId || null)
+  const warnings = await checkRouteSteps(prisma, [...data.steps].sort((a, b) => a.sequence - b.sequence))
 
   const created = await prisma.routing.create({
     data: {
       code: data.code,
       name: data.name,
-      styleId: data.styleId,
+      styleId: data.styleId || null,
+      category: data.styleId ? null : data.category?.trim() || null,
       notes: data.notes ?? null,
       isActive: data.isActive ?? true,
-      steps: { create: data.steps.map((s) => ({ ...s, workstationId: s.workstationId ?? null })) },
+      steps: { create: data.steps.map(stepRow) },
     },
     include: routingInclude,
   })
@@ -1955,7 +1994,7 @@ router.post('/routings', requirePermission(MODULE, 'create'), async (req: AuthRe
     after: created,
   })
 
-  res.status(201).json({ success: true, data: created })
+  res.status(201).json({ success: true, message: [`${created.code} saved.`, ...warnings].join(' '), data: created })
 })
 
 router.patch('/routings/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
@@ -1974,21 +2013,32 @@ router.patch('/routings/:id', requirePermission(MODULE, 'edit'), async (req: Aut
     )
   }
 
-  if (data.steps) await assertRoutingRefsExist(data.steps, data.styleId ?? before.styleId)
+  // Style or category: setting one clears the other.
+  const styleId = data.styleId !== undefined ? data.styleId || null : data.category?.trim() ? null : before.styleId
+  const category = styleId ? null : data.category !== undefined ? data.category?.trim() || null : before.category
+  let warnings: string[] = []
+  if (data.steps) {
+    await assertRoutingRefsExist(data.steps, styleId)
+    warnings = await checkRouteSteps(prisma, [...data.steps].sort((a, b) => a.sequence - b.sequence))
+  } else if (styleId && styleId !== before.styleId) {
+    await assertRoutingRefsExist([], styleId)
+  }
+  // Orders keep the steps they were given; a new version is what new orders get.
+  const changed = !!data.steps && stepsSignature(data.steps.map(stepRow)) !== stepsSignature(before.steps.map((s) => ({ ...s, smv: s.smv == null ? null : Number(s.smv), ratePerPiece: s.ratePerPiece == null ? null : Number(s.ratePerPiece) })))
 
   const after = await prisma.$transaction(async (tx) => {
     if (data.steps) {
       await tx.routingStep.deleteMany({ where: { routingId: before.id } })
-      await tx.routingStep.createMany({
-        data: data.steps.map((s) => ({ ...s, workstationId: s.workstationId ?? null, routingId: before.id })),
-      })
+      await tx.routingStep.createMany({ data: data.steps.map((s) => ({ ...stepRow(s), routingId: before.id })) })
     }
     return tx.routing.update({
       where: { id: before.id },
       data: {
         ...(data.code ? { code: data.code } : {}),
         ...(data.name ? { name: data.name } : {}),
-        ...(data.styleId ? { styleId: data.styleId } : {}),
+        styleId,
+        category,
+        ...(changed ? { version: { increment: 1 } } : {}),
         ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
         ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
         ...(data.isLocked !== undefined ? { isLocked: data.isLocked } : {}),
@@ -2006,7 +2056,10 @@ router.patch('/routings/:id', requirePermission(MODULE, 'edit'), async (req: Aut
     after,
   })
 
-  res.json({ success: true, data: after })
+  const message = changed
+    ? `${after.code} is now version ${after.version}. Orders already planned keep the steps they were given.`
+    : `${after.code} saved.`
+  res.json({ success: true, message: [message, ...warnings].join(' '), data: after })
 })
 
 router.delete('/routings/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
@@ -2033,10 +2086,12 @@ router.delete('/routings/:id', requirePermission(MODULE, 'delete'), async (req: 
  */
 async function assertRoutingRefsExist(
   steps: Array<{ operationId: string; departmentId: string; workstationId?: string | null }>,
-  styleId: string,
+  styleId: string | null,
 ): Promise<void> {
-  const style = await prisma.style.findUnique({ where: { id: styleId }, select: { id: true } })
-  if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+  if (styleId) {
+    const style = await prisma.style.findUnique({ where: { id: styleId }, select: { id: true } })
+    if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
+  }
 
   const operationIds = [...new Set(steps.map((s) => s.operationId))]
   const departmentIds = [...new Set(steps.map((s) => s.departmentId))]

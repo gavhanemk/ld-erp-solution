@@ -1,0 +1,152 @@
+'use client'
+
+import { useEffect, useState } from 'react'
+import { Loader2, Undo2, Boxes } from 'lucide-react'
+import { api, ApiError, masterResource } from '@/lib/api'
+import { FormFrame } from '@/components/ui/FormFrame'
+import { Section } from '@/components/purchase/Section'
+import { SmartSelect } from '@/components/ui/SmartSelect'
+import { StepInput } from '@/components/ui/StepInput'
+
+/**
+ * Material back from the floor unused: the leftover fabric after cutting,
+ * spare buttons after stitching. Against the requisition it was issued on, so
+ * the order's issued figure becomes what it actually used. Goes back into
+ * stock as whoever's it was — a customer's leftover stays the customer's.
+ */
+
+interface ReturnLine {
+  id: string
+  issuedQty: string | number
+  returnedQty?: string | number
+  item: { name: string; uom: { symbol: string } }
+  warehouse: { id: string; name: string }
+  ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+  ownerCustomer?: { name: string } | null
+}
+
+const num = (v: string) => Number(v) || 0
+const fmt = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 3 })
+
+export function FloorReturnDialog({
+  mr,
+  onClose,
+  onSaved,
+}: {
+  mr: { id: string; mrNumber: string; department?: { name: string } | null; lines: ReturnLine[] }
+  onClose: () => void
+  onSaved: (message: string) => void
+}) {
+  const open = mr.lines.map((l) => ({ l, left: Math.round((Number(l.issuedQty) - Number(l.returnedQty ?? 0)) * 1000) / 1000 })).filter((x) => x.left > 0)
+  const [qty, setQty] = useState<Record<string, string>>({})
+  const [store, setStore] = useState<Record<string, string>>(Object.fromEntries(open.map((x) => [x.l.id, x.l.warehouse.id])))
+  const [stores, setStores] = useState<Array<{ id: string; name: string }>>([])
+  const [reason, setReason] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    masterResource<{ id: string; name: string }>('warehouses')
+      .list({ limit: 100, active: true })
+      .then((r) => setStores(r.data))
+      .catch(() => setStores([]))
+  }, [])
+
+  const lines = open.filter((x) => num(qty[x.l.id] ?? '') > 0)
+  const over = lines.find((x) => num(qty[x.l.id] ?? '') > x.left + 1e-9)
+
+  const save = async () => {
+    if (!lines.length || over) return
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/return`, {
+        reason: reason.trim() || null,
+        lines: lines.map((x) => ({ lineId: x.l.id, qty: num(qty[x.l.id] ?? ''), warehouseId: store[x.l.id] || x.l.warehouse.id })),
+      })
+      onSaved(res.message ?? 'Returned to the store.')
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not return it.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <FormFrame
+      icon={Undo2}
+      title={`Back from the floor · ${mr.mrNumber}`}
+      subtitle={`What ${mr.department?.name ?? 'the floor'} did not use, back into the store. The order's issued figure becomes what it used.`}
+      width="max-w-4xl"
+      primary={
+        <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !lines.length || !!over}>
+          {saving ? <Loader2 size={15} className="animate-spin" /> : <Undo2 size={15} />} Return to store
+        </button>
+      }
+      footer={
+        <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
+          Cancel
+        </button>
+      }
+      footerNote={over ? <span className="text-destructive">More than was issued and not yet returned.</span> : `${lines.length} of ${open.length} lines coming back`}
+      error={error}
+      onClose={onClose}
+      busy={saving}
+    >
+      <Section icon={Boxes} title="Coming back">
+        {open.length === 0 ? (
+          <p className="text-muted-foreground text-sm">Nothing issued on {mr.mrNumber} is left to return.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="data-table w-full">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th style={{ textAlign: 'right' }}>Issued, not returned</th>
+                  <th style={{ textAlign: 'right' }}>Coming back</th>
+                  <th>Into store</th>
+                </tr>
+              </thead>
+              <tbody>
+                {open.map(({ l, left }) => (
+                  <tr key={l.id}>
+                    <td>
+                      <div className="text-foreground text-sm">{l.item.name}</div>
+                      {l.ownership === 'CUSTOMER_OWNED' && <div className="text-muted-foreground text-[11px]">{l.ownerCustomer?.name ?? 'Customer'}&apos;s</div>}
+                    </td>
+                    <td className="text-right text-sm tabular-nums">
+                      {fmt(left)} {l.item.uom.symbol}
+                    </td>
+                    <td className="w-36">
+                      <StepInput
+                        decimals
+                        className={`form-input h-9 text-right tabular-nums ${num(qty[l.id] ?? '') > left + 1e-9 ? 'border-destructive/60' : ''}`}
+                        value={qty[l.id] ?? ''}
+                        placeholder="0"
+                        onValueChange={(v) => setQty((q) => ({ ...q, [l.id]: v }))}
+                        aria-label={`${l.item.name} coming back`}
+                      />
+                    </td>
+                    <td className="w-48">
+                      <SmartSelect className="form-input h-9" value={store[l.id] ?? ''} onChange={(e) => setStore((s) => ({ ...s, [l.id]: e.target.value }))} aria-label={`Store for ${l.item.name}`}>
+                        {stores.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                          </option>
+                        ))}
+                      </SmartSelect>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <label className="mt-3 block">
+          <span className="form-label">Note</span>
+          <input className="form-input" maxLength={300} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Leftover after cutting" />
+        </label>
+      </Section>
+    </FormFrame>
+  )
+}

@@ -111,8 +111,9 @@ export function CustomerMaterialDialog({
           masterResource<ItemOption>('items').list({ limit: 200, active: true, sort: 'name', order: 'asc' }),
           masterResource<Option>('warehouses').list({ limit: 100, active: true }),
           // The picker list, open to the store, which has no sales permission.
-          api.get<{ data: Array<{ id: string; soNumber: string; customerId: string }> }>(
-            '/sales/orders/options'
+          // Open job-work orders only: the customer's material comes in for those.
+          api.get<{ data: Array<{ id: string; soNumber: string; customerId: string; isJobWork?: boolean }> }>(
+            '/sales/orders/options?open=1'
           ),
         ])
         if (cancelled) return
@@ -121,7 +122,7 @@ export function CustomerMaterialDialog({
         setWarehouses(w.data)
         // One store to choose from: chosen already.
         if (w.data.length === 1) setWarehouseId(w.data[0].id)
-        setOrders(so.data)
+        setOrders(so.data.filter((o) => o.isJobWork))
       } catch {
         if (!cancelled) setError('Could not load customers, items and stores.')
       } finally {
@@ -175,6 +176,10 @@ export function CustomerMaterialDialog({
     if (filled.length === 0) return setError('Enter what arrived on at least one line.')
     const over = filled.find((l) => num(l.rejectedQty) > num(l.receivedQty))
     if (over) return setError(`Line ${lines.indexOf(over) + 1}: more is rejected than arrived. Rejected is part of what arrived.`)
+    // Their challan's figure is what any shortage is measured against, so it
+    // is asked for rather than copied from what was measured.
+    const noChallan = filled.find((l) => !(num(l.challanQty) > 0))
+    if (noChallan) return setError(`Line ${lines.indexOf(noChallan) + 1}: enter the quantity on their challan, so a shortage shows.`)
 
     setSaving(true)
     try {
@@ -196,7 +201,7 @@ export function CustomerMaterialDialog({
           notes: notes || null,
           lines: filled.map((l) => ({
             itemId: l.itemId,
-            challanQty: num(l.challanQty) || num(l.receivedQty),
+            challanQty: num(l.challanQty),
             receivedQty: num(l.receivedQty),
             rejectedQty: num(l.rejectedQty),
             markings: l.markings || null,

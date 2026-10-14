@@ -73,6 +73,8 @@ export default function FinishedGoodsPage() {
   const [warehouses, setWarehouses] = useState<Array<{ id: string; name: string }>>([])
 
   const [adding, setAdding] = useState(false)
+  /** Opened from a manufacturing order: its pieces ready to pack come in filled. */
+  const [presetMoId, setPresetMoId] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState<Receipt | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -81,6 +83,11 @@ export default function FinishedGoodsPage() {
       .get<{ data: Array<{ id: string; name: string }> }>('/masters/warehouses?limit=100')
       .then((r) => setWarehouses(r.data))
       .catch(() => {})
+    const mo = new URLSearchParams(window.location.search).get('mo')
+    if (mo) {
+      setPresetMoId(mo)
+      setAdding(true)
+    }
   }, [])
 
   useEffect(() => {
@@ -307,7 +314,11 @@ export default function FinishedGoodsPage() {
 
       <FinishedGoodsDialog
         open={adding}
-        onClose={() => setAdding(false)}
+        presetMoId={presetMoId}
+        onClose={() => {
+          setAdding(false)
+          setPresetMoId(null)
+        }}
         onSaved={(msg) => {
           setMessage(msg)
           void load()

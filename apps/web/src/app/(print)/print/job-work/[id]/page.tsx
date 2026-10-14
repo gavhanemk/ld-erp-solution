@@ -55,6 +55,9 @@ interface Payload {
       hsnCode: string | null
       unitRate: string | null
       item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } | null }
+      ownership?: 'OWNED' | 'CUSTOMER_OWNED'
+      ownerCustomer?: { name: string } | null
+      size?: { code: string } | null
     }>
   }
 }
@@ -228,7 +231,7 @@ export default function PrintJobWorkChallan() {
             <Eyebrow style={{ color: GREY }}>Declaration</Eyebrow>
             <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.6 }}>
               {template.declaration ??
-                `Goods sent for job work (${challan.process}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. This is not a supply and no GST is charged. The goods remain the property of ${company.name} and are to be returned, as processed goods or as they are, by ${longDate(yearOn(challan.challanDate))} — one year from this challan.`}
+                `Goods sent for job work (${challan.process}) under section 143 of the CGST Act, 2017, and rule 55 of the CGST Rules, 2017. This is not a supply and no GST is charged. The goods remain the property of ${challan.lines.some((l) => l.ownership === 'CUSTOMER_OWNED') ? [...new Set(challan.lines.filter((l) => l.ownership === 'CUSTOMER_OWNED').map((l) => l.ownerCustomer?.name ?? 'our customer'))].join(', ') + ', held by ' + company.name + ' for job work,' : company.name} and are to be returned, as processed goods or as they are, by ${longDate(yearOn(challan.challanDate))} — one year from this challan.`}
             </div>
           </div>
         </>

@@ -90,7 +90,9 @@ export const jobWorkPending: ReportDefinition = {
       const pending = Math.max(0, sent - settled)
       const lastBack = l.returnLines.reduce<Date | null>((m, r) => (!m || r.jobWorkReturn.returnDate > m ? r.jobWorkReturn.returnDate : m), null)
       const open = pending > 0.0005
-      const overdue = open && l.challan.expectedBackOn != null && l.challan.expectedBackOn < now
+      // Late from the day after it was due, on the Indian calendar.
+      const day = (d: Date) => d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+      const overdue = open && l.challan.expectedBackOn != null && day(l.challan.expectedBackOn) < day(new Date(now))
       return {
         status: overdue ? 'OVERDUE' : open ? 'OUT' : 'DONE',
         challanNumber: l.challan.challanNumber,

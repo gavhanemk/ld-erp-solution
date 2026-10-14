@@ -139,7 +139,8 @@ function billLines(dc: Billable) {
     .map((l) => {
       const so = l.soLine!
       const qty = Number(l.qty)
-      const unitPrice = Number(so.unitPrice)
+      // B-grade pieces bill at the order line's B-grade rate, when it has one.
+      const unitPrice = l.grade === 'B' && so.bGradeRate != null ? Number(so.bGradeRate) : Number(so.unitPrice)
       const discount = Number(so.discount)
       return {
         dcLine: l,
@@ -206,7 +207,8 @@ async function priceInvoice(tx: Prisma.TransactionClient, dc: Billable, data: In
     return {
       itemId: b.dcLine.itemId ?? b.soLine.itemId,
       soLineId: b.soLine.id,
-      description: b.soLine.description,
+      grade: b.dcLine.grade,
+      description: b.dcLine.grade === 'B' ? ['B-grade', b.soLine.description].filter(Boolean).join(' · ') : b.soLine.description,
       hsnCode: b.soLine.hsnCode ?? b.dcLine.item?.hsnCode ?? null,
       qty: b.qty,
       unitPrice: b.unitPrice,
@@ -330,6 +332,7 @@ router.get('/prepare', requirePermission(MODULE, 'create'), async (req, res) => 
       placeOfSupplyProblem,
       lines: billLines(dc).map((b) => ({
         soLineId: b.soLine.id,
+        grade: b.dcLine.grade,
         item: b.dcLine.item,
         styleCode: b.soLine.styleCode,
         color: b.soLine.color,

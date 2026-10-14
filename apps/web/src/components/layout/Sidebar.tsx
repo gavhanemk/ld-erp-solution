@@ -72,6 +72,7 @@ const navItems: NavItem[] = [
       { label: 'Agents & Brokers', href: '/masters/brokers' },
       { label: 'Departments', href: '/masters/departments' },
       { label: 'Workstations', href: '/masters/workstations' },
+      { label: 'Process Master', href: '/masters/processes' },
       { label: 'Extra Charges', href: '/masters/charges' },
       { label: 'Dropdown Lists', href: '/masters/dropdown-lists' },
       { label: 'Warehouses', href: '/masters/warehouses' },
@@ -143,12 +144,14 @@ const navItems: NavItem[] = [
   {
     label: 'Production', icon: Factory,
     children: [
+      /* In the order the work happens: the order, the stages a style goes
+         through, each colour's job card, the handovers between departments,
+         and every stage — cutting to the last check — on one screen. */
       { label: 'Manufacturing Orders', href: '/production/orders' },
       { label: 'Routings', href: '/masters/routings' },
-      { label: 'Cutting', href: '/production/cutting', planned: true },
-      { label: 'Stitching', href: '/production/stitching', planned: true },
-      { label: 'Quality Control', href: '/production/qc', planned: true },
-      { label: 'Packing', href: '/production/packing', planned: true },
+      { label: 'Job Cards', href: '/production/job-cards' },
+      { label: 'Process Transfers', href: '/production/transfers' },
+      { label: 'Production Stages', href: '/production/stages' },
     ],
   },
   {

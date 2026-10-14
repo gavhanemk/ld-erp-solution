@@ -567,6 +567,11 @@ export const createOperationSchema = z.object({
   jobWorkRate: nonNegativeDecimal,
   /** Position in the default factory sequence, so pickers read in floor order. */
   sortOrder: z.number().int().min(0).max(999).optional(),
+  /** What it does to the garment: cutting makes the pieces, a check passes or fails them. */
+  kind: z.enum(['CUTTING', 'STITCHING', 'FINISHING', 'QC', 'PACKING', 'OTHER']).default('OTHER'),
+  /** Where it is usually done; a routing step can say otherwise. */
+  defaultExecution: z.enum(['IN_HOUSE', 'OUTSOURCED']).default('IN_HOUSE'),
+  instructions: optionalText,
   isActive,
 })
 export const updateOperationSchema = createOperationSchema.partial()
@@ -862,23 +867,30 @@ export const createChargeTypeSchema = z.object({
 export const updateChargeTypeSchema = createChargeTypeSchema.partial()
 
 // ─────────────────────────────────────────────────────────────
-// Routing — a style's ordered path through the factory
+// Routing — the ordered path a garment takes through the factory
 // ─────────────────────────────────────────────────────────────
 
 export const routingStepSchema = z.object({
   sequence: z.number().int().min(1).max(200),
-  operationId: z.string().min(1, 'Pick an operation'),
+  operationId: z.string().min(1, 'Pick a process'),
   departmentId: z.string().min(1, 'Pick a department'),
   workstationId: z.string().optional().nullable(),
   smv: z.number().min(0).max(999).optional().nullable(),
   ratePerPiece: z.number().min(0).max(100000).optional().nullable(),
   isQcStep: z.boolean().default(false),
+  /** Done on our floor, or given to an outside unit. */
+  execution: z.enum(['IN_HOUSE', 'OUTSOURCED']).default('IN_HOUSE'),
+  /** Who may leave it out of an order's route. */
+  skip: z.enum(['OPTIONAL', 'WITH_APPROVAL', 'NEVER']).default('WITH_APPROVAL'),
+  instructions: optionalText,
 })
 
-export const createRoutingSchema = z.object({
+const routingFields = z.object({
   code,
   name,
-  styleId: z.string().min(1, 'Pick a style'),
+  /** For one style; or, with `category`, every style filed under it; with neither, any style. */
+  styleId: z.string().optional().nullable(),
+  category: z.string().trim().max(60).optional().nullable(),
   notes: optionalText,
   isActive,
   steps: z
@@ -891,6 +903,12 @@ export const createRoutingSchema = z.object({
     }),
 })
 
-export const updateRoutingSchema = createRoutingSchema.partial().extend({
-  isLocked: z.boolean().optional(),
-})
+const oneTarget = (v: { styleId?: string | null; category?: string | null }) => !(v.styleId && v.category?.trim())
+const oneTargetIssue = { message: 'A routing is for one style or for a category, not both', path: ['category'] }
+
+export const createRoutingSchema = routingFields.refine(oneTarget, oneTargetIssue)
+
+export const updateRoutingSchema = routingFields
+  .partial()
+  .extend({ isLocked: z.boolean().optional() })
+  .refine(oneTarget, oneTargetIssue)
