@@ -4,7 +4,7 @@ import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission } from '../middleware/auth'
 import { normaliseGarmentCode } from '../services/garment.service'
-import { customerTrace, garmentTrace, orderTrace, search, styleTrace } from '../services/trace.service'
+import { customerTrace, filterOptions, findPieces, garmentTrace, orderTrace, search, styleTrace } from '../services/trace.service'
 import { garmentDetail } from './garments.routes'
 
 /*
@@ -18,6 +18,34 @@ const MODULE = 'inventory'
 router.get('/search', requirePermission(MODULE, 'view'), async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : ''
   res.json({ success: true, data: await search(q) })
+})
+
+/** What the filters can offer: customers, orders, styles, colours and sizes that have tagged pieces. */
+router.get('/filters', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await filterOptions() })
+})
+
+/** Tagged pieces by any of the filters, and by what is typed. */
+router.get('/pieces', requirePermission(MODULE, 'view'), async (req, res) => {
+  const s = (k: string) => (typeof req.query[k] === 'string' && req.query[k] ? (req.query[k] as string) : undefined)
+  const status = s('status')
+  if (status && !['IN_STOCK', 'PACKED', 'DISPATCHED', 'SCRAPPED', 'VOID'].includes(status)) throw new AppError('Unknown status', 400, 'BAD_STATUS')
+  res.json({
+    success: true,
+    data: await findPieces({
+      q: s('q'),
+      customerId: s('customerId'),
+      styleId: s('styleId'),
+      soId: s('soId'),
+      moId: s('moId'),
+      color: s('color'),
+      sizeId: s('sizeId'),
+      status,
+      from: s('from'),
+      to: s('to'),
+      page: Number(s('page')) || 1,
+    }),
+  })
 })
 
 /** One garment, by the code on its tag: everything that ever happened to it. */

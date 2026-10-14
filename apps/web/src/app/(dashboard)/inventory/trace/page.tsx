@@ -10,6 +10,7 @@ import { GarmentTrace, type GarmentStory } from '@/components/trace/GarmentTrace
 import { OrderTrace, type OrderStory } from '@/components/trace/OrderTrace'
 import { CustomerTrace, StyleTrace, type CustomerStory, type StyleStory } from '@/components/trace/PartyTrace'
 import { hitTarget, type Hit, type Target } from '@/components/trace/traceTypes'
+import { FILTER_KEYS, FilterBar, PieceResults, type FilterOptions, type Filters } from '@/components/trace/TraceFilters'
 
 const KINDS = ['g', 'so', 'mo', 'c', 's'] as const
 
@@ -89,6 +90,27 @@ function TraceScreen() {
   const [recent, setRecent] = useState<Recent[]>([])
   const boxRef = useRef<HTMLDivElement>(null)
 
+  // The filters live in the address, so Back from a piece comes back to the same list.
+  const [options, setOptions] = useState<FilterOptions | null>(null)
+  const filters = useMemo(() => Object.fromEntries(FILTER_KEYS.map((k) => [k, params.get(k) ?? ''])) as Filters, [params])
+  const filtering = FILTER_KEYS.some((k) => filters[k])
+  useEffect(() => {
+    api
+      .get<{ data: FilterOptions }>('/trace/filters')
+      .then((r) => setOptions(r.data))
+      .catch(() => {})
+  }, [])
+  const setFilters = (patch: Partial<Filters>) => {
+    const next = { ...filters, ...patch }
+    const qs = new URLSearchParams()
+    for (const k of FILTER_KEYS) if (next[k]) qs.set(k, next[k])
+    const url = `/inventory/trace${qs.toString() ? `?${qs}` : ''}`
+    // From a piece or an order, a filter starts a new list; Back returns to what was open.
+    if (target) router.push(url)
+    else router.replace(url)
+    setResults(null)
+  }
+
   useEffect(() => {
     try {
       setRecent(JSON.parse(localStorage.getItem('trace-recent') ?? '[]'))
@@ -107,10 +129,10 @@ function TraceScreen() {
     [router],
   )
 
-  // Suggestions as it is typed.
+  // Suggestions as it is typed — while filtering, what is typed narrows the list instead.
   useEffect(() => {
     const q = typed.trim()
-    if (q.length < 2) {
+    if (q.length < 2 || filtering) {
       setHits(null)
       return
     }
@@ -126,7 +148,7 @@ function TraceScreen() {
       }
     }, 250)
     return () => clearTimeout(t)
-  }, [typed])
+  }, [typed, filtering])
 
   // A click anywhere else closes the suggestions.
   useEffect(() => {
@@ -142,6 +164,8 @@ function TraceScreen() {
     const q = raw.trim()
     setHits(null)
     if (looksLikeGarment(q)) return open({ kind: 'g', id: q })
+    // Filtering: what is typed already narrows the list below.
+    if (filtering) return
     setSearching(true)
     try {
       const r = await api.get<{ data: Hit[] }>(`/trace/search?q=${encodeURIComponent(q)}`)
@@ -236,7 +260,8 @@ function TraceScreen() {
           onCode={(c) => void onCode(c)}
           busy={false}
           autoFocus={!target}
-          placeholder="Scan a tag, or type a code, order, PO, challan, customer or style"
+          clearOnCode={false}
+          placeholder={filtering ? 'Type to narrow the list: a tag, lot, challan, order or colour' : 'Scan a tag, or type a code, order, PO, challan, customer or style'}
           onType={(t) => {
             setTyped(t)
             setResults(null)
@@ -250,6 +275,10 @@ function TraceScreen() {
           }
         />
       </div>
+
+      <FilterBar options={options} f={filters} set={setFilters} clear={() => router.replace('/inventory/trace')} />
+
+      {!target && filtering && <PieceResults f={filters} typed={typed} set={setFilters} open={open} />}
 
       {results && (
         <div className="glass-card overflow-hidden p-0">
@@ -282,7 +311,7 @@ function TraceScreen() {
         </>
       )}
 
-      {!target && !results && (
+      {!target && !results && !filtering && (
         <div className="space-y-5">
           <div className="grid gap-3 sm:grid-cols-3">
             {[

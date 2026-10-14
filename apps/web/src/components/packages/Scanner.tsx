@@ -22,6 +22,7 @@ export function Scanner({
   autoFocus = true,
   onType,
   suggestions,
+  clearOnCode = true,
 }: {
   onCode: (code: string) => void
   busy?: boolean
@@ -31,6 +32,8 @@ export function Scanner({
   onType?: (text: string) => void
   /** Shown just under the box, over what follows: suggestions to pick from. */
   suggestions?: React.ReactNode
+  /** Empty the box once a code is sent — for scanning one after another. Off where what is typed is a search. */
+  clearOnCode?: boolean
 }) {
   const [typed, setTyped] = useState('')
   const [camera, setCamera] = useState(false)
@@ -96,8 +99,10 @@ export function Scanner({
   const submit = () => {
     const code = typed.trim()
     if (!code || busy) return
-    setTyped('')
-    onType?.('')
+    if (clearOnCode) {
+      setTyped('')
+      onType?.('')
+    }
     onCode(code)
   }
 

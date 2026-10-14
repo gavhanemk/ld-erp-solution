@@ -1,4 +1,4 @@
-import { prisma } from '@ld-erp/database'
+import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { normaliseGarmentCode } from './garment.service'
 import { stepFigures } from './floor.service'
@@ -741,5 +741,149 @@ export async function styleTrace(id: string) {
     },
     orders,
     pieces,
+  }
+}
+
+// ── Advanced search: pieces by customer, style, order, colour, size, status, date ──
+
+/**
+ * What the filters can offer: only what has tagged pieces, with the links
+ * between them — an order's customer, an MO's order and styles — so picking a
+ * customer can narrow the order list to theirs.
+ */
+export async function filterOptions() {
+  const [byMo, byItem, bySize] = await Promise.all([
+    prisma.garment.groupBy({ by: ['moId'], _count: { _all: true } }),
+    prisma.garment.groupBy({ by: ['itemId'], _count: { _all: true } }),
+    prisma.garment.groupBy({ by: ['sizeId'], _count: { _all: true } }),
+  ])
+  const [mos, items, sizes] = await Promise.all([
+    prisma.manufacturingOrder.findMany({
+      where: { id: { in: byMo.map((r) => r.moId) } },
+      select: {
+        id: true,
+        moNumber: true,
+        soId: true,
+        so: { select: { soNumber: true, customerPORef: true, customer: { select: { id: true, name: true } } } },
+        lines: { select: { styleId: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.item.findMany({ where: { id: { in: byItem.map((r) => r.itemId) } }, select: { color: true, style: { select: { id: true, code: true, name: true } } } }),
+    prisma.size.findMany({ where: { id: { in: bySize.map((r) => r.sizeId).filter((x): x is string => !!x) } }, select: { id: true, code: true, sequence: true }, orderBy: { sequence: 'asc' } }),
+  ])
+  const customers = new Map<string, { id: string; name: string }>()
+  const sos = new Map<string, { id: string; soNumber: string; poRef: string | null; customerId: string; customer: string }>()
+  for (const m of mos) {
+    if (!m.so || !m.soId) continue
+    customers.set(m.so.customer.id, m.so.customer)
+    sos.set(m.soId, { id: m.soId, soNumber: m.so.soNumber, poRef: m.so.customerPORef, customerId: m.so.customer.id, customer: m.so.customer.name })
+  }
+  const styles = new Map<string, { id: string; code: string; name: string }>()
+  for (const i of items) if (i.style) styles.set(i.style.id, i.style)
+  return {
+    customers: [...customers.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    sos: [...sos.values()],
+    mos: mos.map((m) => ({ id: m.id, moNumber: m.moNumber, soId: m.soId, customerId: m.so?.customer.id ?? null, styleIds: [...new Set(m.lines.map((l) => l.styleId))] })),
+    styles: [...styles.values()].sort((a, b) => a.code.localeCompare(b.code)),
+    colors: [...new Set(items.map((i) => i.color).filter((c): c is string => !!c))].sort(),
+    sizes: sizes.map((s) => ({ id: s.id, code: s.code })),
+  }
+}
+
+export interface PieceFilter {
+  q?: string
+  customerId?: string
+  styleId?: string
+  soId?: string
+  moId?: string
+  color?: string
+  sizeId?: string
+  status?: string
+  from?: string
+  to?: string
+  page?: number
+}
+
+/** Tagged pieces matching every filter given, and what was typed — 50 a page, with the count in each state. */
+export async function findPieces(f: PieceFilter) {
+  const and: Prisma.GarmentWhereInput[] = []
+  if (f.customerId) and.push({ mo: { so: { customerId: f.customerId } } })
+  if (f.soId) and.push({ mo: { soId: f.soId } })
+  if (f.moId) and.push({ moId: f.moId })
+  if (f.styleId) and.push({ item: { styleId: f.styleId } })
+  if (f.color) and.push({ item: { color: { equals: f.color, mode: 'insensitive' } } })
+  if (f.sizeId) and.push({ sizeId: f.sizeId })
+  if (f.from || f.to) {
+    and.push({ fgReceipt: { receiptDate: { ...(f.from ? { gte: new Date(f.from) } : {}), ...(f.to ? { lte: new Date(`${f.to}T23:59:59.999Z`) } : {}) } } })
+  }
+  const q = f.q?.trim()
+  if (q && q.length >= 2) {
+    const like = { contains: q, mode: 'insensitive' as const }
+    const digits = q.replace(/^g-?/i, '').replace(/^0+/, '')
+    and.push({
+      OR: [
+        ...(/^\d+$/.test(digits) ? [{ code: { contains: digits } }] : []),
+        { code: like },
+        { item: { style: { code: like } } },
+        { item: { color: like } },
+        { mo: { moNumber: like } },
+        { mo: { so: { soNumber: like } } },
+        { mo: { so: { customerPORef: like } } },
+        { mo: { so: { customer: { name: like } } } },
+        { dc: { dcNumber: like } },
+        { fgReceipt: { fgrNumber: like } },
+        { bundle: { code: like } },
+        { bundle: { cuttingOrder: { lotNo: like } } },
+      ],
+    })
+  }
+  const base: Prisma.GarmentWhereInput = and.length ? { AND: and } : {}
+  const where: Prisma.GarmentWhereInput = f.status ? { ...base, status: f.status as Prisma.GarmentWhereInput['status'] } : { ...base, status: { not: 'VOID' } }
+  const page = Math.max(1, f.page ?? 1)
+  const [total, counts, rows] = await Promise.all([
+    prisma.garment.count({ where }),
+    prisma.garment.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+    prisma.garment.findMany({
+      where,
+      select: {
+        code: true,
+        status: true,
+        grade: true,
+        printCount: true,
+        size: { select: { code: true } },
+        item: { select: { color: true, style: { select: { code: true } } } },
+        warehouse: { select: { name: true } },
+        dc: { select: { dcNumber: true } },
+        mo: { select: { moNumber: true, so: { select: { soNumber: true, customer: { select: { name: true } } } } } },
+        fgReceipt: { select: { receiptDate: true } },
+        bundle: { select: { cuttingOrder: { select: { lotNo: true } } } },
+      },
+      orderBy: { code: 'asc' },
+      skip: (page - 1) * 50,
+      take: 50,
+    }),
+  ])
+  return {
+    total,
+    page,
+    pages: Math.max(1, Math.ceil(total / 50)),
+    counts: Object.fromEntries(counts.map((c) => [c.status, c._count._all])),
+    rows: rows.map((g) => ({
+      code: g.code,
+      status: g.status,
+      grade: g.grade,
+      printed: g.printCount > 0,
+      style: g.item.style?.code ?? '',
+      color: g.item.color ?? '',
+      size: g.size?.code ?? '',
+      customer: g.mo.so?.customer.name ?? null,
+      soNumber: g.mo.so?.soNumber ?? null,
+      moNumber: g.mo.moNumber,
+      store: g.warehouse.name,
+      dcNumber: g.dc?.dcNumber ?? null,
+      receivedOn: g.fgReceipt.receiptDate,
+      lot: g.bundle?.cuttingOrder?.lotNo ?? null,
+    })),
   }
 }
