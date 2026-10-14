@@ -284,7 +284,7 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
     prisma.garment.count({ where }),
     prisma.garment.findMany({
       where,
-      select: { id: true, code: true, grade: true, status: true, printCount: true, lastPrintedAt: true, size: { select: { code: true } }, item: { select: { name: true } } },
+      select: { id: true, code: true, grade: true, status: true, printCount: true, lastPrintedAt: true, bundleId: true, size: { select: { code: true } }, item: { select: { name: true } }, bundle: { select: { code: true } }, warehouse: { select: { name: true } } },
       orderBy: { code: 'asc' },
       take: limit,
     }),
@@ -296,9 +296,12 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
 function labelWhere(query: Record<string, unknown>): Prisma.GarmentWhereInput {
   const str = (k: string) => (typeof query[k] === 'string' ? (query[k] as string).trim() : '')
   const ids = str('ids') ? str('ids').split(',').filter(Boolean) : []
+  // A job card's pieces: those sewn in its bundles.
+  const bundles = str('bundles') ? str('bundles').split(',').filter(Boolean) : []
   return {
     status: { not: 'VOID' },
     ...(ids.length ? { id: { in: ids } } : {}),
+    ...(bundles.length ? { bundleId: { in: bundles } } : {}),
     ...(str('moId') ? { moId: str('moId') } : {}),
     ...(str('itemId') ? { itemId: str('itemId') } : {}),
     ...(query.sizeId !== undefined && str('sizeId') !== 'all' ? { sizeId: str('sizeId') || null } : {}),

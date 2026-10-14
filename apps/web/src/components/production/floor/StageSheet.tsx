@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
   Ban,
@@ -8,7 +8,6 @@ import {
   ClipboardList,
   Gavel,
   Hammer,
-  History,
   PackageCheck,
   PackageOpen,
   Printer,
@@ -37,6 +36,8 @@ import { ReturnBillDialog } from './ReturnBillDialog'
 import { sendsFromHand } from './useFlow'
 import { transferStatus } from './transferStatus'
 import { isCheck, pcs, type FlowStep, type FlowTransfer, type JobCardDetail, type JobWorkReturn, type LogEntry } from './types'
+import { BundleTable, type SheetPiece } from './BundleTable'
+import { PieceList } from './PieceList'
 
 /**
  * A department's sheet for one job card — stitching, finishing, washing, a
@@ -68,6 +69,7 @@ export interface SheetRow {
   key: string
   eventId: string
   date: string
+  bundleId: string
   bundle: string
   bundleNo: number
   size: string | null
@@ -116,6 +118,7 @@ export function sheetRows(d: JobCardDetail, step: FlowStep): SheetRow[] {
       key,
       eventId: e0.eventId,
       date: e0.date,
+      bundleId: e0.bundleId,
       bundle: b?.code ?? '',
       bundleNo: b?.bundleNo ?? 0,
       size: b?.size?.code ?? null,
@@ -162,6 +165,29 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
 
   const allRows = useMemo(() => sheetRows(d, step), [d, step])
   const rows = sizeId ? allRows.filter((r) => r.sizeId === sizeId) : allRows
+  // The job card's own bundles, and the pieces tagged out of them.
+  const cardBundles = useMemo(() => {
+    const live = d.bundles.filter((b) => !b.cancelled)
+    const own = d.line ? live.filter((b) => b.line?.id === d.line!.id) : live
+    return (own.length ? own : live).sort((a, b) => (a.size?.sequence ?? 0) - (b.size?.sequence ?? 0) || a.bundleNo - b.bundleNo)
+  }, [d.bundles, d.line])
+  const shownBundles = sizeId ? cardBundles.filter((b) => b.size?.id === sizeId) : cardBundles
+  const [pieces, setPieces] = useState<SheetPiece[]>([])
+  const [pieceCode, setPieceCode] = useState<string | null>(null)
+  const [tab, setTab] = useState<'bundles' | 'pieces' | 'log' | 'unit' | 'sent'>('bundles')
+  const bundleIds = cardBundles.map((b) => b.id).join(',')
+  useEffect(() => {
+    if (!bundleIds) return setPieces([])
+    let live = true
+    api
+      .get<{ data: SheetPiece[] }>(`/garments?bundles=${bundleIds}&limit=1000`)
+      .then((r) => live && setPieces(r.data))
+      .catch(() => live && setPieces([]))
+    return () => {
+      live = false
+    }
+  }, [bundleIds])
+  const shownPieces = sizeId ? pieces.filter((p) => cardBundles.find((b) => b.id === p.bundleId)?.size?.id === sizeId) : pieces
   const tot = (k: keyof Pick<SheetRow, 'in' | 'processed' | 'out' | 'damaged' | 'rejected' | 'rework'>) => rows.reduce((s, r) => s + r[k], 0)
 
   const incoming = d.transfers.filter((t) => t.toStep.id === step.id && !t.vendor && (t.status === 'DISPATCHED' || t.status === 'PARTLY_RECEIVED'))
@@ -317,8 +343,128 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
         )}
       </Section>
 
-      {jwos.length > 0 && (
-        <Section icon={Truck} title="Outside unit">
+      {/* Below the sizes, one thing at a time: the bundles, the pieces, the day-by-day entries. */}
+      <div className="glass-card overflow-hidden p-0">
+        <div className="border-border flex flex-wrap items-center gap-1 border-b px-2 pt-2">
+          {(
+            [
+              ['bundles', `Bundles (${shownBundles.length})`],
+              ['pieces', `Pieces (${shownPieces.length})`],
+              ['log', `Day by day (${rows.length})`],
+              ...(jwos.length ? [['unit', 'Outside unit']] : []),
+              ...(outgoing.length ? [['sent', `Transferred from here (${outgoing.length})`]] : []),
+            ] as Array<[typeof tab, string]>
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setTab(key)}
+              className={`rounded-t-lg px-3 py-2 text-sm font-semibold ${tab === key ? 'bg-card text-primary border-border border border-b-transparent' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              {label}
+            </button>
+          ))}
+          {sizes.length > 1 && (tab === 'bundles' || tab === 'pieces' || tab === 'log') && (
+            <div className="ml-auto flex flex-wrap items-center gap-1 pb-1">
+              <button type="button" className={`h-7 rounded-md px-2 text-xs ${!sizeId ? 'bg-primary/10 text-primary font-semibold' : 'btn-ghost'}`} onClick={() => setSizeId('')}>
+                All sizes
+              </button>
+              {sizes.map((z) => (
+                <button key={z.id} type="button" className={`h-7 rounded-md px-2 text-xs ${sizeId === z.id ? 'bg-primary/10 text-primary font-semibold' : 'btn-ghost'}`} onClick={() => setSizeId(z.id)}>
+                  {z.code}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="p-3">
+          {tab === 'bundles' && (
+            <BundleTable
+              bundles={shownBundles}
+              rows={allRows}
+              step={step}
+              pieces={pieces}
+              canUndo={(r) => mayEdit && UNDOABLE.includes(r.type)}
+              onUndo={(r) => setOpen({ kind: 'undo', eventId: r.eventId, label: `${EVENT_LABEL[r.type] ?? 'Entry'} of ${formatDate(r.date)}` })}
+              onPiece={(code) => {
+                setPieceCode(code)
+                setTab('pieces')
+              }}
+            />
+          )}
+          {tab === 'pieces' && <PieceList pieces={shownPieces} code={pieceCode} onCode={setPieceCode} />}
+          {tab === 'log' && (
+            <>
+        {!rows.length ? (
+          <p className="text-muted-foreground text-sm">Nothing has reached {step.name} yet{sizeId ? ' in this size' : ''}.</p>
+        ) : (
+          <div className="border-border max-h-[60vh] overflow-auto rounded-lg border">
+            <table className="data-table w-full min-w-[820px]">
+              <thead className="sticky top-0 z-10 [&_th]:bg-secondary">
+                <tr className="bg-secondary">
+                  <th>Date</th>
+                  <th>Bundle no.</th>
+                  <th>Size</th>
+                  <th style={{ textAlign: 'right' }}>In</th>
+                  <th style={{ textAlign: 'right' }}>{check ? 'Passed' : 'Processed'}</th>
+                  <th style={{ textAlign: 'right' }}>Out</th>
+                  <th style={{ textAlign: 'right' }} className="warn-text">
+                    {check ? 'Failed / damaged' : 'Damaged'}
+                  </th>
+                  <th style={{ textAlign: 'right' }}>Balance</th>
+                  <th>Sign</th>
+                  <th>Document</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.key}>
+                    <td className="whitespace-nowrap text-xs">{formatDate(r.date)}</td>
+                    <td className="font-mono text-xs">{r.bundle}</td>
+                    <td className="text-xs">{r.size ?? '—'}</td>
+                    <td className="text-right text-xs tabular-nums">{r.in ? pcs(r.in) : ''}</td>
+                    <td className="text-right text-xs tabular-nums">{r.processed ? pcs(r.processed) : ''}</td>
+                    <td className="text-right text-xs tabular-nums">{r.out ? pcs(r.out) : ''}</td>
+                    <td className="warn-text text-right text-xs tabular-nums">{r.damaged + r.rejected ? pcs(r.damaged + r.rejected) : ''}{r.rework ? <span className="text-muted-foreground"> ({pcs(r.rework)} rework)</span> : null}</td>
+                    <td className="text-right text-xs font-medium tabular-nums">{pcs(r.balance)}</td>
+                    <td className="text-muted-foreground text-xs">{r.sign}</td>
+                    <td className="text-muted-foreground font-mono text-[11px]">{r.document ?? ''}</td>
+                    <td className="w-8">
+                      {mayEdit && UNDOABLE.includes(r.type) && (
+                        <button
+                          type="button"
+                          className="btn-ghost text-muted-foreground p-1"
+                          title="Undo this entry"
+                          aria-label="Undo"
+                          onClick={() => setOpen({ kind: 'undo', eventId: r.eventId, label: `${EVENT_LABEL[r.type] ?? 'Entry'} of ${formatDate(r.date)}` })}
+                        >
+                          <Undo2 size={12} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="sticky bottom-0 z-10 [&_td]:bg-secondary">
+                <tr className="bg-secondary">
+                  <td colSpan={3} className="text-xs font-medium">
+                    Total
+                  </td>
+                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('in'))}</td>
+                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('processed'))}</td>
+                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('out'))}</td>
+                  <td className="warn-text text-right text-xs font-semibold tabular-nums">{pcs(tot('damaged') + tot('rejected'))}</td>
+                  <td colSpan={4} />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+            </>
+          )}
+          {tab === 'unit' && jwos.length > 0 && (
+
           <div className="space-y-2">
             {jwos.map((j) => (
               <div key={j.id} className="border-border bg-card rounded-lg border p-2.5 text-sm">
@@ -391,97 +537,9 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
               </div>
             ))}
           </div>
-        </Section>
-      )}
+          )}
+          {tab === 'sent' && outgoing.length > 0 && (
 
-      <Section
-        icon={History}
-        title="Bundle by bundle"
-        actions={
-          sizes.length > 1 ? (
-            <div className="flex flex-wrap items-center gap-1">
-              <button type="button" className={`h-7 rounded-md px-2 text-xs ${!sizeId ? 'bg-primary/10 text-primary font-semibold' : 'btn-ghost'}`} onClick={() => setSizeId('')}>
-                All sizes
-              </button>
-              {sizes.map((z) => (
-                <button key={z.id} type="button" className={`h-7 rounded-md px-2 text-xs ${sizeId === z.id ? 'bg-primary/10 text-primary font-semibold' : 'btn-ghost'}`} onClick={() => setSizeId(z.id)}>
-                  {z.code}
-                </button>
-              ))}
-            </div>
-          ) : undefined
-        }
-      >
-        {!rows.length ? (
-          <p className="text-muted-foreground text-sm">Nothing has reached {step.name} yet{sizeId ? ' in this size' : ''}.</p>
-        ) : (
-          <div className="border-border overflow-x-auto rounded-lg border">
-            <table className="data-table w-full min-w-[820px]">
-              <thead>
-                <tr className="bg-secondary">
-                  <th>Date</th>
-                  <th>Bundle no.</th>
-                  <th>Size</th>
-                  <th style={{ textAlign: 'right' }}>In</th>
-                  <th style={{ textAlign: 'right' }}>{check ? 'Passed' : 'Processed'}</th>
-                  <th style={{ textAlign: 'right' }}>Out</th>
-                  <th style={{ textAlign: 'right' }} className="warn-text">
-                    {check ? 'Failed / damaged' : 'Damaged'}
-                  </th>
-                  <th style={{ textAlign: 'right' }}>Balance</th>
-                  <th>Sign</th>
-                  <th>Document</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.key}>
-                    <td className="whitespace-nowrap text-xs">{formatDate(r.date)}</td>
-                    <td className="font-mono text-xs">{r.bundle}</td>
-                    <td className="text-xs">{r.size ?? '—'}</td>
-                    <td className="text-right text-xs tabular-nums">{r.in ? pcs(r.in) : ''}</td>
-                    <td className="text-right text-xs tabular-nums">{r.processed ? pcs(r.processed) : ''}</td>
-                    <td className="text-right text-xs tabular-nums">{r.out ? pcs(r.out) : ''}</td>
-                    <td className="warn-text text-right text-xs tabular-nums">{r.damaged + r.rejected ? pcs(r.damaged + r.rejected) : ''}{r.rework ? <span className="text-muted-foreground"> ({pcs(r.rework)} rework)</span> : null}</td>
-                    <td className="text-right text-xs font-medium tabular-nums">{pcs(r.balance)}</td>
-                    <td className="text-muted-foreground text-xs">{r.sign}</td>
-                    <td className="text-muted-foreground font-mono text-[11px]">{r.document ?? ''}</td>
-                    <td className="w-8">
-                      {mayEdit && UNDOABLE.includes(r.type) && (
-                        <button
-                          type="button"
-                          className="btn-ghost text-muted-foreground p-1"
-                          title="Undo this entry"
-                          aria-label="Undo"
-                          onClick={() => setOpen({ kind: 'undo', eventId: r.eventId, label: `${EVENT_LABEL[r.type] ?? 'Entry'} of ${formatDate(r.date)}` })}
-                        >
-                          <Undo2 size={12} />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="bg-secondary">
-                  <td colSpan={3} className="text-xs font-medium">
-                    Total
-                  </td>
-                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('in'))}</td>
-                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('processed'))}</td>
-                  <td className="text-right text-xs font-semibold tabular-nums">{pcs(tot('out'))}</td>
-                  <td className="warn-text text-right text-xs font-semibold tabular-nums">{pcs(tot('damaged') + tot('rejected'))}</td>
-                  <td colSpan={4} />
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        )}
-      </Section>
-
-      {outgoing.length > 0 && (
-        <Section icon={Send} title="Transferred from here">
           <div className="divide-border divide-y text-sm">
             {outgoing.map((t) => {
               const st = transferStatus(t)
@@ -510,8 +568,9 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
               )
             })}
           </div>
-        </Section>
-      )}
+          )}
+        </div>
+      </div>
 
       {open?.kind === 'count' && <CountInDialog transfer={open.transfer} moNumber={d.mo.moNumber} onClose={() => setOpen(null)} onSaved={done} />}
       {open?.kind === 'settle' && <SettleDialog transfer={open.transfer} onClose={() => setOpen(null)} onSaved={done} />}
