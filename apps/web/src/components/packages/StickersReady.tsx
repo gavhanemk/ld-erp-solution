@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Printer, Tags, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { openPrintTab, printLabels, qtyText } from './packageTypes'
@@ -8,13 +9,13 @@ import type { InwardRef } from './InwardStickers'
 
 interface Ready {
   count: number
-  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; ids: string[] }>
+  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; ids: string[] }>
 }
 
 /**
- * The note in the corner after stock comes in: its stickers were made by
- * themselves, here they are to print. Nothing to fill in and nothing in the
- * way — "Later" leaves them on Stickers → Ready to print.
+ * The window in the middle of the screen after stock comes in: its stickers
+ * were made by themselves, here they are to print. Nothing to fill in —
+ * "Later" leaves them on Stickers → Ready to print.
  */
 export function StickersReady({ source, onClose, onDone }: { source: InwardRef; onClose: () => void; onDone?: (message: string) => void }) {
   const [ready, setReady] = useState<Ready | null>(null)
@@ -36,49 +37,76 @@ export function StickersReady({ source, onClose, onDone }: { source: InwardRef; 
   }, [source.type, source.id])
 
   if (!ready) return null
+  return <ReadyWindow ready={ready} onClose={onClose} onDone={onDone} />
+}
+
+/** "1 sticker of 500 mtr", "5 stickers of 100 mtr", or "3 stickers, 250 mtr in all" when they differ. */
+function stickerLine(g: Ready['groups'][number]) {
+  const n = g.ids.length
+  if (n === 1) return `1 sticker of ${qtyText(g.qty)} ${g.unit}`
+  if (g.each != null) return `${n} stickers of ${qtyText(g.each)} ${g.unit} each`
+  return `${n} stickers, ${qtyText(g.qty)} ${g.unit} in all`
+}
+
+function ReadyWindow({ ready, onClose, onDone }: { ready: Ready; onClose: () => void; onDone?: (message: string) => void }) {
   const ids = ready.groups.flatMap((g) => g.ids)
   const ref = ready.groups[0]?.sourceRef
 
-  return (
-    <div className="border-border bg-card fixed bottom-4 right-4 z-50 w-[min(26rem,calc(100vw-2rem))] rounded-xl border p-4 shadow-xl" role="status">
-      <div className="flex items-start gap-3">
-        <span className="bg-primary/10 text-primary flex h-9 w-9 shrink-0 items-center justify-center rounded-lg">
-          <Tags size={18} />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-foreground font-semibold">
-            {ready.count} {ready.count === 1 ? 'sticker' : 'stickers'} made{ref ? ` for ${ref}` : ''}
-          </p>
-          <ul className="text-muted-foreground mt-0.5 space-y-0.5 text-xs">
-            {ready.groups.slice(0, 3).map((g) => (
-              <li key={g.key} className="truncate">
-                {g.item} — {g.ids.length} × ({qtyText(g.qty / g.ids.length)} {g.unit}) · {g.store}
-              </li>
-            ))}
-            {ready.groups.length > 3 && <li>and {ready.groups.length - 3} more</li>}
-          </ul>
-          <div className="mt-3 flex items-center gap-2">
-            <button
-              type="button"
-              className="btn-primary h-9"
-              onClick={() => {
-                printLabels(ids)
-                onDone?.(`The stickers for ${ref ?? 'it'} have opened in a new tab: press Print there.`)
-                onClose()
-              }}
-            >
-              <Printer size={15} /> Print now
-            </button>
-            <button type="button" className="btn-secondary h-9" onClick={onClose}>
-              Later
-            </button>
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">
+      <div className="glass-card w-full max-w-md overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="stickers-ready-title">
+        <div className="flex items-start gap-3 p-5">
+          <span className="bg-primary/10 text-primary flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+            <Tags size={20} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 id="stickers-ready-title" className="text-foreground text-lg font-semibold">
+              {ready.count} {ready.count === 1 ? 'sticker' : 'stickers'} ready{ref ? ` for ${ref}` : ''}
+            </h2>
+            <p className="text-muted-foreground mt-0.5 text-sm">Made automatically from what came in. Print them and stick them on.</p>
           </div>
+          <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
         </div>
-        <button type="button" className="text-muted-foreground hover:text-foreground" onClick={onClose} aria-label="Close">
-          <X size={16} />
-        </button>
+        <ul className="border-border mx-5 divide-y divide-border rounded-lg border">
+          {ready.groups.slice(0, 5).map((g) => (
+            <li key={g.key} className="px-3 py-2.5">
+              <p className="text-foreground truncate text-sm font-medium">{g.item}</p>
+              <p className="text-muted-foreground text-xs">
+                {stickerLine(g)} · {g.store}
+              </p>
+            </li>
+          ))}
+          {ready.groups.length > 5 && <li className="text-muted-foreground px-3 py-2 text-xs">and {ready.groups.length - 5} more items</li>}
+        </ul>
+        <p className="text-muted-foreground px-5 pt-3 text-xs">Later: they wait in Inventory → Stickers → Ready to print.</p>
+        <div className="flex justify-end gap-2 p-5">
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Later
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            autoFocus
+            onClick={() => {
+              printLabels(ids)
+              onDone?.(`The stickers for ${ref ?? 'it'} have opened in a new tab: press Print there.`)
+              onClose()
+            }}
+          >
+            <Printer size={15} /> Print now
+          </button>
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

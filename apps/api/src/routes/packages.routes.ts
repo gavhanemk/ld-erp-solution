@@ -726,11 +726,17 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
     },
     orderBy: [{ createdAt: 'desc' }, { code: 'asc' }],
   })
-  const groups = new Map<string, { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; ids: string[] }>()
+  // `each`: what every sticker in the group holds, when they all hold the same.
+  const groups = new Map<
+    string,
+    { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; each: number | null; ids: string[] }
+  >()
   for (const r of rows) {
     const key = [r.sourceType, r.sourceId ?? '', r.item.id, r.warehouse.name].join('|')
-    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, ids: [] }
-    g.qty = round3(g.qty + Number(r.qty))
+    const q = Number(r.qty)
+    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, each: q, ids: [] }
+    if (g.each !== null && Math.abs(g.each - q) > 1e-9) g.each = null
+    g.qty = round3(g.qty + q)
     g.ids.push(r.id)
     groups.set(key, g)
   }
