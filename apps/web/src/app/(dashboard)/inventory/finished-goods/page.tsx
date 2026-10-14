@@ -1,10 +1,12 @@
 'use client'
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
-import { AlertCircle, Ban, CalendarDays, Info, Plus, RefreshCw, Search } from 'lucide-react'
+import { AlertCircle, Ban, CalendarDays, ChevronDown, ChevronRight, Info, PackageCheck, Plus, RefreshCw, Search } from 'lucide-react'
 import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { Pagination } from '@/components/tables/Pagination'
 import { ActionMenu, type RowAction } from '@/components/tables/ActionMenu'
+import { RowPanel } from '@/components/tables/RowPanel'
+import { ScrollableTable } from '@/components/tables/ScrollableTable'
 import { useAppSettings } from '@/lib/appSettings'
 import { formatDate, formatRupees } from '@/lib/utils'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -35,6 +37,17 @@ interface Receipt {
 }
 
 const pcs = (n: number | string) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })
+
+/** Where a piece's stock value came from. */
+const RATE_FROM: Record<string, string> = {
+  BOM: 'Approved BOM cost',
+  STANDARD: 'Item standard rate',
+  JOB_WORK: "Customer's goods, ₹0",
+}
+
+/** "38 30 · 40 40 · 42 30", or the pieces when the item has no sizes. */
+const sizeRun = (g: ReturnType<typeof byItem>[number]) =>
+  g.sizes.some((l) => l.size) ? g.sizes.map((l) => `${l.size?.code ?? '—'} ${pcs(l.qty)}`).join(' · ') : `${pcs(g.total)} pcs`
 
 /** A receipt's lines read back per item: "FG-SHRT-002 · S 40 · M 100 · L 120". */
 function byItem(r: Receipt) {
@@ -77,6 +90,8 @@ export default function FinishedGoodsPage() {
   const [presetMoId, setPresetMoId] = useState<string | null>(null)
   const [cancelling, setCancelling] = useState<Receipt | null>(null)
   const [busy, setBusy] = useState(false)
+  /** The receipt whose sizes are open under its row. */
+  const [open, setOpen] = useState<string | null>(null)
 
   useEffect(() => {
     api
@@ -244,60 +259,224 @@ export default function FinishedGoodsPage() {
               : 'Nothing put into the finished-goods store yet. When garments are packed, press "Put packed goods in".'}
           </p>
         ) : (
-          <div className="divide-border divide-y">
-            {rows.map((r) => {
-              const actions = rowActions(r)
-              return (
-                <div key={r.id} className="flex flex-col gap-2 p-3 sm:flex-row sm:items-start sm:gap-4">
-                  <div className="min-w-0 sm:w-52 sm:shrink-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-primary font-mono text-xs font-semibold">{r.fgrNumber}</span>
-                      {r.cancelledAt ? <span className="badge-neutral">Cancelled</span> : <span className="badge-success">In stock</span>}
+          // A table like every other list, and a card per receipt where the
+          // list is too narrow for its columns (see `.list-scope`).
+          <div className="list-scope">
+            <div className="list-cards divide-border divide-y">
+              {rows.map((r) => {
+                const actions = rowActions(r)
+                return (
+                  <div key={r.id} className="space-y-2 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-primary font-mono text-xs font-semibold">{r.fgrNumber}</span>
+                          {r.cancelledAt ? <span className="badge-neutral">Cancelled</span> : <span className="badge-success">In stock</span>}
+                        </div>
+                        <p className="text-muted-foreground mt-0.5 flex items-center gap-1 text-[11px]">
+                          <CalendarDays size={11} /> {formatDate(r.receiptDate)} · {r.warehouse.name}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="text-foreground font-semibold tabular-nums">{pcs(r.pieces)} pcs</p>
+                        <p className="text-muted-foreground text-xs tabular-nums">{formatRupees(r.value)}</p>
+                      </div>
                     </div>
-                    <p className="text-muted-foreground mt-0.5 flex items-center gap-1 text-[11px]">
-                      <CalendarDays size={11} /> {formatDate(r.receiptDate)} · {r.warehouse.name}
-                    </p>
-                    {r.so && (
-                      <p className="text-muted-foreground text-[11px]">
-                        For {r.so.soNumber} · {r.so.customer.name}
-                      </p>
-                    )}
-                    <p className="text-muted-foreground text-[11px]">By {r.createdBy.name}</p>
-                  </div>
-                  <div className="min-w-0 flex-1 space-y-1">
                     {byItem(r).map((g) => (
-                      <Fragment key={g.item.id}>
+                      <div key={g.item.id}>
                         <p className="text-foreground text-sm font-medium leading-snug">
                           {g.item.name}
                           {g.item.color ? <span className="text-muted-foreground font-normal"> · {g.item.color}</span> : null}
-                          <span className="text-muted-foreground ml-1.5 font-mono text-[10px]">{g.item.code}</span>
                         </p>
                         <p className="text-muted-foreground text-xs tabular-nums">
-                          {g.sizes.some((s) => s.size)
-                            ? g.sizes.map((s) => `${s.size?.code ?? '—'} ${pcs(s.qty)}`).join(' · ')
-                            : `${pcs(g.total)} pcs`}
-                          {' · '}
-                          <span className="text-foreground">{pcs(g.total)} pcs</span>
+                          {sizeRun(g)} · <span className="text-foreground">{pcs(g.total)} pcs</span>
                         </p>
-                      </Fragment>
+                      </div>
                     ))}
+                    <p className="text-muted-foreground text-[11px]">
+                      {r.so ? `For ${r.so.soNumber} · ${r.so.customer.name} · ` : ''}By {r.createdBy.name}
+                    </p>
                     {r.cancelledAt && (
                       <p className="text-muted-foreground text-[11px]">
                         Cancelled {formatDate(r.cancelledAt)}
                         {r.cancelledBy ? ` by ${r.cancelledBy.name}` : ''}: {r.cancelReason}
                       </p>
                     )}
+                    {actions.length > 0 && (
+                      <div className="flex justify-end">
+                        <ActionMenu label={`Actions for ${r.fgrNumber}`} items={actions} />
+                      </div>
+                    )}
                   </div>
-                  <div className="flex items-start justify-between gap-3 sm:w-40 sm:shrink-0 sm:flex-col sm:items-end">
-                    <div className="text-right">
-                      <p className="text-foreground font-semibold tabular-nums">{pcs(r.pieces)} pcs</p>
-                      <p className="text-muted-foreground text-xs tabular-nums">{formatRupees(r.value)}</p>
-                    </div>
-                    {actions.length > 0 && <ActionMenu label={`Actions for ${r.fgrNumber}`} items={actions} />}
-                  </div>
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
+
+            <div className="list-rows w-full">
+              <ScrollableTable>
+                <table className="data-table min-w-full">
+                  <thead>
+                    <tr className="bg-secondary">
+                      <th style={{ width: 30 }} />
+                      <th className="whitespace-nowrap">Receipt no.</th>
+                      <th className="whitespace-nowrap">Date</th>
+                      <th>Store</th>
+                      <th className="whitespace-nowrap">Sales order</th>
+                      <th>Items</th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                        Pieces
+                      </th>
+                      <th className="whitespace-nowrap" style={{ textAlign: 'right' }}>
+                        Value
+                      </th>
+                      <th>Status</th>
+                      <th className="whitespace-nowrap">Received by</th>
+                      <th className="border-border bg-secondary sticky right-0 z-10 border-l" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => {
+                      const actions = rowActions(r)
+                      const items = byItem(r)
+                      const expanded = open === r.id
+                      return (
+                        <Fragment key={r.id}>
+                          <tr>
+                            <td>
+                              <button
+                                className="btn-ghost p-1"
+                                onClick={() => setOpen(expanded ? null : r.id)}
+                                aria-label={`${expanded ? 'Hide' : 'Show'} the sizes on ${r.fgrNumber}`}
+                                aria-expanded={expanded}
+                              >
+                                {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                              </button>
+                            </td>
+                            <td className="whitespace-nowrap">
+                              <span className="text-primary font-mono text-xs font-semibold">{r.fgrNumber}</span>
+                            </td>
+                            <td className="whitespace-nowrap text-sm">{formatDate(r.receiptDate)}</td>
+                            <td className="whitespace-nowrap text-sm">{r.warehouse.name}</td>
+                            <td className="text-sm">
+                              {r.so ? (
+                                <>
+                                  <div className="whitespace-nowrap font-mono text-xs">{r.so.soNumber}</div>
+                                  <div className="text-muted-foreground text-xs">{r.so.customer.name}</div>
+                                </>
+                              ) : (
+                                <span className="text-muted-foreground">For stock</span>
+                              )}
+                            </td>
+                            <td className="min-w-[16rem]">
+                              <div className="text-foreground text-sm font-medium leading-snug">
+                                {items[0].item.name}
+                                {items[0].item.color ? <span className="text-muted-foreground font-normal"> · {items[0].item.color}</span> : null}
+                                {items.length > 1 && <span className="text-muted-foreground font-normal"> +{items.length - 1} more</span>}
+                              </div>
+                              <div className="text-muted-foreground text-xs tabular-nums">{items.length === 1 ? sizeRun(items[0]) : `${items.length} items`}</div>
+                            </td>
+                            <td className="whitespace-nowrap text-right font-semibold tabular-nums">{pcs(r.pieces)} pcs</td>
+                            <td className="whitespace-nowrap text-right tabular-nums">{formatRupees(r.value)}</td>
+                            <td className="whitespace-nowrap">
+                              {r.cancelledAt ? (
+                                <span className="badge-neutral" title={`Cancelled ${formatDate(r.cancelledAt)}${r.cancelledBy ? ` by ${r.cancelledBy.name}` : ''}: ${r.cancelReason ?? ''}`}>
+                                  Cancelled
+                                </span>
+                              ) : (
+                                <span className="badge-success">In stock</span>
+                              )}
+                            </td>
+                            <td className="whitespace-nowrap text-sm">{r.createdBy.name}</td>
+                            <td className="border-border bg-card sticky right-0 z-10 whitespace-nowrap border-l text-right">
+                              {actions.length > 0 ? (
+                                <ActionMenu label={`Actions for ${r.fgrNumber}`} items={actions} />
+                              ) : (
+                                <span className="text-muted-foreground text-xs">—</span>
+                              )}
+                            </td>
+                          </tr>
+
+                          {expanded && (
+                            <tr>
+                              <td colSpan={10} className="bg-secondary/40 !px-2 !pb-2 !pt-0">
+                                <div className="w-full space-y-2">
+                                  <RowPanel icon={PackageCheck} title="What came in" note={`${r.lines.length} ${r.lines.length === 1 ? 'line' : 'lines'} on ${r.fgrNumber}`}>
+                                    <table className="subtable w-full table-fixed">
+                                      <colgroup>
+                                        <col style={{ width: '34%' }} />
+                                        <col style={{ width: '10%' }} />
+                                        <col style={{ width: '12%' }} />
+                                        <col style={{ width: '12%' }} />
+                                        <col style={{ width: '14%' }} />
+                                        <col style={{ width: '18%' }} />
+                                      </colgroup>
+                                      <thead className="sticky top-0 z-10">
+                                        <tr>
+                                          <th>Item</th>
+                                          <th>Size</th>
+                                          <th className="text-right">Pieces</th>
+                                          <th className="text-right">Rate</th>
+                                          <th className="text-right">Value</th>
+                                          <th>Rate from</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {items.flatMap((g) =>
+                                          g.sizes.map((l, i) => (
+                                            <tr key={l.id}>
+                                              <td>
+                                                {i === 0 ? (
+                                                  <>
+                                                    <div className="text-foreground">
+                                                      {g.item.name}
+                                                      {g.item.color ? <span className="text-muted-foreground"> · {g.item.color}</span> : null}
+                                                    </div>
+                                                    <div className="text-muted-foreground font-mono text-[10px]">{g.item.code}</div>
+                                                  </>
+                                                ) : null}
+                                              </td>
+                                              <td className="font-semibold">{l.size?.code ?? '—'}</td>
+                                              <td className="text-right tabular-nums">{pcs(l.qty)}</td>
+                                              <td className="text-right tabular-nums">{formatRupees(Number(l.unitRate))}</td>
+                                              <td className="text-right tabular-nums">{formatRupees(Number(l.qty) * Number(l.unitRate))}</td>
+                                              <td className="text-muted-foreground text-xs">{RATE_FROM[l.rateSource] ?? l.rateSource}</td>
+                                            </tr>
+                                          )),
+                                        )}
+                                        <tr className="font-semibold">
+                                          <td>Total</td>
+                                          <td />
+                                          <td className="text-right tabular-nums">{pcs(r.pieces)}</td>
+                                          <td />
+                                          <td className="text-right tabular-nums">{formatRupees(r.value)}</td>
+                                          <td />
+                                        </tr>
+                                      </tbody>
+                                    </table>
+                                  </RowPanel>
+                                  {(r.notes || r.cancelledAt) && (
+                                    <p className="text-muted-foreground px-1 text-xs">
+                                      {r.notes && <>Note: {r.notes}. </>}
+                                      {r.cancelledAt && (
+                                        <>
+                                          Cancelled {formatDate(r.cancelledAt)}
+                                          {r.cancelledBy ? ` by ${r.cancelledBy.name}` : ''}: {r.cancelReason}
+                                        </>
+                                      )}
+                                    </p>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="border-border bg-card sticky right-0 z-10 border-l" />
+                            </tr>
+                          )}
+                        </Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </ScrollableTable>
+            </div>
           </div>
         )}
 
