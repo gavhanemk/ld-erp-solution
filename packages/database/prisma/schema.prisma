@@ -2335,6 +2335,11 @@ model GRNLine {
   batchDetails Json?
   unitRate     Decimal            @default(0) @db.Decimal(10, 2)
   amount       Decimal            @default(0) @db.Decimal(12, 2)
+  /// How the line came packed — 5 bundles, 12 rolls — with each package's
+  /// quantity in order. Its stickers are made one a package, from these.
+  /// Empty: the item's own sticker rule.
+  packType     PackType?
+  packQtys     Decimal[]          @default([]) @db.Decimal(10, 3)
 
   billLines PurchaseInvoiceLine[]
   noteLines PurchaseNoteLine[]

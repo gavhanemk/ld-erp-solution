@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { QrCode } from '@/components/packages/QrCode'
+import { Code128 } from '@/components/packages/Code128'
 import { packLabel, qtyText } from '@/components/packages/packageTypes'
 
 interface Label {
@@ -24,6 +25,13 @@ interface Label {
   grnNumber: string | null
   supplier: string | null
   date: string
+  /** The supplier's challan and our order it came against. */
+  challanNo?: string | null
+  poNumber?: string | null
+  /** The style the goods were bought for. */
+  styleNo?: string | null
+  /** Bundle 2 of 5, when a receipt line came in more than one. */
+  seq?: { n: number; of: number } | null
 }
 interface Payload {
   company: string
@@ -45,47 +53,67 @@ interface OutLabel {
 }
 
 type Layout = 'sheet' | 'roll' | 'small'
+/** What a sticker is scanned by: a QR for a phone camera, a barcode for a handheld scanner, or both. */
+type Codes = 'both' | 'qr' | 'bar'
+const CODES: Record<Codes, string> = { both: 'QR code and barcode', qr: 'QR code only', bar: 'Barcode only' }
 
 const day = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })
 
 /** Type sizes per layout, so the three stickers share one design at three scales. */
-const DIM: Record<Layout, { qr: string; id: string; tag: string; item: string; code: string; qty: string; unit: string; line: string; foot: string | null; gap: string }> = {
-  sheet: { qr: '23mm', id: '10.5pt', tag: '6pt', item: '8pt', code: '6.3pt', qty: '15pt', unit: '8pt', line: '6pt', foot: '5.5pt', gap: '2mm' },
-  roll: { qr: '33mm', id: '14pt', tag: '7.5pt', item: '10.5pt', code: '7.8pt', qty: '22pt', unit: '10pt', line: '7.4pt', foot: '7pt', gap: '3mm' },
-  small: { qr: '15.5mm', id: '8.5pt', tag: '5pt', item: '6.6pt', code: '5.4pt', qty: '11pt', unit: '6.4pt', line: '5.3pt', foot: null, gap: '1.5mm' },
+// `qrBoth` is the QR's size with a barcode under it; `bar` the barcode's height
+// beside a QR, `barOnly` without one.
+const DIM: Record<
+  Layout,
+  { qr: string; qrBoth: string; bar: string; barOnly: string; id: string; tag: string; item: string; code: string; qty: string; unit: string; line: string; foot: string | null; gap: string }
+> = {
+  sheet: { qr: '23mm', qrBoth: '18mm', bar: '5.5mm', barOnly: '7mm', id: '10.5pt', tag: '6pt', item: '8pt', code: '6.3pt', qty: '15pt', unit: '8pt', line: '6pt', foot: '5.5pt', gap: '2mm' },
+  roll: { qr: '33mm', qrBoth: '22mm', bar: '7mm', barOnly: '11mm', id: '14pt', tag: '7.5pt', item: '10.5pt', code: '7.8pt', qty: '22pt', unit: '10pt', line: '7.4pt', foot: '7pt', gap: '3mm' },
+  small: { qr: '15.5mm', qrBoth: '11.5mm', bar: '4.5mm', barOnly: '6mm', id: '8.5pt', tag: '5pt', item: '6.6pt', code: '5.4pt', qty: '11pt', unit: '6.4pt', line: '5.3pt', foot: null, gap: '1.5mm' },
 }
 
 /**
  * One package sticker, read top to bottom in the order a storekeeper asks:
- * which package (the ID, large, with what kind it is), what is in it and how
- * much, where it came from. The QR sits at the left at the largest size the
- * sticker allows; the ID is also printed in full in the header, so a sticker
- * the scanner cannot read can still be typed.
- *
- * A roll of fabric reads differently from a box of trims: its metres are the
- * figure people look for, with the lot and the supplier, so it has a layout
- * of its own.
+ * which package (the ID, large, with what kind it is — "BUNDLE 2/5"), what is
+ * in it and how much, its lot and challan, and where it came from. The QR sits
+ * at the left, the barcode along the bottom, or both; the ID is also printed
+ * in full in the header, so a sticker the scanner cannot read can be typed.
  */
-function Sticker({ p, company, layout }: { p: Label; company: string; layout: Layout }) {
+function Sticker({ p, company, layout, codes }: { p: Label; company: string; layout: Layout; codes: Codes }) {
   const d = DIM[layout]
   const roll = p.packType === 'ROLL'
-  const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
-  const inward = p.grnNumber ? `${p.grnNumber} · ${day(p.date)}` : `Labelled ${day(p.date)}`
+  const tight = layout === 'small'
+  const qrSize = codes === 'both' ? d.qrBoth : d.qr
+  // With a barcode along the bottom there is less height: one line of name
+  // where the sticker is wide enough.
+  const nameLines = tight || codes === 'bar' || (layout === 'sheet' && codes === 'both') ? 1 : 2
+  const foot = codes === 'qr' && d.foot
+  const codeLine = [p.itemCode, p.styleNo ? `Style ${p.styleNo}` : null].filter(Boolean).join(' · ')
+  const lotLine = [p.lotNo ? `Lot ${p.lotNo}` : roll ? 'No lot' : null, p.challanNo ? `Challan ${p.challanNo}` : null].filter(Boolean).join(' · ')
+  const docLine = [p.grnNumber ?? 'Labelled', day(p.date), p.poNumber].filter(Boolean).join(' · ')
+  const where = `${p.store}${p.owner ? ` · ${p.owner}` : ''}`
   return (
     <div className="sticker pk">
       <div className="pk-head">
         <span className="pk-id" style={{ fontSize: d.id }}>{p.code}</span>
+        {!foot && !tight && (
+          <span className="pk-where" style={{ fontSize: d.tag }}>
+            {where}
+          </span>
+        )}
         <span className="pk-tag" style={{ fontSize: d.tag }}>
           {packLabel(p.packType).toUpperCase()}
+          {p.seq ? ` ${p.seq.n}/${p.seq.of}` : ''}
         </span>
       </div>
       <div className="pk-body" style={{ gap: d.gap }}>
-        <div className="pk-qr" style={{ width: d.qr }}>
-          <QrCode text={p.code} size={d.qr} />
-        </div>
+        {codes !== 'bar' && (
+          <div className="pk-qr" style={{ width: qrSize }}>
+            <QrCode text={p.code} size={qrSize} />
+          </div>
+        )}
         <div className="pk-info">
-          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: layout === 'small' ? 1 : 2 }}>{p.item}</div>
-          <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{p.itemCode}</div>
+          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: nameLines }}>{p.item}</div>
+          {!tight && <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{codeLine}</div>}
           <div className="pk-qty">
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{roll ? p.qty.toFixed(2) : qtyText(p.qty)}</span>
             <span style={{ fontSize: d.unit, fontWeight: 700 }}>{p.unit}</span>
@@ -96,61 +124,68 @@ function Sticker({ p, company, layout }: { p: Label; company: string; layout: La
               </span>
             )}
           </div>
-          {layout === 'small' ? (
+          {tight ? (
             // Room for one line: the lot first, as it is what a roll is picked by.
             <div style={{ fontSize: d.line, ...clip }}>
               {p.lotNo ? <b>Lot {p.lotNo} · </b> : null}
               {p.grnNumber ?? day(p.date)}
             </div>
-          ) : roll ? (
-            <>
-              <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>{p.lotNo ? `Lot ${p.lotNo}` : 'No lot'}</div>
-              <div style={{ fontSize: d.line, ...clip }}>{inward}</div>
-              {p.supplier && <div style={{ fontSize: d.line, color: '#333', ...clip }}>{p.supplier}</div>}
-            </>
           ) : (
             <>
-              <div style={{ fontSize: d.line, ...clip }}>{inward}</div>
-              {p.lotNo && <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>Lot {p.lotNo}</div>}
+              {lotLine && <div style={{ fontSize: d.line, fontWeight: 700, ...clip }}>{lotLine}</div>}
+              <div style={{ fontSize: d.line, ...clip }}>{docLine}</div>
             </>
           )}
         </div>
       </div>
-      {d.foot && (
-        <div className="pk-foot" style={{ fontSize: d.foot }}>
-          <span style={clip}>{company}</span>
-          <span style={{ ...clip, textAlign: 'right' }}>
-            {p.store}
-            {p.owner ? ` · ${p.owner}` : ''}
-          </span>
+      {codes !== 'qr' && (
+        <div className="pk-bar" style={{ height: codes === 'bar' ? d.barOnly : d.bar }}>
+          <Code128 text={p.code} />
+        </div>
+      )}
+      {foot && (
+        <div className="pk-foot" style={{ fontSize: foot }}>
+          {/* Who sent it, when it came from a supplier: every sticker is ours anyway. */}
+          <span style={clip}>{p.supplier ?? company}</span>
+          <span style={{ ...clip, textAlign: 'right' }}>{where}</span>
         </div>
       )}
     </div>
   )
 }
 
+const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
+
 /**
  * The label stuck on stock as it leaves: the document number large, as its QR
  * too, then what it is, how much, and where it is going. Same sizes and lines
  * as a package sticker, so one sheet can carry both.
  */
-function OutSticker({ o, company, layout }: { o: OutLabel; company: string; layout: Layout }) {
+function OutSticker({ o, company, layout, codes }: { o: OutLabel; company: string; layout: Layout; codes: Codes }) {
   const d = DIM[layout]
-  const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
+  const qrSize = codes === 'both' ? d.qrBoth : d.qr
+  const foot = codes === 'qr' && d.foot
   return (
     <div className="sticker pk">
       <div className="pk-head">
         <span className="pk-id" style={{ fontSize: d.id }}>{o.docNumber}</span>
+        {!foot && layout !== 'small' && o.owner && (
+          <span className="pk-where" style={{ fontSize: d.tag }}>
+            {o.owner}&apos;s
+          </span>
+        )}
         <span className="pk-tag" style={{ fontSize: d.tag }}>
           {o.tag}
         </span>
       </div>
       <div className="pk-body" style={{ gap: d.gap }}>
-        <div className="pk-qr" style={{ width: d.qr }}>
-          <QrCode text={o.docNumber} size={d.qr} />
-        </div>
+        {codes !== 'bar' && (
+          <div className="pk-qr" style={{ width: qrSize }}>
+            <QrCode text={o.docNumber} size={qrSize} />
+          </div>
+        )}
         <div className="pk-info">
-          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: layout === 'small' ? 1 : 2 }}>{o.item}</div>
+          <div className="pk-item" style={{ fontSize: d.item, WebkitLineClamp: layout === 'small' || codes === 'bar' || (layout === 'sheet' && codes === 'both') ? 1 : 2 }}>{o.item}</div>
           <div style={{ fontSize: d.code, fontFamily: 'ui-monospace, monospace', ...clip }}>{o.itemCode}</div>
           <div className="pk-qty">
             <span style={{ fontSize: d.qty, fontWeight: 800, lineHeight: 1 }}>{qtyText(o.qty)}</span>
@@ -164,8 +199,13 @@ function OutSticker({ o, company, layout }: { o: OutLabel; company: string; layo
           )}
         </div>
       </div>
-      {d.foot && (
-        <div className="pk-foot" style={{ fontSize: d.foot }}>
+      {codes !== 'qr' && (
+        <div className="pk-bar" style={{ height: codes === 'bar' ? d.barOnly : d.bar }}>
+          <Code128 text={o.docNumber} />
+        </div>
+      )}
+      {foot && (
+        <div className="pk-foot" style={{ fontSize: foot }}>
           <span style={clip}>{company}</span>
           <span style={{ ...clip, textAlign: 'right' }}>{o.owner ? `${o.owner}'s` : ''}</span>
         </div>
@@ -199,14 +239,17 @@ function Stickers() {
   const marked = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [layout, setLayout] = useState<Layout>('sheet')
+  const [codes, setCodes] = useState<Codes>('both')
   const [copies, setCopies] = useState(1)
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem('package-label-layout') as Layout | null
       if (saved && saved in SIZES) setLayout(saved)
+      const savedCodes = localStorage.getItem('package-label-codes') as Codes | null
+      if (savedCodes && savedCodes in CODES) setCodes(savedCodes)
     } catch {
-      /* no storage: keep the sheet */
+      /* no storage: keep the sheet, with both codes */
     }
   }, [])
 
@@ -248,6 +291,14 @@ function Stickers() {
       /* fine without it */
     }
   }
+  const pickCodes = (c: Codes) => {
+    setCodes(c)
+    try {
+      localStorage.setItem('package-label-codes', c)
+    } catch {
+      /* fine without it */
+    }
+  }
 
   if (error) return <p style={{ padding: 48, color: '#fff' }}>{error}</p>
   if (!data) return <p style={{ padding: 48, color: '#ddd' }}>Opening the stickers…</p>
@@ -259,7 +310,11 @@ function Stickers() {
     ...data.packages.flatMap((p) => Array.from({ length: copies }, (_, i) => ({ o: null, p, key: `${p.id}-${i}` }))),
   ]
   const one = ({ o, p, key }: (typeof all)[number]) =>
-    o ? <OutSticker key={key} o={o} company={data.company} layout={layout} /> : <Sticker key={key} p={p!} company={data.company} layout={layout} />
+    o ? (
+      <OutSticker key={key} o={o} company={data.company} layout={layout} codes={codes} />
+    ) : (
+      <Sticker key={key} p={p!} company={data.company} layout={layout} codes={codes} />
+    )
   const sheets: Array<typeof all> = []
   for (let i = 0; i < all.length; i += 24) sheets.push(all.slice(i, i + 24))
 
@@ -286,11 +341,14 @@ function Stickers() {
                    border-bottom: 0.3mm solid #000; padding-bottom: 0.6mm; margin-bottom: 0.9mm; }
         .pk-id { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-weight: 800; letter-spacing: .02em; line-height: 1; }
         .pk-tag { border: 0.25mm solid #000; border-radius: 0.6mm; padding: 0.2mm 0.8mm; font-weight: 700; letter-spacing: .06em; line-height: 1.2; }
-        .pk-body { display: flex; flex: 1; min-height: 0; align-items: center; }
+        .pk-body { display: flex; flex: 1; min-height: 0; align-items: center; overflow: hidden; }
         .pk-qr { flex-shrink: 0; }
-        .pk-info { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 0.5mm; }
-        .pk-item { font-weight: 700; line-height: 1.15; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .pk-info { min-width: 0; max-height: 100%; flex: 1; display: flex; flex-direction: column; justify-content: safe center; gap: 0.3mm; }
+        .pk-info > * { flex-shrink: 0; }
+        .pk-where { flex: 1; min-width: 0; text-align: right; color: #333; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .pk-item { font-weight: 700; line-height: 1.22; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
         .pk-qty { display: flex; align-items: baseline; gap: 1mm; margin: 0.3mm 0; }
+        .pk-bar { flex-shrink: 0; margin-top: 0.8mm; }
         .pk-foot { display: flex; justify-content: space-between; gap: 2mm; border-top: 0.2mm solid #999; padding-top: 0.5mm; margin-top: 0.8mm; color: #333; }
         .sheet { width: 210mm; height: 296mm; margin: 0 auto 12px; background: #fff; display: grid;
                  grid-template-columns: repeat(3, 70mm); grid-auto-rows: 37mm; }
@@ -318,6 +376,16 @@ function Stickers() {
             {(Object.keys(SIZES) as Layout[]).map((l) => (
               <option key={l} value={l}>
                 {SIZES[l].label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Codes
+          <select value={codes} onChange={(e) => pickCodes(e.target.value as Codes)}>
+            {(Object.keys(CODES) as Codes[]).map((c) => (
+              <option key={c} value={c}>
+                {CODES[c]}
               </option>
             ))}
           </select>

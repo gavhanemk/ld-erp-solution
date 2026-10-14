@@ -472,8 +472,30 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
     prisma.stockPackage.findMany({ where: { id: { in: ids } }, include: pkgInclude, orderBy: { code: 'asc' } }),
   ])
   const grnIds = [...new Set(rows.filter((r) => r.sourceType === 'GRN' && r.sourceId).map((r) => r.sourceId as string))]
-  const grns = await prisma.gRN.findMany({ where: { id: { in: grnIds } }, select: { id: true, grnNumber: true, grnDate: true, po: { select: { supplier: { select: { name: true } } } } } })
+  const lineIds = [...new Set(rows.map((r) => r.grnLineId).filter((x): x is string => !!x))]
+  const [grns, lines, siblings] = await Promise.all([
+    prisma.gRN.findMany({
+      where: { id: { in: grnIds } },
+      select: { id: true, grnNumber: true, grnDate: true, challanNo: true, po: { select: { poNumber: true, supplier: { select: { name: true } } } } },
+    }),
+    // The style the goods were bought for, off the order line.
+    prisma.gRNLine.findMany({
+      where: { id: { in: lineIds } },
+      select: { id: true, poLine: { select: { styleNo: true, style: { select: { code: true } } } } },
+    }),
+    // "Bundle 2 of 5": every sticker a receipt line was given, in order.
+    prisma.stockPackage.findMany({
+      where: { grnLineId: { in: lineIds }, parentId: null, status: { not: 'VOID' } },
+      select: { id: true, grnLineId: true },
+      orderBy: { code: 'asc' },
+    }),
+  ])
   const grnOf = new Map(grns.map((g) => [g.id, g]))
+  const styleOf = new Map(lines.map((l) => [l.id, l.poLine?.style?.code ?? l.poLine?.styleNo ?? null]))
+  const seqOf = new Map<string, { n: number; of: number }>()
+  const byLine = new Map<string, string[]>()
+  for (const p of siblings) byLine.set(p.grnLineId!, [...(byLine.get(p.grnLineId!) ?? []), p.id])
+  for (const ids of byLine.values()) if (ids.length > 1) ids.forEach((id, i) => seqOf.set(id, { n: i + 1, of: ids.length }))
   res.json({
     success: true,
     data: {
@@ -498,6 +520,10 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           grnNumber: g?.grnNumber ?? r.sourceRef ?? null,
           supplier: g?.po?.supplier?.name ?? null,
           date: g?.grnDate ?? r.createdAt,
+          challanNo: g?.challanNo ?? null,
+          poNumber: g?.po?.poNumber ?? null,
+          styleNo: r.grnLineId ? (styleOf.get(r.grnLineId) ?? null) : null,
+          seq: seqOf.get(r.id) ?? null,
         }
       }),
     },

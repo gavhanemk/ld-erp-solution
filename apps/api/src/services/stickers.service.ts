@@ -168,6 +168,9 @@ type Came = {
   qty: number
   lotNo: string | null
   grnLineId: string | null
+  /** How a GRN line came packed — 5 bundles of 100 — when the receipt said. */
+  packType?: PackType | null
+  packQtys?: number[]
 }
 
 /** What came in on one inward document: its GRN lines, the lines given, or its rows on the stock ledger. */
@@ -175,7 +178,7 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
   if (data.sourceType === 'GRN') {
     const lines = await prisma.gRNLine.findMany({
       where: { grnId: data.sourceId, acceptedQty: { gt: 0 } },
-      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true },
+      select: { id: true, itemId: true, warehouseId: true, acceptedQty: true, batchNumber: true, packType: true, packQtys: true },
       orderBy: { id: 'asc' },
     })
     return lines.map((l) => ({
@@ -186,6 +189,8 @@ async function whatCameIn(data: InwardQuery): Promise<Came[]> {
       qty: Number(l.acceptedQty),
       lotNo: l.batchNumber,
       grnLineId: l.id,
+      packType: l.packType,
+      packQtys: l.packQtys.map(Number),
     }))
   }
   if (data.lines?.length) {
@@ -276,6 +281,9 @@ export async function planStickers(data: InwardQuery) {
     const pos = positionOf(spotOf(c))
     const max = round3(Math.min(c.qty - done, pos.loose))
     if (max <= 0.0005) continue
+    // "5 bundles of 100" typed on the receipt: a sticker a bundle, as long as
+    // none has one yet and they add up to what is to be stickered.
+    const packs = c.packQtys?.length && done <= 0.0005 && Math.abs(round3(c.packQtys.reduce((x, q) => x + q, 0)) - max) <= 0.0005 ? c.packQtys : null
     targets.push({
       key: c.grnLineId ?? [c.itemId, c.warehouseId, c.ownership, c.ownerCustomerId ?? '', c.lotNo ?? ''].join('|'),
       itemId: c.itemId,
@@ -290,14 +298,14 @@ export async function planStickers(data: InwardQuery) {
       lotNo: c.lotNo,
       grnLineId: c.grnLineId,
       max,
-      packType: d.packType,
+      packType: (packs && c.packType) || d.packType,
       perPack: d.perPack,
       remembered: item.packType != null || item.packQty != null,
       /** What the document brought in, before any stickers: rechecked under the lock. */
       came: c.qty,
       // What one unit holds, for the sentence: "1 box on each (144 pcs)".
       content: item.contentQty && Number(item.contentQty) > 0 ? { each: Number(item.contentQty), unit: item.contentUnit || 'pcs' } : null,
-      qtys: suggestQtys(max, d.perPack),
+      qtys: packs ?? suggestQtys(max, d.perPack),
     })
   }
   return { sourceType: data.sourceType, sourceId: data.sourceId, sourceRef, targets, untracked }
@@ -399,6 +407,70 @@ export async function withdrawStickers(
     })
   }
   return live.length
+}
+
+/**
+ * What each item's stickers will be when it comes in, for the receipt form to
+ * say before saving: whether it gets stickers at all, what one package is, and
+ * how much one holds by the item's rule.
+ */
+export async function packDefaults(itemIds: string[]) {
+  const ids = [...new Set(itemIds)]
+  const [items, ruleOf] = await Promise.all([
+    prisma.item.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, categoryId: true, packType: true, packQty: true, uom: { select: { symbol: true, name: true } } },
+    }),
+    packageRules(prisma),
+  ])
+  return new Map(
+    items.map((i) => {
+      const d = stickerDefaultsFrom(i, ruleOf(i.categoryId))
+      return [i.id, { tracked: d.tracked, packType: d.packType, perPack: d.perPack }]
+    }),
+  )
+}
+
+/**
+ * GRN lines whose packages were changed on a correction — 1 sticker for 500
+ * becomes 5 bundles of 100: their stickers come off, to be made again from the
+ * new packages, as long as every one is still whole on the rack. Once one has
+ * been issued from or split, the stock has moved on and they are left alone.
+ */
+export async function repackGrnStickers(
+  tx: Prisma.TransactionClient,
+  grn: { id: string; grnNumber: string },
+  lineIds: string[],
+  userId: string | null,
+): Promise<number> {
+  let withdrawn = 0
+  for (const lineId of lineIds) {
+    const list = await tx.stockPackage.findMany({
+      where: { grnLineId: lineId, status: { not: 'VOID' } },
+      select: { id: true, qty: true, initialQty: true, status: true, warehouseId: true, children: { select: { id: true } } },
+    })
+    const whole = list.every((p) => p.status === 'IN_STOCK' && Math.abs(Number(p.qty) - Number(p.initialQty)) < 1e-9 && !p.children.length)
+    if (!list.length || !whole) continue
+    for (const p of list) {
+      await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
+      await tx.stockPackageMove.create({
+        data: {
+          packageId: p.id,
+          type: 'VOIDED',
+          qty: -Number(p.qty),
+          balanceAfter: 0,
+          warehouseId: p.warehouseId,
+          referenceType: 'GRN',
+          referenceId: grn.id,
+          referenceNumber: grn.grnNumber,
+          notes: `${grn.grnNumber} corrected: packed differently, stickers made again`,
+          createdById: userId,
+        },
+      })
+      withdrawn++
+    }
+  }
+  return withdrawn
 }
 
 /**

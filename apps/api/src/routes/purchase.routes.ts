@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import type { Prisma } from '@prisma/client'
+import type { PackType, Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
@@ -35,7 +35,7 @@ import {
   type BillLineInput,
 } from '../schemas/bill.schemas'
 import { createPaymentSchema } from '../schemas/payment.schemas'
-import { autoStickers, stickersNote, trimGrnStickers, withdrawStickers } from '../services/stickers.service'
+import { autoStickers, packDefaults, repackGrnStickers, stickersNote, trimGrnStickers, withdrawStickers } from '../services/stickers.service'
 
 const router = Router()
 const MODULE = 'purchase'
@@ -901,8 +901,18 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
     include: req.query.view === 'receiving' ? poReceivingInclude : poInclude,
   })
   if (!po || po.deletedAt) throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
-  res.json({ success: true, data: po })
+  res.json({ success: true, data: req.query.view === 'receiving' ? await withPackDefaults(po) : po })
 })
+
+/**
+ * An order being received, with what each line's stickers will be by the
+ * item's rule — so the receipt form can ask how it came packed only for what
+ * gets stickers, and say what happens if nobody says.
+ */
+async function withPackDefaults<T extends { lines: Array<{ itemId: string }> }>(po: T) {
+  const packs = await packDefaults(po.lines.map((l) => l.itemId))
+  return { ...po, lines: po.lines.map((l) => ({ ...l, pack: packs.get(l.itemId) ?? null })) }
+}
 
 /** Everything the printed sheet needs, in one call. */
 router.get('/orders/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -2422,6 +2432,8 @@ interface GrnLineInput {
   receivedQty: number
   rejectedQty?: number
   batchNumber?: string | null
+  packType?: PackType | null
+  packQtys?: number[]
 }
 
 /**
@@ -2518,10 +2530,14 @@ function prepareGrnLines(
     const accepted = received
     const ordered = Number(poLine.qty)
 
+    const packQtys = (line.packQtys ?? []).map(round3)
     return {
       poLine,
       warehouseId: line.warehouseId,
-      batchNumber: line.batchNumber ?? null,
+      batchNumber: line.batchNumber?.trim() || null,
+      // "5 bundles of 100": a sticker each when it is saved.
+      packType: packQtys.length ? (line.packType ?? null) : null,
+      packQtys,
       orderedQty: ordered,
       received,
       rejected,
@@ -2882,6 +2898,9 @@ router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
             warehouseId: true,
             receivedQty: true,
             rejectedQty: true,
+            batchNumber: true,
+            packType: true,
+            packQtys: true,
           },
         },
       },
@@ -2905,7 +2924,7 @@ router.get('/grn/:id', requirePermission(MODULE, 'view'), async (req, res) => {
     }
     res.json({
       success: true,
-      data: { ...grn, po, otherReceived: Object.fromEntries(receivedElsewhere) },
+      data: { ...grn, po: po && (await withPackDefaults(po)), otherReceived: Object.fromEntries(receivedElsewhere) },
     })
     return
   }
@@ -3037,6 +3056,8 @@ router.post('/grn', requirePermission(MODULE, 'create'), async (req: AuthRequest
             rejectedQty: p.rejected,
             acceptedQty: p.accepted,
             batchNumber: p.batchNumber,
+            packType: p.packType,
+            packQtys: p.packQtys,
             unitRate: p.unitRate,
             amount: round2(p.accepted * p.unitRate),
           })),
@@ -3299,6 +3320,8 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     const goneIds = before.lines.filter((l) => !matchedOldIds.has(l.id)).map((l) => l.id)
     if (goneIds.length) await tx.gRNLine.deleteMany({ where: { id: { in: goneIds } } })
 
+    // Lines packed differently now: their stickers are made again below.
+    const repacked: string[] = []
     for (const { prepared: p, old } of pairs) {
       if (!old) continue
       await tx.gRNLine.update({
@@ -3308,10 +3331,19 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
           receivedQty: p.received,
           rejectedQty: p.rejected,
           acceptedQty: p.accepted,
+          batchNumber: p.batchNumber,
+          packType: p.packType,
+          packQtys: p.packQtys,
           unitRate: p.unitRate,
           amount: round2(p.accepted * p.unitRate),
         },
       })
+      const oldPacks = old.packQtys.map((q) => round3(Number(q))).join(',')
+      if (p.packQtys.length && (oldPacks !== p.packQtys.join(',') || old.packType !== p.packType)) repacked.push(old.id)
+      // A lot corrected is corrected on the line's stickers too.
+      if ((old.batchNumber ?? null) !== p.batchNumber) {
+        await tx.stockPackage.updateMany({ where: { grnLineId: old.id, status: { not: 'VOID' } }, data: { lotNo: p.batchNumber } })
+      }
     }
 
     await tx.gRN.update({
@@ -3350,6 +3382,8 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
               rejectedQty: p.rejected,
               acceptedQty: p.accepted,
               batchNumber: p.batchNumber,
+              packType: p.packType,
+              packQtys: p.packQtys,
               unitRate: p.unitRate,
               amount: round2(p.accepted * p.unitRate),
             })),
@@ -3375,8 +3409,10 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     }
 
     await syncOrderFromReceipts(tx, po.id)
-    // No line keeps stickers for more than it now brought in.
+    // No line keeps stickers for more than it now brought in, and a line
+    // packed differently has its stickers made again from its packages.
     await trimGrnStickers(tx, before, req.user?.id ?? null)
+    await repackGrnStickers(tx, before, repacked, req.user?.id ?? null)
 
     return tx.gRN.findUniqueOrThrow({ where: { id: before.id }, include: grnInclude })
   })
@@ -3982,9 +4018,13 @@ async function billedByGrnLine(
   return out
 }
 
-/** The identity of a receipt line, for matching an edit against what is there. */
-const grnLineKey = (poLineId: string | null, warehouseId: string, batch: string | null) =>
-  `${poLineId ?? '-'}|${warehouseId}|${batch ?? ''}`
+/**
+ * The identity of a receipt line, for matching an edit against what is there.
+ * An order line goes into a store once per receipt, so that is enough: a lot
+ * number corrected is the same line with a new lot, not a new line.
+ */
+const grnLineKey = (poLineId: string | null, warehouseId: string, _batch?: string | null) =>
+  `${poLineId ?? '-'}|${warehouseId}`
 
 async function checkAgainstReceipts(
   tx: Prisma.TransactionClient,
