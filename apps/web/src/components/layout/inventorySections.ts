@@ -20,6 +20,7 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Stock Documents', href: '/inventory/documents' },
       { label: 'Stock Ledger', href: '/inventory/ledger' },
+      { label: 'Stock Count', href: '/inventory/count' },
     ],
   },
   { label: 'Material Requisitions', tabs: [{ label: 'Material Requisitions', href: '/inventory/requisitions' }] },
