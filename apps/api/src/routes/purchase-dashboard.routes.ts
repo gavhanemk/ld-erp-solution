@@ -81,6 +81,9 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
 
   const base: Prisma.PurchaseOrderWhereInput = {
     deletedAt: null,
+    // Goods orders: a service order is billed, never received, and would sit
+    // in "waiting for goods" for ever.
+    isService: false,
     ...(supplierId ? { supplierId } : {}),
     ...(lineInCategory ? { lines: { some: lineInCategory } } : {}),
   }

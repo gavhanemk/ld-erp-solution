@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import bcrypt from 'bcryptjs'
+import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
+import { termsOn } from '../services/tds.service'
 import { formatDocumentNumber } from '../lib/docNumber'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
@@ -21,6 +23,7 @@ import {
   updateRoleSchema,
   updateTaxRateSchema,
   updateTdsSectionSchema,
+  tdsRateSchema,
   updateUserSchema,
   withDefaults,
 } from '../schemas/settings.schemas'
@@ -778,21 +781,74 @@ router.delete('/tax-rates/:id', requirePermission(SETTINGS, 'delete'), async (re
 // TDS SECTIONS
 // ═══════════════════════════════════════════
 
+/** A section with its history, numbers as numbers, oldest rate first. */
+type SectionWithRates = Prisma.TdsSectionGetPayload<{ include: { rates: true } }>
+const shapeSection = (s: SectionWithRates) => ({
+  ...s,
+  rate: Number(s.rate),
+  rates: [...s.rates]
+    .sort((a, b) => a.effectiveFrom.getTime() - b.effectiveFrom.getTime())
+    .map((r) => ({
+      ...r,
+      rate: Number(r.rate),
+      noPanRate: r.noPanRate == null ? null : Number(r.noPanRate),
+      singleLimit: r.singleLimit == null ? null : Number(r.singleLimit),
+      yearlyLimit: r.yearlyLimit == null ? null : Number(r.yearlyLimit),
+    })),
+})
+
+/**
+ * Writes today's rate onto the section, from its history.
+ *
+ * The section's own `rate` is only what the list shows at a glance; every
+ * bill reads the history for its own date. Kept in step after each change so
+ * the two never disagree about today.
+ */
+async function syncSectionRate(tx: Prisma.TransactionClient, sectionId: string) {
+  const section = await tx.tdsSection.findUniqueOrThrow({
+    where: { id: sectionId },
+    include: { rates: true },
+  })
+  const today = termsOn(section, new Date())
+  await tx.tdsSection.update({ where: { id: sectionId }, data: { rate: today.rate } })
+}
+
 router.get('/tds-sections', requirePermission(SETTINGS, 'view'), async (_req, res) => {
   const sections = await prisma.tdsSection.findMany({
     where: { companyId: await companyId() },
-    orderBy: [{ section: 'asc' }, { rate: 'asc' }],
+    include: { rates: true },
+    orderBy: [{ section: 'asc' }, { label: 'asc' }],
   })
-  res.json({ success: true, data: sections.map((s) => ({ ...s, rate: Number(s.rate) })) })
+  res.json({ success: true, data: sections.map(shapeSection) })
 })
 
 router.post('/tds-sections', requirePermission(SETTINGS, 'create'), async (req: AuthRequest, res) => {
-  const data = createTdsSectionSchema.parse(req.body)
+  const { effectiveFrom, noPanRate, singleLimit, yearlyLimit, ...data } = createTdsSectionSchema.parse(
+    req.body
+  )
   const company = await companyId()
 
   const created = await prisma.$transaction(async (tx) => {
     if (data.isDefault) await tx.tdsSection.updateMany({ where: { companyId: company }, data: { isDefault: false } })
-    return tx.tdsSection.create({ data: { ...data, companyId: company } })
+    const section = await tx.tdsSection.create({
+      data: {
+        ...data,
+        companyId: company,
+        rates: {
+          create: {
+            // A calendar day, stored as bill dates are (midnight UTC), so a rate
+            // from the 1st applies to a bill dated the 1st on any server.
+            effectiveFrom: effectiveFrom ?? new Date(new Date().toISOString().slice(0, 10)),
+            rate: data.rate,
+            noPanRate: noPanRate ?? null,
+            singleLimit: singleLimit ?? null,
+            yearlyLimit: yearlyLimit ?? null,
+          },
+        },
+      },
+    })
+    await syncSectionRate(tx, section.id)
+    return tx.tdsSection.findUniqueOrThrow({ where: { id: section.id }, include: { rates: true } })
   })
 
   await writeAuditLog(req, {
@@ -803,8 +859,93 @@ router.post('/tds-sections', requirePermission(SETTINGS, 'create'), async (req: 
     after: created,
   })
 
-  res.status(201).json({ success: true, data: { ...created, rate: Number(created.rate) } })
+  res.status(201).json({ success: true, data: shapeSection(created) })
 })
+
+/**
+ * A new rate from a date. The old one stays for the bills dated before it.
+ *
+ * A row on the same start date is replaced rather than refused: that is
+ * somebody correcting a typo in the change they just entered.
+ */
+router.post('/tds-sections/:id/rates', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
+  const data = tdsRateSchema.parse(req.body)
+  const before = await prisma.tdsSection.findUnique({ where: { id: req.params.id }, include: { rates: true } })
+  if (!before) throw new AppError('TDS section not found', 404, 'NOT_FOUND')
+
+  // A calendar day, stored as bill dates are (midnight UTC).
+  const effectiveFrom = new Date(data.effectiveFrom.toISOString().slice(0, 10))
+
+  const after = await prisma.$transaction(async (tx) => {
+    await tx.tdsSectionRate.upsert({
+      where: { sectionId_effectiveFrom: { sectionId: before.id, effectiveFrom } },
+      create: {
+        sectionId: before.id,
+        effectiveFrom,
+        rate: data.rate,
+        noPanRate: data.noPanRate ?? null,
+        singleLimit: data.singleLimit ?? null,
+        yearlyLimit: data.yearlyLimit ?? null,
+      },
+      update: {
+        rate: data.rate,
+        noPanRate: data.noPanRate ?? null,
+        singleLimit: data.singleLimit ?? null,
+        yearlyLimit: data.yearlyLimit ?? null,
+      },
+    })
+    await syncSectionRate(tx, before.id)
+    return tx.tdsSection.findUniqueOrThrow({ where: { id: before.id }, include: { rates: true } })
+  })
+
+  await writeAuditLog(req, {
+    module: SETTINGS,
+    action: 'UPDATE',
+    entityType: 'TdsSection',
+    entityId: after.id,
+    before,
+    after,
+  })
+
+  res.json({ success: true, data: shapeSection(after) })
+})
+
+/** Takes back a rate entered by mistake. The last one cannot go. */
+router.delete(
+  '/tds-sections/:id/rates/:rateId',
+  requirePermission(SETTINGS, 'edit'),
+  async (req: AuthRequest, res) => {
+    const before = await prisma.tdsSection.findUnique({ where: { id: req.params.id }, include: { rates: true } })
+    if (!before) throw new AppError('TDS section not found', 404, 'NOT_FOUND')
+    if (!before.rates.some((r) => r.id === req.params.rateId)) {
+      throw new AppError('That rate is not on this section', 404, 'NOT_FOUND')
+    }
+    if (before.rates.length <= 1) {
+      throw new AppError(
+        'A section needs at least one rate. Add the right one first, then remove this.',
+        409,
+        'LAST_RATE'
+      )
+    }
+
+    const after = await prisma.$transaction(async (tx) => {
+      await tx.tdsSectionRate.delete({ where: { id: req.params.rateId } })
+      await syncSectionRate(tx, before.id)
+      return tx.tdsSection.findUniqueOrThrow({ where: { id: before.id }, include: { rates: true } })
+    })
+
+    await writeAuditLog(req, {
+      module: SETTINGS,
+      action: 'UPDATE',
+      entityType: 'TdsSection',
+      entityId: after.id,
+      before,
+      after,
+    })
+
+    res.json({ success: true, data: shapeSection(after) })
+  }
+)
 
 router.patch('/tds-sections/:id', requirePermission(SETTINGS, 'edit'), async (req: AuthRequest, res) => {
   const data = updateTdsSectionSchema.parse(req.body)
@@ -821,7 +962,7 @@ router.patch('/tds-sections/:id', requirePermission(SETTINGS, 'edit'), async (re
         data: { isDefault: false },
       })
     }
-    return tx.tdsSection.update({ where: { id: before.id }, data })
+    return tx.tdsSection.update({ where: { id: before.id }, data, include: { rates: true } })
   })
 
   await writeAuditLog(req, {
@@ -833,7 +974,7 @@ router.patch('/tds-sections/:id', requirePermission(SETTINGS, 'edit'), async (re
     after,
   })
 
-  res.json({ success: true, data: { ...after, rate: Number(after.rate) } })
+  res.json({ success: true, data: shapeSection(after) })
 })
 
 router.delete('/tds-sections/:id', requirePermission(SETTINGS, 'delete'), async (req: AuthRequest, res) => {

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import {
@@ -38,6 +38,8 @@ interface NavChild {
    * broken system rather than an unfinished one.
    */
   planned?: boolean
+  /** A small label above this entry, starting a group inside the menu. */
+  heading?: string
 }
 
 interface NavItem {
@@ -115,6 +117,15 @@ const navItems: NavItem[] = [
          could look it up. */
       { label: 'Debit Notes', href: '/purchase/debit-notes' },
       { label: 'Credit Notes', href: '/purchase/credit-notes' },
+      /* Services and expenses, kept together as the old ERP's Expense menu
+         was: a service order, then the bills — with TDS — and cash spends.
+         Payments and notes above serve both. */
+      {
+        label: 'Service Purchase Orders',
+        href: '/purchase/service-orders',
+        heading: 'Services & Expenses',
+      },
+      { label: 'Expenses', href: '/purchase/expenses' },
     ],
   },
   {
@@ -341,36 +352,43 @@ export function Sidebar({ collapsed, onCollapse, mobileOpen, onMobileClose }: Si
                       id={`nav-group-${slug(item.label)}`}
                       className="ml-4 mt-0.5 pl-4 border-l border-border/50 space-y-0.5 animate-fade-in"
                     >
-                      {item.children.map((child) =>
-                        child.planned ? (
-                          <div
-                            key={child.href}
-                            title="Not built yet"
-                            aria-disabled="true"
-                            className="flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium text-slate-600 cursor-default select-none"
-                          >
-                            <ChevronRightIcon size={12} className="shrink-0 opacity-40" />
-                            <span className="flex-1">{child.label}</span>
-                            <span className="text-[9px] uppercase tracking-wider text-slate-600 border border-slate-700 rounded px-1 py-px">
-                              soon
-                            </span>
-                          </div>
-                        ) : (
-                          <Link
-                            key={child.href}
-                            href={child.href}
-                            className={cn(
-                              'flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium transition-colors',
-                              isActive(child.href)
-                                ? 'text-teal-400 bg-teal-500/10'
-                                : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
-                            )}
-                          >
-                            <ChevronRightIcon size={12} className="shrink-0" />
-                            {child.label}
-                          </Link>
-                        ),
-                      )}
+                      {item.children.map((child) => (
+                        <Fragment key={child.href}>
+                          {child.heading && (
+                            <p className="px-2 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                              {child.heading}
+                            </p>
+                          )}
+                          {child.planned ? (
+                            <div
+                              key={child.href}
+                              title="Not built yet"
+                              aria-disabled="true"
+                              className="flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium text-slate-600 cursor-default select-none"
+                            >
+                              <ChevronRightIcon size={12} className="shrink-0 opacity-40" />
+                              <span className="flex-1">{child.label}</span>
+                              <span className="text-[9px] uppercase tracking-wider text-slate-600 border border-slate-700 rounded px-1 py-px">
+                                soon
+                              </span>
+                            </div>
+                          ) : (
+                            <Link
+                              key={child.href}
+                              href={child.href}
+                              className={cn(
+                                'flex items-center gap-2 px-2 py-2 rounded-lg text-xs font-medium transition-colors',
+                                isActive(child.href)
+                                  ? 'text-teal-400 bg-teal-500/10'
+                                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                              )}
+                            >
+                              <ChevronRightIcon size={12} className="shrink-0" />
+                              {child.label}
+                            </Link>
+                          )}
+                        </Fragment>
+                      ))}
                     </div>
                   )}
                 </div>

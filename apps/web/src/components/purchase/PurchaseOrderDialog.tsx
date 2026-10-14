@@ -149,6 +149,8 @@ export interface PurchaseOrder {
   supplierId: string
   poDate: string
   poType?: string | null
+  /** A service order — labour, job charges — billed rather than received. */
+  isService?: boolean
   deliveryDate: string | null
   deliveryWarehouseId: string | null
   deliveryCustomerId: string | null
@@ -524,11 +526,18 @@ export function PurchaseOrderDialog({
   onSaved,
   record,
   fromEnquiry,
+  service,
 }: {
   open: boolean
   onClose: () => void
   onSaved: () => void
   record?: PurchaseOrder | null
+  /**
+   * A service purchase order: labour, job charges, a repair. Its rows open
+   * on the expense heads, there are no indents to pull from, and it is billed
+   * rather than received.
+   */
+  service?: boolean
   /**
    * The enquiry this order is being raised from.
    *
@@ -544,6 +553,7 @@ export function PurchaseOrderDialog({
   fromEnquiry?: { enquiry: EnquiryLite; quote: EnquiryQuote } | null
 }) {
   const isEdit = Boolean(record)
+  const serviceMode = Boolean(service) || Boolean(record?.isService)
   /** Only for a new order — see the prop's note. */
   const source = isEdit ? null : (fromEnquiry ?? null)
   const enquiry = source?.enquiry ?? null
@@ -1120,6 +1130,26 @@ export function PurchaseOrderDialog({
     mrNumber: null,
     enquiryLineId: null,
   })
+
+  /*
+   * A service order's rows open on the expense heads, as an expense bill's do:
+   * labour and job charges are filed there, not with the fabric. Only on rows
+   * nobody has started, so a category picked by hand stays picked.
+   */
+  const expenseCategoryId = useMemo(
+    () => categories.find((c) => !c.parentId && /expense/i.test(c.name))?.id ?? '',
+    [categories]
+  )
+  useEffect(() => {
+    if (!open || !serviceMode || !expenseCategoryId) return
+    setLines((prev) =>
+      prev.some((l) => !l.itemId && !l.categoryId)
+        ? prev.map((l) =>
+            !l.itemId && !l.categoryId ? { ...l, categoryId: expenseCategoryId, subcategoryId: '' } : l
+          )
+        : prev
+    )
+  }, [open, serviceMode, expenseCategoryId, lines.length])
 
   /** Rows that have an item on them. A blank row is not part of the order. */
   const activeLines = lines.filter((l) => l.itemId)
@@ -1726,6 +1756,8 @@ export function PurchaseOrderDialog({
   const payload = () => ({
     supplierId,
     poType,
+    // Read by the server on a new order only; an order never changes kind.
+    isService: serviceMode,
     // The link, not the reference. The server fills `enquiryNo` and
     // `enquiryDate` from the enquiry's own PI row.
     enquiryId: enquiry?.id ?? null,
@@ -2010,7 +2042,7 @@ export function PurchaseOrderDialog({
                   id="po-dialog-title"
                   className="text-foreground truncate text-xl font-semibold tracking-tight"
                 >
-                  Purchase Order
+                  {serviceMode ? 'Service Purchase Order' : 'Purchase Order'}
                 </h2>
                 {/* The number moves down here rather than into the heading. The
                   heading says what the form is; the line under it says which
@@ -2018,7 +2050,9 @@ export function PurchaseOrderDialog({
                 <p className="text-muted-foreground mt-0.5 text-[13px]">
                   {isEdit
                     ? `${record?.poNumber} — only a draft order can be changed`
-                    : 'New order to a supplier'}
+                    : serviceMode
+                      ? 'Labour, job charges, repairs — billed when the work is done'
+                      : 'New order to a supplier'}
                 </p>
               </div>
             </div>
@@ -2406,13 +2440,16 @@ export function PurchaseOrderDialog({
                   {/* Where the old ERP puts it: on the items bar, left of the
                     order type, so it is the first thing offered when there are
                     items to add rather than something found afterwards. */}
-                  <button
-                    type="button"
-                    className="btn-secondary h-7 px-2.5 text-xs"
-                    onClick={() => setIndentOpen(true)}
-                  >
-                    <ClipboardList size={14} /> Select from indent
-                  </button>
+                  {/* Indents ask the store for goods; a service order has none. */}
+                  {!serviceMode && (
+                    <button
+                      type="button"
+                      className="btn-secondary h-7 px-2.5 text-xs"
+                      onClick={() => setIndentOpen(true)}
+                    >
+                      <ClipboardList size={14} /> Select from indent
+                    </button>
+                  )}
                   <label htmlFor="po-type" className="text-muted-foreground text-xs">
                     Order type
                   </label>
@@ -3175,8 +3212,14 @@ export function PurchaseOrderDialog({
                   missing while offering it is a form nobody trusts the rest
                   of. */}
                 <p className="text-muted-foreground text-xs">
-                  Type a row, or take what production has already asked for with{' '}
-                  <span className="text-foreground font-medium">Select from indent</span>.
+                  {serviceMode ? (
+                    'Pick the expense head for each service — labour, job charges, a repair.'
+                  ) : (
+                    <>
+                      Type a row, or take what production has already asked for with{' '}
+                      <span className="text-foreground font-medium">Select from indent</span>.
+                    </>
+                  )}
                 </p>
               </div>
             </Section>

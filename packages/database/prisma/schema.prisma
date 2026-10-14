@@ -595,8 +595,41 @@ model TdsSection {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// The rate and limits over time. `rate` above is the one in force today,
+  /// kept so a list can show it without working it out; a bill always reads
+  /// the history for its own date.
+  rates     TdsSectionRate[]
+  suppliers Supplier[]
+  items     Item[]
+  bills     PurchaseInvoice[]
+
   @@unique([companyId, section, label])
   @@map("tds_sections")
+}
+
+/// One TDS section's rate and limits from a date onwards.
+///
+/// The law changes the rate or the limits from a date, and a bill has to be
+/// worked out at what applied on its own date — so a change is a new row with
+/// its start date, never an edit to the old one. The row in force on a date
+/// is the latest one starting on or before it.
+model TdsSectionRate {
+  id            String     @id @default(cuid())
+  sectionId     String
+  section       TdsSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  effectiveFrom DateTime
+  rate          Decimal    @db.Decimal(5, 2)
+  /// The higher rate when the payee has given no PAN.
+  noPanRate     Decimal?   @db.Decimal(5, 2)
+  /// One bill above this needs TDS.
+  singleLimit   Decimal?   @db.Decimal(12, 2)
+  /// The year's total with this payee above this needs TDS.
+  yearlyLimit   Decimal?   @db.Decimal(12, 2)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@unique([sectionId, effectiveFrom])
+  @@map("tds_section_rates")
 }
 
 /// One row per preference. A key/value table rather than columns, so adding a
@@ -669,6 +702,9 @@ model Item {
   /// for the same cloth.
   taxRateId    String?
   taxRate      TaxRate?     @relation(fields: [taxRateId], references: [id])
+  /// On an expense head: the TDS section a bill for it usually falls under.
+  tdsSectionId String?
+  tdsSection   TdsSection?  @relation(fields: [tdsSectionId], references: [id], onDelete: SetNull)
   /// Which garment this is, for a finished good. Required when type is
   /// FINISHED_GOOD and forbidden otherwise; color must be one of the style's
   /// own colors[]. Neither rule can live in the database — "one of this
@@ -1036,6 +1072,10 @@ model Supplier {
   /// own GSTIN. LD Silk Mills supplies fabric to LD Cotton Mills this way, so
   /// the purchase is real and carries GST, but group figures must exclude it.
   isGroupCompany Boolean          @default(false)
+  /// The section this supplier's bills are usually deducted under. Fills the
+  /// expense bill; the bill can still pick another.
+  tdsSectionId   String?
+  tdsSection     TdsSection?      @relation(fields: [tdsSectionId], references: [id], onDelete: SetNull)
   isActive       Boolean          @default(true)
   notes          String?
   createdAt      DateTime         @default(now())
@@ -1079,6 +1119,7 @@ model Warehouse {
   adjustments       StockAdjustment[]
 
   supplierPayments SupplierPayment[]
+  purchaseBills    PurchaseInvoice[]
   purchaseNotes    PurchaseNote[]
   returnLines      PurchaseReturnLine[]
 
@@ -1917,6 +1958,10 @@ model PurchaseOrder {
   deliveryDate        DateTime?
   status              PurchaseOrderStatus   @default(DRAFT)
   poType              String                @default("STANDARD")
+  /// A service order — labour, job charges, a repair — rather than goods. It
+  /// is never received at the gate: it is billed, and what is billed is what
+  /// counts as done. Kept off the goods order list and the receiving screen.
+  isService           Boolean               @default(false)
   /// The enquiry this order came out of, where it came out of one.
   ///
   /// Null for an order typed straight in, which is most of them: a buyer who
@@ -2126,7 +2171,8 @@ model PurchaseOrderLine {
   shortClosedById  String?
   shortClosedBy    User?     @relation("PurchaseOrderLineShortClosedBy", fields: [shortClosedById], references: [id])
 
-  grnLines GRNLine[]
+  grnLines  GRNLine[]
+  billLines PurchaseInvoiceLine[]
 
   @@index([mrLineId])
   @@index([enquiryLineId])
@@ -2335,6 +2381,17 @@ model PurchaseInvoice {
   tdsSection          String?
   tdsRate             Decimal?       @db.Decimal(5, 2)
   tdsAmount           Decimal        @default(0) @db.Decimal(12, 2)
+  /// The section record the bill was deducted under. `tdsSection` keeps the
+  /// code as printed at the time; this is what the TDS report groups by.
+  tdsSectionId        String?
+  tdsSectionRef       TdsSection?    @relation(fields: [tdsSectionId], references: [id], onDelete: SetNull)
+  /// Whether the TDS amount was worked out from the rate (the old ERP's
+  /// "Auto cal") or typed in by hand.
+  tdsAuto             Boolean        @default(true)
+  /// Which of our places booked it — the old ERP's "Location", empty meaning
+  /// head office. As on a supplier payment.
+  warehouseId         String?
+  warehouse           Warehouse?     @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
   /// GST payable by us rather than the supplier — common on transport and on
   /// bills from unregistered parties.
   isReverseCharge     Boolean        @default(false)
@@ -4227,6 +4284,10 @@ model PurchaseInvoiceLine {
   /// rolled-back transaction before it was changed.
   grnLineId    String?
   grnLine      GRNLine?        @relation(fields: [grnLineId], references: [id], onDelete: Restrict)
+  /// The service order line this bills. A service has no goods receipt, so
+  /// the bill itself is what marks the work done against the order.
+  poLineId     String?
+  poLine       PurchaseOrderLine? @relation(fields: [poLineId], references: [id], onDelete: SetNull)
   description  String?
   hsnCode      String?
   qty          Decimal         @db.Decimal(10, 3)
@@ -4247,6 +4308,7 @@ model PurchaseInvoiceLine {
   returnLines PurchaseReturnLine[]
 
   @@index([billId])
+  @@index([poLineId])
   @@map("purchase_invoice_lines")
 }
 

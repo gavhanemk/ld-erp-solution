@@ -29,19 +29,44 @@ const STATUS_WORDS: Record<string, string> = {
   CANCELLED: 'Cancelled',
 }
 
+/*
+ * Whether the supplier's bill for a delivery has been booked — the same test
+ * the Goods Receipt screen and the bill form use: what arrived against what
+ * live bills have claimed. Cancelled bills claim nothing.
+ */
+const BILLING_WORDS: Record<string, string> = {
+  NOT_BILLED: 'Not billed',
+  PART_BILLED: 'Part billed',
+  BILLED: 'Billed',
+}
+
+const BILLING_TONE: Record<string, Tone> = {
+  NOT_BILLED: 'warn',
+  PART_BILLED: 'info',
+  BILLED: 'good',
+}
+
+const DAY = 86_400_000
+
 /**
- * What actually arrived, one row per item on each receipt.
+ * What actually arrived, one row per item on each receipt — and whether the
+ * supplier's bill for it has been booked.
  *
  * Per line rather than per receipt, because a receipt's whole substance is
- * what turned up and how much of it went back. A row reading "2 items" is the
- * one thing a spreadsheet cannot work with.
+ * what turned up and how much of it went back, and because a receipt can be
+ * part billed. This was two reports — this register and "GRN Against Bill" —
+ * reading the same receipt lines; the billing columns and the Billing filter
+ * are that second report, here.
+ *
+ * The value not billed is at the receipt's own rate, before tax: what the
+ * goods are in stock at, and so what the books carry with no bill behind it.
  */
 export const goodsReceiptRegister: ReportDefinition = {
   id: 'goods-receipt-register',
   module: 'purchase',
   title: 'Goods Receipt Register',
   description:
-    'Every item booked in at the gate, with what was ordered, what turned up, what was refused and what reached stock.',
+    'Every item booked in at the gate — ordered, received, refused and into stock — and how much of it the supplier has billed.',
   filters: [
     ...dateRangeFilters,
     supplierFilter,
@@ -51,6 +76,12 @@ export const goodsReceiptRegister: ReportDefinition = {
       label: 'Status',
       type: 'select',
       options: Object.entries(STATUS_WORDS).map(([value, label]) => ({ value, label })),
+    },
+    {
+      key: 'billing',
+      label: 'Billing',
+      type: 'select',
+      options: Object.entries(BILLING_WORDS).map(([value, label]) => ({ value, label })),
     },
     searchFilter,
   ],
@@ -67,6 +98,11 @@ export const goodsReceiptRegister: ReportDefinition = {
     { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
     { key: 'rejected', label: 'Rejected', type: 'qty', total: 'sum' },
     { key: 'accepted', label: 'Into Stock', type: 'qty', total: 'sum' },
+    { key: 'billedQty', label: 'Billed', type: 'qty', total: 'sum' },
+    { key: 'unbilledQty', label: 'Not Billed', type: 'qty', total: 'sum' },
+    { key: 'unbilledValue', label: 'Value Not Billed', type: 'money', total: 'sum' },
+    { key: 'billNumbers', label: 'Our Bill Ref(s)', type: 'text', width: 18 },
+    { key: 'theirBills', label: 'Their Bill No(s).', type: 'text', width: 20 },
     { key: 'store', label: 'Store', type: 'text', width: 22 },
     {
       key: 'status',
@@ -76,6 +112,15 @@ export const goodsReceiptRegister: ReportDefinition = {
       badgeTones: STATUS_TONE,
       width: 18,
     },
+    {
+      key: 'billing',
+      label: 'Billing',
+      type: 'badge',
+      badges: BILLING_WORDS,
+      badgeTones: BILLING_TONE,
+      width: 13,
+    },
+    { key: 'daysUnbilled', label: 'Days Unbilled', type: 'integer', width: 13 },
   ],
 
   summary: {
@@ -141,6 +186,15 @@ export const goodsReceiptRegister: ReportDefinition = {
             receivedQty: true,
             rejectedQty: true,
             acceptedQty: true,
+            unitRate: true,
+            poLine: { select: { unitRate: true, discount: true } },
+            billLines: {
+              where: { bill: { status: { not: 'CANCELLED' } } },
+              select: {
+                qty: true,
+                bill: { select: { billNumber: true, supplierInvoiceNo: true } },
+              },
+            },
             item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
             warehouse: { select: { name: true } },
           },
@@ -148,24 +202,61 @@ export const goodsReceiptRegister: ReportDefinition = {
       },
     })
 
-    const rows = receipts.flatMap((g) =>
-      g.lines.map((l) => ({
-        grnDate: g.grnDate,
-        grnNumber: g.grnNumber,
-        poNumber: g.po?.poNumber ?? '',
-        supplier: g.po?.supplier?.name ?? '',
-        challanNo: g.challanNo ?? '',
-        itemCode: l.item.code,
-        item: l.item.name,
-        uom: l.item.uom?.symbol ?? '',
-        ordered: Number(l.orderedQty),
-        received: Number(l.receivedQty),
-        rejected: Number(l.rejectedQty),
-        accepted: Number(l.acceptedQty),
-        store: l.warehouse?.name ?? '',
-        status: g.status,
-      }))
+    const today = new Date()
+    const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+
+    const all = receipts.flatMap((g) =>
+      g.lines.map((l) => {
+        const received = Number(l.receivedQty)
+        const cancelledReceipt = g.status === 'CANCELLED'
+        const billedQty = round2(l.billLines.reduce((s, b) => s + Number(b.qty), 0))
+        const unbilledQty = cancelledReceipt ? 0 : round2(Math.max(0, received - billedQty))
+        // The receipt's own rate, falling back to the order line's net of its
+        // discount for a receipt booked before receipts carried one.
+        const receiptRate = Number(l.unitRate)
+        const rate =
+          receiptRate > 0
+            ? receiptRate
+            : round2(Number(l.poLine?.unitRate ?? 0) * (1 - Number(l.poLine?.discount ?? 0) / 100))
+        const day = new Date(g.grnDate.getFullYear(), g.grnDate.getMonth(), g.grnDate.getDate())
+        return {
+          grnDate: g.grnDate,
+          grnNumber: g.grnNumber,
+          poNumber: g.po?.poNumber ?? '',
+          supplier: g.po?.supplier?.name ?? '',
+          challanNo: g.challanNo ?? '',
+          itemCode: l.item.code,
+          item: l.item.name,
+          uom: l.item.uom?.symbol ?? '',
+          ordered: Number(l.orderedQty),
+          received,
+          rejected: Number(l.rejectedQty),
+          accepted: Number(l.acceptedQty),
+          billedQty,
+          unbilledQty,
+          unbilledValue: round2(unbilledQty * rate),
+          billNumbers: [...new Set(l.billLines.map((b) => b.bill.billNumber))].join(', '),
+          theirBills: [...new Set(l.billLines.map((b) => b.bill.supplierInvoiceNo ?? ''))]
+            .filter(Boolean)
+            .join(', '),
+          store: l.warehouse?.name ?? '',
+          status: g.status,
+          // A cancelled receipt has nothing to bill, so it carries no billing.
+          billing: cancelledReceipt
+            ? ''
+            : billedQty <= 0
+              ? 'NOT_BILLED'
+              : billedQty < received
+                ? 'PART_BILLED'
+                : 'BILLED',
+          daysUnbilled:
+            unbilledQty > 0
+              ? Math.max(0, Math.floor((startOfToday.getTime() - day.getTime()) / DAY))
+              : 0,
+        }
+      })
     )
+    const rows = params.billing ? all.filter((r) => r.billing === params.billing) : all
 
     // A cancelled receipt is listed and counted nowhere — it booked nothing in.
     const live = rows.filter((r) => r.status !== 'CANCELLED')
@@ -185,6 +276,12 @@ export const goodsReceiptRegister: ReportDefinition = {
     }
 
     const rejectRate = received === 0 ? null : rejected / received
+
+    // Goods in stock with no bill behind them yet, and the ones waiting long.
+    const unbilled = live.filter((r) => r.unbilledQty > 0)
+    const unbilledValue = round2(unbilled.reduce((s, r) => s + r.unbilledValue, 0))
+    const staleUnbilled = unbilled.filter((r) => r.daysUnbilled > 30)
+    const staleUnbilledValue = round2(staleUnbilled.reduce((s, r) => s + r.unbilledValue, 0))
 
     const bySupplier = new Map<string, number>()
     for (const r of live) bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.accepted)
@@ -222,6 +319,11 @@ export const goodsReceiptRegister: ReportDefinition = {
     } else if (live.length) {
       insights.push('Nothing was refused at the gate in this period.')
     }
+    if (unbilled.length) {
+      insights.push(
+        `₹${unbilledValue.toLocaleString('en-IN')} of goods received is still waiting for the supplier's bill, on ${new Set(unbilled.map((r) => r.grnNumber)).size} receipt${new Set(unbilled.map((r) => r.grnNumber)).size === 1 ? '' : 's'}.`
+      )
+    }
     if (deliveries) {
       insights.push(
         `${deliveries} ${deliveries === 1 ? 'delivery' : 'deliveries'} across ${new Set(live.map((r) => r.supplier)).size} suppliers, covering ${byItem.size} items.`
@@ -248,6 +350,13 @@ export const goodsReceiptRegister: ReportDefinition = {
             format: 'percent',
             basis: 'above the 2% treated as ordinary wastage',
             tone: 'bad',
+          },
+          {
+            label: 'Not billed for over 30 days',
+            value: staleUnbilledValue || null,
+            format: 'money',
+            basis: `${staleUnbilled.length} line${staleUnbilled.length === 1 ? '' : 's'} — ask the supplier for the bill`,
+            tone: 'warn',
           },
           {
             label: 'Waiting for checking',
@@ -378,6 +487,7 @@ export const goodsReceiptRegister: ReportDefinition = {
             : 'No cancelled receipts fell in this period.',
           'Quantities are in each item’s own unit and are not comparable across items. The totals add unlike units and are there for a filtered column, not for the whole sheet.',
           'A receipt still in draft has booked nothing into stock, but its ordered and received figures are counted here.',
+          'Billed counts live bills only. The value not billed is at the receipt rate, before tax.',
         ],
       },
     }

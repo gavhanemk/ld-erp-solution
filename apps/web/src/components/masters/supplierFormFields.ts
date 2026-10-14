@@ -88,6 +88,19 @@ export const supplierFormFields: FormField[] = [
     placeholder: 'UDYAM-MH-00-0000000',
     uppercase: true,
   },
+  /*
+   * The TDS section their bills usually fall under — a contractor, a
+   * consultant. Fills the expense bill's TDS box; the bill can still pick
+   * another. The sections themselves are set up in Settings.
+   */
+  {
+    name: 'tdsSectionId',
+    label: 'Usual TDS Section',
+    type: 'select',
+    section: 'Bank, MSME & Notes',
+    optionsFrom: { resource: 'tds-sections' },
+    nullWhenEmpty: true,
+  },
   { name: 'notes', label: 'Notes', type: 'textarea', section: 'Bank, MSME & Notes', span: 1, rows: 1 },
   {
     name: 'isPreferred',

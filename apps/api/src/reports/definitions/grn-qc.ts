@@ -198,13 +198,30 @@ const common = {
   ],
 }
 
-/** Every quality check, line by line — the old system's "Done GRN QC Report". */
+/**
+ * Every quality check, line by line — the old system's "Done GRN QC Report",
+ * and its "Reject Quantity on QC" too: the rejected lines, and how much of
+ * them has gone back on a return challan, are a "Show" choice on the same
+ * rows rather than a second report reading them again.
+ */
 export const grnQcRegister: ReportDefinition = {
   id: 'grn-qc-register',
   ...common,
+  filters: [
+    ...common.filters,
+    {
+      key: 'show',
+      label: 'Show',
+      type: 'select',
+      options: [
+        { value: 'REJECTED', label: 'Only rejected' },
+        { value: 'TO_RETURN', label: 'Still to send back' },
+      ],
+    },
+  ],
   title: 'GRN QC Register',
   description:
-    'Every quality check done on a goods receipt — per item, what was received, passed and rejected, why, and who checked it.',
+    'Every quality check on a goods receipt — per item, what passed and what was rejected, why, who checked it, and how much has gone back to the supplier.',
   columns: [
     { key: 'qcDate', label: 'QC Date', type: 'date', width: 13 },
     { key: 'grnNumber', label: 'GRN No.', type: 'text', width: 14 },
@@ -220,6 +237,11 @@ export const grnQcRegister: ReportDefinition = {
     { key: 'rejectRate', label: 'Reject %', type: 'percent', total: 'none' },
     { key: 'reasonType', label: 'Rejection Reason', type: 'text', width: 22 },
     { key: 'reason', label: 'QC Note', type: 'text', width: 30 },
+    { key: 'sentBack', label: 'Sent Back', type: 'qty', total: 'sum' },
+    { key: 'toReturn', label: 'Still to Send Back', type: 'qty', total: 'sum' },
+    { key: 'toReturnValue', label: 'Value Still Here', type: 'money', total: 'sum' },
+    { key: 'returnNumbers', label: 'Return Challan(s)', type: 'text', width: 18 },
+    { key: 'daysWaiting', label: 'Days Waiting', type: 'integer', width: 12 },
     { key: 'godown', label: 'Received Into', type: 'text', width: 20 },
     { key: 'inspectedBy', label: 'Checked By', type: 'text', width: 18 },
     {
@@ -245,8 +267,19 @@ export const grnQcRegister: ReportDefinition = {
   },
 
   async run(ctx) {
-    const { rows, totalRows } = await qcRows(ctx)
+    const { rows: all, totalRows } = await qcRows(ctx)
+    const rows =
+      ctx.params.show === 'REJECTED'
+        ? all.filter((r) => r.status !== 'CANCELLED' && r.rejected > 0)
+        : ctx.params.show === 'TO_RETURN'
+          ? all.filter((r) => r.toReturn > 0)
+          : all
     const live = rows.filter((r) => r.status !== 'CANCELLED')
+    // Rejected goods still at the mill, and the ones kept there too long.
+    const waiting = live.filter((r) => r.toReturn > 0)
+    const waitingValue = round2(waiting.reduce((s, r) => s + r.toReturnValue, 0))
+    const old = waiting.filter((r) => r.daysWaiting > 15)
+    const oldValue = round2(old.reduce((s, r) => s + r.toReturnValue, 0))
     const cancelledChecks = new Set(
       rows.filter((r) => r.status === 'CANCELLED').map((r) => r.grnNumber + r.qcDate.toISOString())
     ).size
@@ -285,6 +318,12 @@ export const grnQcRegister: ReportDefinition = {
         insights.push(
           `Most rejected by value: ${worst[0]} — ₹${round2(worst[1]).toLocaleString('en-IN')}.`
         )
+      if (rejected > 0)
+        insights.push(
+          waiting.length
+            ? `₹${waitingValue.toLocaleString('en-IN')} of rejected goods is still at the mill, on ${waiting.length} line${waiting.length === 1 ? '' : 's'} — send it back on a return challan.`
+            : 'Everything rejected has gone back to the supplier.'
+        )
     }
 
     return {
@@ -301,6 +340,13 @@ export const grnQcRegister: ReportDefinition = {
             value: rate != null && rate > 0.02 ? rate : null,
             format: 'percent',
             basis: `${rejected.toLocaleString('en-IN')} of ${received.toLocaleString('en-IN')} received`,
+            tone: 'bad',
+          },
+          {
+            label: 'Rejected, waiting over 15 days',
+            value: oldValue || null,
+            format: 'money',
+            basis: `${old.length} line${old.length === 1 ? '' : 's'} not yet sent back — raise a return challan`,
             tone: 'bad',
           },
         ],
@@ -381,161 +427,6 @@ export const grnQcRegister: ReportDefinition = {
             : 'No cancelled checks fell in this period.',
           'QC is optional — receipts nobody checked are not listed. See the Goods Receipt Register for every delivery.',
           'Quantities are in each item’s own unit. Values are at the receipt rate before tax.',
-        ],
-      },
-    }
-  },
-}
-
-/** What QC rejected and whether it has gone back — the old "Reject Quantity on QC". */
-export const qcRejections: ReportDefinition = {
-  id: 'qc-rejections',
-  ...common,
-  title: 'Rejected on QC',
-  description:
-    'Everything rejected on a quality check — how much, why, where it is waiting, and how much has gone back to the supplier on a return challan.',
-  columns: [
-    { key: 'qcDate', label: 'QC Date', type: 'date', width: 13 },
-    { key: 'grnNumber', label: 'GRN No.', type: 'text', width: 14 },
-    { key: 'poNumber', label: 'Order No.', type: 'text', width: 14 },
-    { key: 'supplier', label: 'Supplier', type: 'text', width: 28 },
-    { key: 'itemCode', label: 'Item Code', type: 'text', width: 16 },
-    { key: 'item', label: 'Item', type: 'text', width: 30 },
-    { key: 'uom', label: 'UOM', type: 'text', width: 8 },
-    { key: 'received', label: 'Received', type: 'qty', total: 'sum' },
-    { key: 'rejected', label: 'Rejected', type: 'qty', total: 'sum' },
-    { key: 'reasonType', label: 'Rejection Reason', type: 'text', width: 22 },
-    { key: 'reason', label: 'QC Note', type: 'text', width: 30 },
-    { key: 'rejectGodown', label: 'Waiting In', type: 'text', width: 20 },
-    { key: 'sentBack', label: 'Sent Back', type: 'qty', total: 'sum' },
-    { key: 'toReturn', label: 'Still to Send Back', type: 'qty', total: 'sum' },
-    { key: 'toReturnValue', label: 'Value Still Here', type: 'money', total: 'sum' },
-    { key: 'returnNumbers', label: 'Return Challan(s)', type: 'text', width: 18 },
-    { key: 'daysWaiting', label: 'Days Waiting', type: 'integer', width: 12 },
-  ],
-  summary: {
-    title: 'Rejected goods waiting longest to go back',
-    columns: [
-      'qcDate',
-      'grnNumber',
-      'supplier',
-      'item',
-      'toReturn',
-      'toReturnValue',
-      'daysWaiting',
-    ],
-    by: 'daysWaiting',
-    limit: 12,
-  },
-  pivot: {
-    rows: 'supplier',
-    values: ['toReturnValue', 'rejected', 'sentBack', 'toReturn'],
-    slicers: ['rejectGodown', 'uom'],
-    note: 'The value is in rupees and adds across items. Pick a UOM before reading a quantity total.',
-  },
-
-  async run(ctx) {
-    const { rows: all } = await qcRows(ctx)
-    const rows = all.filter((r) => r.status !== 'CANCELLED' && r.rejected > 0)
-    const rejectedValue = round2(rows.reduce((s, r) => s + r.rejectedValue, 0))
-    const waiting = rows.filter((r) => r.toReturn > 0)
-    const waitingValue = round2(waiting.reduce((s, r) => s + r.toReturnValue, 0))
-    const old = waiting.filter((r) => r.daysWaiting > 15)
-    const oldValue = round2(old.reduce((s, r) => s + r.toReturnValue, 0))
-
-    const bySupplier = new Map<string, number>()
-    for (const r of waiting)
-      bySupplier.set(r.supplier, (bySupplier.get(r.supplier) ?? 0) + r.toReturnValue)
-
-    const insights: string[] = []
-    if (rows.length) {
-      insights.push(
-        waiting.length
-          ? `₹${waitingValue.toLocaleString('en-IN')} of rejected goods is still at the mill, on ${waiting.length} line${waiting.length === 1 ? '' : 's'}.`
-          : 'Everything rejected on QC has gone back to the supplier.'
-      )
-      const top = [...bySupplier].sort((a, b) => b[1] - a[1])[0]
-      if (top)
-        insights.push(
-          `The most is waiting to go back to ${top[0]} — ₹${round2(top[1]).toLocaleString('en-IN')}.`
-        )
-    }
-
-    return {
-      rows,
-      totalRows: undefined,
-      analysis: {
-        headline:
-          rows.length === 0
-            ? 'Nothing was rejected on QC in this period.'
-            : `${rows.length} rejected line${rows.length === 1 ? '' : 's'}, ₹${waitingValue.toLocaleString('en-IN')} still to go back.`,
-        exceptions: [
-          {
-            label: 'Waiting over 15 days to go back',
-            value: oldValue || null,
-            format: 'money',
-            basis: `${old.length} line${old.length === 1 ? '' : 's'} — raise the return challan from the bill`,
-            tone: 'bad',
-          },
-        ],
-        kpis: [
-          {
-            label: 'Rejected lines',
-            value: rows.length || null,
-            format: 'integer',
-            basis: `worth ₹${rejectedValue.toLocaleString('en-IN')}`,
-          },
-          {
-            label: 'Sent back in full',
-            value: ratio(rows.length - waiting.length, rows.length),
-            format: 'percent',
-            basis: `${rows.length - waiting.length} of ${rows.length} lines`,
-          },
-          {
-            label: 'Value still here',
-            value: rows.length ? waitingValue : null,
-            format: 'money',
-            basis: 'rejected and not yet returned',
-            tone: waitingValue > 0 ? 'warn' : 'good',
-          },
-          {
-            label: 'Longest wait',
-            value: waiting.length ? Math.max(...waiting.map((r) => r.daysWaiting)) : null,
-            format: 'days',
-            basis: 'since the check',
-          },
-        ],
-        panels: (
-          [
-            {
-              title: 'Rejected goods still at the mill, by supplier',
-              question: 'ranking',
-              format: 'money',
-              points: topWithRest(
-                [...bySupplier].map(([label, value]) => ({ label, value: round2(value) })),
-                8
-              ),
-            },
-            {
-              title: 'Sent back against still here',
-              question: 'composition',
-              format: 'money',
-              points: [
-                {
-                  label: 'Sent back',
-                  value: round2(rejectedValue - waitingValue),
-                  tone: 'good' as Tone,
-                },
-                { label: 'Still here', value: waitingValue, tone: 'warn' as Tone },
-              ],
-            },
-          ] as Panel[]
-        ).filter((p) => p.points.some((x) => x.value > 0)),
-        insights,
-        caveats: [
-          'Only checks that still stand. A cancelled check moved its goods back and has nothing waiting.',
-          '"Sent back" counts return challans against the bill line this receipt line was billed on, capped at what QC rejected. Goods returned before they were billed cannot be matched here.',
-          'Values are at the receipt rate before tax.',
         ],
       },
     }

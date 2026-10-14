@@ -135,15 +135,42 @@ export const updateTaxRateSchema = createTaxRateSchema.partial()
 
 // ── TDS sections ─────────────────────────────────────────────────────────────
 
+const tdsPercent = z.number().min(0, 'Cannot be negative').max(100, 'Cannot exceed 100%')
+const tdsLimit = z.number().min(0, 'Cannot be negative').max(1e10).optional().nullable()
+
+/**
+ * The rate and limits from a date onwards. The law changes them from a date,
+ * so a change is a new row with its own start — never an edit to the old one,
+ * which would re-price every bill booked under it.
+ */
+export const tdsRateSchema = z.object({
+  effectiveFrom: z.coerce.date({ errorMap: () => ({ message: 'Give the date this rate starts' }) }),
+  rate: tdsPercent,
+  noPanRate: tdsPercent.optional().nullable(),
+  singleLimit: tdsLimit,
+  yearlyLimit: tdsLimit,
+})
+
 export const createTdsSectionSchema = z.object({
   section: z.string().min(1, 'Section is required').max(20),
   label: z.string().min(1, 'Label is required').max(80),
-  rate: z.number().min(0, 'Cannot be negative').max(100, 'Cannot exceed 100%'),
+  rate: tdsPercent,
   isDefault: z.boolean().default(false),
   isActive: z.boolean().default(true),
+  /** When the first rate starts. Left out, it starts today. */
+  effectiveFrom: z.coerce.date().optional(),
+  noPanRate: tdsPercent.optional().nullable(),
+  singleLimit: tdsLimit,
+  yearlyLimit: tdsLimit,
 })
 
-export const updateTdsSectionSchema = createTdsSectionSchema.partial()
+/** Name and status only — the rate changes through its history. */
+export const updateTdsSectionSchema = z.object({
+  section: z.string().min(1, 'Section is required').max(20).optional(),
+  label: z.string().min(1, 'Label is required').max(80).optional(),
+  isDefault: z.boolean().optional(),
+  isActive: z.boolean().optional(),
+})
 
 // ── Preferences ──────────────────────────────────────────────────────────────
 

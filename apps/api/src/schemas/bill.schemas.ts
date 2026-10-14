@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { paymentModes } from './payment.schemas'
 
 /**
  * What the purchase bill screens are allowed to send.
@@ -50,6 +51,12 @@ export const billLineSchema = z.object({
    * against what was actually accepted.
    */
   grnLineId: z.string().optional().nullable(),
+  /**
+   * The service order line this bills, when the bill was made from a service
+   * purchase order. A service has no goods receipt, so this is what counts the
+   * work as done against the order.
+   */
+  poLineId: z.string().optional().nullable(),
   description: z.string().max(300).optional().nullable(),
   qty,
   unitPrice: rate,
@@ -117,6 +124,17 @@ const billBase = z.object({
   isReverseCharge: z.boolean().optional(),
   tdsSection: z.string().max(20).optional().nullable(),
   tdsRate: percent('TDS rate').optional().nullable(),
+  /**
+   * The TDS section record. When it is given, the rate is the one in force on
+   * the bill's date as Settings holds it — not whatever the screen sent.
+   */
+  tdsSectionId: z.string().min(1).optional().nullable(),
+  /** The old ERP's "Auto cal": worked out from the rate, or typed by hand. */
+  tdsAuto: z.boolean().optional(),
+  /** The TDS as typed, when Auto calculate is off. */
+  tdsAmount: money.optional().nullable(),
+  /** Which of our places booked it — the old ERP's "Location". Empty is head office. */
+  warehouseId: z.string().min(1).optional().nullable(),
   notes: z.string().max(1000).optional().nullable(),
   /**
    * Why a rate higher than the order was agreed to. Asked for once per bill
@@ -128,7 +146,9 @@ const billBase = z.object({
   charges: z.array(billChargeSchema).optional(),
 })
 
-export const createBillSchema = billBase.superRefine((data, ctx) => {
+type BillIn = z.infer<typeof billBase>
+
+const checkBill = (data: BillIn, ctx: z.RefinementCtx) => {
   // A bill dated before the supplier's own invoice would be booking a document
   // that did not exist yet, and it puts the two in different GST periods.
   if (data.supplierInvoiceDate && data.billDate && data.supplierInvoiceDate > data.billDate) {
@@ -147,14 +167,54 @@ export const createBillSchema = billBase.superRefine((data, ctx) => {
     })
   }
 
-  if (data.tdsRate && !data.tdsSection) {
+  if (data.tdsRate && !data.tdsSection && !data.tdsSectionId) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['tdsSection'],
       message: 'Say which TDS section this is deducted under, or clear the rate',
     })
   }
-})
+
+  if (data.tdsSectionId && data.tdsAuto === false && data.tdsAmount == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['tdsAmount'],
+      message: 'Type the TDS amount, or tick Auto calculate',
+    })
+  }
+
+  if (!data.tdsSectionId && data.tdsAmount) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['tdsSectionId'],
+      message: 'Pick the TDS section this is deducted under',
+    })
+  }
+}
+
+export const createBillSchema = billBase.superRefine(checkBill)
+
+/**
+ * A cash expense: the bill and the payment that settles it, saved together.
+ *
+ * The payment carries no amount — it is always what the bill leaves to pay,
+ * worked out by the server after TDS. Its own rules (a reference for a bank
+ * transfer, a cheque number for a cheque) are checked against the payment
+ * schema once the amount is known.
+ */
+export const cashExpenseSchema = billBase
+  .extend({
+    payment: z.object({
+      mode: z.enum(paymentModes).default('CASH'),
+      bankAccountId: z.string().optional().nullable(),
+      paymentDate: z.coerce.date().optional(),
+      referenceNo: z.string().max(60).optional().nullable(),
+      chequeNo: z.string().max(40).optional().nullable(),
+      chequeDate: z.coerce.date().optional().nullable(),
+      notes: z.string().max(1000).optional().nullable(),
+    }),
+  })
+  .superRefine(checkBill)
 
 // `.superRefine()` leaves a ZodEffects, which has no `.partial()`. The base
 // object is kept separate for exactly this reason — see the build rules.
