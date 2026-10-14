@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { Plus, Pencil, X, Check, Ban } from 'lucide-react'
-import { ApiError } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import {
   settingsApi,
   type Company,
@@ -39,6 +39,64 @@ export default function CompanySettingsPage() {
 }
 
 // ── Company profile ──────────────────────────────────────────────────────────
+
+/**
+ * Sizes still carrying store barcodes once the GS1 prefix is saved: changed
+ * to GS1 ones in one press. Shows nothing while there are none.
+ */
+function StoreBarcodes({ gs1Prefix }: { gs1Prefix: string | null | undefined }) {
+  const [count, setCount] = useState(0)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ data: { count: number } }>('/retail/store-barcodes')
+      setCount(res.data.count)
+    } catch {
+      setCount(0)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load, gs1Prefix])
+
+  const change = async () => {
+    const what = count === 1 ? '1 store barcode' : `${count} store barcodes`
+    if (!confirm(`Change ${what} to GS1 ones? Tags already printed carry the old numbers and will need printing again.`)) return
+    setBusy(true)
+    setMessage(null)
+    try {
+      const res = await api.post<{ message: string }>('/retail/store-barcodes/to-gs1', {})
+      setMessage({ kind: 'success', text: res.message })
+      await load()
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof ApiError ? err.message : 'Could not change the barcodes.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!count) return message ? <Notice kind={message.kind}>{message.text}</Notice> : null
+  const sizes = count === 1 ? '1 size has a store barcode' : `${count} sizes have store barcodes`
+  return (
+    <div className="space-y-2">
+      {message && <Notice kind={message.kind}>{message.text}</Notice>}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-secondary px-3 py-2 text-sm">
+        <span>
+          {sizes} <span className="text-muted-foreground">(starting 200).</span>
+          {!gs1Prefix && <span className="text-muted-foreground"> Save your GS1 prefix to change them to GS1 ones.</span>}
+        </span>
+        {gs1Prefix && (
+          <button type="button" className="btn-primary h-9" onClick={() => void change()} disabled={busy}>
+            {busy ? 'Changing…' : 'Change to GS1 barcodes'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
 
 function CompanyProfile() {
   const [company, setCompany] = useState<Company | null>(null)
@@ -310,15 +368,16 @@ function CompanyProfile() {
             <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Retail labels</h3>
             <p className="text-xs text-muted-foreground mt-1">
               The EAN-13 barcodes on retail tags are built from the GS1 prefix, and the tags carry the country of origin and the
-              customer-care line.
+              customer-care line. Without a prefix, tags get store barcodes starting 200: they scan at your own counter, but outside
+              shops and marketplaces need GS1 ones.
             </p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="GS1 company prefix" htmlFor="gs1Prefix" error={errors.gs1Prefix} help="7 to 10 digits, from the GS1 India certificate">
+            <Field label="GS1 company prefix" htmlFor="gs1Prefix" error={errors.gs1Prefix} help="7 to 10 digits, from the GS1 India certificate. Leave empty until you have it">
               <input
                 id="gs1Prefix"
                 className="form-input font-mono"
-                placeholder="8901234"
+                placeholder="e.g. 8901234"
                 inputMode="numeric"
                 maxLength={10}
                 value={values.gs1Prefix ?? ''}
@@ -344,12 +403,13 @@ function CompanyProfile() {
               <input
                 id="customerCare"
                 className="form-input"
-                placeholder="care@ldcottonmills.com · +91 98765 43210"
+                placeholder="e.g. care@ldcottonmills.com · +91 98765 43210"
                 value={values.customerCare ?? ''}
                 onChange={(e) => set('customerCare', e.target.value)}
               />
             </Field>
           </div>
+          <StoreBarcodes gs1Prefix={company?.gs1Prefix} />
         </div>
 
         <div className="pt-4 border-t border-border space-y-4">

@@ -4,7 +4,7 @@ import { prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
-import { barcodesFor, isEan13, skuKey } from '../services/barcode.service'
+import { barcodesFor, isEan13, isStoreEan, skuKey, storeToGs1 } from '../services/barcode.service'
 
 /*
  * A style's retail barcodes: every colour and size of it, its EAN-13 and the
@@ -52,7 +52,7 @@ router.get('/styles/:styleId/barcodes', requirePermission(MODULE, 'view'), async
       prefix: company?.gs1Prefix ?? null,
       rows: skus.map((s) => {
         const b = byKey.get(skuKey(s.itemId, s.sizeId))
-        return { ...s, ean: b?.ean ?? null, mrp: b?.mrp == null ? null : Number(b.mrp) }
+        return { ...s, ean: b?.ean ?? null, store: b ? isStoreEan(b.ean) : false, mrp: b?.mrp == null ? null : Number(b.mrp) }
       }),
     },
   })
@@ -61,8 +61,6 @@ router.get('/styles/:styleId/barcodes', requirePermission(MODULE, 'view'), async
 /** Barcodes for every colour and size of the style that has none yet. */
 router.post('/styles/:styleId/barcodes/assign', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const { style, skus } = await skusOf(req.params.styleId)
-  const company = await prisma.company.findFirst({ select: { gs1Prefix: true } })
-  if (!company?.gs1Prefix) throw new AppError('Enter the GS1 company prefix in Settings → Company first.', 400, 'NO_GS1_PREFIX')
   const before = await prisma.retailBarcode.count({ where: { itemId: { in: skus.map((s) => s.itemId) } } })
   await prisma.$transaction((tx) => barcodesFor(tx, skus, req.user?.id ?? null), { timeout: 60_000 })
   const after = await prisma.retailBarcode.count({ where: { itemId: { in: skus.map((s) => s.itemId) } } })
@@ -102,13 +100,32 @@ router.patch('/barcodes', requirePermission(MODULE, 'edit'), async (req: AuthReq
       // No number typed: give the next one, then set the MRP on it.
       const got = await barcodesFor(tx, [{ itemId: data.itemId, sizeId: data.sizeId }], req.user?.id ?? null)
       const b = got.get(skuKey(data.itemId, data.sizeId))
-      if (!b) throw new AppError('Enter the GS1 company prefix in Settings → Company first, or type the barcode in.', 400, 'NO_GS1_PREFIX')
+      if (!b) throw new AppError('Could not give a barcode. Type one in instead.', 400, 'NO_BARCODE')
       return tx.retailBarcode.update({ where: { ean: b.ean }, data: { mrp: data.mrp ?? null } })
     }
     return tx.retailBarcode.create({ data: { itemId: data.itemId, sizeId: data.sizeId, ean: data.ean, mrp: data.mrp ?? null, createdById: req.user?.id ?? null } })
   })
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'RetailBarcode', entityId: row.id, after: row })
   res.json({ success: true, data: { ean: row.ean, mrp: row.mrp == null ? null : Number(row.mrp) } })
+})
+
+/** How many sizes still carry store barcodes, to change once the GS1 prefix is in. */
+router.get('/store-barcodes', requirePermission(MODULE, 'view'), async (_req, res) => {
+  const [count, company] = await Promise.all([
+    prisma.retailBarcode.count({ where: { ean: { startsWith: '2' } } }),
+    prisma.company.findFirst({ select: { gs1Prefix: true } }),
+  ])
+  res.json({ success: true, data: { count, gs1Prefix: company?.gs1Prefix ?? null } })
+})
+
+/** Every store barcode changed to a GS1 one, in one go. */
+router.post('/store-barcodes/to-gs1', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const changed = await prisma.$transaction((tx) => storeToGs1(tx), { timeout: 120_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'RetailBarcode', entityId: 'store-to-gs1', after: { changed } })
+  res.json({
+    success: true,
+    message: changed ? `${changed} store barcodes changed to GS1 ones. Print their retail tags again.` : 'There were no store barcodes to change.',
+  })
 })
 
 export default router

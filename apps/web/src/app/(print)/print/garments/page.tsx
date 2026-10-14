@@ -159,7 +159,7 @@ function RetailTag({ g, maker }: { g: Label; maker: Maker }) {
         {r?.ean ? (
           <Ean13 code={r.ean} width="38mm" height="13mm" />
         ) : (
-          <div style={{ ...tiny, border: '0.2mm dashed #999', padding: '1.5mm', textAlign: 'center' }}>No barcode: enter the GS1 prefix in Settings → Company</div>
+          <div style={{ ...tiny, border: '0.2mm dashed #999', padding: '1.5mm', textAlign: 'center' }}>No barcode yet</div>
         )}
       </div>
       <div className="rt-foot">
@@ -378,7 +378,7 @@ function RetailGaps({ garments }: { garments: Label[] }) {
   if (!noMrp && !noEan) return null
   return (
     <span style={{ color: '#b45309', fontSize: 12, fontWeight: 600 }}>
-      {[noMrp ? `${noMrp} without MRP (Masters → Styles)` : null, noEan ? `${noEan} without a barcode (GS1 prefix in Settings → Company)` : null]
+      {[noMrp ? `${noMrp} without MRP (Masters → Styles)` : null, noEan ? `${noEan} without a barcode (Masters → Styles → Barcodes)` : null]
         .filter(Boolean)
         .join(' · ')}
     </span>

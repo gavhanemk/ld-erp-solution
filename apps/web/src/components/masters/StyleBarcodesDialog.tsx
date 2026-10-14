@@ -13,6 +13,8 @@ interface Row {
   sizeId: string | null
   size: string
   ean: string | null
+  /** A store barcode (starting 200), given before the company had a GS1 prefix. */
+  store: boolean
   mrp: number | null
 }
 
@@ -26,8 +28,8 @@ const key = (r: Row) => `${r.itemId}|${r.sizeId ?? ''}`
 
 /**
  * A style's retail barcodes: every colour and size, its EAN-13 and its MRP.
- * Numbers are given from the GS1 prefix in one press; one already issued on
- * the GS1 portal can be typed in instead. A size whose MRP differs from the
+ * Numbers are given in one press — from the GS1 prefix, or store barcodes
+ * until there is one; one already issued on the GS1 portal can be typed in. A size whose MRP differs from the
  * style's — 2XL dearer, say — carries its own.
  */
 export function StyleBarcodesDialog({ styleId, onClose }: { styleId: string; onClose: () => void }) {
@@ -52,6 +54,7 @@ export function StyleBarcodesDialog({ styleId, onClose }: { styleId: string; onC
   }, [load])
 
   const missing = data?.rows.filter((r) => !r.ean).length ?? 0
+  const store = data?.rows.filter((r) => r.store).length ?? 0
   const changed = Object.keys(edits).length
 
   const assign = async () => {
@@ -123,19 +126,34 @@ export function StyleBarcodesDialog({ styleId, onClose }: { styleId: string; onC
             <span className="text-muted-foreground">
               {data.prefix ? (
                 <>
-                  GS1 prefix <span className="text-foreground font-mono">{data.prefix}</span> · style MRP{' '}
-                  <span className="text-foreground">{data.style.mrp != null ? `₹${data.style.mrp.toLocaleString('en-IN')}` : 'not set'}</span>
+                  GS1 prefix <span className="text-foreground font-mono">{data.prefix}</span>
                 </>
               ) : (
-                'No GS1 prefix yet: enter it in Settings → Company, or type each barcode in.'
-              )}
+                'Store barcodes'
+              )}{' '}
+              · style MRP{' '}
+              <span className="text-foreground">{data.style.mrp != null ? `₹${data.style.mrp.toLocaleString('en-IN')}` : 'not set'}</span>
             </span>
-            {missing > 0 && data.prefix && (
+            {missing > 0 && (
               <button type="button" className="btn-primary h-9" onClick={() => void assign()} disabled={busy}>
                 <Barcode size={15} /> Give barcodes to {missing} {missing === 1 ? 'size' : 'sizes'}
               </button>
             )}
           </div>
+          {!data.prefix ? (
+            <p className="rounded-lg border border-border bg-secondary px-3 py-2 text-xs text-muted-foreground">
+              No GS1 prefix yet, so sizes get <b className="text-foreground">store barcodes</b> starting 200. They scan at your own
+              counter, but outside shops and marketplaces need GS1 ones. When you get your GS1 prefix, enter it in Settings → Company and
+              change them all there in one go.
+            </p>
+          ) : (
+            store > 0 && (
+              <p className="rounded-lg border border-border bg-secondary px-3 py-2 text-xs text-muted-foreground">
+                {store} {store === 1 ? 'size here still has a store barcode' : 'sizes here still have store barcodes'}. Change them to GS1
+                ones in Settings → Company.
+              </p>
+            )
+          )}
           {!data.rows.length ? (
             <p className="text-muted-foreground py-4 text-center text-sm">No finished items for this style yet. They are made from its colours.</p>
           ) : (
@@ -162,12 +180,13 @@ export function StyleBarcodesDialog({ styleId, onClose }: { styleId: string; onC
                           <input
                             className="form-input h-8 w-40 font-mono text-xs"
                             value={e.ean ?? r.ean ?? ''}
-                            placeholder={data.prefix ? 'Given on save' : '13 digits'}
+                            placeholder="Given when printed"
                             maxLength={13}
                             inputMode="numeric"
                             onChange={(ev) => setEdits((p) => ({ ...p, [key(r)]: { ...p[key(r)], ean: ev.target.value.replace(/\D/g, '') } }))}
                             aria-label={`Barcode for ${r.color} ${r.size}`}
                           />
+                          {r.store && <span className="text-muted-foreground ml-2 text-[11px]">store</span>}
                         </td>
                         <td className="text-right">
                           <StepInput
