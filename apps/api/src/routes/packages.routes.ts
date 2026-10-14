@@ -21,7 +21,7 @@ import {
   type PackageSource,
 } from '../services/package.service'
 import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
-import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, sourceRefOf } from '../services/stickers.service'
+import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, restickStickers, sourceRefOf } from '../services/stickers.service'
 import { lockedBalanceOf } from '../services/stock.service'
 
 /*
@@ -102,6 +102,11 @@ const correctSchema = z.object({
   reason: z.string().trim().min(3, 'Say why the quantity is being corrected'),
 })
 const voidSchema = z.object({ reason: z.string().trim().min(3, 'Say why the label is being withdrawn') })
+const restickSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(500),
+  qtys: z.array(qty).min(1, 'Make at least one sticker').max(500, 'That is more than 500 stickers'),
+  packType: z.enum(PACK_TYPES).optional().nullable(),
+})
 
 const pkgInclude = {
   item: {
@@ -471,7 +476,9 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
     prisma.company.findFirst({ select: { name: true } }),
     prisma.stockPackage.findMany({ where: { id: { in: ids } }, include: pkgInclude, orderBy: { code: 'asc' } }),
   ])
-  const grnIds = [...new Set(rows.filter((r) => r.sourceType === 'GRN' && r.sourceId).map((r) => r.sourceId as string))]
+  // A GRN's stickers, and the ones split from them, which keep its id.
+  const fromGrn = (r: (typeof rows)[number]) => (r.sourceType === 'GRN' || r.grnLineId) && r.sourceId
+  const grnIds = [...new Set(rows.filter(fromGrn).map((r) => r.sourceId as string))]
   const lineIds = [...new Set(rows.map((r) => r.grnLineId).filter((x): x is string => !!x))]
   const [grns, lines, siblings] = await Promise.all([
     prisma.gRN.findMany({
@@ -501,7 +508,7 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
     data: {
       company: company?.name ?? '',
       packages: rows.map((r) => {
-        const g = r.sourceId ? grnOf.get(r.sourceId) : undefined
+        const g = fromGrn(r) ? grnOf.get(r.sourceId as string) : undefined
         return {
           id: r.id,
           code: r.code,
@@ -743,6 +750,7 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
     select: {
       id: true,
       qty: true,
+      packType: true,
       sourceType: true,
       sourceId: true,
       sourceRef: true,
@@ -755,12 +763,12 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
   // `each`: what every sticker in the group holds, when they all hold the same.
   const groups = new Map<
     string,
-    { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; each: number | null; ids: string[] }
+    { key: string; sourceRef: string | null; date: Date; itemCode: string; item: string; store: string; unit: string; qty: number; each: number | null; packType: string; ids: string[] }
   >()
   for (const r of rows) {
     const key = [r.sourceType, r.sourceId ?? '', r.item.id, r.warehouse.name].join('|')
     const q = Number(r.qty)
-    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, each: q, ids: [] }
+    const g = groups.get(key) ?? { key, sourceRef: r.sourceRef, date: r.createdAt, itemCode: r.item.code, item: r.item.name, store: r.warehouse.name, unit: r.item.uom?.symbol ?? '', qty: 0, each: q, packType: r.packType, ids: [] }
     if (g.each !== null && Math.abs(g.each - q) > 1e-9) g.each = null
     g.qty = round3(g.qty + q)
     g.ids.push(r.id)
@@ -816,6 +824,32 @@ router.post('/auto', requirePermission(MODULE, 'create'), async (req: AuthReques
     orderBy: { code: 'asc' },
   })
   res.json({ success: true, message: made.count ? `${made.count} new stickers made.` : '', data: { made: made.count, ids: all.map((p) => p.id) } })
+})
+
+/**
+ * The stickers of one line made again in the number and sizes chosen — before
+ * printing, or any time while they are still whole on the rack.
+ */
+router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = restickSchema.parse(req.body)
+  const result = await prisma.$transaction((tx) => restickStickers(tx, data.ids, data.qtys, data.packType ?? null, req.user?.id ?? null), {
+    timeout: 60_000,
+    maxWait: 20_000,
+  })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'StockPackage',
+    entityId: result.created[0].id,
+    before: { codes: result.before },
+    after: { codes: result.created.map((c) => c.code), qtys: data.qtys },
+  })
+  const n = result.created.length
+  res.json({
+    success: true,
+    message: `${n} ${n === 1 ? 'sticker' : 'stickers'} made in place of ${result.before.length}, ready to print.`,
+    data: { ids: result.created.map((c) => c.id) },
+  })
 })
 
 /** Counted once the print box opens on them: that is a print, opening the page is not. */
@@ -944,6 +978,7 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
           notes: `Part of ${pkg.code}, moved on ${note.transferNumber}`,
           sourceType: 'SPLIT',
           sourceId: pkg.sourceId,
+          sourceRef: pkg.sourceRef,
           grnLineId: pkg.grnLineId,
           parentId: pkg.id,
           userId: req.user?.id ?? null,
@@ -1000,6 +1035,7 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
         notes: `Split from ${pkg.code}`,
         sourceType: 'SPLIT',
         sourceId: pkg.sourceId,
+        sourceRef: pkg.sourceRef,
         grnLineId: pkg.grnLineId,
         parentId: pkg.id,
         userId: req.user?.id ?? null,

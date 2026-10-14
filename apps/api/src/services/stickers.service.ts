@@ -474,6 +474,118 @@ export async function repackGrnStickers(
 }
 
 /**
+ * Stickers made again in the sizes somebody chose: 1 sticker of 500 mtr
+ * becomes 3 of 200, 150 and 150, or 7 bundles of whatever they hold. The old
+ * ones come off and new ones go on for exactly the same stock, so nothing in
+ * the store changes — only how it is labelled. Only stickers still whole on the
+ * rack can be changed: once one has been issued from or split, the stock has
+ * moved on. When they were all a GRN line's stickers, the line's packages are
+ * corrected to match.
+ */
+export async function restickStickers(
+  tx: Prisma.TransactionClient,
+  ids: string[],
+  qtys: number[],
+  packType: PackType | null,
+  userId: string | null,
+) {
+  const list = await tx.stockPackage.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      code: true,
+      itemId: true,
+      warehouseId: true,
+      ownership: true,
+      ownerCustomerId: true,
+      qty: true,
+      initialQty: true,
+      status: true,
+      packType: true,
+      lotNo: true,
+      notes: true,
+      sourceType: true,
+      sourceId: true,
+      sourceRef: true,
+      grnLineId: true,
+      children: { select: { id: true } },
+      item: { select: { name: true, uom: { select: { symbol: true } } } },
+    },
+    orderBy: { code: 'asc' },
+  })
+  if (list.length !== new Set(ids).size) throw new AppError('Some of those stickers no longer exist. Refresh and try again.', 404, 'NOT_FOUND')
+  const first = list[0]
+  const sameGroup = (p: (typeof list)[number]) =>
+    p.itemId === first.itemId &&
+    p.warehouseId === first.warehouseId &&
+    p.ownership === first.ownership &&
+    (p.ownerCustomerId ?? null) === (first.ownerCustomerId ?? null) &&
+    p.sourceType === first.sourceType &&
+    (p.sourceId ?? null) === (first.sourceId ?? null) &&
+    (p.grnLineId ?? null) === (first.grnLineId ?? null)
+  if (!list.every(sameGroup)) throw new AppError('Those stickers are not all the same item from the same delivery. Change them one line at a time.', 400, 'MIXED')
+
+  const spot = { itemId: first.itemId, warehouseId: first.warehouseId, ownership: first.ownership, ownerCustomerId: first.ownerCustomerId }
+  await lockedBalanceOf(tx, spot)
+  // Read again under the lock: nothing may have been issued from them meanwhile.
+  const now = await tx.stockPackage.findMany({ where: { id: { in: ids } }, select: { code: true, qty: true, initialQty: true, status: true, children: { select: { id: true } } } })
+  const used = now.find((p) => p.status !== 'IN_STOCK' || Math.abs(Number(p.qty) - Number(p.initialQty)) > 1e-9 || p.children.length)
+  if (used) throw new AppError(`${used.code} has already been issued from, moved or split, so these stickers can no longer be changed.`, 400, 'USED')
+
+  const unit = first.item.uom?.symbol ?? ''
+  const total = round3(now.reduce((s, p) => s + Number(p.qty), 0))
+  const wanted = qtys.map(round3)
+  const sum = round3(wanted.reduce((s, q) => s + q, 0))
+  if (Math.abs(sum - total) > 0.0005) {
+    throw new AppError(`The new stickers add up to ${sum} ${unit}, but these hold ${total} ${unit}. Make them match.`, 400, 'NOT_MATCHING')
+  }
+
+  for (const p of list) {
+    await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
+    await tx.stockPackageMove.create({
+      data: {
+        packageId: p.id,
+        type: 'VOIDED',
+        qty: -Number(p.qty),
+        balanceAfter: 0,
+        warehouseId: p.warehouseId,
+        referenceType: p.sourceType,
+        referenceId: p.sourceId,
+        referenceNumber: p.sourceRef,
+        notes: `Stickers changed: ${list.length} made into ${wanted.length}`,
+        createdById: userId,
+      },
+    })
+  }
+  const created = await createPackages(tx, {
+    spot,
+    packType: packType ?? first.packType,
+    qtys: wanted,
+    lotNo: first.lotNo,
+    notes: first.notes,
+    sourceType: first.sourceType as PackageSource,
+    sourceId: first.sourceId,
+    sourceRef: first.sourceRef,
+    grnLineId: first.grnLineId,
+    userId,
+    // The same stock, labelled again: it is not loose, it was in the old stickers.
+    fromPackage: true,
+    unit,
+    itemName: first.item.name,
+  })
+
+  // Every sticker of a GRN line changed: the receipt says how it came packed.
+  if (first.grnLineId) {
+    const line = await tx.gRNLine.findUnique({ where: { id: first.grnLineId }, select: { acceptedQty: true } })
+    const others = await tx.stockPackage.count({ where: { grnLineId: first.grnLineId, status: { not: 'VOID' }, id: { notIn: created.map((c) => c.id) } } })
+    if (line && !others && Math.abs(Number(line.acceptedQty) - sum) <= 0.0005) {
+      await tx.gRNLine.update({ where: { id: first.grnLineId }, data: { packQtys: wanted, packType: packType ?? first.packType } })
+    }
+  }
+  return { created, before: list.map((p) => p.code), unit }
+}
+
+/**
  * A GRN corrected: no line may keep stickers for more than it now brought in.
  * The newest stickers still whole come off first, until what is stickered
  * fits; the automatic stickers afterwards make any the line is now short of.

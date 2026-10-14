@@ -1,15 +1,16 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Printer, Tags, X } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { openPrintTab, printLabels, qtyText } from './packageTypes'
 import type { InwardRef } from './InwardStickers'
+import { ChangeStickers } from './ChangeStickers'
 
 interface Ready {
   count: number
-  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; ids: string[] }>
+  groups: Array<{ key: string; sourceRef: string | null; item: string; store: string; unit: string; qty: number; each?: number | null; packType?: string; ids: string[] }>
 }
 
 /**
@@ -20,24 +21,31 @@ interface Ready {
 export function StickersReady({ source, onClose, onDone }: { source: InwardRef; onClose: () => void; onDone?: (message: string) => void }) {
   const [ready, setReady] = useState<Ready | null>(null)
 
+  const load = useCallback(
+    () =>
+      api
+        .get<{ data: Ready }>(`/packages/ready?${new URLSearchParams({ sourceType: source.type, sourceId: source.id })}`)
+        .then((r) => r.data),
+    [source.type, source.id],
+  )
+
   useEffect(() => {
     let live = true
-    api
-      .get<{ data: Ready }>(`/packages/ready?${new URLSearchParams({ sourceType: source.type, sourceId: source.id })}`)
+    load()
       .then((r) => {
         if (!live) return
-        if (!r.data.count) return onClose()
-        setReady(r.data)
+        if (!r.count) return onClose()
+        setReady(r)
       })
       .catch(() => live && onClose())
     return () => {
       live = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source.type, source.id])
+  }, [load])
 
   if (!ready) return null
-  return <ReadyWindow ready={ready} onClose={onClose} onDone={onDone} />
+  return <ReadyWindow ready={ready} onClose={onClose} onDone={onDone} reload={() => load().then(setReady)} />
 }
 
 /** "1 sticker of 500 mtr", "5 stickers of 100 mtr", or "3 stickers, 250 mtr in all" when they differ. */
@@ -48,15 +56,27 @@ function stickerLine(g: Ready['groups'][number]) {
   return `${n} stickers, ${qtyText(g.qty)} ${g.unit} in all`
 }
 
-function ReadyWindow({ ready, onClose, onDone }: { ready: Ready; onClose: () => void; onDone?: (message: string) => void }) {
+function ReadyWindow({
+  ready,
+  onClose,
+  onDone,
+  reload,
+}: {
+  ready: Ready
+  onClose: () => void
+  onDone?: (message: string) => void
+  reload: () => Promise<void>
+}) {
   const ids = ready.groups.flatMap((g) => g.ids)
   const ref = ready.groups[0]?.sourceRef
+  // One item's stickers being changed: how many, and how much on each.
+  const [changing, setChanging] = useState<Ready['groups'][number] | null>(null)
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && !changing && onClose()
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, changing])
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm sm:left-[var(--sidebar-current-width)]">
@@ -77,11 +97,16 @@ function ReadyWindow({ ready, onClose, onDone }: { ready: Ready; onClose: () => 
         </div>
         <ul className="border-border mx-5 divide-y divide-border rounded-lg border">
           {ready.groups.slice(0, 5).map((g) => (
-            <li key={g.key} className="px-3 py-2.5">
-              <p className="text-foreground truncate text-sm font-medium">{g.item}</p>
-              <p className="text-muted-foreground text-xs">
-                {stickerLine(g)} · {g.store}
-              </p>
+            <li key={g.key} className="flex items-center gap-2 px-3 py-2.5">
+              <div className="min-w-0 flex-1">
+                <p className="text-foreground truncate text-sm font-medium">{g.item}</p>
+                <p className="text-muted-foreground text-xs">
+                  {stickerLine(g)} · {g.store}
+                </p>
+              </div>
+              <button type="button" className="btn-secondary h-8 shrink-0 px-2.5 text-xs" onClick={() => setChanging(g)}>
+                Change
+              </button>
             </li>
           ))}
           {ready.groups.length > 5 && <li className="text-muted-foreground px-3 py-2 text-xs">and {ready.groups.length - 5} more items</li>}
@@ -105,6 +130,16 @@ function ReadyWindow({ ready, onClose, onDone }: { ready: Ready; onClose: () => 
           </button>
         </div>
       </div>
+      {changing && (
+        <ChangeStickers
+          line={changing}
+          onClose={() => setChanging(null)}
+          onDone={() => {
+            setChanging(null)
+            void reload()
+          }}
+        />
+      )}
     </div>,
     document.body,
   )

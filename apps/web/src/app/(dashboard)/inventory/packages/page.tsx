@@ -10,6 +10,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { InwardStickers, type LabelTarget } from '@/components/packages/InwardStickers'
 import { printLabels, qtyText } from '@/components/packages/packageTypes'
 import { PackageGroups, type PackageGroup } from '@/components/packages/PackageGroups'
+import { ChangeStickers } from '@/components/packages/ChangeStickers'
 
 interface ToLabel {
   tracked: boolean
@@ -310,7 +311,16 @@ function PackagesScreen() {
           />
         )}
         {/* Stock just added is not here until its stickers are printed: say so, and where it is. */}
-        {tab === 'ready' && <ReadyView ready={ready} loading={loading} />}
+        {tab === 'ready' && (
+          <ReadyView
+            ready={ready}
+            loading={loading}
+            onChanged={(m) => {
+              setMessage(m)
+              void load()
+            }}
+          />
+        )}
         {tab === 'list' && waiting > 0 && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-amber-500/5 px-4 py-2 text-sm">
             <Tags size={14} className="text-amber-500" />
@@ -393,14 +403,29 @@ type Tab = 'ready' | 'list' | 'label'
 /** Stickers made by themselves when stock came in, not printed yet: a group a document and item. */
 interface ReadyList {
   count: number
-  groups: Array<{ key: string; sourceRef: string | null; date: string; itemCode: string; item: string; store: string; unit: string; qty: number; ids: string[] }>
+  groups: Array<{
+    key: string
+    sourceRef: string | null
+    date: string
+    itemCode: string
+    item: string
+    store: string
+    unit: string
+    qty: number
+    /** What each sticker holds, when they all hold the same. */
+    each?: number | null
+    packType?: string
+    ids: string[]
+  }>
 }
 
 /**
  * What is waiting at the printer: stickers made by themselves when stock came
  * in. Print one line, or all of it; printed ones leave the list.
  */
-function ReadyView({ ready, loading }: { ready: ReadyList | null; loading: boolean }) {
+function ReadyView({ ready, loading, onChanged }: { ready: ReadyList | null; loading: boolean; onChanged: (message: string) => void }) {
+  // One line's stickers being changed: how many, and how much on each.
+  const [changing, setChanging] = useState<ReadyList['groups'][number] | null>(null)
   if (!ready) return <p className="p-6 text-center text-sm text-muted-foreground">{loading ? 'Loading…' : ''}</p>
   if (!ready.groups.length) {
     return (
@@ -444,10 +469,15 @@ function ReadyView({ ready, loading }: { ready: ReadyList | null; loading: boole
                 <td className="whitespace-nowrap text-right text-sm tabular-nums">
                   <span className="font-semibold">{g.ids.length}</span>{' '}
                   <span className="text-muted-foreground">
-                    × {qtyText(g.qty / g.ids.length)} {g.unit}
+                    {g.ids.length === 1 || g.each != null
+                      ? `× ${qtyText(g.ids.length === 1 ? g.qty : (g.each ?? 0))} ${g.unit}`
+                      : `stickers, ${qtyText(g.qty)} ${g.unit} in all`}
                   </span>
                 </td>
-                <td className="text-right">
+                <td className="whitespace-nowrap text-right">
+                  <button className="btn-secondary mr-2 h-9" onClick={() => setChanging(g)} title="Make more or fewer stickers, or change how much is on each">
+                    Change
+                  </button>
                   <button className="btn-secondary h-9" onClick={() => printLabels(g.ids)}>
                     <Printer size={14} /> Print {g.ids.length}
                   </button>
@@ -457,6 +487,16 @@ function ReadyView({ ready, loading }: { ready: ReadyList | null; loading: boole
           </tbody>
         </table>
       </ScrollableTable>
+      {changing && (
+        <ChangeStickers
+          line={changing}
+          onClose={() => setChanging(null)}
+          onDone={(message) => {
+            setChanging(null)
+            onChanged(message)
+          }}
+        />
+      )}
     </>
   )
 }

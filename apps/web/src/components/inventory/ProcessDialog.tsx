@@ -8,6 +8,7 @@ import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { formatDate } from '@/lib/utils'
 import type { OutwardRef } from '@/components/packages/packageTypes'
+import { ScanIssue } from '@/components/packages/ScanIssue'
 
 /**
  * Working on an approved requisition: three forms in one window, one tab each.
@@ -431,6 +432,20 @@ export function ProcessDialog({
         <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-foreground">
           You raised or approved this requisition, so somebody else in the store issues it. You can still reserve and buy.
         </p>
+      )}
+
+      {/* Approved, so it can be handed over by scanning: stock comes down with each sticker. */}
+      {tab === 'issue' && canIssue && data && rows.some((r) => r.owed > 0) && (
+        <ScanIssue
+          mrId={mr.id}
+          mrNumber={mr.mrNumber}
+          itemIds={mr.lines.map((l) => l.item.id)}
+          onIssued={(message) => {
+            setNotice(message)
+            onDone(message)
+            void read()
+          }}
+        />
       )}
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">

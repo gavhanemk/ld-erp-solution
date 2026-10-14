@@ -28,6 +28,23 @@ export const STATUS: Record<string, { label: string; cls: string }> = {
 
 export const qtyText = (n: number) => Number(n.toFixed(3)).toLocaleString('en-IN')
 
+const round3 = (n: number) => Math.round(n * 1000) / 1000
+
+/** `total` over `n` stickers, all the same but the last, which takes what does not divide: 100 over 3 is 33.333, 33.333, 33.334. */
+export function splitEvenly(total: number, n: number): number[] {
+  if (!(n >= 1) || !(total > 0)) return []
+  const each = Math.floor((total / n) * 1000) / 1000
+  return [...Array<number>(n - 1).fill(each), round3(total - each * (n - 1))]
+}
+
+/** Sizes typed one by one — "98, 102 100.5" — as quantities, blanks and noughts left out. */
+export const parseSizes = (text: string): number[] =>
+  text
+    .split(/[\s,;+]+/)
+    .map(Number)
+    .filter((q) => q > 0)
+    .map(round3)
+
 /**
  * A tab opened while the click is still fresh. A browser blocks a tab opened
  * after a save has come back, as though a page had popped it up on its own;

@@ -34,6 +34,7 @@ import { IconField, Readout } from '@/components/purchase/FormBits'
 import { shortCloseNoun } from '@/components/purchase/shortClose'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { parseSizes, splitEvenly } from '@/components/packages/packageTypes'
 import type { InwardRef } from '@/components/packages/InwardStickers'
 
 /**
@@ -132,18 +133,8 @@ const qtyFmt = (n: number) => String(round3(n))
  * taken as they are. Nothing said: none, and the item's own rule applies.
  */
 function packQtysOf(a: Alloc): number[] {
-  const received = num(a.received)
-  if (a.exact) {
-    return (a.sizes ?? '')
-      .split(/[\s,;+]+/)
-      .map(Number)
-      .filter((q) => q > 0)
-      .map(round3)
-  }
-  const n = Math.floor(num(a.packs))
-  if (n < 1 || received <= 0) return []
-  const each = Math.floor((received / n) * 1000) / 1000
-  return [...Array<number>(n - 1).fill(each), round3(received - each * (n - 1))]
+  if (a.exact) return parseSizes(a.sizes ?? '')
+  return splitEvenly(num(a.received), Math.floor(num(a.packs)))
 }
 
 /**
