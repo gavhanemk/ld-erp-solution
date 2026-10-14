@@ -39,6 +39,82 @@ export function nextStepAfter<T extends RouteStep>(steps: T[], stepId: string): 
 /** Pieces done at this step are finished: no step after it still takes pieces. */
 export const isLastStep = <T extends RouteStep>(steps: T[], stepId: string) => nextStepAfter(steps, stepId) === null
 
+/** What has been sent to a step, bundle by bundle: the lines of its transfers, rework and cancelled ones left out. */
+export interface SentLine {
+  bundleId: string
+  toStepId: string
+  qty: number
+}
+
+export interface Destination<T> {
+  step: T
+  /** The step pieces finish at, into finished goods. */
+  last: boolean
+  /** The natural next one in the route's order. */
+  next: boolean
+  /** How many more pieces of each bundle may go there. */
+  caps: Record<string, number>
+  /** For the last step: the steps each bundle has still to go through. */
+  missing: Record<string, string[]>
+}
+
+/**
+ * Where pieces at one step may go next. The order's route says which steps
+ * there are; which one the pieces go to is the floor's choice: any step those
+ * bundles have not all been through yet — printing before stitching or after,
+ * as the work needs. Cutting is where pieces start, so nothing goes back to
+ * it, and the last step — into finished goods — takes only pieces that have
+ * been through every other step, so nothing gets there half-made.
+ *
+ * Counted in pieces, bundle by bundle: a bundle of 10 with 6 sent to
+ * stitching can still send 4 there. A bundle split off another carries on
+ * from what its parent had been through.
+ */
+export function destinationsFrom<T extends RouteStep>(
+  steps: T[],
+  fromId: string,
+  bundles: Array<{ id: string; qty: number; parentId?: string | null }>,
+  sent: SentLine[],
+): Destination<T>[] {
+  const live = ordered(steps).filter((s) => !s.skippedAt)
+  const starts = new Set(live.filter((s) => s.kind === 'CUTTING').map((s) => s.id))
+  if (!starts.size && live[0]) starts.add(live[0].id)
+  const lastId = live[live.length - 1]?.id
+  const parentOf = new Map(bundles.map((b) => [b.id, b.parentId ?? null]))
+  const qtyOf = new Map(bundles.map((b) => [b.id, b.qty]))
+  const direct = new Map<string, number>()
+  for (const l of sent) direct.set(`${l.bundleId}|${l.toStepId}`, (direct.get(`${l.bundleId}|${l.toStepId}`) ?? 0) + l.qty)
+  const through = (bundleId: string, stepId: string, depth = 0): number => {
+    const own = direct.get(`${bundleId}|${stepId}`) ?? 0
+    const parent = parentOf.get(bundleId)
+    if (own > 0 || !parent || depth > 5) return own
+    return Math.min(qtyOf.get(bundleId) ?? 0, through(parent, stepId, depth + 1))
+  }
+  const naturalNext = nextStepAfter(steps, fromId)?.id ?? null
+
+  return live
+    .filter((s) => s.id !== fromId && !starts.has(s.id))
+    .map((s) => {
+      const last = s.id === lastId
+      const others = live.filter((t) => !starts.has(t.id) && t.id !== s.id)
+      const caps: Record<string, number> = {}
+      const missing: Record<string, string[]> = {}
+      for (const b of bundles) {
+        const already = through(b.id, s.id)
+        let cap = b.qty - already
+        if (last) {
+          const done = others.length ? Math.min(...others.map((t) => through(b.id, t.id))) : b.qty
+          cap = Math.min(cap, done - already)
+          // The steps holding it back: some of its pieces have not been through them.
+          const short = others.filter((t) => through(b.id, t.id) <= already && through(b.id, t.id) < b.qty).map((t) => t.name)
+          if (short.length) missing[b.id] = short
+        }
+        caps[b.id] = Math.max(0, cap)
+      }
+      return { step: s, last, next: s.id === naturalNext, caps, missing }
+    })
+}
+
 /** A check: what comes out is passed or failed rather than made. */
 export const isCheck = (s: { isQcStep: boolean; kind: ProcessKind }) => s.isQcStep || s.kind === 'QC'
 

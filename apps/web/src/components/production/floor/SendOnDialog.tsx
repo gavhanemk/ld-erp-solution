@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Boxes, Factory, Loader2, Send, Truck } from 'lucide-react'
+import { ArrowRight, Boxes, Factory, Loader2, MapPin, Send, Truck } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -12,12 +12,24 @@ import { bundleRows, sendsFromHand } from './useFlow'
 import { newClientKey, pcs, type Flow } from './types'
 
 /**
- * The process transfer: bundles from one step sent to the next on the
- * order's route — never anywhere else. The receiving desk counts them in.
- * To an outside unit it goes on the step's job work order (made the first
- * time) as a job-work challan, and the unit holds the pieces until they come
- * back.
+ * The process transfer: bundles from one step sent on to the step the floor
+ * picks — any step on the order's route those bundles have not been through
+ * yet, the last one only once they have been through all the others. Some
+ * bundles can go one way and the rest another, or later. The receiving desk
+ * counts them in. To an outside unit it goes on the step's job work order
+ * (made the first time) as a job-work challan, and the unit holds the pieces
+ * until they come back.
  */
+
+/** Where pieces at a step may go, with how many of each bundle. */
+interface Destination {
+  stepId: string
+  name: string
+  last: boolean
+  next: boolean
+  caps: Record<string, number>
+  missing: Record<string, string[]>
+}
 
 interface Unit {
   id: string
@@ -33,10 +45,13 @@ interface Supplier {
 
 export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flow; fromStepId: string; onClose: () => void; onSaved: (message: string, transferId: string) => void }) {
   const from = flow.steps.find((s) => s.id === fromStepId)!
-  const to = from.next ? flow.steps.find((s) => s.id === from.next!.id)! : null
-  const [outside, setOutside] = useState(to?.execution === 'OUTSOURCED')
-  const [vendorId, setVendorId] = useState(to?.workstation?.supplier?.id ?? '')
-  const [rate, setRate] = useState(to?.ratePerPiece != null ? String(to.ratePerPiece) : '')
+  const [dests, setDests] = useState<Destination[] | null>(null)
+  const [toId, setToId] = useState('')
+  const to = toId ? (flow.steps.find((s) => s.id === toId) ?? null) : null
+  const dest = dests?.find((x) => x.stepId === toId) ?? null
+  const [outside, setOutside] = useState(false)
+  const [vendorId, setVendorId] = useState('')
+  const [rate, setRate] = useState('')
   const [expectedBy, setExpectedBy] = useState('')
   const [issuedBy, setIssuedBy] = useState('')
   const [vehicleNo, setVehicleNo] = useState('')
@@ -51,8 +66,43 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
 
   // A working step sends straight from in hand; a check or cutting what it has done or passed.
   const fromHand = sendsFromHand(from)
-  const rows = useMemo(() => bundleRows(flow.bundles, { stepId: from.id, bucket: fromHand ? ['DONE', 'WIP'] : 'DONE' }), [flow, from.id, fromHand])
+  const ready = useMemo(() => bundleRows(flow.bundles, { stepId: from.id, bucket: fromHand ? ['DONE', 'WIP'] : 'DONE' }), [flow, from.id, fromHand])
   const columns = [{ key: 'qty', label: 'Sending' }]
+  // What can go where: no more of a bundle than the chosen step still takes.
+  const canGo = (d: Destination) => ready.some((r) => (d.caps[r.id] ?? 0) > 0)
+  const rows = useMemo(() => (dest ? ready.map((r) => ({ ...r, available: Math.min(r.available, dest.caps[r.id] ?? 0) })).filter((r) => r.available > 0) : []), [ready, dest])
+  const heldBack = dest ? ready.length - rows.length : 0
+
+  // The steps it could go to, read fresh from the route and what has been sent already.
+  useEffect(() => {
+    let alive = true
+    api
+      .get<{ data: Destination[] }>(`/production/orders/${flow.mo.id}/destinations?fromStepId=${from.id}`)
+      .then((r) => {
+        if (!alive) return
+        setDests(r.data)
+        const usable = r.data.filter((x) => ready.some((b) => (x.caps[b.id] ?? 0) > 0))
+        // The next one in the route's order when it can take them, else the first that can.
+        setToId((usable.find((x) => x.next) ?? usable[0])?.stepId ?? '')
+      })
+      .catch(() => alive && setError('Could not work out where these bundles can go.'))
+    return () => {
+      alive = false
+    }
+    // Read once when the form opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flow.mo.id, from.id])
+
+  // A different step: its own way of working, unit and rate; the quantities start again.
+  useEffect(() => {
+    if (!to) return
+    setOutside(to.execution === 'OUTSOURCED')
+    setVendorId(to.workstation?.supplier?.id ?? '')
+    setRate(to.ratePerPiece != null ? String(to.ratePerPiece) : '')
+    setValues({})
+    // Only when the destination changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toId])
 
   useEffect(() => {
     if (!outside) return
@@ -77,9 +127,13 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
   const chosen = rows.map((r) => ({ bundleId: r.id, qty: Number(values[r.id]?.qty) || 0 })).filter((l) => l.qty > 0)
   const total = chosen.reduce((s, l) => s + l.qty, 0)
   const over = overRows(rows, values, columns)
-  const blocker = !to
+  const blocker = from.last
     ? `${from.name} is the last step: its pieces go to Finished Goods In.`
-    : !chosen.length
+    : !dests
+      ? 'Working out where they can go…'
+      : !to
+        ? 'Pick where the bundles go.'
+        : !chosen.length
       ? 'Enter how many pieces of each bundle are going.'
       : over.length
         ? `${over[0].code} has only ${over[0].available} ready.`
@@ -118,13 +172,15 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
       icon={Send}
       title={`Process transfer from ${from.name}`}
       subtitle={
-        to ? (
+        from.last ? (
+          `${from.name} is the last step`
+        ) : to ? (
           <span className="inline-flex items-center gap-1.5">
             {flow.mo.moNumber}: {from.name} <ArrowRight size={12} /> {to.name}
             {outside ? ' at an outside unit, on a job-work challan' : ', to be counted in there'}
           </span>
         ) : (
-          `${from.name} is the last step`
+          `${flow.mo.moNumber}: from ${from.name} to the step you pick`
         )
       }
       width="max-w-4xl"
@@ -143,6 +199,56 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
       onClose={onClose}
       busy={saving}
     >
+      {!from.last && (
+        <Section icon={MapPin} title="Where do they go?">
+          {!dests ? (
+            <p className="text-muted-foreground flex items-center gap-2 text-sm">
+              <Loader2 size={14} className="animate-spin" /> Working out where they can go…
+            </p>
+          ) : (
+            <>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {dests.map((x) => {
+                  const step = flow.steps.find((s) => s.id === x.stepId)
+                  const ok = canGo(x)
+                  const picked = x.stepId === toId
+                  // Why a step cannot take them: been there already, or the last step with work still to do.
+                  const still = [...new Set(ready.flatMap((r) => x.missing[r.id] ?? []))]
+                  const why = x.last && still.length ? `After ${still.join(', ')}` : 'Already been through it'
+                  return (
+                    <button
+                      key={x.stepId}
+                      type="button"
+                      disabled={!ok}
+                      onClick={() => setToId(x.stepId)}
+                      className={`rounded-lg border p-2.5 text-left transition-colors ${
+                        picked ? 'border-primary bg-primary/10 ring-primary/30 ring-2' : ok ? 'border-border hover:border-primary/50' : 'border-border cursor-not-allowed opacity-50'
+                      }`}
+                      aria-pressed={picked}
+                    >
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-foreground text-sm font-semibold">{x.name}</span>
+                        {x.next && <span className="badge-info">Next in route</span>}
+                        {x.last && <span className="badge-neutral">Last step</span>}
+                      </span>
+                      <span className="text-muted-foreground block text-xs">
+                        {step?.department.name}
+                        {step?.execution === 'OUTSOURCED' ? ' · outside unit' : ''}
+                      </span>
+                      {!ok && <span className="text-muted-foreground block text-xs">{why}</span>}
+                    </button>
+                  )
+                })}
+              </div>
+              {!dests.some(canGo) && (
+                <p className="warn-text mt-2 text-sm">
+                  These bundles have been through every step they can go to from here. What is left goes into finished goods from the last step.
+                </p>
+              )}
+            </>
+          )}
+        </Section>
+      )}
       {to && (
         <Section icon={outside ? Truck : Factory} title={outside ? `To an outside unit for ${to.name}` : `To ${to.name} (${to.department.name})`}>
           <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -199,7 +305,13 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
           {to.instructions && <p className="text-muted-foreground mt-2 text-xs">For {to.name}: {to.instructions}</p>}
         </Section>
       )}
-      <Section icon={Boxes} title={`Bundles ready at ${from.name}`}>
+      <Section icon={Boxes} title={to ? `Bundles ready at ${from.name} that can go to ${to.name}` : `Bundles ready at ${from.name}`}>
+        {heldBack > 0 && to && (
+          <p className="text-muted-foreground mb-2 text-xs">
+            {heldBack} more {heldBack === 1 ? 'bundle is' : 'bundles are'} ready here but cannot go to {to.name}
+            {dest?.last ? ': they still have other steps to go through' : ': they have already been there'}. Pick another step for {heldBack === 1 ? 'it' : 'them'}.
+          </p>
+        )}
         <BundleQtyTable
           rows={rows}
           columns={columns}

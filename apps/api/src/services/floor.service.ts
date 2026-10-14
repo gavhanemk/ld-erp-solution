@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balancesOf, flowsOf, keyOf, lockMo, postEvent, reverseEvent, type BalanceRow, type Move } from './wip.service'
-import { isCheck, isLastStep, nextStepAfter } from './route.service'
+import { destinationsFrom, isCheck, isLastStep, nextStepAfter, type RouteStep } from './route.service'
 
 /**
  * The floor: what happens to an order's pieces between cutting and packing.
@@ -102,7 +102,7 @@ function byBundle<T extends { bundleId: string }>(lines: T[], add: (a: T, b: T) 
 
 export const dispatchSchema = z.object({
   fromStepId: z.string().min(1, 'Say which step it leaves'),
-  /** Defaults to the next step on the route, which is the only one allowed. */
+  /** Any step on the route these bundles have not been through yet; the next one in order when not said. */
   toStepId: z.string().optional().nullable(),
   /** The outside unit, when the next step is done outside. */
   vendorId: z.string().optional().nullable(),
@@ -120,7 +120,31 @@ export const dispatchSchema = z.object({
 /** A working step on our own floor sends pieces on straight from in hand; a check, cutting or a unit only what it has done. */
 export const sendsFromHand = (s: { kind: ProcessKind; isQcStep: boolean; execution: StepExecution }) => s.kind !== 'CUTTING' && !isCheck(s) && s.execution === 'IN_HOUSE'
 
-/** Sends bundles on from a step to the next one on the route. */
+/**
+ * Where pieces at a step may go next, with how many of each bundle — read
+ * fresh, for the transfer form and for the check when it is saved.
+ */
+export async function destinationsOf<T extends RouteStep>(db: Tx | PrismaClient, mo: { id: string; steps: T[] }, fromId: string) {
+  const [bundles, sent] = await Promise.all([
+    db.productionBundle.findMany({ where: { moId: mo.id }, select: { id: true, qty: true, parentId: true } }),
+    db.processTransferLine.findMany({
+      where: { transfer: { moId: mo.id, isRework: false, status: { not: 'CANCELLED' } } },
+      select: { bundleId: true, dispatchedQty: true, transfer: { select: { toStepId: true } } },
+    }),
+  ])
+  return destinationsFrom(
+    mo.steps,
+    fromId,
+    bundles,
+    sent.map((l) => ({ bundleId: l.bundleId, toStepId: l.transfer.toStepId, qty: l.dispatchedQty })),
+  )
+}
+
+/**
+ * Sends bundles on from a step to the step the floor picks: any step on the
+ * order's route these bundles have not been through yet, the last one only
+ * once they have been through all the others.
+ */
 export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchSchema>, userId: string) {
   const mo = await openMo(tx, moId)
   if (await seen(tx, d.clientKey)) {
@@ -128,18 +152,55 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
     return { transfer: dup, duplicate: true }
   }
   const from = stepOf(mo, d.fromStepId)
-  const next = nextStepAfter(mo.steps, from.id)
-  if (!next) throw new AppError(`${from.name} is the last step: its pieces go to Finished Goods In, not to another step.`, 409, 'LAST_STEP')
-  if (d.toStepId && d.toStepId !== next.id) {
-    const to = stepOf(mo, d.toStepId)
-    throw new AppError(`Pieces done at ${from.name} go next to ${next.name}, not ${to.name}. To change that, change the order's route.`, 409, 'NOT_NEXT_STEP')
-  }
-  const to = next
+  if (!nextStepAfter(mo.steps, from.id)) throw new AppError(`${from.name} is the last step: its pieces go to Finished Goods In, not to another step.`, 409, 'LAST_STEP')
   const lines = byBundle(
     d.lines.filter((l) => l.qty > 0),
     (a, b) => ({ ...a, qty: a.qty + b.qty }),
   )
   if (!lines.length) throw new AppError('Enter how many pieces of each bundle are going.', 400, 'NOTHING_SENT')
+
+  // Where they may go: the route's steps, as far as these bundles go.
+  const choices = await destinationsOf(tx, mo, from.id)
+  const fits = (c: (typeof choices)[number]) => lines.every((l) => l.qty <= (c.caps[l.bundleId] ?? 0))
+  let choice
+  if (d.toStepId) {
+    const asked = stepOf(mo, d.toStepId)
+    choice = choices.find((c) => c.step.id === asked.id)
+    if (!choice) {
+      throw new AppError(
+        asked.id === from.id
+          ? `The pieces are already at ${from.name}: pick where they go next.`
+          : asked.skippedAt
+            ? `${asked.name} is left out of this order's route.`
+            : `Pieces cannot go back to ${asked.name}.`,
+        409,
+        'NOT_A_DESTINATION',
+      )
+    }
+  } else {
+    // Not said: the next one in the route's order, or the first one they can all go to.
+    choice = choices.find((c) => c.next && fits(c)) ?? choices.find(fits)
+    if (!choice) throw new AppError('Pick which step these bundles go to.', 400, 'NO_DESTINATION')
+  }
+  const to = choice.step
+  const codes = new Map(
+    (await tx.productionBundle.findMany({ where: { id: { in: lines.map((l) => l.bundleId) } }, select: { id: true, code: true } })).map((b) => [b.id, b.code]),
+  )
+  for (const l of lines) {
+    const cap = choice.caps[l.bundleId] ?? 0
+    if (l.qty <= cap) continue
+    const code = codes.get(l.bundleId) ?? 'A bundle'
+    const missing = choice.missing[l.bundleId]
+    throw new AppError(
+      choice.last && missing?.length
+        ? `${code} has not been through ${missing.join(', ')} yet, so it cannot go to ${to.name}: everything else on the route comes first.`
+        : cap > 0
+          ? `${code}: only ${cap} more of its pieces can go to ${to.name}; the rest have already been sent there.`
+          : `${code} has already been sent to ${to.name}. Pick a step it has not been through.`,
+      409,
+      'NOT_ALLOWED_THERE',
+    )
+  }
 
   const vendorId = d.vendorId || null
   if (to.execution === 'OUTSOURCED' && !vendorId) throw new AppError(`${to.name} is done outside: say which unit the pieces go to.`, 400, 'NO_VENDOR')

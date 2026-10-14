@@ -13,6 +13,7 @@ import {
   closeJobWorkOrder,
   decide,
   decideSchema,
+  destinationsOf,
   dispatch,
   dispatchSchema,
   holdMo,
@@ -284,6 +285,26 @@ router.get('/transfers/:id/print', requirePermission(MODULE, 'view'), async (req
     rate: Number(l.bom?.totalCost ?? l.soLine?.item.standardRate ?? 0),
   }))
   res.json({ success: true, data: { ...header, transfer: t, goods } })
+})
+
+/**
+ * Where pieces at a step may go next: every step on the order's route, with
+ * how many pieces of each bundle may go there and, for the last step, what
+ * each bundle still has to go through first.
+ */
+router.get('/orders/:id/destinations', requirePermission(MODULE, 'view'), async (req, res) => {
+  const fromStepId = typeof req.query.fromStepId === 'string' ? req.query.fromStepId : ''
+  if (!fromStepId) throw new AppError('Say which step the pieces are at.', 400, 'NO_STEP')
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: req.params.id },
+    select: { id: true, steps: { orderBy: { sequence: 'asc' }, select: { id: true, sequence: true, name: true, kind: true, isQcStep: true, execution: true, skippedAt: true } } },
+  })
+  if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
+  const list = await destinationsOf(prisma, mo, fromStepId)
+  res.json({
+    success: true,
+    data: list.map((c) => ({ stepId: c.step.id, name: c.step.name, last: c.last, next: c.next, caps: c.caps, missing: c.missing })),
+  })
 })
 
 router.post('/orders/:id/transfers', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {

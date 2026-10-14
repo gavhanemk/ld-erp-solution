@@ -14,7 +14,6 @@ import {
   Receipt,
   Scale,
   Send,
-  Truck,
   Undo2,
   Wrench,
 } from 'lucide-react'
@@ -217,7 +216,6 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   }
 
   // What waits here, each with the button that does it.
-  const nextName = next ? `${next.name}${next.execution === 'OUTSOURCED' ? ' (outside unit)' : ''}` : ''
   const ready = (f?.waiting ?? 0) + (fromHand ? f?.inHand ?? 0 : 0)
   const steps: NextStep[] = []
   for (const t of incoming) {
@@ -257,12 +255,12 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   if (!outside && (f?.inHand ?? 0) > 0) {
     steps.push({
       key: 'hand',
-      text: check ? `${pcs(f!.inHand)} pcs here to check` : `${pcs(f!.inHand)} pcs here — when worked, transfer them to ${nextName || 'finished goods'}; note any damaged`,
+      text: check ? `${pcs(f!.inHand)} pcs here to check` : `${pcs(f!.inHand)} pcs here — when worked, ${next ? 'transfer them on to the next step you pick' : 'put them into finished goods'}; note any damaged`,
       actions: mayCreate
         ? check
           ? [{ label: 'Record the check', icon: ClipboardList, primary: true, onClick: () => setOpen({ kind: 'work' }) }]
           : [
-              ...(next ? [{ label: `Transfer to ${next.name}`, icon: next.execution === 'OUTSOURCED' ? Truck : Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }] : []),
+              ...(next ? [{ label: 'Transfer on', icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }] : []),
               { label: 'Record work / damaged', icon: Hammer, onClick: () => setOpen({ kind: 'work' }) },
             ]
         : [],
@@ -271,11 +269,11 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
   if ((f?.waiting ?? 0) > 0) {
     steps.push({
       key: 'ready',
-      text: `${pcs(f!.waiting)} pcs ${check ? 'passed' : 'done'} and ready ${step.last ? 'to go into finished goods' : `to transfer to ${nextName}`}`,
+      text: `${pcs(f!.waiting)} pcs ${check ? 'passed' : 'done'} and ready ${step.last ? 'to go into finished goods' : 'to transfer on — pick the step they go to'}`,
       actions: step.last
         ? [{ label: 'Into finished goods', icon: PackageCheck, primary: true, onClick: () => window.location.assign(`/inventory/finished-goods?mo=${d.mo.id}`) }]
         : mayCreate && next
-          ? [{ label: `Transfer to ${next.name}`, icon: next.execution === 'OUTSOURCED' ? Truck : Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }]
+          ? [{ label: 'Transfer on', icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }]
           : [],
     })
   }
@@ -328,7 +326,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
             { label: 'Order', of: (id) => sizes.find((z) => z.id === id)?.qty ?? 0, tone: 'muted' },
             { label: outside ? 'Sent to unit' : 'Received (in)', of: (id) => fig(id)?.received ?? 0 },
             { label: check ? 'Passed' : 'Processed', of: (id) => fig(id)?.completed ?? 0, tone: 'primary' },
-            { label: step.last ? 'Into finished goods' : `Out to ${next?.name ?? 'next'}`, of: (id) => (step.last ? fig(id)?.packed ?? 0 : fig(id)?.sentOn ?? 0) },
+            { label: step.last ? 'Into finished goods' : 'Sent on', of: (id) => (step.last ? fig(id)?.packed ?? 0 : fig(id)?.sentOn ?? 0) },
             { label: check ? 'Failed / damaged' : 'Damaged', of: (id) => (fig(id)?.damaged ?? 0) + (fig(id)?.rejected ?? 0), tone: 'warn' },
             { label: outside ? 'With the unit' : 'In hand (balance)', of: (id) => (outside ? fig(id)?.atVendor ?? 0 : (fig(id)?.inHand ?? 0) + (fig(id)?.waiting ?? 0)) },
             { label: 'On the way here', of: (id) => fig(id)?.inTransit ?? 0, tone: 'muted' },

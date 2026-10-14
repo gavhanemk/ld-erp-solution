@@ -41,20 +41,19 @@ const DOT: Record<Tone, string> = { act: 'bg-primary', warn: 'bg-destructive', i
 export function whatWaits(r: StageRow): Array<{ text: string; tone: Tone }> {
   const f = r.figures
   const out: Array<{ text: string; tone: Tone }> = []
-  const nextName = r.next ? `${r.next.name}${r.next.execution === 'OUTSOURCED' ? ' (outside unit)' : ''}` : 'finished goods'
   const check = r.stage === 'QC'
   if (r.toCountIn) out.push({ text: `${r.toCountIn} ${r.toCountIn === 1 ? 'transfer' : 'transfers'} from ${r.from.join(' / ') || 'the stage before'} to count in (${pcs(f.inTransit)} pcs)`, tone: 'act' })
   if (r.stage === 'CUTTING') {
     const left = Math.max(0, r.card.line.totalQty - f.completed - r.withCutters)
     if (r.withCutters) out.push({ text: `${pcs(r.withCutters)} pcs with cutting contractors — receive them when cut`, tone: 'info' })
-    if (f.waiting) out.push({ text: `${pcs(f.waiting)} pcs cut, ready to transfer to ${nextName}`, tone: 'act' })
+    if (f.waiting) out.push({ text: `${pcs(f.waiting)} pcs cut, ready to transfer on`, tone: 'act' })
     if (left && f.state !== 'DONE') out.push({ text: `${pcs(left)} pcs still to issue for cutting`, tone: 'info' })
   } else {
     if (f.atVendor) out.push({ text: `${pcs(f.atVendor)} pcs with ${r.step.unit?.name ?? 'the outside unit'} — record them when they come back`, tone: 'info' })
     if (f.inHand && r.step.execution !== 'OUTSOURCED') {
-      out.push({ text: check ? `${pcs(f.inHand)} pcs to check` : `${pcs(f.inHand)} pcs here to work on and send to ${nextName}`, tone: 'act' })
+      out.push({ text: check ? `${pcs(f.inHand)} pcs to check` : `${pcs(f.inHand)} pcs here to work on and send on`, tone: 'act' })
     }
-    if (f.waiting) out.push({ text: `${pcs(f.waiting)} pcs ${check ? 'passed' : 'done'}, ready to ${r.step.last ? 'go into finished goods' : `transfer to ${nextName}`}`, tone: 'act' })
+    if (f.waiting) out.push({ text: `${pcs(f.waiting)} pcs ${check ? 'passed' : 'done'}, ready to ${r.step.last ? 'go into finished goods' : 'transfer on'}`, tone: 'act' })
     if (f.damagedNow + f.rejectedNow) out.push({ text: `${pcs(f.damagedNow + f.rejectedNow)} pcs ${check ? 'failed or damaged' : 'damaged'} — decide what happens to them`, tone: 'warn' })
     if (f.inRework) out.push({ text: `${pcs(f.inRework)} pcs in rework`, tone: 'warn' })
     if (f.short) out.push({ text: `${pcs(f.short)} pcs short on a transfer — settle it`, tone: 'warn' })

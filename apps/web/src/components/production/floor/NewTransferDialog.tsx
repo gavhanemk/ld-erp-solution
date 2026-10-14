@@ -74,14 +74,14 @@ export function NewTransferDialog({ onClose, onSaved }: { onClose: () => void; o
           <SmartSelect className="form-input" value={fromStepId} onChange={(e) => setFromStepId(e.target.value)} disabled={!senders.length}>
             {!senders.length && <option value="">—</option>}
             {senders.map((s) => (
-              <option key={s.id} value={s.id} data-sub={`${pcs(s.figures!.waiting + (sendsFromHand(s) ? s.figures!.inHand : 0))} ready · to ${s.next!.name}`}>
+              <option key={s.id} value={s.id} data-sub={`${pcs(s.figures!.waiting + (sendsFromHand(s) ? s.figures!.inHand : 0))} ready to send on`}>
                 {s.name}
               </option>
             ))}
           </SmartSelect>
         </label>
       </div>
-      {from && <p className="text-muted-foreground text-xs">From {from.name} to {from.next!.name}{from.next!.execution === 'OUTSOURCED' ? ', an outside unit, on a job-work challan' : ', counted in there'}.</p>}
+      {from && <p className="text-muted-foreground text-xs">From {from.name}: on the next screen, pick the step they go to.</p>}
     </FormFrame>
   )
 }

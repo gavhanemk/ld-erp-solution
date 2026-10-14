@@ -103,8 +103,8 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
   if ((f?.waiting ?? 0) > 0 && next) {
     steps.push({
       key: 'send',
-      text: `${pcs(f!.waiting)} pcs cut and ready to transfer to ${next.name}${next.execution === 'OUTSOURCED' ? ' (outside unit)' : ''}`,
-      actions: mayCreate ? [{ label: `Transfer to ${next.name}`, icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }] : [],
+      text: `${pcs(f!.waiting)} pcs cut and ready to transfer on — pick the step they go to`,
+      actions: mayCreate ? [{ label: 'Transfer on', icon: Send, primary: true, onClick: () => setOpen({ kind: 'send' }) }] : [],
     })
   }
   const idle = f?.state === 'DONE' ? `All ${pcs(toMake)} pcs cut and sent to ${next?.name ?? 'the next stage'}.` : 'Nothing waiting at cutting right now.'
