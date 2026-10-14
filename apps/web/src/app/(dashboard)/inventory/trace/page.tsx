@@ -9,7 +9,7 @@ import { looksLikeGarment } from '@/components/packages/GarmentCard'
 import { GarmentTrace, type GarmentStory } from '@/components/trace/GarmentTrace'
 import { OrderTrace, type OrderStory } from '@/components/trace/OrderTrace'
 import { CustomerTrace, StyleTrace, type CustomerStory, type StyleStory } from '@/components/trace/PartyTrace'
-import { hitTarget, type Hit, type Target } from '@/components/trace/traceTypes'
+import { hitTarget, useAfterPrint, type Hit, type Target } from '@/components/trace/traceTypes'
 import { FILTER_KEYS, FilterBar, PieceResults, type FilterOptions, type Filters } from '@/components/trace/TraceFilters'
 
 const KINDS = ['g', 'so', 'mo', 'c', 's'] as const
@@ -215,6 +215,22 @@ function TraceScreen() {
       live = false
     }
   }, [target])
+
+  // Back from printing its labels: read it again in place, so "Not printed" turns to "Printed".
+  const printed = useAfterPrint()
+  useEffect(() => {
+    if (!printed || !target) return
+    let live = true
+    api
+      .get<{ data: unknown }>(urlOf(target))
+      .then((r) => live && setLoaded({ kind: target.kind, body: r.data } as Loaded))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+    // Only on coming back from printing; opening something else is the effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [printed])
 
   const hitList = (list: Hit[], onPick: (h: Hit) => void) =>
     list.map((h, i) => {

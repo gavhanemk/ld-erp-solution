@@ -1,9 +1,11 @@
+import { useEffect, useState } from 'react'
 import {
   ClipboardList,
   Factory,
   Package,
   Scissors,
   ShieldCheck,
+  ShoppingCart,
   Tag,
   Truck,
   Undo2,
@@ -16,7 +18,7 @@ import {
  * uses for them.
  */
 
-export type Phase = 'order' | 'material' | 'cutting' | 'production' | 'qc' | 'store' | 'tag' | 'despatch' | 'return'
+export type Phase = 'order' | 'material' | 'purchase' | 'cutting' | 'production' | 'qc' | 'store' | 'tag' | 'despatch' | 'return'
 
 export interface Step {
   at: string
@@ -44,6 +46,7 @@ export const hitTarget = (h: Hit): Target =>
 export const PHASE: Record<Phase, { label: string; icon: LucideIcon; dot: string; chip: string }> = {
   order: { label: 'Order', icon: ClipboardList, dot: 'bg-sky-500', chip: 'text-sky-600 bg-sky-500/10 border-sky-500/30' },
   material: { label: 'Materials', icon: Package, dot: 'bg-amber-500', chip: 'text-amber-600 bg-amber-500/10 border-amber-500/30' },
+  purchase: { label: 'Purchase', icon: ShoppingCart, dot: 'bg-lime-500', chip: 'text-lime-700 bg-lime-500/10 border-lime-500/30' },
   cutting: { label: 'Cutting', icon: Scissors, dot: 'bg-orange-500', chip: 'text-orange-600 bg-orange-500/10 border-orange-500/30' },
   production: { label: 'Production', icon: Factory, dot: 'bg-indigo-500', chip: 'text-indigo-600 bg-indigo-500/10 border-indigo-500/30' },
   qc: { label: 'Quality check', icon: ShieldCheck, dot: 'bg-emerald-500', chip: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/30' },
@@ -96,6 +99,50 @@ export const qty = (n: number) => n.toLocaleString('en-IN', { maximumFractionDig
 export interface Pieces {
   totals: Record<string, number>
   tagged: number
+  /** Tagged pieces whose label has never been printed. */
+  notPrinted: number
   bySize: Array<{ style: string; color: string; size: string; counts: Record<string, number>; total: number }>
-  list: Array<{ code: string; status: string; grade: string; printed: boolean; style: string; color: string; size: string; store: string; dcNumber: string | null; moNumber: string }>
+  list: Array<{ id: string; code: string; status: string; grade: string; printed: boolean; style: string; color: string; size: string; store: string; dcNumber: string | null; moNumber: string }>
+}
+
+/** One line of a material request, and what was bought for it. */
+export interface MaterialLine {
+  mrNumber: string
+  department: string
+  status: string
+  item: string
+  code: string
+  unit: string
+  asked: number
+  issued: number
+  returned: number
+  toBuy: number
+  ordered: number
+  received: number
+  purchases: Array<{ poNumber: string; supplier: string; date: string; qty: number; receipts: Array<{ grnNumber: string; date: string; qty: number }> }>
+}
+
+// Labels open in their own tab; coming back to this one, the list is read
+// again, so what was just printed no longer shows as "Not printed".
+let printOpened = false
+
+/** Opens the label sheet for the pieces the query names. */
+export function printLabels(query: string) {
+  printOpened = true
+  window.open(`/print/garments?${query}`, '_blank')
+}
+
+/** A number that goes up each time this tab is come back to after labels were opened to print. */
+export function useAfterPrint() {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const back = () => {
+      if (!printOpened) return
+      printOpened = false
+      setTick((t) => t + 1)
+    }
+    window.addEventListener('focus', back)
+    return () => window.removeEventListener('focus', back)
+  }, [])
+  return tick
 }

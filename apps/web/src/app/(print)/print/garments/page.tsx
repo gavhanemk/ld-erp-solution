@@ -241,8 +241,8 @@ function Labels() {
   const qs = params.toString()
   const retail = layout === 'retail'
   useEffect(() => {
-    if (!params.get('moId') && !params.get('ids')) {
-      setError('Open the labels from Garment Tags.')
+    if (!params.get('moId') && !params.get('ids') && params.get('trace') !== '1') {
+      setError('Open the labels from Garment Tags or Track & Trace.')
       return
     }
     // The retail tag also brings each piece's MRP, barcode and care symbols.

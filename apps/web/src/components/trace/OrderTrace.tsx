@@ -3,8 +3,8 @@
 import { Boxes, ClipboardList, Factory, PackageCheck, Scissors, Truck, Warehouse } from 'lucide-react'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Timeline } from './Timeline'
-import { Fact, Go, PiecesBySize, PiecesList, Section } from './TraceBits'
-import { MO_STATUS, SO_STATUS, badge, fmtDay, qty, type Pieces, type Step, type Target } from './traceTypes'
+import { Fact, Go, MaterialsUsed, PiecesBySize, PiecesList, Section } from './TraceBits'
+import { MO_STATUS, SO_STATUS, badge, fmtDay, qty, type MaterialLine, type Pieces, type Step, type Target } from './traceTypes'
 
 export interface OrderStory {
   kind: 'SO' | 'MO'
@@ -18,6 +18,7 @@ export interface OrderStory {
     steps: Array<{ name: string; kind: string; check: boolean; state: string; received: number; completed: number; inHand: number; atVendor: number; rework: number; waiting: number; damaged: number }>
   }>
   pieces: Pieces
+  materials: MaterialLine[]
   timeline: Step[]
 }
 
@@ -95,6 +96,8 @@ export function OrderTrace({ o, open }: { o: OrderStory; open: (t: Target) => vo
         <KpiTile icon={Truck} tone={TONE.blue} label="Despatched" value={qty(f.despatched)} sub={`${pct(f.despatched, f.ordered)}% of the order`} />
       </div>
 
+      <MaterialsUsed lines={o.materials} />
+
       {o.stages.map((s) =>
         s.steps.length ? (
           <Section key={s.moId} icon={Factory} title={`Production steps · ${s.moNumber}`} note={`${qty(s.planned)} pieces planned`}>
@@ -146,7 +149,7 @@ export function OrderTrace({ o, open }: { o: OrderStory; open: (t: Target) => vo
       )}
 
       <PiecesBySize pieces={o.pieces} />
-      <PiecesList pieces={o.pieces} open={open} />
+      <PiecesList pieces={o.pieces} open={open} printQuery={o.kind === 'SO' && o.so ? `trace=1&soId=${o.so.id}` : o.mos[0] ? `trace=1&moId=${o.mos[0].id}` : undefined} />
       <Timeline steps={o.timeline} />
     </div>
   )

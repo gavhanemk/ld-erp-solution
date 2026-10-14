@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, Filter, Loader2, X } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { ChevronLeft, ChevronRight, Filter, Loader2, Printer, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
-import { GARMENT_STATUS, badge, fmtDay, qty, type Target } from './traceTypes'
+import { LabelCell } from './TraceBits'
+import { GARMENT_STATUS, badge, fmtDay, printLabels, qty, useAfterPrint, type Target } from './traceTypes'
 
 /** The filters, as the address keeps them: so Back comes back to the same list. */
 export const FILTER_KEYS = ['fc', 'fo', 'fm', 'fs', 'col', 'sz', 'st', 'from', 'to'] as const
@@ -126,6 +127,7 @@ export function FilterBar({ options, f, set, clear }: { options: FilterOptions |
 }
 
 interface PieceRow {
+  id: string
   code: string
   status: string
   grade: string
@@ -148,7 +150,8 @@ interface PieceRow {
  */
 export function PieceResults({ f, typed, set, open }: { f: Filters; typed: string; set: (patch: Partial<Filters>) => void; open: (t: Target) => void }) {
   const [page, setPage] = useState(1)
-  const [data, setData] = useState<{ total: number; pages: number; counts: Record<string, number>; rows: PieceRow[] } | null>(null)
+  const [data, setData] = useState<{ total: number; notPrinted: number; pages: number; counts: Record<string, number>; rows: PieceRow[] } | null>(null)
+  const printed = useAfterPrint()
   const [loading, setLoading] = useState(false)
   const [q, setQ] = useState(typed)
 
@@ -160,24 +163,29 @@ export function PieceResults({ f, typed, set, open }: { f: Filters; typed: strin
   const key = JSON.stringify([f, q])
   useEffect(() => setPage(1), [key])
 
-  useEffect(() => {
-    let live = true
-    setLoading(true)
-    const qs = new URLSearchParams({ page: String(page) })
+  // The filters as the API and the label sheet read them.
+  const query = useMemo(() => {
+    const qs = new URLSearchParams()
     const map: Array<[FilterKey, string]> = [['fc', 'customerId'], ['fo', 'soId'], ['fm', 'moId'], ['fs', 'styleId'], ['col', 'color'], ['sz', 'sizeId'], ['st', 'status'], ['from', 'from'], ['to', 'to']]
     for (const [k, name] of map) if (f[k]) qs.set(name, f[k])
     if (q.length >= 2) qs.set('q', q)
+    return qs.toString()
+    // The key holds the filters and the typed text.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+
+  useEffect(() => {
+    let live = true
+    setLoading(true)
     api
-      .get<{ data: { total: number; pages: number; counts: Record<string, number>; rows: PieceRow[] } }>(`/trace/pieces?${qs}`)
+      .get<{ data: { total: number; notPrinted: number; pages: number; counts: Record<string, number>; rows: PieceRow[] } }>(`/trace/pieces?${query}${query ? '&' : ''}page=${page}`)
       .then((r) => live && setData(r.data))
-      .catch(() => live && setData({ total: 0, pages: 1, counts: {}, rows: [] }))
+      .catch(() => live && setData({ total: 0, notPrinted: 0, pages: 1, counts: {}, rows: [] }))
       .finally(() => live && setLoading(false))
     return () => {
       live = false
     }
-    // The key holds the filters and the typed text.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, page])
+  }, [query, page, printed])
 
   const all = data ? Object.entries(data.counts).filter(([s]) => s !== 'VOID').reduce((t, [, n]) => t + n, 0) : 0
   return (
@@ -207,6 +215,16 @@ export function PieceResults({ f, typed, set, open }: { f: Filters; typed: strin
                 {GARMENT_STATUS[s].label} {qty(data.counts[s])}
               </button>
             ))}
+            {data.notPrinted > 0 && (
+              <button
+                type="button"
+                className="btn-primary ml-auto h-8 px-3 text-xs"
+                onClick={() => printLabels(`trace=1${query ? `&${query}` : ''}&only=new`)}
+                title="Print the labels of every piece in this list that has not been printed yet"
+              >
+                <Printer size={13} /> Print {qty(data.notPrinted)} not printed
+              </button>
+            )}
           </>
         )}
       </div>
@@ -253,7 +271,9 @@ export function PieceResults({ f, typed, set, open }: { f: Filters; typed: strin
                     </td>
                     <td className="font-mono text-xs">{r.dcNumber ?? <span className="text-muted-foreground">—</span>}</td>
                     <td className="whitespace-nowrap text-xs">{fmtDay(r.receivedOn)}</td>
-                    <td className="text-muted-foreground text-xs">{r.printed ? 'Printed' : 'Not printed'}</td>
+                    <td className="text-xs">
+                      <LabelCell printed={r.printed} id={r.id} code={r.code} />
+                    </td>
                   </tr>
                 )
               })}

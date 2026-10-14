@@ -12,7 +12,7 @@ import type { garmentDetail } from '../routes/garments.routes'
  */
 
 /** Which part of the journey a step belongs to, for its colour and icon on the screen. */
-export type Phase = 'order' | 'material' | 'cutting' | 'production' | 'qc' | 'store' | 'tag' | 'despatch' | 'return'
+export type Phase = 'order' | 'material' | 'purchase' | 'cutting' | 'production' | 'qc' | 'store' | 'tag' | 'despatch' | 'return'
 
 export interface Step {
   at: Date
@@ -131,10 +131,10 @@ const TAG_EVENT: Record<string, { phase: Phase; title: string }> = {
 }
 
 /** A garment's whole life, from its order being booked to today. */
-export async function garmentTrace(id: string, moId: string, dcId: string | null, detailOf: typeof garmentDetail) {
-  const [detail, g, mrs, dc] = await Promise.all([detailOf(id), garmentBase(id), materialIssues(moId), challanOf(dcId)])
+export async function garmentTrace(id: string, moId: string, soId: string | null, dcId: string | null, detailOf: typeof garmentDetail) {
+  const [detail, g, materials, dc] = await Promise.all([detailOf(id), garmentBase(id), materialsOf([moId], soId), challanOf(dcId)])
   if (!g) throw new AppError('That garment does not exist', 404, 'NOT_FOUND')
-  return assemble(detail, g, mrs, dc)
+  return assemble(detail, g, materials, dc)
 }
 
 const garmentBase = (id: string) =>
@@ -172,13 +172,6 @@ const garmentBase = (id: string) =>
     },
   })
 
-const materialIssues = (moId: string) =>
-  prisma.materialRequisition.findMany({
-    where: { moId, issuedAt: { not: null } },
-    select: { mrNumber: true, issuedAt: true, department: { select: { name: true } }, issuedBy: { select: { name: true } } },
-    orderBy: { issuedAt: 'asc' },
-  })
-
 /** The challan a piece went on: still on the piece once despatched. */
 const challanOf = (dcId: string | null) =>
   dcId
@@ -203,7 +196,7 @@ const challanOf = (dcId: string | null) =>
 function assemble(
   detail: Awaited<ReturnType<typeof garmentDetail>>,
   g: NonNullable<Awaited<ReturnType<typeof garmentBase>>>,
-  mrs: Awaited<ReturnType<typeof materialIssues>>,
+  materials: Awaited<ReturnType<typeof materialsOf>>,
   dc: Awaited<ReturnType<typeof challanOf>>,
 ) {
   const so = g.mo.so
@@ -220,9 +213,7 @@ function assemble(
     if (so.approvedAt) steps.push({ at: so.approvedAt, phase: 'order', title: 'Order approved', ref: so.soNumber, by: so.approvedBy?.name })
   }
   steps.push({ at: g.mo.createdAt, phase: 'order', title: `Manufacturing order ${g.mo.moNumber} raised`, ref: g.mo.moNumber, by: g.mo.createdBy?.name })
-  for (const m of mrs) {
-    steps.push({ at: m.issuedAt!, phase: 'material', title: 'Materials issued for the order', detail: `To ${m.department.name}`, ref: m.mrNumber, by: m.issuedBy?.name })
-  }
+  steps.push(...materials.steps)
   // The bundle it was sewn in, step by step through the floor.
   for (const e of detail.production) {
     const cut = e.type === 'Cut'
@@ -321,6 +312,7 @@ function assemble(
         }
       : null,
     milestones,
+    materials: materials.lines,
     timeline: steps,
   }
 }
@@ -331,11 +323,13 @@ const GARMENT_STATES = ['IN_STOCK', 'PACKED', 'DISPATCHED', 'SCRAPPED', 'VOID'] 
 
 /** Tagged pieces by colour, size and where they are, for a set of orders. */
 async function piecesOf(where: { moId?: { in: string[] }; item?: { styleId: string } }) {
-  const [grouped, list] = await Promise.all([
+  const [grouped, notPrinted, list] = await Promise.all([
     prisma.garment.groupBy({ by: ['itemId', 'sizeId', 'status'], where, _count: { _all: true } }),
+    prisma.garment.count({ where: { ...where, status: { not: 'VOID' }, printCount: 0 } }),
     prisma.garment.findMany({
       where,
       select: {
+        id: true,
         code: true,
         status: true,
         grade: true,
@@ -371,8 +365,10 @@ async function piecesOf(where: { moId?: { in: string[] }; item?: { styleId: stri
   return {
     totals,
     tagged: GARMENT_STATES.filter((s) => s !== 'VOID').reduce((t, s) => t + (totals[s] ?? 0), 0),
+    notPrinted,
     bySize: [...rows.values()].sort((a, b) => a.style.localeCompare(b.style) || a.color.localeCompare(b.color) || a.seq - b.seq),
     list: list.map((g) => ({
+      id: g.id,
       code: g.code,
       status: g.status,
       grade: g.grade,
@@ -442,7 +438,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   }
   const moIds = mos.map((m) => m.id)
 
-  const [stages, pieces, mrs, cuts, transfers, qcEvents, receipts, challans] = await Promise.all([
+  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans] = await Promise.all([
     Promise.all(
       mos.map(async (m) => ({
         moId: m.id,
@@ -469,10 +465,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
       })),
     ),
     piecesOf({ moId: { in: moIds } }),
-    prisma.materialRequisition.findMany({
-      where: { moId: { in: moIds } },
-      select: { mrNumber: true, requestDate: true, createdAt: true, approvedAt: true, issuedAt: true, status: true, department: { select: { name: true } }, raisedBy: { select: { name: true } }, approvedBy: { select: { name: true } }, issuedBy: { select: { name: true } } },
-    }),
+    materialsOf(moIds, so?.id ?? null),
     prisma.cuttingOrder.findMany({
       where: { moId: { in: moIds }, status: { not: 'CANCELLED' } },
       select: { cutOrderNumber: true, cutDate: true, createdAt: true, actualPieces: true, plannedPieces: true, lotNo: true, cutterName: true, createdBy: { select: { name: true } }, moLine: { select: { color: true, style: { select: { code: true } } } } },
@@ -538,11 +531,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
     if (m.actualEndDate) steps.push({ at: m.actualEndDate, phase: 'production', title: 'Production completed', ref: m.moNumber })
     if (m.closedAt) steps.push({ at: m.closedAt, phase: 'order', title: 'Manufacturing order closed', ref: m.moNumber })
   }
-  for (const r of mrs) {
-    steps.push({ at: r.createdAt, phase: 'material', title: 'Materials asked for', detail: r.department.name, ref: r.mrNumber, by: r.raisedBy?.name })
-    if (r.approvedAt) steps.push({ at: r.approvedAt, phase: 'material', title: 'Material request approved', ref: r.mrNumber, by: r.approvedBy?.name })
-    if (r.issuedAt) steps.push({ at: r.issuedAt, phase: 'material', title: 'Materials issued', detail: `To ${r.department.name}`, ref: r.mrNumber, by: r.issuedBy?.name })
-  }
+  steps.push(...materials.steps)
   for (const c of cuts) {
     steps.push({
       at: c.cutDate,
@@ -632,6 +621,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
     },
     stages,
     pieces,
+    materials: materials.lines,
     timeline: steps.slice(-400),
   }
 }
@@ -805,8 +795,12 @@ export interface PieceFilter {
   page?: number
 }
 
-/** Tagged pieces matching every filter given, and what was typed — 50 a page, with the count in each state. */
-export async function findPieces(f: PieceFilter) {
+/**
+ * The pieces every filter given and what was typed pick out: `base` in any
+ * state, `where` narrowed to the state chosen. Label printing uses it too, so
+ * a filtered list prints exactly the pieces it shows.
+ */
+export function piecesWhere(f: PieceFilter) {
   const and: Prisma.GarmentWhereInput[] = []
   if (f.customerId) and.push({ mo: { so: { customerId: f.customerId } } })
   if (f.soId) and.push({ mo: { soId: f.soId } })
@@ -840,13 +834,21 @@ export async function findPieces(f: PieceFilter) {
   }
   const base: Prisma.GarmentWhereInput = and.length ? { AND: and } : {}
   const where: Prisma.GarmentWhereInput = f.status ? { ...base, status: f.status as Prisma.GarmentWhereInput['status'] } : { ...base, status: { not: 'VOID' } }
+  return { base, where }
+}
+
+/** Tagged pieces matching every filter given, and what was typed — 50 a page, with the count in each state. */
+export async function findPieces(f: PieceFilter) {
+  const { base, where } = piecesWhere(f)
   const page = Math.max(1, f.page ?? 1)
-  const [total, counts, rows] = await Promise.all([
+  const [total, notPrinted, counts, rows] = await Promise.all([
     prisma.garment.count({ where }),
+    prisma.garment.count({ where: { AND: [where, { printCount: 0 }] } }),
     prisma.garment.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
     prisma.garment.findMany({
       where,
       select: {
+        id: true,
         code: true,
         status: true,
         grade: true,
@@ -866,10 +868,12 @@ export async function findPieces(f: PieceFilter) {
   ])
   return {
     total,
+    notPrinted,
     page,
     pages: Math.max(1, Math.ceil(total / 50)),
     counts: Object.fromEntries(counts.map((c) => [c.status, c._count._all])),
     rows: rows.map((g) => ({
+      id: g.id,
       code: g.code,
       status: g.status,
       grade: g.grade,
@@ -886,4 +890,131 @@ export async function findPieces(f: PieceFilter) {
       lot: g.bundle?.cuttingOrder?.lotNo ?? null,
     })),
   }
+}
+
+// ── Materials: what the order asked for, was given, and what was bought for it ──
+
+/** Pieces of material as text: "120 mtr Cotton Oxford". */
+const amount = (q: number, unit: string | null | undefined, item: string) => `${Number(q.toFixed(3)).toLocaleString('en-IN')} ${unit ?? ''} ${item}`.replace(/\s+/g, ' ').trim()
+
+/**
+ * An order's materials, start to finish: each requisition line — what was
+ * asked for, what the store gave, what had to be bought — and, for what was
+ * bought, the purchase orders raised and the goods received on them; with
+ * each of those as dated steps for the history.
+ */
+export async function materialsOf(moIds: string[], soId: string | null, db: Prisma.TransactionClient = prisma) {
+  const mrs = await db.materialRequisition.findMany({
+    where: { OR: [{ moId: { in: moIds } }, ...(soId ? [{ soId, moId: null }] : [])] },
+    select: {
+      id: true,
+      mrNumber: true,
+      status: true,
+      createdAt: true,
+      approvedAt: true,
+      closedAt: true,
+      department: { select: { name: true } },
+      raisedBy: { select: { name: true } },
+      approvedBy: { select: { name: true } },
+      issuedBy: { select: { name: true } },
+      lines: {
+        select: {
+          id: true,
+          requestedQty: true,
+          issuedQty: true,
+          returnedQty: true,
+          purchaseQty: true,
+          item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
+          // Orders in the bin or called off were never bought; a cancelled receipt never came.
+          poLines: {
+            where: { po: { deletedAt: null, status: { not: 'CANCELLED' } } },
+            select: {
+              qty: true,
+              po: { select: { id: true, poNumber: true, poDate: true, createdAt: true, status: true, supplier: { select: { name: true } }, createdBy: { select: { name: true } } } },
+              grnLines: { where: { grn: { status: { not: 'CANCELLED' } } }, orderBy: { grn: { grnDate: 'asc' } }, select: { acceptedQty: true, grn: { select: { id: true, grnNumber: true, grnDate: true, status: true, createdBy: { select: { name: true } } } } } },
+            },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+  const moved = mrs.length
+    ? await db.stockLedger.findMany({
+        where: { referenceType: { in: ['MATERIAL_REQUISITION', 'MR_RETURN'] }, referenceId: { in: mrs.map((m) => m.id) } },
+        select: { referenceId: true, referenceType: true, transactionDate: true, createdAt: true, inQty: true, outQty: true, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+        orderBy: { createdAt: 'asc' },
+      })
+    : []
+
+  const steps: Step[] = []
+  for (const r of mrs) {
+    steps.push({ at: r.createdAt, phase: 'material', title: 'Materials asked for', detail: `${r.lines.length} ${r.lines.length === 1 ? 'item' : 'items'} for ${r.department.name}`, ref: r.mrNumber, by: r.raisedBy?.name })
+    if (r.approvedAt) steps.push({ at: r.approvedAt, phase: 'material', title: 'Material request approved', ref: r.mrNumber, by: r.approvedBy?.name })
+    // What the store handed over, as it happened — a requisition is often issued in parts.
+    const mine = moved.filter((m) => m.referenceId === r.id)
+    const batches = new Map<string, typeof mine>()
+    for (const m of mine) {
+      const key = `${m.referenceType}|${m.createdAt.toISOString().slice(0, 16)}`
+      batches.set(key, [...(batches.get(key) ?? []), m])
+    }
+    for (const list of batches.values()) {
+      const back = list[0].referenceType === 'MR_RETURN'
+      const what = list.map((m) => amount(Number(back ? m.inQty : m.outQty), m.item.uom?.symbol, m.item.name)).join(', ')
+      steps.push({
+        at: list[0].createdAt,
+        phase: 'material',
+        title: back ? 'Materials returned to the store' : 'Materials issued',
+        detail: back ? what : `${what} to ${r.department.name}`,
+        ref: r.mrNumber,
+        by: back ? null : r.issuedBy?.name,
+      })
+    }
+  }
+  // Purchase orders and goods receipts for what had to be bought, each once.
+  const seenPo = new Set<string>()
+  const seenGrn = new Set<string>()
+  for (const r of mrs) {
+    for (const l of r.lines) {
+      for (const pl of l.poLines) {
+        const po = pl.po
+        if (!seenPo.has(po.id)) {
+          seenPo.add(po.id)
+          const forThis = r.lines.flatMap((x) => x.poLines.filter((y) => y.po.id === po.id).map((y) => amount(Number(y.qty), x.item.uom?.symbol, x.item.name)))
+          steps.push({ at: po.createdAt, phase: 'purchase', title: `Purchase order raised with ${po.supplier.name}`, detail: forThis.join(', '), ref: po.poNumber, by: po.createdBy?.name })
+        }
+        for (const gl of pl.grnLines) {
+          const g = gl.grn
+          if (seenGrn.has(g.id)) continue
+          seenGrn.add(g.id)
+          steps.push({ at: g.grnDate, phase: 'purchase', title: 'Goods received from the supplier', detail: `${amount(Number(gl.acceptedQty), l.item.uom?.symbol, l.item.name)} · ${po.supplier.name}`, ref: g.grnNumber, by: g.createdBy?.name })
+        }
+      }
+    }
+  }
+
+  const lines = mrs.flatMap((r) =>
+    r.lines.map((l) => ({
+      mrNumber: r.mrNumber,
+      department: r.department.name,
+      status: r.closedAt ? 'CLOSED' : r.status,
+      item: l.item.name,
+      code: l.item.code,
+      unit: l.item.uom?.symbol ?? '',
+      asked: n(l.requestedQty),
+      issued: n(l.issuedQty),
+      returned: n(l.returnedQty),
+      toBuy: l.purchaseQty == null ? 0 : n(l.purchaseQty),
+      ordered: l.poLines.reduce((s, x) => s + n(x.qty), 0),
+      received: l.poLines.reduce((s, x) => s + x.grnLines.reduce((t, g) => t + n(g.acceptedQty), 0), 0),
+      purchases: l.poLines.map((x) => ({
+        poNumber: x.po.poNumber,
+        supplier: x.po.supplier.name,
+        date: x.po.poDate,
+        qty: n(x.qty),
+        receipts: x.grnLines.map((g) => ({ grnNumber: g.grn.grnNumber, date: g.grn.grnDate, qty: n(g.acceptedQty) })),
+      })),
+    })),
+  )
+  return { lines, steps }
 }

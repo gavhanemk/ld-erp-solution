@@ -1,8 +1,8 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { Boxes, Factory, Search } from 'lucide-react'
-import { GARMENT_STATUS, badge, qty, type Pieces, type Target } from './traceTypes'
+import { Boxes, Factory, Printer, Search, ShoppingCart } from 'lucide-react'
+import { GARMENT_STATUS, badge, fmtDay, printLabels, qty, type MaterialLine, type Pieces, type Target } from './traceTypes'
 
 /** A named fact: "SIZE" small and grey, the value under it. */
 export function Fact({ label, children }: { label: string; children: React.ReactNode }) {
@@ -83,7 +83,7 @@ export function PiecesBySize({ pieces }: { pieces: Pieces }) {
 }
 
 /** Every tagged piece, findable by its code, size or where it is; a code opens that piece's story. */
-export function PiecesList({ pieces, open }: { pieces: Pieces; open: (t: Target) => void }) {
+export function PiecesList({ pieces, open, printQuery }: { pieces: Pieces; open: (t: Target) => void; printQuery?: string }) {
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
   const [all, setAll] = useState(false)
@@ -113,6 +113,11 @@ export function PiecesList({ pieces, open }: { pieces: Pieces; open: (t: Target)
           </button>
         ))}
         <span className="ml-auto text-xs text-muted-foreground">{rows.length} shown</span>
+        {printQuery && pieces.notPrinted > 0 && (
+          <button type="button" className="btn-primary h-8 px-3 text-xs" onClick={() => printLabels(`${printQuery}&only=new`)} title="Print every label here that has not been printed yet">
+            <Printer size={13} /> Print {qty(pieces.notPrinted)} not printed
+          </button>
+        )}
       </div>
       <div className="max-h-[28rem] overflow-auto">
         <table className="data-table table-compact min-w-full">
@@ -146,7 +151,9 @@ export function PiecesList({ pieces, open }: { pieces: Pieces; open: (t: Target)
                     <span className={`badge ${st.cls}`}>{st.label}</span> <span className="text-xs text-muted-foreground">{p.status === 'DISPATCHED' ? '' : p.store}</span>
                   </td>
                   <td className="font-mono text-xs">{p.dcNumber ?? <span className="text-muted-foreground">—</span>}</td>
-                  <td className="text-xs text-muted-foreground">{p.printed ? 'Printed' : 'Not printed'}</td>
+                  <td className="text-xs">
+                    <LabelCell printed={p.printed} id={p.id} code={p.code} />
+                  </td>
                 </tr>
               )
             })}
@@ -160,6 +167,121 @@ export function PiecesList({ pieces, open }: { pieces: Pieces; open: (t: Target)
           </button>
         </div>
       )}
+    </Section>
+  )
+}
+
+/** A piece's label: "Printed", or a button that prints it. */
+export function LabelCell({ printed, id, code }: { printed: boolean; id: string; code: string }) {
+  if (printed) return <span className="text-muted-foreground">Printed</span>
+  return (
+    <button
+      type="button"
+      className="btn-secondary h-7 whitespace-nowrap px-2 text-xs"
+      onClick={(e) => {
+        e.stopPropagation()
+        printLabels(`ids=${id}&only=all`)
+      }}
+      title={`${code} has no label yet: print it`}
+    >
+      <Printer size={12} /> Print
+    </button>
+  )
+}
+
+const unitQty = (n: number, unit: string) => (n ? `${qty(n)} ${unit}`.trim() : '—')
+
+/**
+ * What the order asked the store for, what it was given and gave back, and —
+ * where the store did not have it — what was bought for it, from whom, and
+ * what has come in.
+ */
+export function MaterialsUsed({ lines, note }: { lines: MaterialLine[]; note?: string }) {
+  if (!lines.length) {
+    return (
+      <Section icon={ShoppingCart} title="Materials & purchase">
+        <p className="px-4 py-5 text-sm text-muted-foreground">No material request has been raised for this order yet.</p>
+      </Section>
+    )
+  }
+  const requests = new Set(lines.map((l) => l.mrNumber)).size
+  const pos = new Set(lines.flatMap((l) => l.purchases.map((p) => p.poNumber))).size
+  return (
+    <Section
+      icon={ShoppingCart}
+      title="Materials & purchase"
+      note={[note, `${requests} ${requests === 1 ? 'request' : 'requests'}`, pos ? `${pos} purchase ${pos === 1 ? 'order' : 'orders'}` : 'nothing bought for it'].filter(Boolean).join(' · ')}
+    >
+      <div className="max-h-[28rem] overflow-auto">
+        <table className="data-table table-compact min-w-full">
+          <thead className="sticky top-0 z-10 [&_th]:bg-secondary">
+            <tr>
+              <th style={{ minWidth: 200 }}>Material</th>
+              <th>Request</th>
+              <th style={{ textAlign: 'right' }}>Asked for</th>
+              <th style={{ textAlign: 'right' }}>Given</th>
+              <th style={{ textAlign: 'right' }}>Returned</th>
+              <th>Status</th>
+              <th style={{ minWidth: 220 }}>Bought for it</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.map((l, i) => {
+              const state =
+                l.issued >= l.asked && l.asked > 0
+                  ? { label: 'Given in full', cls: 'badge-success' }
+                  : l.issued > 0
+                    ? { label: 'Partly given', cls: 'badge-warning' }
+                    : l.status === 'REJECTED' || l.status === 'CANCELLED'
+                      ? { label: l.status === 'REJECTED' ? 'Turned down' : 'Cancelled', cls: 'badge-danger' }
+                      : l.status === 'PENDING'
+                        ? { label: 'Waiting for approval', cls: 'badge-neutral' }
+                        : { label: 'Waiting for the store', cls: 'badge-info' }
+              return (
+                <tr key={i}>
+                  <td>
+                    <div className="font-medium text-foreground">{l.item}</div>
+                    <div className="font-mono text-[11px] text-muted-foreground">{l.code}</div>
+                  </td>
+                  <td className="whitespace-nowrap">
+                    <span className="font-mono text-xs">{l.mrNumber}</span>
+                    <div className="text-[11px] text-muted-foreground">{l.department}</div>
+                  </td>
+                  <td className="whitespace-nowrap text-right tabular-nums">{unitQty(l.asked, l.unit)}</td>
+                  <td className="whitespace-nowrap text-right tabular-nums">{unitQty(l.issued, l.unit)}</td>
+                  <td className="whitespace-nowrap text-right tabular-nums">{unitQty(l.returned, l.unit)}</td>
+                  <td className="whitespace-nowrap">
+                    <span className={`badge ${state.cls}`}>{state.label}</span>
+                  </td>
+                  <td className="text-xs">
+                    {l.purchases.length ? (
+                      <div className="space-y-1">
+                        {l.purchases.map((p) => (
+                          <div key={p.poNumber}>
+                            <span className="font-mono font-semibold">{p.poNumber}</span> <span className="text-muted-foreground">· {p.supplier} · {fmtDay(p.date)}</span>
+                            <div className="text-muted-foreground">
+                              {qty(p.qty)} {l.unit} ordered ·{' '}
+                              {p.receipts.length
+                                ? p.receipts.map((r) => `${qty(r.qty)} in on ${r.grnNumber} (${fmtDay(r.date)})`).join(', ')
+                                : 'nothing received yet'}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : l.toBuy > 0 ? (
+                      <span className="warn-text">
+                        {qty(l.toBuy)} {l.unit} to buy · no purchase order yet
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">From stock</span>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </Section>
   )
 }

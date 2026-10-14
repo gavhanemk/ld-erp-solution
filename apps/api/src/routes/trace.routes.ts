@@ -51,9 +51,9 @@ router.get('/pieces', requirePermission(MODULE, 'view'), async (req, res) => {
 /** One garment, by the code on its tag: everything that ever happened to it. */
 router.get('/garment/:code', requirePermission(MODULE, 'view'), async (req, res) => {
   const code = normaliseGarmentCode(decodeURIComponent(req.params.code))
-  const g = await prisma.garment.findUnique({ where: { code }, select: { id: true, moId: true, dcId: true } })
+  const g = await prisma.garment.findUnique({ where: { code }, select: { id: true, moId: true, dcId: true, mo: { select: { soId: true } } } })
   if (!g) throw new AppError(`No garment with the code ${code}. Check the tag, or type the number printed on it.`, 404, 'NOT_FOUND')
-  res.json({ success: true, data: await garmentTrace(g.id, g.moId, g.dcId, garmentDetail) })
+  res.json({ success: true, data: await garmentTrace(g.id, g.moId, g.mo.soId, g.dcId, garmentDetail) })
 })
 
 router.get('/order/:kind/:id', requirePermission(MODULE, 'view'), async (req, res) => {

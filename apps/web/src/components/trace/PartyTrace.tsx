@@ -212,7 +212,7 @@ export function StyleTrace({ s, open }: { s: StyleStory; open: (t: Target) => vo
         )}
       </Section>
       <PiecesBySize pieces={s.pieces} />
-      <PiecesList pieces={s.pieces} open={open} />
+      <PiecesList pieces={s.pieces} open={open} printQuery={`trace=1&styleId=${s.style.id}`} />
     </div>
   )
 }

@@ -7,6 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { generateGarments, normaliseGarmentCode } from '../services/garment.service'
 import { addToChallan, dispatchScanned, moveGarments, removeFromChallan, requestScrap, returnGarments } from '../services/garmentMove.service'
 import { barcodesFor, skuKey } from '../services/barcode.service'
+import { piecesWhere } from '../services/trace.service'
 
 /*
  * Garment tags: one QR label per finished piece.
@@ -295,6 +296,13 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
 /** Which garments a print or a list means, from the query string. */
 function labelWhere(query: Record<string, unknown>): Prisma.GarmentWhereInput {
   const str = (k: string) => (typeof query[k] === 'string' ? (query[k] as string).trim() : '')
+  // Track & Trace's list, printed exactly as it is filtered there.
+  if (str('trace') === '1') {
+    const opt = (k: string) => str(k) || undefined
+    const status = ['IN_STOCK', 'PACKED', 'DISPATCHED', 'SCRAPPED'].includes(str('status')) ? str('status') : undefined
+    const { where } = piecesWhere({ q: opt('q'), customerId: opt('customerId'), soId: opt('soId'), moId: opt('moId'), styleId: opt('styleId'), color: opt('color'), sizeId: opt('sizeId'), status, from: opt('from'), to: opt('to') })
+    return str('only') === 'new' ? { AND: [where, { printCount: 0 }] } : where
+  }
   const ids = str('ids') ? str('ids').split(',').filter(Boolean) : []
   // A job card's pieces: those sewn in its bundles.
   const bundles = str('bundles') ? str('bundles').split(',').filter(Boolean) : []
@@ -314,7 +322,7 @@ function labelWhere(query: Record<string, unknown>): Prisma.GarmentWhereInput {
 /** For printing: every label the query names, with what goes on it. */
 router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   const where = labelWhere(req.query)
-  if (!req.query.ids && !req.query.moId) throw new AppError('Choose the order or the pieces to print', 400, 'NO_FILTER')
+  if (!req.query.ids && !req.query.moId && req.query.trace !== '1') throw new AppError('Choose the order or the pieces to print', 400, 'NO_FILTER')
   const retail = req.query.retail === '1'
   const [company, rows] = await Promise.all([
     prisma.company.findFirst({

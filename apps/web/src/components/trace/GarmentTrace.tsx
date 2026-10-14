@@ -4,8 +4,8 @@ import { Check, MapPin, Printer } from 'lucide-react'
 import { QrCode } from '@/components/packages/QrCode'
 import { Code128 } from '@/components/packages/Code128'
 import { Timeline } from './Timeline'
-import { Fact, Go } from './TraceBits'
-import { GARMENT_STATUS, MO_STATUS, badge, fmtDay, fmtTime, type Step, type Target } from './traceTypes'
+import { Fact, Go, MaterialsUsed } from './TraceBits'
+import { GARMENT_STATUS, MO_STATUS, badge, fmtDay, fmtTime, type MaterialLine, type Step, type Target } from './traceTypes'
 
 export interface GarmentStory {
   id: string
@@ -38,6 +38,7 @@ export interface GarmentStory {
   challan: { dcNumber: string; dcDate: string; status: string; dispatchedAt: string | null; deliveredAt: string | null; vehicle: string | null; transporter: string | null; lr: string | null; invoice: string | null } | null
   where: string
   milestones: Array<{ key: string; label: string; at: string | null }>
+  materials: MaterialLine[]
   timeline: Step[]
 }
 
@@ -167,6 +168,8 @@ export function GarmentTrace({ g, open }: { g: GarmentStory; open: (t: Target) =
           )}
         </div>
       </div>
+
+      <MaterialsUsed lines={g.materials} note={`For all of ${g.mo.moNumber}`} />
 
       <Timeline steps={g.timeline} />
     </div>
