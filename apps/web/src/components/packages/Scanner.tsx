@@ -20,11 +20,17 @@ export function Scanner({
   busy = false,
   placeholder = 'Scan a sticker, or type its number',
   autoFocus = true,
+  onType,
+  suggestions,
 }: {
   onCode: (code: string) => void
   busy?: boolean
   placeholder?: string
   autoFocus?: boolean
+  /** What is being typed, as it is typed — for suggestions under the box. */
+  onType?: (text: string) => void
+  /** Shown just under the box, over what follows: suggestions to pick from. */
+  suggestions?: React.ReactNode
 }) {
   const [typed, setTyped] = useState('')
   const [camera, setCamera] = useState(false)
@@ -91,12 +97,13 @@ export function Scanner({
     const code = typed.trim()
     if (!code || busy) return
     setTyped('')
+    onType?.('')
     onCode(code)
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="relative flex flex-col gap-2 sm:flex-row">
         <div className="flex h-14 flex-1 items-center gap-3 rounded-xl border-2 border-primary/40 bg-secondary px-4 focus-within:border-primary">
           <ScanLine size={22} className="shrink-0 text-primary" aria-hidden />
           <input
@@ -104,7 +111,10 @@ export function Scanner({
             className="min-w-0 flex-1 border-0 bg-transparent text-lg font-medium text-foreground outline-none placeholder:text-muted-foreground"
             placeholder={placeholder}
             value={typed}
-            onChange={(e) => setTyped(e.target.value)}
+            onChange={(e) => {
+              setTyped(e.target.value)
+              onType?.(e.target.value)
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault()
@@ -135,6 +145,7 @@ export function Scanner({
           {camera ? <CameraOff size={20} /> : <Camera size={20} />}
           {camera ? 'Stop camera' : 'Use camera'}
         </button>
+        {suggestions}
       </div>
       {camError && <p className="text-sm text-red-400">{camError}</p>}
       {camera && (

@@ -651,7 +651,7 @@ router.post('/:id/void', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   res.json({ success: true, message: `${g.code} withdrawn. Its piece is untagged and can be tagged again.`, data: await garmentDetail(g.id) })
 })
 
-async function garmentDetail(id: string) {
+export async function garmentDetail(id: string) {
   const g = await prisma.garment.findUnique({
     where: { id },
     include: {

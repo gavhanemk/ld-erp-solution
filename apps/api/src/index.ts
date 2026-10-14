@@ -32,6 +32,7 @@ import inventoryRoutes from './routes/inventory.routes'
 import packageRoutes from './routes/packages.routes'
 import retailRoutes from './routes/retail.routes'
 import garmentRoutes from './routes/garments.routes'
+import traceRoutes from './routes/trace.routes'
 import finishedGoodsRoutes from './routes/finishedGoods.routes'
 import productionRoutes from './routes/production.routes'
 import accountsRoutes from './routes/accounts.routes'
@@ -296,6 +297,7 @@ app.use('/api/packages', authMiddleware, packageRoutes)
 app.use('/api/retail', authMiddleware, retailRoutes)
 // One QR tag per finished garment: tag an order's pieces, print, scan.
 app.use('/api/garments', authMiddleware, garmentRoutes)
+app.use('/api/trace', authMiddleware, traceRoutes)
 // Packed garments into the finished-goods store, by size. A store document,
 // under Inventory's permissions, kept out of inventory.routes.ts.
 app.use('/api/finished-goods', authMiddleware, finishedGoodsRoutes)
