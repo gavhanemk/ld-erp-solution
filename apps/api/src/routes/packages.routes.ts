@@ -26,6 +26,7 @@ import {
 import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
 import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, restickStickers, sourceRefOf } from '../services/stickers.service'
 import { lockedBalanceOf } from '../services/stock.service'
+import { findOptions, findPackages, findSchema } from '../services/packageFind.service'
 
 /*
  * Labelled packages of stock and what is done to them by scanning.
@@ -792,6 +793,21 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
     groups.set(key, g)
   }
   res.json({ success: true, data: { count: rows.length, groups: [...groups.values()] } })
+})
+
+/**
+ * Stickers found by what people remember of them — item, lot, rack, the GRN,
+ * challan, PO or supplier it came on, the requisition, MO or order it went
+ * to — typed as one line, or picked detail by detail.
+ */
+router.get('/find', requirePermission(MODULE, 'view'), async (req, res) => {
+  const out = await findPackages(findSchema.parse(req.query))
+  res.json({ success: true, data: out.rows, total: out.total, inStock: out.inStock })
+})
+
+/** What the find-by-details dropdowns offer. */
+router.get('/find/options', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await findOptions() })
 })
 
 /** The racks in use, in one store or all of them, for the rack box to offer. */

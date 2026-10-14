@@ -3,9 +3,9 @@
 import { Suspense, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { AlertTriangle, CheckCircle2, Loader2, MapPin, Package, Tags, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Filter, Loader2, MapPin, Package, Tags, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
-import { Scanner } from '@/components/packages/Scanner'
+import { StickerFinder, StickerScanner } from '@/components/packages/StickerSearch'
 import { PackageCard } from '@/components/packages/PackageCard'
 import { RackInput, useRacks } from '@/components/packages/RackInput'
 import { qtyText, type PackageDetail } from '@/components/packages/packageTypes'
@@ -50,6 +50,8 @@ function ScanScreen() {
   const [putAway, setPutAway] = useState<PutAway[]>([])
   const [focusKey, setFocusKey] = useState(0)
   const onRack = rack.trim()
+  // The dropdowns for finding stickers by what is known of them.
+  const [finding, setFinding] = useState(false)
 
   const find = useCallback(
     async (code: string) => {
@@ -114,8 +116,20 @@ function ScanScreen() {
         </Link>
       </div>
 
-      <div className="glass-card space-y-3 p-4">
-        <Scanner onCode={(c) => void find(c)} busy={busy} focusKey={focusKey} placeholder={onRack ? `Scan stickers for rack ${onRack}` : undefined} />
+      {/* Above the cards after it, so the list of matches under the box is never drawn beneath them. */}
+      <div className="glass-card relative z-20 space-y-3 p-4">
+        <StickerScanner
+          onCode={(c) => void find(c)}
+          busy={busy}
+          focusKey={focusKey}
+          status={onRack ? 'IN_STOCK' : 'ALL'}
+          placeholder={onRack ? `Scan stickers for rack ${onRack}, or type the item, lot or challan` : undefined}
+        />
+        {!onRack && (
+          <button type="button" className={`h-8 px-2.5 text-xs ${finding ? 'btn-secondary' : 'btn-ghost'}`} onClick={() => setFinding((x) => !x)} aria-expanded={finding}>
+            <Filter size={14} /> {finding ? 'Hide find by details' : "Don't know the number? Find by details"}
+          </button>
+        )}
         {mayPutAway && (
           <div className={`flex flex-wrap items-center gap-2 rounded-lg border p-2.5 ${onRack ? 'border-primary/50 bg-primary/5' : 'border-dashed border-border'}`}>
             <MapPin size={16} className="shrink-0 text-primary" />
@@ -146,6 +160,15 @@ function ScanScreen() {
         )}
       </div>
 
+      {/* A sticker opened from the list: brought into view, below a list that can be long. */}
+      {finding && !onRack && (
+        <StickerFinder
+          onOpen={(code) =>
+            void find(code).then(() => window.setTimeout(() => document.getElementById('scan-result')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60))
+          }
+        />
+      )}
+
       {busy && !pkg && (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 size={16} className="animate-spin" /> {onRack ? 'Putting it on the rack…' : 'Looking it up…'}
@@ -164,6 +187,7 @@ function ScanScreen() {
         </div>
       )}
 
+      <div id="scan-result" className="scroll-mt-4" />
       {onRack ? (
         putAway.length > 0 && (
           <div className="glass-card overflow-hidden p-0">

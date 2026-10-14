@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { CheckCircle2, Loader2, Printer, ScanLine } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { StepInput } from '@/components/ui/StepInput'
-import { Scanner } from './Scanner'
+import { StickerScanner } from './StickerSearch'
 import { STATUS, printLabels, qtyText, type PackageDetail } from './packageTypes'
 
 type Waiting = PackageDetail['requisitions'][number]
@@ -98,13 +98,21 @@ export function ScanIssue({
   }
 
   return (
-    <div className="space-y-3 rounded-xl border border-border bg-card p-3">
+    <div className="relative z-20 space-y-3 rounded-xl border border-border bg-card p-3">
       <p className="flex flex-wrap items-center gap-x-2 text-sm">
         <ScanLine size={16} className="text-primary" />
         <span className="font-semibold text-foreground">Scan stickers to issue</span>
         <span className="text-muted-foreground">— each one comes out of stock the moment you press Issue.</span>
       </p>
-      <Scanner key={round} onCode={(c) => void read(c)} busy={busy} />
+      {/* Typing finds this requisition's own items in stock: a word, a lot, a challan, a supplier. */}
+      <StickerScanner
+        key={round}
+        onCode={(c) => void read(c)}
+        busy={busy}
+        status="IN_STOCK"
+        itemIds={itemIds}
+        placeholder="Scan a sticker, or type the item, lot, rack, challan or supplier"
+      />
       {error && <p className="text-sm text-red-400">{error}</p>}
 
       {pkg && line && (
