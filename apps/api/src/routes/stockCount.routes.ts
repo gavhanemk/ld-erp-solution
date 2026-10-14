@@ -48,10 +48,10 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
   res.status(201).json({ success: true, message: `${count.countNumber} started. Scan every sticker on the racks.`, data: count })
 })
 
-/** One sticker scanned. */
+/** One sticker scanned, with the rack being counted when the counter gave one. */
 router.post('/:id/scan', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const { code } = scanSchema.parse(req.body)
-  const scan = await prisma.$transaction((tx) => scanPackage(tx, req.params.id, code, req.user?.id ?? null), T)
+  const { code, rack } = scanSchema.parse(req.body)
+  const scan = await prisma.$transaction((tx) => scanPackage(tx, req.params.id, code, req.user?.id ?? null, rack), T)
   res.status(201).json({ success: true, data: scan })
 })
 

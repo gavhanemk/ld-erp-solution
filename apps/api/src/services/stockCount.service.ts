@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { normaliseCode, packageRules, round3 } from './package.service'
+import { normaliseCode, normaliseRack, packageRules, round3, setRack } from './package.service'
 import { afterCountDecided } from './stockCountHooks.service'
 import { createAdjustment } from '../routes/inventory.routes'
 
@@ -30,7 +30,11 @@ export const startCountSchema = z.object({
   warehouseId: z.string().min(1, 'Pick the store being counted'),
   notes: z.string().trim().max(500).optional().nullable(),
 })
-export const scanSchema = z.object({ code: z.string().trim().min(1, 'Scan a sticker, or type its number').max(120) })
+export const scanSchema = z.object({
+  code: z.string().trim().min(1, 'Scan a sticker, or type its number').max(120),
+  /** The rack being counted, when the counter says: what is found goes on it. */
+  rack: z.string().max(40).optional().nullable(),
+})
 export const looseSchema = z.object({
   lines: z
     .array(
@@ -50,6 +54,8 @@ export const cancelCountSchema = z.object({ reason: z.string().trim().min(3, 'Sa
 const STATUS_WORD: Record<string, string> = { OPEN: 'still being counted', SUBMITTED: 'waiting for a store manager', CLOSED: 'closed', CANCELLED: 'cancelled' }
 const spotKey = (s: { itemId: string; ownership: string; ownerCustomerId: string | null }) => `${s.itemId}|${s.ownership}|${s.ownerCustomerId ?? ''}`
 const clock = (d: Date) => d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' })
+/** Racks in walking order: A-2 before A-10, and stickers on no rack last. */
+const byRack = (a: string | null, b: string | null) => (a === b ? 0 : a == null ? 1 : b == null ? -1 : a.localeCompare(b, 'en', { numeric: true }))
 
 async function lockCount(tx: Prisma.TransactionClient, id: string) {
   await tx.$queryRaw`SELECT id FROM ld_erp.stock_counts WHERE id = ${id} FOR UPDATE`
@@ -89,6 +95,7 @@ const scanSelect = {
   code: true,
   result: true,
   qty: true,
+  rack: true,
   scannedAt: true,
   scannedBy: { select: { name: true } },
   package: {
@@ -99,6 +106,7 @@ const scanSelect = {
       qty: true,
       packType: true,
       lotNo: true,
+      rack: true,
       warehouseId: true,
       warehouse: { select: { name: true } },
       item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
@@ -139,23 +147,33 @@ function shapeScan(s: ScanRow, warehouseId: string) {
     packType: p?.packType ?? null,
     lotNo: p?.lotNo ?? null,
     store: p?.warehouse.name ?? null,
+    // Where it was found, else where the system has it.
+    rack: s.rack ?? p?.rack ?? null,
     at: s.scannedAt,
     by: s.scannedBy?.name ?? null,
     note,
   }
 }
 
-/** One sticker scanned. A sticker already counted is refused, saying when and by whom. */
-export async function scanPackage(tx: Prisma.TransactionClient, countId: string, raw: string, userId: string | null) {
+/**
+ * One sticker scanned. A sticker already counted is refused, saying when and
+ * by whom. With the rack being counted, a sticker found goes on that rack.
+ */
+export async function scanPackage(tx: Prisma.TransactionClient, countId: string, raw: string, userId: string | null, rackRaw?: string | null) {
   const c = await lockCount(tx, countId)
   mustBeOpen(c)
   const code = normaliseCode(raw)
   const had = await tx.stockCountScan.findUnique({ where: { countId_code: { countId, code } }, select: { scannedAt: true, scannedBy: { select: { name: true } } } })
   if (had) throw new AppError(`${code} is already counted — at ${clock(had.scannedAt)}${had.scannedBy ? ` by ${had.scannedBy.name}` : ''}.`, 409, 'ALREADY_SCANNED')
-  const pkg = await tx.stockPackage.findUnique({ where: { code }, select: { id: true, status: true, warehouseId: true, qty: true } })
+  const rack = normaliseRack(rackRaw)
+  const pkg = await tx.stockPackage.findUnique({ where: { code }, select: { id: true, status: true, warehouseId: true, qty: true, rack: true } })
   const result = !pkg ? 'UNKNOWN' : pkg.status !== 'IN_STOCK' ? 'NOT_IN_STOCK' : pkg.warehouseId === c.warehouseId ? 'FOUND' : 'ELSEWHERE'
+  // Found on this rack: that is where it is now.
+  if (pkg && result === 'FOUND' && rack) {
+    await setRack(tx, pkg, rack, { userId, referenceType: 'STOCK_COUNT', referenceId: c.id, referenceNumber: c.countNumber })
+  }
   const made = await tx.stockCountScan.create({
-    data: { countId, code, packageId: pkg?.id ?? null, result, qty: pkg ? pkg.qty : null, scannedById: userId },
+    data: { countId, code, packageId: pkg?.id ?? null, result, qty: pkg ? pkg.qty : null, rack, scannedById: userId },
     select: scanSelect,
   })
   return shapeScan(made, c.warehouseId)
@@ -202,7 +220,7 @@ export async function reviewOf(db: Db, c: { id: string; warehouseId: string; loo
   const [packages, scans, ledger, ruleOf] = await Promise.all([
     db.stockPackage.findMany({
       where: { warehouseId: c.warehouseId, status: 'IN_STOCK' },
-      select: { id: true, code: true, itemId: true, ownership: true, ownerCustomerId: true, qty: true, packType: true, lotNo: true },
+      select: { id: true, code: true, itemId: true, ownership: true, ownerCustomerId: true, qty: true, packType: true, lotNo: true, rack: true },
       orderBy: { code: 'asc' },
     }),
     db.stockCountScan.findMany({ where: { countId: c.id }, orderBy: { scannedAt: 'desc' }, select: scanSelect }),
@@ -289,8 +307,10 @@ export async function reviewOf(db: Db, c: { id: string; warehouseId: string; loo
     .filter((p) => !found.has(p.id) && counted.has(spotKey(p)))
     .map((p) => {
       const it = itemOf.get(p.itemId)
-      return { id: p.id, code: p.code, itemId: p.itemId, item: it?.name ?? '', unit: it?.uom?.symbol ?? '', qty: Number(p.qty), packType: p.packType, lotNo: p.lotNo }
+      return { id: p.id, code: p.code, itemId: p.itemId, item: it?.name ?? '', unit: it?.uom?.symbol ?? '', qty: Number(p.qty), packType: p.packType, lotNo: p.lotNo, rack: p.rack }
     })
+    // Rack by rack, so the list reads in the order the store is walked.
+    .sort((a, b) => byRack(a.rack, b.rack) || a.code.localeCompare(b.code))
   const shaped = scans.map((s) => shapeScan(s, c.warehouseId))
   return {
     lines,
@@ -351,7 +371,11 @@ export async function countView(id: string) {
   const ids = Array.isArray(c.missing) ? (c.missing as string[]) : []
   const [missing, scans] = await Promise.all([
     ids.length
-      ? prisma.stockPackage.findMany({ where: { id: { in: ids } }, select: { id: true, code: true, qty: true, status: true, packType: true, lotNo: true, item: { select: { name: true, uom: { select: { symbol: true } } } } }, orderBy: { code: 'asc' } })
+      ? prisma.stockPackage.findMany({
+          where: { id: { in: ids } },
+          select: { id: true, code: true, qty: true, status: true, packType: true, lotNo: true, rack: true, item: { select: { name: true, uom: { select: { symbol: true } } } } },
+          orderBy: { code: 'asc' },
+        })
       : Promise.resolve([]),
     prisma.stockCountScan.findMany({ where: { countId: c.id }, orderBy: { scannedAt: 'desc' }, select: scanSelect }),
   ])
@@ -372,7 +396,7 @@ export async function countView(id: string) {
         }
       : null,
     // Withdrawn once the adjustment was approved; still standing while it waits, or if it was refused.
-    missing: missing.map((p) => ({ id: p.id, code: p.code, item: p.item.name, unit: p.item.uom?.symbol ?? '', qty: Number(p.qty), status: p.status, packType: p.packType, lotNo: p.lotNo })),
+    missing: missing.map((p) => ({ id: p.id, code: p.code, item: p.item.name, unit: p.item.uom?.symbol ?? '', qty: Number(p.qty), status: p.status, packType: p.packType, lotNo: p.lotNo, rack: p.rack })),
     scans: scans.map((s) => shapeScan(s, c.warehouseId)),
   }
 }

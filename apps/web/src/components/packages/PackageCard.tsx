@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   History,
   Loader2,
+  MapPin,
   MoreHorizontal,
   PackageMinus,
   Plus,
@@ -19,6 +20,7 @@ import { api, ApiError, can } from '@/lib/api'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { QrCode } from './QrCode'
+import { RackInput } from './RackInput'
 import { STATUS, openPrintTab, packLabel, printLabels, printOutward, qtyText, type OutwardRef, type PackageDetail } from './packageTypes'
 
 /** What an action prints: a label for stock that went out, and the stickers that changed. */
@@ -34,6 +36,7 @@ const MOVE_LABEL: Record<string, string> = {
   SPLIT_FROM: 'Cut from another package',
   CORRECTED: 'Quantity corrected',
   VOIDED: 'Label withdrawn',
+  RACKED: 'Rack',
 }
 
 const day = (d: string | null) =>
@@ -62,11 +65,13 @@ export function PackageCard({
   const [action, setAction] = useState<Action | null>(live ? 'issue' : 'history')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The rack box, open while the rack is being changed.
+  const [rack, setRack] = useState<string | null>(null)
 
   const st = STATUS[pkg.status] ?? { label: pkg.status, cls: 'badge-neutral' }
   const editable = can('inventory', 'edit')
 
-  /** Saves an action. `prints` names what it prints, in a tab opened on the click. */
+  /** Saves an action. `prints` names what it prints, in a tab opened on the click. True once saved. */
   const run = async (path: string, body: unknown, prints?: Prints) => {
     setBusy(true)
     setError(null)
@@ -79,12 +84,18 @@ export function PackageCard({
         const p = prints(res.data)
         printOutward(p.out ?? null, p.ids, tab)
       }
+      return true
     } catch (err) {
       tab?.close()
       setError(err instanceof ApiError ? err.message : 'Could not save. Is the API running?')
+      return false
     } finally {
       setBusy(false)
     }
+  }
+
+  const saveRack = async (value: string | null) => {
+    if (await run('rack', { rack: value })) setRack(null)
   }
 
   const tabs: Array<{ key: Action; label: string; icon: typeof History; show: boolean }> = [
@@ -121,6 +132,14 @@ export function PackageCard({
               <span className="text-muted-foreground">{pkg.unit}</span>
             </Fact>
             <Fact label="Store">{pkg.warehouse.name}</Fact>
+            <Fact label="Rack">
+              {pkg.rack ? <span className="font-semibold">{pkg.rack}</span> : <span className="text-muted-foreground">Not on a rack</span>}
+              {live && editable && rack === null && (
+                <button type="button" className="ml-2 text-xs font-semibold text-primary hover:underline" onClick={() => setRack(pkg.rack ?? '')}>
+                  {pkg.rack ? 'Change' : 'Put on a rack'}
+                </button>
+              )}
+            </Fact>
             <Fact label="Labelled with">
               {qtyText(pkg.initialQty)} {pkg.unit}
             </Fact>
@@ -138,6 +157,22 @@ export function PackageCard({
               </Fact>
             )}
           </div>
+          {rack !== null && (
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <RackInput value={rack} onChange={setRack} racks={pkg.racks} autoFocus className="form-input h-10 w-36" onEnter={() => rack.trim() && void saveRack(rack)} />
+              <button type="button" className="btn-primary h-10" disabled={busy || !rack.trim()} onClick={() => void saveRack(rack)}>
+                {busy ? <Loader2 size={15} className="animate-spin" /> : <MapPin size={15} />} Save rack
+              </button>
+              {pkg.rack && (
+                <button type="button" className="btn-ghost h-10" disabled={busy} onClick={() => void saveRack(null)}>
+                  Take off rack
+                </button>
+              )}
+              <button type="button" className="btn-ghost h-10" disabled={busy} onClick={() => setRack(null)}>
+                Cancel
+              </button>
+            </div>
+          )}
           {/* The packages claim more than the store holds: something left unscanned. */}
           {pkg.position.loose < -0.0005 && (
             <p className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-sm warn-text">

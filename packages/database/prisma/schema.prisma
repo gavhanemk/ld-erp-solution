@@ -2921,6 +2921,8 @@ model StockCountScan {
   result      String
   /// What the package held when scanned.
   qty         Decimal?      @db.Decimal(10, 3)
+  /// The rack it was found on, when the counter said which rack they were on.
+  rack        String?
   scannedById String?
   scannedBy   User?         @relation("StockCountScannedBy", fields: [scannedById], references: [id])
   scannedAt   DateTime      @default(now())
@@ -5396,6 +5398,8 @@ enum PackageMoveType {
   SPLIT_FROM
   CORRECTED
   VOIDED
+  /// Put on a rack, or moved from one rack to another in the same store.
+  RACKED
 }
 
 /// One physical package of stock — a roll, a box, a carton — with the QR
@@ -5426,6 +5430,9 @@ model StockPackage {
   qty             Decimal        @db.Decimal(10, 3)
   /// The supplier's lot or batch, from the GRN, or as typed.
   lotNo           String?
+  /// Where in its store it sits: B-3. Set by scanning it onto a rack, or in a
+  /// stock count; cleared when it moves to another store.
+  rack            String?
   notes           String?
   status          PackageStatus  @default(IN_STOCK)
   /// Where it came from: GRN (labelled on receipt), STOCK (stock already on
@@ -5456,6 +5463,7 @@ model StockPackage {
   @@index([itemId, warehouseId, status])
   @@index([sourceType, sourceId])
   @@index([parentId])
+  @@index([warehouseId, rack])
   @@map("stock_packages")
 }
 

@@ -17,6 +17,8 @@ export interface CountScan {
   packType: string | null
   lotNo: string | null
   store: string | null
+  /** The rack it was found on, else the one the system has it on. */
+  rack: string | null
   at: string
   by: string | null
   note: string
@@ -53,6 +55,7 @@ export interface ToFind {
   qty: number
   packType: string
   lotNo: string | null
+  rack: string | null
 }
 
 interface CountHead {
@@ -95,7 +98,7 @@ export interface DoneCount extends CountHead {
     approvedBy: { name: string } | null
     lines: Array<{ item: string; code: string; unit: string; owner: string | null; book: number; counted: number; difference: number }>
   } | null
-  missing: Array<{ id: string; code: string; item: string; unit: string; qty: number; status: string; packType: string; lotNo: string | null }>
+  missing: Array<{ id: string; code: string; item: string; unit: string; qty: number; status: string; packType: string; lotNo: string | null; rack: string | null }>
   scans: CountScan[]
 }
 

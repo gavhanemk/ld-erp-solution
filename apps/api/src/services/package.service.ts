@@ -35,6 +35,60 @@ export function normaliseCode(raw: string): string {
   return s
 }
 
+/**
+ * A rack as typed or scanned, tidied so "b-3", "B 3" and "Rack B-3" are one
+ * rack: capitals, single spaces, no leading "Rack". Blank is no rack.
+ */
+export function normaliseRack(raw: string | null | undefined): string | null {
+  const s = (raw ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^RACK[\s:.-]*/, '')
+    .trim()
+  if (!s) return null
+  if (s.length > 20) throw new AppError('A rack name is at most 20 letters, like B-3 or SHELF 12.', 400, 'BAD_RACK')
+  return s
+}
+
+/**
+ * Puts a package on a rack, or takes it off one (null), and notes it in the
+ * package's history. Nothing happens when it is already there.
+ */
+export async function setRack(
+  tx: Prisma.TransactionClient,
+  pkg: { id: string; rack: string | null; qty: Prisma.Decimal | number; warehouseId: string },
+  rack: string | null,
+  by: { userId: string | null; referenceType?: string | null; referenceId?: string | null; referenceNumber?: string | null },
+) {
+  if ((pkg.rack ?? null) === rack) return false
+  await tx.stockPackage.update({ where: { id: pkg.id }, data: { rack } })
+  await recordPackageMove(tx, {
+    packageId: pkg.id,
+    type: 'RACKED',
+    qty: 0,
+    balanceAfter: Number(pkg.qty),
+    warehouseId: pkg.warehouseId,
+    notes: rack ? (pkg.rack ? `Rack ${pkg.rack} → ${rack}` : `Put on rack ${rack}`) : `Taken off rack ${pkg.rack}`,
+    referenceType: by.referenceType ?? null,
+    referenceId: by.referenceId ?? null,
+    referenceNumber: by.referenceNumber ?? null,
+    userId: by.userId,
+  })
+  return true
+}
+
+/** The racks in use in a store, for the rack box to offer. */
+export async function racksIn(tx: Prisma.TransactionClient, warehouseId?: string | null) {
+  const rows = await tx.stockPackage.groupBy({
+    by: ['rack'],
+    where: { status: 'IN_STOCK', rack: { not: null }, ...(warehouseId ? { warehouseId } : {}) },
+    _count: true,
+    orderBy: { rack: 'asc' },
+  })
+  return rows.map((r) => ({ rack: r.rack as string, packages: r._count }))
+}
+
 /** Held for the rest of the transaction, so two scans of one box cannot both take from it. */
 export async function lockPackage(tx: Prisma.TransactionClient, id: string) {
   await tx.$queryRaw`SELECT id FROM ld_erp.stock_packages WHERE id = ${id} FOR UPDATE`
@@ -289,6 +343,8 @@ export async function createPackages(
     packType: PackType
     qtys: number[]
     lotNo?: string | null
+    /** The rack it sits on: a split keeps the rack of the package it was cut from. */
+    rack?: string | null
     notes?: string | null
     sourceType: PackageSource
     sourceId?: string | null
@@ -339,6 +395,7 @@ export async function createPackages(
         initialQty: q,
         qty: q,
         lotNo: input.lotNo || null,
+        rack: input.rack || null,
         notes: input.notes || null,
         sourceType: input.sourceType,
         sourceId: input.sourceId ?? null,

@@ -3,10 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Link from 'next/link'
-import { AlertCircle, AlertTriangle, ArrowLeft, Ban, CheckCircle2, ClipboardCheck, Loader2, PackageSearch, RefreshCw, ScanLine, Undo2, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, ArrowLeft, Ban, CheckCircle2, ClipboardCheck, Loader2, MapPin, PackageSearch, RefreshCw, ScanLine, Undo2, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { KpiTile, TONE } from '@/components/dashboard/DashKit'
 import { Scanner } from '@/components/packages/Scanner'
+import { RackInput, useRacks } from '@/components/packages/RackInput'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import {
@@ -138,6 +139,10 @@ function Counting({ count, reload, onError, onFinished }: { count: OpenCount; re
   const [tab, setTab] = useState<Tab>('find')
   const [finishing, setFinishing] = useState(false)
   const [cancelling, setCancelling] = useState(false)
+  // The rack being counted, if the counter says: what is found goes on it.
+  const racks = useRacks(count.warehouse.id)
+  const [rack, setRack] = useState('')
+  const [focusKey, setFocusKey] = useState(0)
   const mayCount = can('inventory', 'create')
   const stickered = r.lines.filter((l) => l.packages > 0 || l.scanned > 0)
   const loose = r.lines.filter((l) => l.looseBook !== 0 || l.looseCounted != null)
@@ -147,7 +152,7 @@ function Counting({ count, reload, onError, onFinished }: { count: OpenCount; re
     setRefused(null)
     onError(null)
     try {
-      const res = await api.post<{ data: CountScan }>(`/stock-counts/${count.id}/scan`, { code })
+      const res = await api.post<{ data: CountScan }>(`/stock-counts/${count.id}/scan`, { code, rack: rack.trim() || null })
       setLast(res.data)
       // A buzz on a phone when a scan needs a second look.
       if (res.data.result !== 'FOUND') navigator.vibrate?.(200)
@@ -199,7 +204,24 @@ function Counting({ count, reload, onError, onFinished }: { count: OpenCount; re
 
       {mayCount && (
         <div className="glass-card space-y-3 p-4">
-          <Scanner onCode={(c) => void scan(c)} busy={busy} placeholder="Scan a sticker, or type its number" />
+          <Scanner onCode={(c) => void scan(c)} busy={busy} focusKey={focusKey} placeholder="Scan a sticker, or type its number" />
+          <div className="flex flex-wrap items-center gap-2">
+            <MapPin size={16} className="text-primary shrink-0" />
+            <span className="text-foreground text-sm font-medium">Rack you are counting</span>
+            <RackInput
+              value={rack}
+              onChange={setRack}
+              racks={racks}
+              className="form-input h-9 w-32"
+              placeholder="Optional"
+              label="Rack being counted"
+              // Done typing: back to the scan box.
+              onEnter={() => setFocusKey((k) => k + 1)}
+            />
+            <span className="text-muted-foreground text-xs">
+              {rack.trim() ? `Stickers found now go on rack ${rack.trim()}.` : 'Type it to record where each sticker is as you count.'}
+            </span>
+          </div>
           {refused && (
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
               <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" />
@@ -271,9 +293,9 @@ function LastScan({ s, onUndo }: { s: CountScan; onUndo: () => void }) {
           <span className="font-mono font-semibold">{s.code}</span> <span className={`font-semibold ${look.text}`}>· {look.label}</span>
         </p>
         <p className="text-foreground mt-0.5 text-sm">{s.note}</p>
-        {(s.lotNo || s.owner) && (
+        {(s.lotNo || s.owner || s.rack) && (
           <p className="text-muted-foreground text-xs">
-            {[s.lotNo ? `Lot ${s.lotNo}` : null, s.owner ? `${s.owner}'s` : null].filter(Boolean).join(' · ')}
+            {[s.rack ? `Rack ${s.rack}` : null, s.lotNo ? `Lot ${s.lotNo}` : null, s.owner ? `${s.owner}'s` : null].filter(Boolean).join(' · ')}
           </p>
         )}
       </div>
@@ -300,8 +322,13 @@ function StillToFind({ count }: { count: OpenCount }) {
           </p>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
             {group.map((p) => (
-              <span key={p.id} className="border-border bg-secondary/50 rounded-md border px-2 py-1 text-xs" title={`${p.packType.toLowerCase()}${p.lotNo ? `, lot ${p.lotNo}` : ''}`}>
-                <span className="font-mono font-semibold">{p.code}</span> <span className="text-muted-foreground">{qty(p.qty)} {p.unit}{p.lotNo ? ` · lot ${p.lotNo}` : ''}</span>
+              <span key={p.id} className="border-border bg-secondary/50 rounded-md border px-2 py-1 text-xs" title={`${p.packType.toLowerCase()}${p.lotNo ? `, lot ${p.lotNo}` : ''}${p.rack ? `, last seen on rack ${p.rack}` : ''}`}>
+                <span className="font-mono font-semibold">{p.code}</span>
+                {p.rack && <span className="text-foreground font-semibold"> · {p.rack}</span>}{' '}
+                <span className="text-muted-foreground">
+                  {qty(p.qty)} {p.unit}
+                  {p.lotNo ? ` · lot ${p.lotNo}` : ''}
+                </span>
               </span>
             ))}
           </div>
@@ -375,6 +402,7 @@ function ScanList({ scans, empty, onUndo }: { scans: CountScan[]; empty: string;
             <div className="min-w-0 flex-1">
               <p className="text-foreground text-sm">
                 <span className="font-mono font-semibold">{s.code}</span> <span className={`text-xs font-medium ${look.text}`}>{look.label}</span>
+                {s.rack && <span className="text-muted-foreground text-xs"> · Rack {s.rack}</span>}
               </p>
               <p className="text-muted-foreground text-xs">{s.note}</p>
             </div>
@@ -634,6 +662,7 @@ function Finished({ count }: { count: DoneCount }) {
                 <span className="text-muted-foreground">
                   {p.item}
                   {p.status === 'VOID' ? ' · withdrawn' : ` · ${qty(p.qty)} ${p.unit}`}
+                  {p.rack ? ` · rack ${p.rack}` : ''}
                 </span>
               </span>
             ))}
