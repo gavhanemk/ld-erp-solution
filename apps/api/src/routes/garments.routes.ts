@@ -6,6 +6,7 @@ import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { generateGarments, normaliseGarmentCode } from '../services/garment.service'
 import { addToChallan, dispatchScanned, moveGarments, removeFromChallan, requestScrap, returnGarments } from '../services/garmentMove.service'
+import { barcodesFor, skuKey } from '../services/barcode.service'
 
 /*
  * Garment tags: one QR label per finished piece.
@@ -311,8 +312,11 @@ function labelWhere(query: Record<string, unknown>): Prisma.GarmentWhereInput {
 router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   const where = labelWhere(req.query)
   if (!req.query.ids && !req.query.moId) throw new AppError('Choose the order or the pieces to print', 400, 'NO_FILTER')
+  const retail = req.query.retail === '1'
   const [company, rows] = await Promise.all([
-    prisma.company.findFirst({ select: { name: true } }),
+    prisma.company.findFirst({
+      select: { name: true, legalName: true, address: true, city: true, state: true, pincode: true, phone: true, email: true, customerCare: true, countryOfOrigin: true, logoUrl: true },
+    }),
     prisma.garment.findMany({
       where,
       take: 20_000,
@@ -322,20 +326,63 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         code: true,
         grade: true,
         printCount: true,
-        item: { select: { code: true, name: true, color: true, style: { select: { code: true, name: true } } } },
+        itemId: true,
+        sizeId: true,
+        item: {
+          select: {
+            code: true,
+            name: true,
+            color: true,
+            style: { select: { code: true, name: true, mrp: true, composition: true, fabricType: true, washCare: true } },
+          },
+        },
         size: { select: { code: true } },
-        mo: { select: { moNumber: true, brand: { select: { name: true } }, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
+        fgReceipt: { select: { receiptDate: true } },
+        mo: {
+          select: {
+            moNumber: true,
+            brand: { select: { name: true, logoUrl: true } },
+            so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } },
+          },
+        },
         bundle: { select: { code: true, cuttingOrder: { select: { lotNo: true } }, moLine: { select: { jobCard: { select: { lotNo: true } } } } } },
         // The delivery challan it is on or went out on, once it is scanned onto one.
         dc: { select: { dcNumber: true, status: true } },
       },
     }),
   ])
+  // The retail label's barcode: each style-colour-size's own, given now if it
+  // has none yet (from the GS1 prefix in Settings → Company).
+  const barcodes = retail
+    ? await prisma.$transaction((tx) => barcodesFor(tx, rows.map((g) => ({ itemId: g.itemId, sizeId: g.sizeId })), (req as AuthRequest).user?.id ?? null), { timeout: 60_000 })
+    : new Map<string, { ean: string; mrp: number | null }>()
+  const mfd = (d: Date) => `${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`
   res.json({
     success: true,
     data: {
       company: company?.name ?? '',
+      // Who made and sells it, for the retail label's legal lines.
+      maker: retail
+        ? {
+            name: company?.legalName || company?.name || '',
+            address: [company?.address, company?.city, company?.state, company?.pincode].filter(Boolean).join(', '),
+            care: company?.customerCare || [company?.phone, company?.email].filter(Boolean).join(' · '),
+            origin: company?.countryOfOrigin || 'India',
+          }
+        : null,
       garments: rows.map((g) => ({
+        ...(retail
+          ? {
+              retail: {
+                logoUrl: g.mo.brand?.logoUrl ?? company?.logoUrl ?? null,
+                ean: barcodes.get(skuKey(g.itemId, g.sizeId))?.ean ?? null,
+                mrp: barcodes.get(skuKey(g.itemId, g.sizeId))?.mrp ?? (g.item.style?.mrp == null ? null : Number(g.item.style.mrp)),
+                composition: g.item.style?.composition || g.item.style?.fabricType || null,
+                washCare: g.item.style?.washCare ?? [],
+                mfd: mfd(g.fgReceipt.receiptDate),
+              },
+            }
+          : {}),
         id: g.id,
         code: g.code,
         brand: g.mo.brand?.name ?? company?.name ?? '',

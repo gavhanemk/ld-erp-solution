@@ -352,6 +352,24 @@ export const updateItemSchema = createItemSchema.innerType().partial()
 // Style
 // ─────────────────────────────────────────────────────────────
 
+/** The wash-care symbols a retail label can carry, in the order they are printed. */
+export const WASH_CARE = [
+  'WASH_30',
+  'WASH_40',
+  'HAND_WASH',
+  'NO_WASH',
+  'NO_BLEACH',
+  'TUMBLE_LOW',
+  'NO_TUMBLE',
+  'LINE_DRY',
+  'DRY_SHADE',
+  'IRON_LOW',
+  'IRON_MED',
+  'NO_IRON',
+  'DRY_CLEAN',
+  'NO_DRY_CLEAN',
+] as const
+
 export const createStyleSchema = z.object({
   code,
   name,
@@ -377,6 +395,11 @@ export const createStyleSchema = z.object({
     ),
   techPackUrl: z.string().url().optional().nullable(),
   imageUrl: z.string().url().optional().nullable(),
+  // The retail label: MRP inclusive of all taxes, what it is made of, and its
+  // wash-care symbols.
+  mrp: z.union([z.number().min(0).max(9_999_999), z.string().regex(/^\d+(\.\d+)?$/)]).optional().nullable(),
+  composition: z.string().trim().max(100).optional().nullable(),
+  washCare: z.array(z.enum(WASH_CARE)).default([]),
   isActive,
 })
 export const updateStyleSchema = createStyleSchema.partial()
@@ -744,6 +767,16 @@ export const updateCompanySchema = z.object({
   email,
   website: z.string().url().optional().nullable(),
   logoUrl: z.string().url().optional().nullable(),
+  // Retail labels: the GS1 company prefix their barcodes are built from, and
+  // the legal lines a retail label carries.
+  gs1Prefix: z
+    .string()
+    .trim()
+    .regex(/^\d{7,10}$/, 'A GS1 company prefix is 7 to 10 digits, as on the GS1 India certificate')
+    .optional()
+    .nullable(),
+  countryOfOrigin: z.string().trim().max(60).optional().nullable(),
+  customerCare: z.string().trim().max(200).optional().nullable(),
   currentFY: z
     .string()
     .regex(/^\d{4}$/, 'Financial year token looks like 2425')

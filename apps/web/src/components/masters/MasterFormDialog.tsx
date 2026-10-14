@@ -100,7 +100,7 @@ const SPAN = {
   4: { 1: '', 2: 'sm:col-span-2', 3: 'sm:col-span-2 lg:col-span-3' },
 } as const
 
-export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags' | 'readout'
+export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'checkbox' | 'date' | 'tags' | 'readout' | 'chips'
 
 export interface FormField {
   name: string
@@ -328,6 +328,9 @@ export function MasterFormDialog<T extends { id: string }>({
         : undefined
       if (existing !== undefined && existing !== null) {
         seed[f.name] = f.type === 'tags' && Array.isArray(existing) ? existing.join(', ') : existing
+      } else if (f.type === 'chips') {
+        // Any number of fixed choices: none picked yet.
+        seed[f.name] = []
       } else if (f.type === 'checkbox') {
         // A new record is added to be used. Starting "Active" unticked saved
         // every new item, customer and supplier as inactive, so it vanished
@@ -954,6 +957,29 @@ function Field({
       </label>
 
       {type === 'readout' && <div className="form-readout min-h-[2.625rem] flex-wrap">{readout}</div>}
+
+      {/* Any number of fixed choices, each a chip to tick: wash-care symbols. */}
+      {type === 'chips' && (
+        <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby={id}>
+          {options?.map((o) => {
+            const list = Array.isArray(value) ? (value as string[]) : []
+            const on = list.includes(o.value)
+            return (
+              <button
+                key={o.value}
+                type="button"
+                aria-pressed={on}
+                onClick={() => onChange(on ? list.filter((v) => v !== o.value) : [...list, o.value])}
+                className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  on ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {o.label}
+              </button>
+            )
+          })}
+        </div>
+      )}
 
       {type === 'textarea' && (
         <textarea

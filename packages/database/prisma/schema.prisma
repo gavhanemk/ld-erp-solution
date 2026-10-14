@@ -447,6 +447,15 @@ model Company {
   /// Printed at the top of every document. Stored inline so a mill PC with no
   /// file server still prints a letterhead.
   logoUrl        String?
+  /// GS1 India company prefix (7–10 digits, starting 890). Retail barcodes
+  /// are this, the next item reference, and a check digit.
+  gs1Prefix      String?
+  /// The next item reference to give out under the prefix; never reused.
+  gs1NextRef     Int       @default(1)
+  /// Printed on retail labels: "Country of origin: India".
+  countryOfOrigin String?  @default("India")
+  /// The customer-care line on retail labels; phone and email when empty.
+  customerCare   String?
   /// Printed above the signature line.
   signatureUrl   String?
   /// The account a customer is asked to pay into, printed on the invoice.
@@ -702,6 +711,7 @@ model Item {
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
+  barcodes      RetailBarcode[]           @relation("ItemBarcodes")
   bomComponents BOMLine[]                 @relation("ComponentItem")
   stockLedger   StockLedger[]
   enquiryLines  PurchaseEnquiryLine[]
@@ -756,6 +766,13 @@ model Style {
   colors      String[]
   techPackUrl String?
   imageUrl    String?
+  /// Maximum retail price, inclusive of all taxes, for the retail label. A
+  /// size can carry its own on its barcode.
+  mrp         Decimal?   @db.Decimal(10, 2)
+  /// "100% Cotton": printed on the retail label.
+  composition String?
+  /// Wash-care symbols for the label, as codes: WASH_30, NO_BLEACH, IRON_MED…
+  washCare    String[]   @default([])
   isActive    Boolean    @default(true)
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
@@ -4178,6 +4195,7 @@ model Size {
   @@unique([sizeGroupId, code])
   @@map("sizes")
   garments Garment[] @relation("GarmentSize")
+  barcodes RetailBarcode[] @relation("SizeBarcodes")
 }
 
 model SalesOrderLineSize {
@@ -5394,4 +5412,23 @@ model GarmentEvent {
 
   @@index([garmentId, createdAt])
   @@map("garment_events")
+}
+
+/// One retail barcode (EAN-13) per finished item — style and colour — and
+/// size: built from the company's GS1 prefix, given once and never reused.
+model RetailBarcode {
+  id          String   @id @default(cuid())
+  itemId      String
+  item        Item     @relation("ItemBarcodes", fields: [itemId], references: [id])
+  sizeId      String?
+  size        Size?    @relation("SizeBarcodes", fields: [sizeId], references: [id], onDelete: Restrict)
+  ean         String   @unique
+  /// This size's own MRP, when it differs from the style's.
+  mrp         Decimal? @db.Decimal(10, 2)
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([itemId, sizeId])
+  @@map("retail_barcodes")
 }

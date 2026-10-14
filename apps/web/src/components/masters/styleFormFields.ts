@@ -1,4 +1,5 @@
 import type { FormField } from '@/components/masters/MasterFormDialog'
+import { WASH_CARE } from '@/components/packages/WashCare'
 
 /*
  * The style form, shared by Masters → Styles and by "Add new style" on a
@@ -59,4 +60,23 @@ export const styleFormFields: FormField[] = [
     help: 'Separate colours with commas',
   },
   { name: 'isActive', label: 'Active', type: 'checkbox', placeholder: 'Available for new orders', section: 'Size & Colour' },
+  // What the retail tag says: the price, what it is made of, how to wash it.
+  {
+    name: 'mrp',
+    label: 'MRP (₹)',
+    type: 'number',
+    section: 'Retail Label',
+    placeholder: '1499',
+    help: 'Inclusive of all taxes. A size can have its own under Barcodes',
+  },
+  { name: 'composition', label: 'Composition', section: 'Retail Label', placeholder: '100% Cotton', span: 2, help: 'Printed on the retail tag' },
+  {
+    name: 'washCare',
+    label: 'Wash Care',
+    type: 'chips',
+    section: 'Retail Label',
+    span: 3,
+    options: WASH_CARE,
+    help: 'Tick the symbols to print on the retail tag',
+  },
 ]

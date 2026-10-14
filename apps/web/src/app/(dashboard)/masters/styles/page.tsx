@@ -1,7 +1,8 @@
 'use client'
 
-import { useState } from 'react'
-import { FileSpreadsheet } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { Barcode, FileSpreadsheet } from 'lucide-react'
+import { StyleBarcodesDialog } from '@/components/masters/StyleBarcodesDialog'
 import { ActiveBadge, MasterTable, type Column, type FilterDef } from '@/components/masters/MasterTable'
 import { BRAND_LABEL, styleFormFields } from '@/components/masters/styleFormFields'
 import { ImportStylesDialog } from '@/components/masters/ImportStylesDialog'
@@ -24,7 +25,7 @@ interface Style {
   isActive: boolean
 }
 
-const columns: Column<Style>[] = [
+const baseColumns: Column<Style>[] = [
   { key: 'code', header: 'Style Code', sortable: true, className: 'font-mono text-xs text-teal-400' },
   { key: 'name', header: 'Style Name', sortable: true, className: 'font-medium' },
   {
@@ -124,6 +125,32 @@ export default function StylesPage() {
   const [importing, setImporting] = useState(false)
   // Bumped after an import, so the list and its filter counts reload.
   const [refreshKey, setRefreshKey] = useState(0)
+  const [barcodesFor, setBarcodesFor] = useState<string | null>(null)
+
+  // The retail barcodes of a style's colours and sizes, one press from its row.
+  const columns = useMemo<Column<Style>[]>(
+    () => [
+      ...baseColumns,
+      {
+        key: 'barcodes',
+        header: '',
+        render: (s) => (
+          <button
+            type="button"
+            className="btn-secondary h-8 px-2.5 text-xs"
+            onClick={(e) => {
+              e.stopPropagation()
+              setBarcodesFor(s.id)
+            }}
+            title="EAN-13 barcodes and MRP by size, for the retail tag"
+          >
+            <Barcode size={13} /> Barcodes
+          </button>
+        ),
+      },
+    ],
+    [],
+  )
 
   return (
     <>
@@ -145,6 +172,7 @@ export default function StylesPage() {
           </button>
         }
       />
+      {barcodesFor && <StyleBarcodesDialog styleId={barcodesFor} onClose={() => setBarcodesFor(null)} />}
       {importing && (
         <ImportStylesDialog onClose={() => setImporting(false)} onImported={() => setRefreshKey((k) => k + 1)} />
       )}

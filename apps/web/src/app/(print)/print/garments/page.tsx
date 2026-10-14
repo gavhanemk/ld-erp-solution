@@ -5,6 +5,8 @@ import { useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
 import { QrCode } from '@/components/packages/QrCode'
+import { Ean13 } from '@/components/packages/Ean13'
+import { WashCareIcons } from '@/components/packages/WashCare'
 
 interface Label {
   id: string
@@ -23,11 +25,23 @@ interface Label {
   lot: string | null
   challan: string | null
   printed: boolean
+  /** The retail tag's lines, sent when the retail tag is chosen. */
+  retail?: { logoUrl: string | null; ean: string | null; mrp: number | null; composition: string | null; washCare: string[]; mfd: string }
 }
 
-type Layout = 'tag' | 'poly' | 'sheet'
+/** Who made and sells it: the retail tag's legal lines. */
+interface Maker {
+  name: string
+  address: string
+  care: string
+  origin: string
+}
+
+type Layout = 'tag' | 'poly' | 'sheet' | 'retail'
+type TrackingLayout = Exclude<Layout, 'retail'>
 
 const SIZES: Record<Layout, { label: string; page: string }> = {
+  retail: { label: 'Retail tag with MRP and barcode, 50 × 75 mm', page: '50mm 75mm' },
   tag: { label: 'Hang tag / sticker, 50 × 25 mm', page: '50mm 25mm' },
   poly: { label: 'Polybag sticker, 75 × 50 mm', page: '75mm 50mm' },
   sheet: { label: 'A4 sheet, 24 a page (70 × 37 mm)', page: 'A4' },
@@ -35,7 +49,7 @@ const SIZES: Record<Layout, { label: string; page: string }> = {
 
 const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
 
-const GDIM: Record<Layout, { qr: string; id: string; brand: string; style: string; size: string; line: string; desc: string; gap: string; rowGap: string }> = {
+const GDIM: Record<TrackingLayout, { qr: string; id: string; brand: string; style: string; size: string; line: string; desc: string; gap: string; rowGap: string }> = {
   tag: { qr: '15.5mm', id: '8pt', brand: '5pt', style: '6.8pt', size: '11pt', line: '5.3pt', desc: '0', gap: '1.5mm', rowGap: '0.1mm' },
   sheet: { qr: '23mm', id: '10pt', brand: '5.8pt', style: '7pt', size: '12pt', line: '5.6pt', desc: '6.4pt', gap: '2mm', rowGap: '0.15mm' },
   poly: { qr: '31mm', id: '12.5pt', brand: '7pt', style: '8.6pt', size: '16pt', line: '6.5pt', desc: '7.8pt', gap: '2.5mm', rowGap: '0.1mm' },
@@ -58,7 +72,7 @@ function Field({ k, v, size, bold = false }: { k: string; v: string; size: strin
  * and colour, customer, order, lot, and the delivery challan once the piece
  * is scanned onto one. The larger labels add the description, MO and SKU.
  */
-function GarmentLabel({ g, layout }: { g: Label; layout: Layout }) {
+function GarmentLabel({ g, layout }: { g: Label; layout: TrackingLayout }) {
   const d = GDIM[layout]
   const order = g.poRef ? ['PO', g.poRef] : ['Order', g.soNumber ?? 'For stock']
   return (
@@ -106,6 +120,82 @@ function GarmentLabel({ g, layout }: { g: Label; layout: Layout }) {
   )
 }
 
+const money = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+/**
+ * The retail tag a customer reads in the shop: brand, style, colour and size,
+ * the MRP inclusive of all taxes, the EAN-13 the billing counter scans, the
+ * piece's own QR for the warehouse, and the lines the law asks for — month
+ * and year of manufacture, country of origin, net quantity, who made and sells
+ * it, and where to complain — with the wash-care symbols.
+ */
+function RetailTag({ g, maker }: { g: Label; maker: Maker }) {
+  const r = g.retail
+  const tiny = { fontSize: '4.6pt', lineHeight: 1.25 } as const
+  return (
+    <div className="sticker rt">
+      <div className="rt-brand">
+        {r?.logoUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={r.logoUrl} alt={g.brand} style={{ maxHeight: '7mm', maxWidth: '32mm', objectFit: 'contain' }} />
+        ) : (
+          <span style={{ fontSize: '9pt', fontWeight: 800, letterSpacing: '.08em', ...clip }}>{g.brand.toUpperCase()}</span>
+        )}
+      </div>
+      <div style={{ fontSize: '7.5pt', fontWeight: 700, lineHeight: 1.15, textAlign: 'center', ...clip }}>{g.description}</div>
+      <div style={{ fontSize: '5.6pt', textAlign: 'center', color: '#333', ...clip }}>
+        {g.style} · {g.color}
+      </div>
+      <div className="rt-size">
+        <span style={{ fontSize: '5.6pt', fontWeight: 600 }}>SIZE</span>
+        <span className="rt-size-box">{g.size || '—'}</span>
+      </div>
+      <div style={{ textAlign: 'center', lineHeight: 1.05 }}>
+        <span style={{ fontSize: '6pt', fontWeight: 700 }}>MRP ₹ </span>
+        <span style={{ fontSize: '12pt', fontWeight: 800 }}>{r?.mrp != null ? money(r.mrp) : '—'}</span>
+        <div style={{ fontSize: '4.6pt' }}>(Inclusive of all taxes)</div>
+      </div>
+      <div className="rt-ean">
+        {r?.ean ? (
+          <Ean13 code={r.ean} width="38mm" height="13mm" />
+        ) : (
+          <div style={{ ...tiny, border: '0.2mm dashed #999', padding: '1.5mm', textAlign: 'center' }}>No barcode: enter the GS1 prefix in Settings → Company</div>
+        )}
+      </div>
+      <div className="rt-foot">
+        <div style={{ flexShrink: 0, textAlign: 'center' }}>
+          <QrCode text={g.code} size="12mm" />
+          <div style={{ fontSize: '4.2pt', fontFamily: 'ui-monospace, Consolas, monospace', fontWeight: 700 }}>{g.code}</div>
+        </div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          {r?.composition && <div style={{ ...tiny, fontWeight: 700, ...clip }}>{r.composition}</div>}
+          <div style={tiny}>
+            <b>MFD:</b> {r?.mfd ?? '—'} · <b>Net qty:</b> 1 N
+          </div>
+          <div style={tiny}>
+            <b>Country of origin:</b> {maker.origin}
+          </div>
+          <div style={{ marginTop: '0.6mm' }}>
+            <WashCareIcons codes={r?.washCare ?? []} size="3.6mm" />
+          </div>
+        </div>
+      </div>
+      <div className="rt-legal" style={tiny}>
+        {/* The full address and the care line: the law wants them whole, and the tag has the room. */}
+        <div style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+          <b>Mfd &amp; Mktd by:</b> {maker.name}
+          {maker.address ? `, ${maker.address}` : ''}
+        </div>
+        {maker.care && (
+          <div style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-word' }}>
+            <b>Customer care:</b> {maker.care}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /**
  * Garment labels for printing, one per piece. Opening the page prints
  * nothing; when the print box is opened the labels are counted as printed,
@@ -113,24 +203,26 @@ function GarmentLabel({ g, layout }: { g: Label; layout: Layout }) {
  */
 function Labels() {
   const params = useSearchParams()
-  const [data, setData] = useState<{ company: string; garments: Label[] } | null>(null)
+  const [data, setData] = useState<{ company: string; maker: Maker | null; garments: Label[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [layout, setLayout] = useState<Layout>('tag')
   const marked = useRef(false)
 
   const qs = params.toString()
+  const retail = layout === 'retail'
   useEffect(() => {
     if (!params.get('moId') && !params.get('ids')) {
       setError('Open the labels from Garment Tags.')
       return
     }
+    // The retail tag also brings each piece's MRP, barcode and care symbols.
     api
-      .get<{ data: { company: string; garments: Label[] } }>(`/garments/labels?${qs}`)
+      .get<{ data: { company: string; maker: Maker | null; garments: Label[] } }>(`/garments/labels?${qs}${retail ? '&retail=1' : ''}`)
       .then((r) => setData(r.data))
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the garments.'))
-    // The query string is the whole of what this page shows.
+    // The query string, and whether it is the retail tag, are the whole of what this page shows.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qs])
+  }, [qs, retail])
 
   useEffect(() => {
     try {
@@ -209,6 +301,14 @@ function Labels() {
         .roll { display: flex; flex-direction: column; align-items: center; gap: 8px; }
         .roll.tag .sticker { width: 50mm; height: 25mm; padding: 1.5mm 2mm; border: 0.2mm dashed #bbb; }
         .roll.poly .sticker { width: 75mm; height: 50mm; padding: 2.5mm 3mm; border: 0.2mm dashed #bbb; }
+        .roll.retail .sticker { width: 50mm; height: 75mm; padding: 2.5mm 3mm; border: 0.2mm dashed #bbb; }
+        .rt { display: flex; flex-direction: column; gap: 0.7mm; }
+        .rt-brand { display: flex; align-items: center; justify-content: center; height: 8mm; border-bottom: 0.3mm solid #000; padding-bottom: 0.5mm; }
+        .rt-size { display: flex; align-items: center; justify-content: center; gap: 1.5mm; }
+        .rt-size-box { border: 0.4mm solid #000; padding: 0 2.2mm; font-size: 15pt; font-weight: 800; line-height: 1.15; }
+        .rt-ean { display: flex; justify-content: center; }
+        .rt-foot { display: flex; gap: 1.5mm; align-items: center; }
+        .rt-legal { border-top: 0.2mm solid #999; padding-top: 0.6mm; margin-top: auto; }
         @media print {
           .no-print { display: none !important; }
           html, body { background: #fff !important; }
@@ -236,6 +336,7 @@ function Labels() {
           {data.garments.length} {data.garments.length === 1 ? 'label' : 'labels'}, {data.garments[0].code} to {data.garments[data.garments.length - 1].code}
           {reprints ? ` · ${reprints} printed before (same codes)` : ''}
         </span>
+        {retail && <RetailGaps garments={data.garments} />}
       </div>
       {layout === 'sheet' ? (
         sheets.map((page, i) => (
@@ -245,6 +346,12 @@ function Labels() {
             ))}
           </div>
         ))
+      ) : layout === 'retail' ? (
+        <div className="roll retail">
+          {data.garments.map((g) => (
+            <RetailTag key={g.id} g={g} maker={data.maker ?? { name: data.company, address: '', care: '', origin: 'India' }} />
+          ))}
+        </div>
       ) : (
         <div className={`roll ${layout}`}>
           {data.garments.map((g) => (
@@ -261,5 +368,19 @@ export default function PrintGarments() {
     <Suspense fallback={<p style={{ padding: 48, color: '#ddd' }}>Opening the labels…</p>}>
       <Labels />
     </Suspense>
+  )
+}
+
+/** What a retail tag would print without: said before the print, so it can be put right first. */
+function RetailGaps({ garments }: { garments: Label[] }) {
+  const noMrp = garments.filter((g) => g.retail && g.retail.mrp == null).length
+  const noEan = garments.filter((g) => g.retail && !g.retail.ean).length
+  if (!noMrp && !noEan) return null
+  return (
+    <span style={{ color: '#b45309', fontSize: 12, fontWeight: 600 }}>
+      {[noMrp ? `${noMrp} without MRP (Masters → Styles)` : null, noEan ? `${noEan} without a barcode (GS1 prefix in Settings → Company)` : null]
+        .filter(Boolean)
+        .join(' · ')}
+    </span>
   )
 }

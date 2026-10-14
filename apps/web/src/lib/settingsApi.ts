@@ -3,6 +3,10 @@ import { api, type Single } from './api'
 /** Types and calls for the Settings screens. */
 
 export interface Company {
+  /** Retail labels: the GS1 prefix their EAN-13s are built from, and their legal lines. */
+  gs1Prefix?: string | null
+  countryOfOrigin?: string | null
+  customerCare?: string | null
   id: string
   name: string
   legalName: string | null

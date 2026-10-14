@@ -92,6 +92,7 @@ function CompanyProfile() {
       'name', 'legalName', 'gstin', 'stateCode', 'pan', 'tan', 'msmeNumber',
       'phone', 'email', 'website',
       'address', 'city', 'state', 'pincode', 'currentFY',
+      'gs1Prefix', 'countryOfOrigin', 'customerCare',
     ]
     for (const key of editable) {
       const raw = (values[key] ?? '').trim()
@@ -301,6 +302,54 @@ function CompanyProfile() {
               onChange={(e) => set('pincode', e.target.value)}
             />
           </Field>
+        </div>
+
+        {/* What a garment's retail tag carries from the company. */}
+        <div className="pt-4 border-t border-border space-y-4">
+          <div>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Retail labels</h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              The EAN-13 barcodes on retail tags are built from the GS1 prefix, and the tags carry the country of origin and the
+              customer-care line.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Field label="GS1 company prefix" htmlFor="gs1Prefix" error={errors.gs1Prefix} help="7 to 10 digits, from the GS1 India certificate">
+              <input
+                id="gs1Prefix"
+                className="form-input font-mono"
+                placeholder="8901234"
+                inputMode="numeric"
+                maxLength={10}
+                value={values.gs1Prefix ?? ''}
+                onChange={(e) => set('gs1Prefix', e.target.value.replace(/\D/g, ''))}
+              />
+            </Field>
+            <Field label="Country of origin" htmlFor="countryOfOrigin" error={errors.countryOfOrigin}>
+              <input
+                id="countryOfOrigin"
+                className="form-input"
+                placeholder="India"
+                value={values.countryOfOrigin ?? ''}
+                onChange={(e) => set('countryOfOrigin', e.target.value)}
+              />
+            </Field>
+            <Field
+              label="Customer care"
+              htmlFor="customerCare"
+              error={errors.customerCare}
+              span={2}
+              help="Printed on retail tags. Empty: the phone and email above"
+            >
+              <input
+                id="customerCare"
+                className="form-input"
+                placeholder="care@ldcottonmills.com · +91 98765 43210"
+                value={values.customerCare ?? ''}
+                onChange={(e) => set('customerCare', e.target.value)}
+              />
+            </Field>
+          </div>
         </div>
 
         <div className="pt-4 border-t border-border space-y-4">
