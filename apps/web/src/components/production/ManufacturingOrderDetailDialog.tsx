@@ -10,7 +10,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CuttingDialog } from './CuttingDialog'
-import { SetRoutingDialog } from './SetRoutingDialog'
+import { StagesDialog } from './StagesDialog'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { PROGRESS, type Flow } from './floor/types'
 import { LIVE_MO, moStatus } from './status'
@@ -737,7 +737,7 @@ export function ManufacturingOrderDetailDialog({
         </div>
       </div>
       {settingRoute && mo && (
-        <SetRoutingDialog
+        <StagesDialog
           moId={mo.id}
           moNumber={mo.moNumber}
           styleIds={[...new Set(mo.lines.map((l) => l.style.id))]}

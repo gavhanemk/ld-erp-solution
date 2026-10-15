@@ -1,11 +1,11 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowRight, Loader2, PackageOpen, Printer, Tags } from 'lucide-react'
+import { ArrowRight, Loader2, Printer, Tags } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
-import { openPrintTab, printOutward, qtyText, type OutwardRef } from './packageTypes'
+import { openPrintTab, packCount, printOutward, qtyText, type OutwardRef } from './packageTypes'
 
 interface Spot {
   key: string
@@ -29,13 +29,13 @@ interface Plan {
 const r3 = (n: number) => Math.round(n * 1000) / 1000
 
 /**
- * The stickers after stock goes out, as sentences to check and print.
+ * The labels after stock goes out, one card per item, in plain words.
  *
- * One label for each line that left — the document number as its QR, where it
- * is going, how much. And where it came out of stickered rolls or boxes
- * without a scan, which ones it was taken off: the oldest first, worked out
- * here, with a fresh sticker for what is left in them. "Change" is only for
- * when that guess is wrong.
+ * Each item that left gets one label to stick on it — the document number as
+ * its QR, where it is going, how much. Under it, the rolls or boxes it came
+ * off when it went out without a scan: the oldest first, worked out here. A
+ * whole one used up needs nothing; a part-used one gets a fresh sticker for
+ * what is left. "Not these? Change" is only for when that guess is wrong.
  */
 export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRef; onClose: () => void; onDone: (message: string) => void }) {
   const [plan, setPlan] = useState<Plan | null>(null)
@@ -117,22 +117,103 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
     )
   }
 
-  /** What happens to one package, in words. */
+  /** What a package is, said once: "roll", "box". */
+  const kind = (t: string) => packCount(1, t).replace(/^1 /, '')
+
+  /** What happens to one package, in words a store keeper uses. */
   const fate = (s: Spot, p: Spot['packages'][number]) => {
     const take = Number(takes[p.id]) || 0
     const left = r3(p.qty - take)
     if (take <= 0) return null
-    if (left <= 0) return plan.moves ? `${p.code} goes whole to ${plan.to}` : `${p.code} is used up`
-    return plan.moves
-      ? `${qtyText(take)} ${s.unit} from ${p.code} goes as a new sticker; ${qtyText(left)} ${s.unit} stays, fresh sticker`
-      : `${qtyText(take)} ${s.unit} taken off ${p.code}; ${qtyText(left)} ${s.unit} left, fresh sticker`
+    const what = `${kind(p.packType)} of ${qtyText(p.qty)} ${s.unit}${p.lotNo ? `, lot ${p.lotNo}` : ''}`
+    if (left <= 0) {
+      return { text: plan.moves ? `The whole ${what} goes, with its own sticker.` : `The whole ${what} — used up, nothing to print.`, fresh: false, code: p.code }
+    }
+    return {
+      text: plan.moves
+        ? `${qtyText(take)} ${s.unit} of the ${what} goes on a new sticker; ${qtyText(left)} ${s.unit} stays.`
+        : `${qtyText(take)} ${s.unit} taken off the ${what}; ${qtyText(left)} ${s.unit} left on it.`,
+      fresh: true,
+      code: p.code,
+    }
+  }
+
+  // Each item once: what went, its label, and which rolls or boxes it came off.
+  const used = new Set<string>()
+  const cards = plan.lines.map((l) => {
+    const spot = plan.spots.find((s) => !used.has(s.key) && s.itemCode === l.itemCode && s.store === l.from)
+    if (spot) used.add(spot.key)
+    return { l, spot }
+  })
+  const loose = plan.spots.filter((s) => !used.has(s.key))
+  const verb = plan.moves ? 'moved' : 'issued'
+
+  /** `went`: how much this document sent, when the stickers are behind by more than that. */
+  const spotBlock = (s: Spot, went?: number) => {
+    const fates = s.packages.map((p) => fate(s, p)).filter((f): f is NonNullable<ReturnType<typeof fate>> => !!f)
+    return (
+      <div className="border-border mt-2.5 border-t pt-2.5">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-muted-foreground text-[11px] font-semibold uppercase tracking-wide">Taken from</p>
+          <button type="button" className="text-primary text-xs font-medium hover:underline" onClick={() => setOpen((o) => ({ ...o, [s.key]: !o[s.key] }))}>
+            {open[s.key] ? 'Done' : 'Not these? Change'}
+          </button>
+        </div>
+        {/* The stickers can be behind by more than this one issue: earlier stock went out with its labels skipped. Said, so the sum is not a surprise. */}
+        {went != null && s.over > went + 1e-6 && (
+          <p className="warn-text mt-1 text-xs">
+            {qtyText(s.over)} {s.unit} has left {s.store} without its stickers being updated: {qtyText(went)} {s.unit} now, the rest on earlier issues whose labels were skipped. Taking it off these {packCount(2, s.packages[0]?.packType ?? 'OTHER').replace(/^2 /, '')} puts the stickers back in line with the stock.
+          </p>
+        )}
+        {!open[s.key] ? (
+          <ul className="mt-1 space-y-1 text-sm">
+            {fates.length ? (
+              fates.map((f) => (
+                <li key={f.code} className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="text-foreground">{f.text}</span>
+                  {f.fresh && <span className="badge-info">+1 fresh sticker</span>}
+                  <span className="text-muted-foreground font-mono text-[11px]">{f.code}</span>
+                </li>
+              ))
+            ) : (
+              <li className="warn-text text-xs">None picked. Say which {kind(s.packages[0]?.packType ?? 'OTHER')} it came off, or the stickers will not match the stock.</li>
+            )}
+          </ul>
+        ) : (
+          <div className="mt-2 space-y-1.5">
+            <p className="text-muted-foreground text-xs">
+              {qtyText(s.over)} {s.unit} went out of {s.store}. Type how much came off each:
+            </p>
+            {s.packages.map((p) => (
+              <div key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="text-foreground w-48 text-xs">
+                  {kind(p.packType)} of {qtyText(p.qty)} {s.unit}
+                  {p.lotNo ? `, lot ${p.lotNo}` : ''} <span className="text-muted-foreground font-mono">{p.code}</span>
+                </span>
+                <div className="relative w-32">
+                  <StepInput
+                    className="form-input h-9 pr-10"
+                    value={takes[p.id] ?? ''}
+                    onValueChange={(v) => setTakes((t) => ({ ...t, [p.id]: v }))}
+                    decimals
+                    max={p.qty}
+                    aria-label={`Taken off ${p.code}`}
+                  />
+                  <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">{s.unit}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )
   }
 
   return (
     <FormFrame
       icon={Tags}
-      title={`Stickers for ${plan.number}`}
-      subtitle="Check the lines below and press Print."
+      title={`Labels for ${plan.number}`}
+      subtitle={`${plan.lines.length} ${plan.lines.length === 1 ? 'item' : 'items'} ${verb} to ${plan.to}. The stock is already updated; these labels only mark the goods.`}
       onClose={onClose}
       busy={saving}
       error={error}
@@ -140,82 +221,49 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
       primary={
         <button type="button" className="btn-primary" onClick={() => void print()} disabled={saving || Boolean(problem)}>
           {saving ? <Loader2 size={15} className="animate-spin" /> : <Printer size={15} />}
-          Print {count} {count === 1 ? 'sticker' : 'stickers'}
+          Print {count} {count === 1 ? 'label' : 'labels'}
         </button>
       }
       footer={
         <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
-          Skip
+          Not now
         </button>
       }
-      footerNote={problem ? <span className="warn-text">{problem}</span> : null}
+      footerNote={
+        problem ? (
+          <span className="warn-text">{problem}</span>
+        ) : (
+          `${count} to print: one for each item that went${fresh ? `, and ${fresh} fresh for what is left on part-used ${fresh === 1 ? 'roll or box' : 'rolls or boxes'}` : ''}.`
+        )
+      }
     >
       <div className="space-y-2.5">
-        {plan.lines.map((l) => (
+        {cards.map(({ l, spot }) => (
           <div key={l.key} className="border-border bg-card rounded-xl border p-3">
             <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-              <span className="text-foreground text-sm font-semibold">
-                {l.item} <span className="text-muted-foreground font-mono text-xs font-normal">{l.itemCode}</span>
-              </span>
-              <span className="text-muted-foreground flex items-center gap-1 text-xs">
-                {qtyText(l.qty)} {l.unit} · {l.from} <ArrowRight size={11} /> {plan.to}
+              <span className="text-foreground text-sm font-semibold">{l.item}</span>
+              <span className="text-foreground flex items-center gap-1 text-sm tabular-nums">
+                {qtyText(l.qty)} {l.unit}
+                <span className="text-muted-foreground flex items-center gap-1 text-xs">
+                  · {l.from} <ArrowRight size={11} /> {plan.to}
+                </span>
               </span>
             </div>
-            <p className="text-foreground mt-2 flex items-center gap-1.5 text-sm">
+            <p className="text-muted-foreground mt-1.5 flex items-center gap-1.5 text-sm">
               <Tags size={14} className="text-primary shrink-0" />
-              1 sticker for what goes out, with {plan.number} on it
+              <span>
+                <span className="text-foreground">1 label</span> to stick on what goes, with {plan.number} and {plan.to} on it
+              </span>
             </p>
+            {spot && spotBlock(spot, l.qty)}
           </div>
         ))}
-
-        {plan.spots.map((s) => {
-          const lines = s.packages.map((p) => fate(s, p)).filter(Boolean)
-          return (
-            <div key={s.key} className="border-border bg-card rounded-xl border p-3">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <div className="min-w-0 text-sm">
-                  <p className="text-foreground flex items-center gap-1.5 font-medium">
-                    <PackageOpen size={14} className="text-primary shrink-0" />
-                    {s.item}: taken from these stickered {s.packages[0]?.packType === 'ROLL' ? 'rolls' : 'packages'}
-                  </p>
-                  <ul className="text-muted-foreground mt-1 space-y-0.5 pl-5 text-xs">
-                    {lines.length ? lines.map((t) => <li key={t}>{t}</li>) : <li>None — the stickers will not match the stock until it is fixed.</li>}
-                  </ul>
-                </div>
-                <button type="button" className="text-primary text-sm font-medium hover:underline" onClick={() => setOpen((o) => ({ ...o, [s.key]: !o[s.key] }))}>
-                  {open[s.key] ? 'Done' : 'Change'}
-                </button>
-              </div>
-              {open[s.key] && (
-                <div className="border-border mt-3 space-y-1.5 border-t pt-3">
-                  <p className="text-muted-foreground mb-1 text-xs">
-                    {qtyText(s.over)} {s.unit} went out of {s.store}. Say how much came off each:
-                  </p>
-                  {s.packages.map((p) => (
-                    <div key={p.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <span className="w-24 font-mono text-xs font-semibold">{p.code}</span>
-                      <span className="text-muted-foreground w-32 text-xs">
-                        has {qtyText(p.qty)} {s.unit}
-                        {p.lotNo ? ` · lot ${p.lotNo}` : ''}
-                      </span>
-                      <div className="relative w-32">
-                        <StepInput
-                          className="form-input h-9 pr-10"
-                          value={takes[p.id] ?? ''}
-                          onValueChange={(v) => setTakes((t) => ({ ...t, [p.id]: v }))}
-                          decimals
-                          max={p.qty}
-                          aria-label={`Taken off ${p.code}`}
-                        />
-                        <span className="text-muted-foreground pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs">{s.unit}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )
-        })}
+        {loose.map((s) => (
+          <div key={s.key} className="border-border bg-card rounded-xl border p-3">
+            <p className="text-foreground text-sm font-semibold">{s.item}</p>
+            {spotBlock(s)}
+          </div>
+        ))}
       </div>
     </FormFrame>
   )

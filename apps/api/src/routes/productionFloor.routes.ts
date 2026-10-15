@@ -6,7 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { getPrintHeader } from '../lib/printData'
-import { applyRouting, editRoute, editRouteSchema, restoreStep, routingsFor, skipStep } from '../services/route.service'
+import { applyRouting, editRoute, editRouteSchema, restoreStep, routeStepSchema, routingsFor, skipStep } from '../services/route.service'
 import {
   billSchema,
   cancelTransfer,
@@ -78,9 +78,15 @@ router.get('/routings/for', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: await routingsFor(prisma, ids) })
 })
 
-/** POST /orders/:id/routing — gives an order a routing's steps, while nothing has been cut on it. */
+/**
+ * POST /orders/:id/routing — gives an order a routing's steps, while nothing
+ * has been cut on it. With `steps`, the routing's stages as changed for this
+ * order in the same window: loaded, then set to these, in one go.
+ */
 router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { routingId } = z.object({ routingId: z.string().min(1, 'Pick a routing') }).parse(req.body)
+  const { routingId, steps } = z
+    .object({ routingId: z.string().min(1, 'Pick a routing'), steps: z.array(routeStepSchema).min(1).max(60).optional() })
+    .parse(req.body)
   const routing = await prisma.$transaction(async (tx) => {
     const mo = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true } })
     if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
@@ -96,11 +102,23 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
       if (!issued) throw new AppError(`${mo.moNumber}'s materials have not been issued yet. Raise its requisition and have the store issue it, then load the stages.`, 409, 'MATERIALS_NOT_ISSUED')
     }
     const routing = await applyRouting(tx, req.params.id, routingId)
+    // Changed for this order before loading: nothing has moved yet, so every step is written as given.
+    if (steps) await editRoute(tx, req.params.id, { steps: steps.map((s) => ({ ...s, id: null })), reason: `Set for ${mo.moNumber} when its stages were loaded` })
     if (mo.status !== 'DRAFT') await ensureJobCards(tx, req.params.id)
-    return routing
+    const names = (await tx.mOStep.findMany({ where: { moId: req.params.id }, orderBy: { sequence: 'asc' }, select: { name: true } })).map((s) => s.name)
+    return { routing, names }
   }, T)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: req.params.id, after: { routingId, routing: routing.code } })
-  res.json({ success: true, message: `Stages loaded from ${routing.code}: ${routing.steps.map((s) => s.operation.name).join(' → ')}. Each colour's process sheets are ready, starting with cutting.` })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'ManufacturingOrder',
+    entityId: req.params.id,
+    after: { routingId, routing: routing.routing.code, route: routing.names, changed: !!steps },
+  })
+  res.json({
+    success: true,
+    message: `Stages set: ${routing.names.join(' → ')}${steps ? ` (from ${routing.routing.code}, changed for this order)` : ` (from ${routing.routing.code})`}. Each colour's process sheets are ready, starting with cutting.`,
+  })
 })
 
 /** PATCH /orders/:id/route — this order's own route changed, ahead of the pieces. */
