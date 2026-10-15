@@ -1,13 +1,73 @@
 # LD ERP Solution — Where the project stands
 
-_Last updated: Mon 12 Oct 2026 — Routings by style: start and stop each step (branch `feat/masters-routing-style-tracker`)_
+_Last updated: Thu 15 Oct 2026 — Routings: fabric instead of code, no timer, delete and "changed by" (branch `feat/routing-fabric-and-edits`)_
 
 This file is the running record of what is built, what is not, and what to do
 next. Read it first after any break.
 
 ---
 
+## Routings: fabric instead of code, no timer, delete and "changed by" (Thu 15 Oct)
+
+Branch `feat/routing-fabric-and-edits`. Asked for on 15 Oct:
+
+**1. The routing form: no Code, a Fabric instead.**
+- **No code to type.** The API makes one from the style: `RT-<style code>`, then `-2`, `-3` for a second routing of the same style. A category's routing is `RT-<CATEGORY>`, and one for any style is `RT-ANY`.
+  - The code stays in the database because orders, BOMs and the production screens still show it. It follows the style if a routing is moved to another style.
+  - Existing codes (RT-SH-PLAIN etc.) are kept.
+- **Fabric** is a picker of the fabric items that have stock records: items filed under a "Fabric" category or one of its sub-categories, the same rule cutting and job cards use.
+  - Each shows what is on hand from the stock ledger, ours and customers' apart, the same figures as Inventory → Stock.
+  - Optional, since a shared routing has no one fabric. A routing keeps its fabric even after it runs out.
+  - Endpoint: `GET /api/masters/routings/fabrics`.
+- **Where routings show:** the list, the Styles tab and the style's page show the routing's name and fabric, not its code.
+
+**2. The style's page: the Start/Stop timer is gone.** So are Leave out and Undo, which only served it.
+- **Each step's state comes from the floor**, from `stepFigures`, the same as the order's own stage sheets. Across all the style's orders:
+  - **Done:** every counted order is through the step. A completed order counts as through every step.
+  - **Not started:** no counted order has begun it.
+  - **In progress:** anything else.
+  - **Left out:** left out on every order.
+- **Which orders count:** closed orders are listed but not counted.
+- **The style as a whole:** done, not started, or **at its first step not yet done**. The amber "Waiting" state is gone. A style with a routing and no orders reads "No orders yet".
+- **What a step card shows:** units completed as a bar against units planned, instructions and the note. Notes stay.
+- **Old Start/Stop presses:** the 3 test presses already in `style_step_runs` stay on their rows, unshown. Nothing writes those columns now.
+
+**3. Full CRUD, with who changed it.**
+- **Delete** (`masters:delete`) deletes a routing for good, with its steps.
+  - It is refused while an order or a BOM uses the routing; stop using it instead.
+  - It is refused while the routing is locked.
+  - On the list the button is greyed out, with the reason in its tooltip.
+- **Stop using / Use again** now go through `PATCH isActive`. Before, `DELETE` only switched a routing off.
+- **Who made it and who changed it last:** `routings.createdById` and `routings.updatedById`, set on every save, including lock, unlock, stop and use again.
+  - Shown as "Changed 15 Oct 2026, 3:20 pm by …" on the list, the form's subtitle and the style's page.
+  - Filled from the audit log where it had a record. The 5 seeded routings had none, so they show only the time until someone saves them.
+- **Code moved:** create, edit and delete now live in `services/routing.service.ts`; `master.routes.ts` only parses, audits and answers.
+
+**Database:** migration `20261020100000_routing_fabric_and_editor`, which adds three empty columns to `routings`. Its folder is dated 20 Oct only so it sorts after main's 19 Oct migrations. Applied to the shared database on 15 Oct after a rolled-back dry run. See `MIGRATION-NOTES.md`.
+
+**Tested:**
+- Type-check, the API build and `next build` pass.
+- `tools/check-routing-master.ts`: 27 checks covering:
+  - the code made from the style, numbered, for a category, and following a moved routing;
+  - the fabric list and its on-hand against the ledger;
+  - a non-fabric refused;
+  - who made and changed it;
+  - lock, stop and use again;
+  - delete, refused when in use or locked.
+- `tools/check-style-tracking.ts`, rewritten: 17 checks covering:
+  - each step's state and units recomputed from the floor;
+  - closed orders left out;
+  - a style with no orders;
+  - notes;
+  - the list and its filter.
+- Both run against the shared database in a rolled-back transaction.
+- **Not yet clicked through against the live API.**
+
+---
+
 ## Routings by style: start and stop each step (Mon 12 Oct)
+
+_The Start/Stop, leave-out and undo below were taken off on 15 Oct (see above); the rest stands._
 
 Branch `feat/masters-routing-style-tracker`. Asked for on 12 Oct: tie routing
 to the style, show where each style has got to, and record when each step

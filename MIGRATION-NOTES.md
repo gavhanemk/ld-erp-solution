@@ -7,6 +7,34 @@ Delete an entry once its branch is merged and everybody has pulled.
 
 ---
 
+## 15 Oct 2026 — routings: fabric, who made and changed each one
+
+**Migration:** `20261020100000_routing_fabric_and_editor`. The folder is dated
+20 Oct only so it sorts after main's 19 Oct migrations.
+**Branch:** `feat/routing-fabric-and-edits`
+**Status: applied to the shared database on 15 Oct.** Nobody needs to apply it.
+Dry-run first inside a transaction that was rolled back, then applied with
+`prisma migrate deploy`.
+
+### What changed
+
+| Table | Change |
+|---|---|
+| `routings` | Three new nullable columns, each with a foreign key that is set to null if the item or user goes: `fabricItemId` (→ `items`, indexed), the fabric the garment is cut from; `createdById` and `updatedById` (→ `users`), who made the routing and who saved it last |
+
+The two people columns were filled from the audit log where it had a record:
+the CREATE entry's user, and the latest entry's user. Only the two test
+routings (ZZTEST-RT-01, -03) had any. The 5 seeded routings stay empty until
+somebody saves them. `updatedAt` was not touched. `code` is unchanged and still
+unique; the API now makes it, so it is no longer typed.
+
+### What you have to do
+
+Nothing, unless your branch has no copy of this folder. Then `prisma migrate
+dev` will offer to drop the columns. Say no; `prisma migrate deploy` is safe.
+
+---
+
 ## 12 Oct 2026 — routings by style: start and stop each step
 
 **Migration:** `20261012200000_style_step_runs`

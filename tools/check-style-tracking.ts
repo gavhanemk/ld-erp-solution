@@ -1,20 +1,20 @@
-// The style tracker under Masters → Routings, end to end, on the live shared
-// database inside one transaction that always throws (nothing is kept):
-// starting in order (a step starts once the one before it has started),
-// overlapping steps, stopping, undo in order, leaving a step out under the
-// routing's own rule, notes, the list's states, and units completed read from
-// the floor's ledger.
+// The style page under Masters → Routings, on the live shared database inside
+// one transaction that always throws (nothing is kept): each step's state and
+// units completed read from the floor's ledger across the style's orders — no
+// Start or Stop since 15 Oct 2026 — a closed order left out, a style with no
+// orders, notes on a step, and the list's states.
 //
-// Needs a style with a routing of its own whose first step is cutting and
-// which has a step that only a manager may leave out — the demo style
-// LD-SH-2601 with RT-SH-PLAIN. Run it from apps/api, so the database settings
-// load:
+// Needs the demo style LD-SH-2601 with its routing RT-SH-PLAIN and its orders
+// (one completed, one not yet cut). Run it from apps/api, so the database
+// settings load:
 //
 //   cd apps/api
 //   npx tsx ../../tools/check-style-tracking.ts
 import { prisma } from '../packages/database/src/index'
-import { leaveOutStep, listStyles, noteStep, startStep, stopStep, styleDetail, undoStep } from '../apps/api/src/services/styleTrack.service'
+import * as track from '../apps/api/src/services/styleTrack.service'
 import { stepFigures } from '../apps/api/src/services/floor.service'
+
+const { listStyles, noteStep, styleDetail, runKey, withOccurrence } = track
 
 let pass = 0
 let fail = 0
@@ -24,111 +24,91 @@ const check = (label: string, ok: boolean, extra = '') => {
 }
 const ROLLBACK = new Error('ROLLBACK')
 
-/** Runs `fn` and says whether it was refused with this code. */
-async function refused(fn: () => Promise<unknown>, code: string) {
-  try {
-    await fn()
-    return 'not refused'
-  } catch (e) {
-    const got = (e as { code?: string }).code
-    return got === code ? true : `refused with ${got ?? (e as Error).message}`
-  }
-}
+const stepSelect = { id: true, sequence: true, operationId: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } as const
 
 async function main() {
   const style = await prisma.style.findUnique({ where: { code: 'LD-SH-2601' }, select: { id: true, code: true } })
-  const user = await prisma.user.findFirst({ where: { status: 'ACTIVE' }, select: { id: true } })
-  if (!style || !user) throw new Error('Needs the demo style LD-SH-2601 and an active user')
+  if (!style) throw new Error('Needs the demo style LD-SH-2601')
   const runsBefore = await prisma.styleStepRun.count()
+  check('the timer is gone: no Start, Stop, leave-out or undo', !('startStep' in track) && !('stopStep' in track) && !('leaveOutStep' in track) && !('undoStep' in track))
 
   try {
     await prisma.$transaction(
       async (tx) => {
-        const clerk = { userId: user.id, mayApprove: false }
-        const manager = { userId: user.id, mayApprove: true }
-        // Clear this style's records inside the transaction, so the run starts clean.
-        await tx.styleStepRun.deleteMany({ where: { styleId: style.id } })
-
         let d = await styleDetail(tx, style.id)
-        check('the style has a routing of its own', d.applies === 'STYLE' && !!d.routing, d.routing?.code)
-        check('it starts not started', d.overall.state === 'NOT_STARTED', d.overall.state)
-        const [first, second, third] = d.steps
-        check('the first step is cutting, which cannot be left out', first.kind === 'CUTTING' && first.skip === 'NEVER')
-        check('the second step waits for the first', second.startBlockedBy === first.name, String(second.startBlockedBy))
+        check('the style has a routing of its own', d.applies === 'STYLE' && !!d.routing, d.routing?.name)
+        check('the routing comes with its fabric and who changed it', d.routing !== null && 'fabric' in d.routing && 'updatedBy' in d.routing)
 
-        const at = (s: { operationId: string; occurrence: number }) => [s.operationId, s.occurrence] as const
+        // Each step worked out again here, straight from the floor: done on
+        // every counted order, not started on any, in progress otherwise.
+        const lines = await tx.mOLine.findMany({
+          where: { styleId: style.id, mo: { status: { not: 'CLOSED' } } },
+          select: { id: true, totalQty: true, mo: { select: { id: true, status: true, steps: { select: stepSelect } } } },
+        })
+        const perLine = await Promise.all(
+          lines.map(async (l) => {
+            if (!l.mo.steps.length) return null
+            const figs = new Map((await stepFigures(tx, l.mo.id, l.mo.steps, l.totalQty, l.id)).map((f) => [f.stepId, f]))
+            return new Map(withOccurrence([...l.mo.steps].sort((a, b) => a.sequence - b.sequence)).map((s) => [runKey(s.operationId, s.occurrence), { state: l.mo.status === 'COMPLETED' ? 'DONE' : figs.get(s.id)!.state, completed: figs.get(s.id)!.completed }]))
+          }),
+        )
+        const expected = d.steps.map((s) => {
+          const states = perLine.map((m) => (m ? m.get(s.key)?.state : 'NOT_STARTED')).filter(Boolean) as string[]
+          const completed = perLine.reduce((n, m) => n + (m?.get(s.key)?.completed ?? 0), 0)
+          const live = states.filter((x) => x !== 'SKIPPED')
+          const state = !states.length ? 'NOT_STARTED' : !live.length ? 'SKIPPED' : live.every((x) => x === 'DONE') ? 'DONE' : live.every((x) => x === 'NOT_STARTED') ? 'NOT_STARTED' : 'IN_PROGRESS'
+          return { state, completed }
+        })
+        check('every step\'s state is the floor\'s, across the style\'s orders', d.steps.every((s, i) => s.state === expected[i].state), d.steps.map((s) => `${s.name} ${s.state}`).join(', '))
+        check('every step\'s units completed is the floor\'s own figure', d.steps.every((s, i) => s.completed === expected[i].completed), d.steps.map((s) => `${s.name} ${s.completed}`).join(', '))
+        check('planned is the counted orders\' pieces', d.production.planned === lines.reduce((n, l) => n + l.totalQty, 0), String(d.production.planned))
+        const firstOpen = d.steps.find((s) => s.state !== 'DONE' && s.state !== 'SKIPPED')
+        check(
+          'the style stands at its first step not yet done',
+          d.overall.state === 'IN_PROGRESS' ? d.overall.step === firstOpen?.name : d.overall.state === 'DONE' ? !firstOpen : true,
+          `${d.overall.state} ${d.overall.step ?? ''}`,
+        )
 
-        check('starting the second step before the first is refused', (await refused(() => startStep(tx, style.id, ...at(second), clerk), 'PREVIOUS_NOT_STARTED')) === true)
-
-        await startStep(tx, style.id, ...at(first), clerk)
-        d = await styleDetail(tx, style.id)
-        check('after Start, the style is in progress at cutting', d.overall.state === 'IN_PROGRESS' && d.overall.step === first.name, `${d.overall.state} ${d.overall.step}`)
-        check('starting cutting again is refused', (await refused(() => startStep(tx, style.id, ...at(first), clerk), 'ALREADY_STARTED')) === true)
-
-        await startStep(tx, style.id, ...at(second), clerk)
-        d = await styleDetail(tx, style.id)
-        check('the second step starts while cutting is still going (overlap)', d.steps[0].state === 'IN_PROGRESS' && d.steps[1].state === 'IN_PROGRESS')
-        check('the style shows the furthest step under way', d.overall.step === second.name, String(d.overall.step))
-
-        check('stopping a step not started is refused', (await refused(() => stopStep(tx, style.id, ...at(third), clerk), 'NOT_STARTED')) === true)
-        const stopped = await stopStep(tx, style.id, ...at(first), clerk)
-        check('stopping cutting says how long it took', /after it started/.test(stopped.message), stopped.message)
-        check('stopping it twice is refused', (await refused(() => stopStep(tx, style.id, ...at(first), clerk), 'ALREADY_STOPPED')) === true)
-
-        await undoStep(tx, style.id, ...at(first), manager)
-        d = await styleDetail(tx, style.id)
-        check('undo takes back the stop first', d.steps[0].state === 'IN_PROGRESS', d.steps[0].state)
-        check('undoing cutting\'s start is refused while a later step has started', (await refused(() => undoStep(tx, style.id, ...at(first), manager), 'LATER_STEP_STARTED')) === true)
-
-        // Leaving out: cutting never; a manager-only step needs a manager.
-        check('cutting cannot be left out', (await refused(() => leaveOutStep(tx, style.id, ...at(first), 'testing the rule', manager), 'CANNOT_SKIP')) === true)
-        const managerOnly = d.steps.find((s, i) => i >= 2 && s.skip === 'WITH_APPROVAL' && s.state === 'NOT_STARTED')
-        if (managerOnly) {
-          check('a manager-only step is refused to a clerk', (await refused(() => leaveOutStep(tx, style.id, ...at(managerOnly), 'testing the rule', clerk), 'NEEDS_APPROVAL')) === true)
-          await leaveOutStep(tx, style.id, ...at(managerOnly), 'testing the rule', manager)
+        // Close every order that is not finished: only the completed one
+        // counts, and the style is done.
+        const open = await tx.manufacturingOrder.findMany({ where: { lines: { some: { styleId: style.id } }, status: { notIn: ['COMPLETED', 'CLOSED'] } }, select: { id: true } })
+        const finished = await tx.manufacturingOrder.count({ where: { lines: { some: { styleId: style.id } }, status: 'COMPLETED' } })
+        if (open.length && finished) {
+          await tx.manufacturingOrder.updateMany({ where: { id: { in: open.map((o) => o.id) } }, data: { status: 'CLOSED' } })
           d = await styleDetail(tx, style.id)
-          const i = d.steps.findIndex((s) => s.key === managerOnly.key)
-          check('a manager can leave it out', d.steps[i].state === 'SKIPPED')
-          const after = d.steps[i + 1]
-          if (after) {
-            const expected = d.steps.slice(0, i).filter((s) => s.state !== 'SKIPPED').pop()
-            check('the step after it now waits on the one before the left-out step', after.startBlockedBy === (expected?.state === 'NOT_STARTED' ? expected.name : null), String(after.startBlockedBy))
-          }
-          check('starting a left-out step is refused', (await refused(() => startStep(tx, style.id, ...at(managerOnly), manager), 'STEP_SKIPPED')) === true)
-          await undoStep(tx, style.id, ...at(managerOnly), manager)
-          d = await styleDetail(tx, style.id)
-          check('undo puts it back, and the empty record goes', d.steps[i].state === 'NOT_STARTED' && !d.steps[i].run)
+          check('with the unfinished orders closed, every step is done', d.steps.every((s) => s.state === 'DONE' || s.state === 'SKIPPED') && d.overall.state === 'DONE', d.overall.state)
+          check('a closed order is still listed, but not counted', d.production.orders.some((o) => o.status === 'CLOSED') && d.production.planned < d.production.orders.reduce((n, o) => n + o.planned, 0))
         } else {
-          check('the routing has a manager-only step to test with', false)
+          check('the style has a completed order and an open one to test closing with', false)
         }
 
-        await noteStep(tx, style.id, ...at(third), 'Waiting for the trims to arrive')
+        // A style with a routing and no orders has not started.
+        const idle = (await tx.style.findMany({ where: { isActive: true, routings: { some: { isActive: true } }, moLines: { none: {} } }, select: { id: true }, take: 1 }))[0]
+        if (idle) {
+          const i = await styleDetail(tx, idle.id)
+          check('a style with no orders has not started, and plans nothing', i.overall.state === 'NOT_STARTED' && i.overall.planned === 0 && i.steps.every((s) => s.state === 'NOT_STARTED'))
+        }
+
+        // Notes stay.
+        const [, , third] = d.steps
+        await tx.styleStepRun.deleteMany({ where: { styleId: style.id, operationId: third.operationId, occurrence: third.occurrence } })
+        await noteStep(tx, style.id, third.operationId, third.occurrence, 'Waiting for the trims to arrive')
         d = await styleDetail(tx, style.id)
-        check('a note can go on a step not yet started', d.steps[2].run?.note === 'Waiting for the trims to arrive' && d.steps[2].state === 'NOT_STARTED')
-        await noteStep(tx, style.id, ...at(third), null)
+        check('a note goes on a step', d.steps[2].note === 'Waiting for the trims to arrive' && !!d.steps[2].noteAt)
+        await noteStep(tx, style.id, third.operationId, third.occurrence, null)
         d = await styleDetail(tx, style.id)
-        check('clearing it removes the empty record', !d.steps[2].run)
+        check('clearing it removes the record', !d.steps[2].note && (await tx.styleStepRun.count({ where: { styleId: style.id, operationId: third.operationId, occurrence: third.occurrence } })) === 0)
 
         // The list reads the same states.
-        const list = await listStyles(tx, { q: style.code, state: 'IN_PROGRESS', page: 1, limit: 10 })
-        check('the list finds it under in progress', list.rows.some((r) => r.style.id === style.id && r.overall.state === 'IN_PROGRESS'))
+        const list = await listStyles(tx, { q: style.code, page: 1, limit: 10 })
+        const row = list.rows.find((r) => r.style.id === style.id)
+        check('the list shows the same state', row?.overall.state === d.overall.state, row?.overall.state)
+        check('and the routing by name, with its fabric', row?.routing?.name === d.routing?.name && row?.routing?.fabric === (d.routing?.fabric?.name ?? null))
         const all = await listStyles(tx, { page: 1, limit: 200 })
         const counted = all.counts.IN_PROGRESS + all.counts.NOT_STARTED + all.counts.DONE + all.counts.NO_ROUTING
         check('every style falls in exactly one state', counted === all.counts.ALL, `${counted} of ${all.counts.ALL}`)
-
-        // Units completed: the floor's own figures, summed over the style's lines.
-        const lines = await tx.mOLine.findMany({
-          where: { styleId: style.id, mo: { steps: { some: {} } } },
-          select: { id: true, totalQty: true, mo: { select: { id: true, steps: { select: { id: true, sequence: true, operationId: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } } } } },
-        })
-        let cutDirect = 0
-        for (const l of lines) {
-          const figs = await stepFigures(tx, l.mo.id, l.mo.steps, l.totalQty, l.id)
-          const cutStep = l.mo.steps.find((s) => s.kind === 'CUTTING')
-          cutDirect += figs.find((f) => f.stepId === cutStep?.id)?.completed ?? 0
-        }
-        check('units completed at cutting match the floor\'s own figures', d.steps[0].completed === cutDirect, `${d.steps[0].completed} vs ${cutDirect} over ${lines.length} line(s)`)
-        console.log(`     units completed by step: ${d.steps.map((s) => `${s.name} ${s.completed}`).join(', ')}`)
+        const filtered = await listStyles(tx, { state: 'DONE', page: 1, limit: 200 })
+        check('the filter keeps only that state', filtered.rows.every((r) => r.overall.state === 'DONE') && filtered.total === all.counts.DONE, `${filtered.total} done`)
 
         throw ROLLBACK
       },

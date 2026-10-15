@@ -11,35 +11,31 @@ import {
   ClipboardList,
   Copy,
   History,
+  Layers,
   ListOrdered,
   Loader2,
   Lock,
   MessageSquare,
   Pencil,
-  Play,
   Plus,
   Route,
   Shirt,
-  Square,
-  Undo2,
+  Trash2,
 } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { RoutingFormDialog, type Routing } from '@/components/masters/RoutingFormDialog'
-import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { describe, pcs, STEP_STATE, STYLE_STATE, took, when, type StyleDetail, type TrackStep } from './track'
-
-type Act = 'start' | 'stop' | 'leave-out' | 'undo'
+import { changed, describe, pcs, STEP_STATE, STYLE_STATE, when, type StyleDetail, type TrackStep } from './track'
 
 /**
- * One style's page under Masters → Routings: the routing it follows, and each
- * step with a Start and a Stop — pressed by hand on the floor's word — the
- * time it took, and the pieces completed there, which come from the floor's
- * own records and are never typed here.
+ * One style's page under Masters → Routings: the routing it follows — its
+ * fabric, who changed it last, to edit or delete — and each step with where
+ * it stands and the pieces completed there. Both come from the floor's own
+ * records, across every order for the style; nothing here is pressed or
+ * typed but a note on a step.
  *
- * A step starts once the one before it has started (steps overlap on the
- * floor). Each step is started and stopped once; a mistake is undone by a
- * production manager, with a reason, the last thing first.
+ * Until 15 Oct 2026 each step had a Start and a Stop pressed by hand, and a
+ * timer; the business took them off.
  */
 export function StyleTracker({ styleId }: { styleId: string }) {
   const [d, setD] = useState<StyleDetail | null>(null)
@@ -47,12 +43,10 @@ export function StyleTracker({ styleId }: { styleId: string }) {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
-  const [ask, setAsk] = useState<{ step: TrackStep; action: 'leave-out' | 'undo' } | null>(null)
   const [noteFor, setNoteFor] = useState<string | null>(null)
   const [noteText, setNoteText] = useState('')
   const [form, setForm] = useState<{ record: Routing | null; preset: { styleId: string; from: Routing | null } | null } | null>(null)
-  // "Running for 2 hours" keeps counting while the page is open.
-  const [, setTick] = useState(0)
+  const [deleting, setDeleting] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -69,49 +63,42 @@ export function StyleTracker({ styleId }: { styleId: string }) {
   useEffect(() => {
     void load()
   }, [load])
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 60_000)
-    return () => clearInterval(t)
-  }, [])
 
-  const canRecord = can('production', 'create')
-  const canUndo = can('production', 'edit')
-  const canApprove = can('production', 'approve')
+  const canNote = can('production', 'create')
   const canEditRouting = can('masters', 'edit')
   const canNewRouting = can('masters', 'create')
-
-  const path = (s: TrackStep, action: string) => `/masters/style-tracking/${styleId}/steps/${s.operationId}/${s.occurrence}/${action}`
-
-  const act = async (s: TrackStep, action: Act, body: Record<string, unknown> = {}) => {
-    setBusyKey(s.key)
-    setError(null)
-    setMessage(null)
-    try {
-      const res = await api.post<{ message?: string; data: StyleDetail }>(path(s, action), body)
-      setD(res.data)
-      setMessage(res.message ?? null)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save that. Is the API running?')
-      // The routing may have changed under us: show it as it is now.
-      if (err instanceof ApiError && err.status === 404) void load()
-    } finally {
-      setBusyKey(null)
-      setAsk(null)
-    }
-  }
+  const canDeleteRouting = can('masters', 'delete')
 
   const saveNote = async (s: TrackStep) => {
     setBusyKey(s.key)
     setError(null)
     try {
-      const res = await api.patch<{ message?: string; data: StyleDetail }>(path(s, 'note'), { note: noteText.trim() || null })
+      const res = await api.patch<{ message?: string; data: StyleDetail }>(`/masters/style-tracking/${styleId}/steps/${s.operationId}/${s.occurrence}/note`, { note: noteText.trim() || null })
       setD(res.data)
       setMessage(res.message ?? null)
       setNoteFor(null)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save the note.')
+      // The routing may have changed under us: show it as it is now.
+      if (err instanceof ApiError && err.status === 404) void load()
     } finally {
       setBusyKey(null)
+    }
+  }
+
+  const deleteRouting = async (r: Routing) => {
+    if (!confirm(`Delete "${r.name}" for good? Its steps go with it. This cannot be undone.`)) return
+    setDeleting(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const res = await api.delete<{ message?: string }>(`/masters/routings/${r.id}`)
+      setMessage(res.message ?? 'Deleted.')
+      await load()
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete it. Is the API running?')
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -141,11 +128,13 @@ export function StyleTracker({ styleId }: { styleId: string }) {
 
   const look = STYLE_STATE[d.overall.state]
   const live = d.steps.filter((s) => s.state !== 'SKIPPED')
-  const going = d.steps.filter((s) => s.state === 'IN_PROGRESS')
   const lastLive = live[live.length - 1]
   const pct = d.overall.total ? Math.round((d.overall.done / d.overall.total) * 100) : 0
+  const planned = d.production.planned
   const routing = d.routing
   const ownRouting = routing && d.applies === 'STYLE'
+  const usedBy = routing ? (routing._count?.mos ?? 0) + (routing._count?.boms ?? 0) : 0
+  const stamp = routing ? changed(routing) : null
 
   const tile = (label: string, value: React.ReactNode, sub?: React.ReactNode) => (
     <div className="glass-card p-3">
@@ -154,8 +143,6 @@ export function StyleTracker({ styleId }: { styleId: string }) {
       {sub && <div className="text-muted-foreground mt-0.5 text-xs">{sub}</div>}
     </div>
   )
-
-  const undoWhat = (s: TrackStep) => (s.run?.skippedAt ? 'leaving out' : s.run?.stoppedAt ? 'stop' : 'start')
 
   return (
     <div className="space-y-4">
@@ -201,12 +188,10 @@ export function StyleTracker({ styleId }: { styleId: string }) {
 
         <div className="border-border mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
           {routing ? (
-            <div className="min-w-0 text-xs">
+            <div className="min-w-0 space-y-0.5 text-xs">
               <p className="text-foreground flex flex-wrap items-center gap-1.5">
                 <Route size={13} className="text-primary shrink-0" />
-                <span className="font-mono">{routing.code}</span>
-                <span className="text-muted-foreground">—</span>
-                <span>{routing.name}</span>
+                <span className="font-medium">{routing.name}</span>
                 <span className="text-muted-foreground">
                   · version {routing.version} · {routing.steps?.length ?? 0} steps
                 </span>
@@ -216,7 +201,19 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                   </span>
                 )}
               </p>
-              <p className="text-muted-foreground mt-0.5">
+              <p className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                <span className="inline-flex items-center gap-1">
+                  <Layers size={12} className="shrink-0" aria-hidden />
+                  {routing.fabric ? <span className="text-foreground">{routing.fabric.name}</span> : 'No fabric set'}
+                </span>
+                {stamp && (
+                  <span className="inline-flex items-center gap-1">
+                    <History size={12} className="shrink-0" aria-hidden />
+                    {stamp}
+                  </span>
+                )}
+              </p>
+              <p className="text-muted-foreground">
                 {d.applies === 'STYLE'
                   ? d.alternatives > 0
                     ? `Its own routing. ${d.alternatives} more ${d.alternatives === 1 ? 'is' : 'are'} for this style; this page follows the one changed most recently.`
@@ -233,6 +230,16 @@ export function StyleTracker({ styleId }: { styleId: string }) {
             {ownRouting && canEditRouting && (
               <button className="btn-secondary h-8 px-3 text-xs" onClick={() => setForm({ record: routing, preset: null })}>
                 <Pencil size={13} /> Edit routing
+              </button>
+            )}
+            {ownRouting && canDeleteRouting && (
+              <button
+                className="btn-ghost text-muted-foreground hover:text-destructive h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-current"
+                onClick={() => void deleteRouting(routing)}
+                disabled={deleting || usedBy > 0 || routing.isLocked}
+                title={usedBy > 0 ? 'Orders or BOMs use it, so it is kept. Stop using it under All routings instead.' : routing.isLocked ? 'Unlock it first' : 'Delete for good'}
+              >
+                {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
               </button>
             )}
             {!ownRouting && canNewRouting && (
@@ -268,8 +275,8 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                 <div className="bg-primary h-full rounded-full" style={{ width: `${pct}%` }} />
               </div>,
             )}
-            {tile('In progress', going.length ? <span className="text-base">{going.map((s) => s.name).join(', ')}</span> : '—', going.length ? `since ${when(going[0].run!.startedAt!)}` : 'Nothing under way')}
-            {tile('Units planned', pcs(d.production.planned), `${d.production.orders.length} order ${d.production.orders.length === 1 ? 'line' : 'lines'}`)}
+            {tile('Where it is', d.overall.state === 'IN_PROGRESS' ? <span className="text-base">{d.overall.step}</span> : '—', d.overall.state === 'IN_PROGRESS' ? 'the first step not yet done' : describe(d.overall))}
+            {tile('Units planned', pcs(planned), `${d.production.orders.length} order ${d.production.orders.length === 1 ? 'line' : 'lines'}`)}
             {tile('Through the last step', lastLive ? pcs(lastLive.completed) : '—', lastLive ? `completed at ${lastLive.name}` : undefined)}
           </div>
 
@@ -278,15 +285,15 @@ export function StyleTracker({ styleId }: { styleId: string }) {
               <h2 className="text-foreground flex items-center gap-2 text-lg font-semibold">
                 <ListOrdered size={18} className="text-primary" /> Steps
               </h2>
-              <p className="text-muted-foreground text-xs">A step starts once the one before it has started. Units completed come from the production floor&apos;s records.</p>
+              <p className="text-muted-foreground text-xs">Where each step stands, and the units completed, come from the production floor&apos;s records for every order of this style.</p>
             </div>
 
             <ol>
               {d.steps.map((s, i) => {
-                const r = s.run
                 const st = STEP_STATE[s.state]
                 const busy = busyKey === s.key
                 const last = i === d.steps.length - 1
+                const share = planned ? Math.min(100, Math.round((s.completed / planned) * 100)) : 0
                 return (
                   <li key={s.key} className="flex gap-3">
                     {/* The rail: a numbered dot per step, joined by a line that fills as steps finish. */}
@@ -332,37 +339,20 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                         <span className={st.badge}>{st.label}</span>
                       </div>
 
-                      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-4">
-                        <div>
-                          <dt className="text-muted-foreground">Started</dt>
-                          <dd className="text-foreground">{r?.startedAt ? when(r.startedAt) : '—'}</dd>
-                          {r?.startedAt && r.startedBy && <dd className="text-muted-foreground">by {r.startedBy.name}</dd>}
-                        </div>
-                        <div>
-                          <dt className="text-muted-foreground">Stopped</dt>
-                          <dd className="text-foreground">{r?.stoppedAt ? when(r.stoppedAt) : '—'}</dd>
-                          {r?.stoppedAt && r.stoppedBy && <dd className="text-muted-foreground">by {r.stoppedBy.name}</dd>}
-                        </div>
-                        <div>
-                          <dt className="text-muted-foreground">{s.state === 'IN_PROGRESS' ? 'Running for' : 'Took'}</dt>
-                          <dd className="text-foreground">{r?.startedAt ? took(r.startedAt, r.stoppedAt ?? new Date()) : '—'}</dd>
-                        </div>
-                        <div>
-                          <dt className="text-muted-foreground">Units completed</dt>
-                          <dd className="text-foreground font-mono tabular-nums">
+                      <div className="mt-3 max-w-md text-xs">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-muted-foreground">Units completed</span>
+                          <span className="text-foreground font-mono tabular-nums">
                             {pcs(s.completed)}
-                            {d.production.planned > 0 && <span className="text-muted-foreground"> of {pcs(d.production.planned)}</span>}
-                          </dd>
+                            {planned > 0 && <span className="text-muted-foreground"> of {pcs(planned)}</span>}
+                          </span>
                         </div>
-                      </dl>
+                        <div className="bg-secondary mt-1 h-1.5 w-full overflow-hidden rounded-full" aria-hidden>
+                          <div className={cn('h-full rounded-full', s.state === 'DONE' ? 'bg-emerald-500' : 'bg-primary')} style={{ width: `${share}%` }} />
+                        </div>
+                        {s.state === 'SKIPPED' && <p className="text-muted-foreground mt-1">Left out on this style&apos;s orders.</p>}
+                      </div>
 
-                      {s.state === 'SKIPPED' && r?.skippedAt && (
-                        <p className="text-muted-foreground mt-2 text-xs">
-                          Left out {when(r.skippedAt)}
-                          {r.skippedBy ? ` by ${r.skippedBy.name}` : ''}
-                          {r.skipReason ? `: ${r.skipReason}` : ''}
-                        </p>
-                      )}
                       {s.instructions && (
                         <p className="text-muted-foreground mt-2 text-xs">
                           <span className="text-foreground font-medium">Instructions:</span> {s.instructions}
@@ -387,53 +377,36 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                             <button className="btn-ghost h-7 px-2.5 text-xs" onClick={() => setNoteFor(null)} disabled={busy}>
                               Cancel
                             </button>
+                            {busy && <Loader2 size={14} className="text-muted-foreground animate-spin" />}
                           </div>
                         </div>
                       ) : (
-                        r?.note && (
-                          <p className="text-foreground mt-2 flex items-start gap-1.5 text-xs">
-                            <MessageSquare size={12} className="text-muted-foreground mt-0.5 shrink-0" />
-                            <span>{r.note}</span>
-                          </p>
-                        )
+                        <div className="mt-2 flex flex-wrap items-start justify-between gap-2">
+                          {s.note ? (
+                            <p className="text-foreground flex min-w-0 items-start gap-1.5 text-xs">
+                              <MessageSquare size={12} className="text-muted-foreground mt-0.5 shrink-0" />
+                              <span>
+                                {s.note}
+                                {s.noteAt && <span className="text-muted-foreground"> — {when(s.noteAt)}</span>}
+                              </span>
+                            </p>
+                          ) : (
+                            <span />
+                          )}
+                          {canNote && (
+                            <button
+                              className="btn-ghost h-7 px-2.5 text-xs"
+                              onClick={() => {
+                                setNoteFor(s.key)
+                                setNoteText(s.note ?? '')
+                              }}
+                              disabled={busy}
+                            >
+                              <MessageSquare size={13} /> {s.note ? 'Edit note' : 'Add note'}
+                            </button>
+                          )}
+                        </div>
                       )}
-
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        {canRecord && s.state === 'NOT_STARTED' && (
-                          <button className="btn-primary h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none" onClick={() => void act(s, 'start')} disabled={busy || !!s.startBlockedBy}>
-                            <Play size={13} /> Start
-                          </button>
-                        )}
-                        {canRecord && s.state === 'IN_PROGRESS' && (
-                          <button className="btn-primary h-8 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none" onClick={() => void act(s, 'stop')} disabled={busy}>
-                            <Square size={13} /> Stop
-                          </button>
-                        )}
-                        {s.state === 'NOT_STARTED' && s.startBlockedBy && <span className="text-muted-foreground text-xs">Starts once {s.startBlockedBy} has started.</span>}
-                        {canRecord && s.state === 'NOT_STARTED' && s.skip !== 'NEVER' && (s.skip === 'OPTIONAL' || canApprove) && (
-                          <button className="btn-ghost h-8 px-2.5 text-xs" onClick={() => setAsk({ step: s, action: 'leave-out' })} disabled={busy}>
-                            <Ban size={13} /> Leave out
-                          </button>
-                        )}
-                        {canRecord && noteFor !== s.key && (
-                          <button
-                            className="btn-ghost h-8 px-2.5 text-xs"
-                            onClick={() => {
-                              setNoteFor(s.key)
-                              setNoteText(r?.note ?? '')
-                            }}
-                            disabled={busy}
-                          >
-                            <MessageSquare size={13} /> {r?.note ? 'Edit note' : 'Add note'}
-                          </button>
-                        )}
-                        {busy && <Loader2 size={14} className="text-muted-foreground animate-spin" />}
-                        {canUndo && r && (r.startedAt || r.skippedAt) && (
-                          <button className="btn-ghost text-muted-foreground ml-auto h-8 px-2.5 text-xs" onClick={() => setAsk({ step: s, action: 'undo' })} disabled={busy}>
-                            <Undo2 size={13} /> Undo {undoWhat(s)}
-                          </button>
-                        )}
-                      </div>
                     </div>
                   </li>
                 )
@@ -472,7 +445,10 @@ export function StyleTracker({ styleId }: { styleId: string }) {
                     <td className="font-mono text-xs">{o.moNumber}</td>
                     <td className="text-xs">{o.color}</td>
                     <td className="text-right font-mono text-xs tabular-nums">{pcs(o.planned)}</td>
-                    <td className="text-xs">{o.status.charAt(0) + o.status.slice(1).toLowerCase()}</td>
+                    <td className="text-xs">
+                      {o.status.charAt(0) + o.status.slice(1).toLowerCase()}
+                      {o.status === 'CLOSED' && <span className="text-muted-foreground"> — not counted</span>}
+                    </td>
                     <td className="text-xs">{o.staged ? 'Loaded' : <span className="text-muted-foreground">Not loaded yet</span>}</td>
                   </tr>
                 ))}
@@ -481,51 +457,6 @@ export function StyleTracker({ styleId }: { styleId: string }) {
           </div>
         )}
       </section>
-
-      {d.history.length > 0 && (
-        <section className="glass-card p-4 sm:p-5" aria-label="No longer on the routing">
-          <h2 className="text-foreground mb-2 flex items-center gap-2 text-lg font-semibold">
-            <History size={18} className="text-primary" /> No longer on the routing
-          </h2>
-          <p className="text-muted-foreground mb-3 text-xs">Steps that were started or left out before the routing changed. Kept for the record.</p>
-          <ul className="space-y-1.5 text-xs">
-            {d.history.map((h) => (
-              <li key={h.id} className="border-border rounded-lg border px-3 py-2">
-                <span className="text-foreground font-medium">{h.stepName}</span>
-                <span className="text-muted-foreground">
-                  {h.skippedAt ? ` — left out ${when(h.skippedAt)}` : ''}
-                  {h.startedAt ? ` — started ${when(h.startedAt)}` : ''}
-                  {h.stoppedAt ? `, stopped ${when(h.stoppedAt)}` : ''}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {ask && (
-        <ReasonDialog
-          title={
-            ask.action === 'leave-out'
-              ? `Leave ${ask.step.name} out for ${d.style.code}?`
-              : `Undo the ${undoWhat(ask.step)} of ${ask.step.name}?`
-          }
-          description={
-            ask.action === 'leave-out'
-              ? `${ask.step.name} will show as left out, and the step after it can start without it. ${ask.step.skip === 'WITH_APPROVAL' ? 'It is a required step, so this is recorded as a manager’s decision.' : ''}`
-              : ask.step.run?.skippedAt
-                ? `${ask.step.name} goes back on the route as not started.`
-                : ask.step.run?.stoppedAt
-                  ? `${ask.step.name} goes back to in progress; its stop time is cleared.`
-                  : `${ask.step.name} goes back to not started; its start time is cleared.`
-          }
-          confirmLabel={ask.action === 'leave-out' ? 'Leave it out' : 'Undo'}
-          danger={ask.action === 'undo'}
-          busy={busyKey === ask.step.key}
-          onConfirm={(reason) => void act(ask.step, ask.action, { reason })}
-          onCancel={() => setAsk(null)}
-        />
-      )}
 
       <RoutingFormDialog
         open={!!form}
