@@ -1163,6 +1163,8 @@ async function availableFor(
       SELECT "itemId", ownership::text AS "ownership", "ownerCustomerId", SUM("inQty" - "outQty")::float8 AS "qty"
       FROM ld_erp.stock_ledger
       WHERE "itemId" IN (${Prisma.join(itemIds)})
+        -- Goods a quality check rejected are held apart: never on offer to issue.
+        AND grade <> 'R'
       GROUP BY "itemId", ownership, "ownerCustomerId"`,
     prisma.$queryRaw<Array<{ itemId: string; mrLineId: string; qty: number }>>`
       SELECT "itemId", "mrLineId", qty::float8 AS "qty"
@@ -1317,6 +1319,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       FROM ld_erp.stock_ledger s
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
       WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND s.grade <> 'R'
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
@@ -2507,7 +2510,7 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
            xb.name AS "releasedBy", r."releasedAt", r."releaseReason",
            -- Our stock of the item in that store now, reserved or not.
            COALESCE((SELECT SUM(sl."inQty" - sl."outQty") FROM ld_erp.stock_ledger sl
-                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED'), 0)::float8 AS "onHand"
+                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED' AND sl.grade <> 'R'), 0)::float8 AS "onHand"
     FROM ld_erp.stock_reservations r
     JOIN ld_erp.items i ON i.id = r."itemId"
     LEFT JOIN ld_erp.uom u ON u.id = i."uomId"

@@ -5,7 +5,8 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { balanceOf, recordMovement } from '../services/stock.service'
-import { liveQcOf, readQc, type QcData, type QcLine } from '../services/grnQc.service'
+import { REJECTED_GRADE, heldOf, liveQcOf, readQc, type QcData, type QcLine } from '../services/grnQc.service'
+import { z } from 'zod'
 import { cancelQcSchema, createQcSchema } from '../schemas/grn-qc.schemas'
 import { REASON_RULES } from '../services/purchaseNote.service'
 import { returnReasonOptions } from '../lib/returnReasons'
@@ -32,6 +33,42 @@ const MODULE = 'purchase'
 const router = Router()
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000
+
+/**
+ * Goods moved between good (A) and rejected (R) in the store they are in:
+ * out of one grade, in to the other at the value they went out at — a hold,
+ * not a loss.
+ */
+async function regrade(
+  tx: Prisma.TransactionClient,
+  a: { itemId: string; warehouseId: string; qty: number; from: string; to: string; referenceType: string; referenceId: string; when: Date; notes: string },
+) {
+  const out = await recordMovement(tx, {
+    itemId: a.itemId,
+    warehouseId: a.warehouseId,
+    transactionType: 'TRANSFER',
+    direction: 'OUT',
+    qty: a.qty,
+    grade: a.from,
+    referenceType: a.referenceType,
+    referenceId: a.referenceId,
+    transactionDate: a.when,
+    notes: a.notes,
+  })
+  await recordMovement(tx, {
+    itemId: a.itemId,
+    warehouseId: a.warehouseId,
+    transactionType: 'TRANSFER',
+    direction: 'IN',
+    qty: a.qty,
+    unitRate: out.unitRate,
+    grade: a.to,
+    referenceType: a.referenceType,
+    referenceId: a.referenceId,
+    transactionDate: a.when,
+    notes: a.notes,
+  })
+}
 
 const grnSelect = {
   id: true,
@@ -92,6 +129,8 @@ async function shapeQc(
     remarks: row.remarks,
     createdAt: row.createdAt,
     rejectWarehouse,
+    // Rejects kept where they were received, held as rejected (not issuable).
+    hold: d?.hold ?? null,
     cancelled: d?.cancelled ?? null,
     lines: (d?.lines ?? []).map((l) => ({
       ...l,
@@ -267,7 +306,10 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
           ? 'FAIL'
           : 'CONDITIONAL_PASS'
 
-    const payload: QcData = { version: 1, rejectWarehouseId, lines }
+    // With no reject godown named, rejected goods stay where they are, held as
+    // rejected so they cannot be issued — until they go back or are used after all.
+    const hold = rejecting.length && !rejectWarehouseId ? ('SAME_STORE' as const) : null
+    const payload: QcData = { version: 1, rejectWarehouseId, hold, lines }
     const created = await tx.inwardQC.create({
       data: {
         grnId: grn.id,
@@ -307,7 +349,21 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       })
     }
 
-    return { created, grn, rejecting, rejectWarehouseId }
+    for (const l of hold ? rejecting : []) {
+      await regrade(tx, {
+        itemId: l.itemId,
+        warehouseId: l.warehouseId,
+        qty: l.rejectedQty,
+        from: 'A',
+        to: REJECTED_GRADE,
+        referenceType: 'GRN_QC',
+        referenceId: created.id,
+        when,
+        notes: `Rejected on QC of ${grn.grnNumber}${l.reason ? `: ${l.reason}` : ''}`,
+      })
+    }
+
+    return { created, grn, rejecting, rejectWarehouseId, hold }
   })
 
   await writeAuditLog(req, {
@@ -327,12 +383,15 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
       )?.name
     : null
 
+  const lineWord = `${qc.rejecting.length} line${qc.rejecting.length === 1 ? '' : 's'}`
   res.status(201).json({
     success: true,
     data: { id: qc.created.id, result: qc.created.result },
-    message: qc.rejecting.length
-      ? `QC recorded on ${qc.grn.grnNumber}. ${qc.rejecting.length} line${qc.rejecting.length === 1 ? '' : 's'} part or fully rejected — moved to ${where}. Send them back on a return challan from the bill.`
-      : `QC recorded on ${qc.grn.grnNumber} — everything passed.`,
+    message: !qc.rejecting.length
+      ? `QC recorded on ${qc.grn.grnNumber} — everything passed.`
+      : where
+        ? `QC recorded on ${qc.grn.grnNumber}. ${lineWord} part or fully rejected — moved to ${where}. Send them back on a return challan from the bill.`
+        : `QC recorded on ${qc.grn.grnNumber}. ${lineWord} part or fully rejected — held as rejected in the store, so they cannot be issued. Decide on them in Purchase → Rejected Goods: send them back, or use them after all.`,
   })
 })
 
@@ -360,6 +419,32 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     // some have already left the reject godown — on a return challan — the
     // move is refused by name, and that challan has to be cancelled first.
     const now = new Date()
+    if (d.hold === 'SAME_STORE') {
+      const touched = d.lines.find((l) => (l.usedQty ?? 0) > 0 || (l.returnedQty ?? 0) > 0)
+      if (touched) {
+        const sent = [...new Set((touched.events ?? []).filter((e) => e.kind === 'RETURNED').map((e) => e.refNumber).filter(Boolean))]
+        throw new AppError(
+          `Some of what this check rejected has already been ${(touched.returnedQty ?? 0) > 0 ? `sent back${sent.length ? ` on ${sent.join(', ')}` : ''}` : 'used after all'}, so the check stands.` +
+            ((touched.returnedQty ?? 0) > 0 ? ' Cancel that return challan first.' : ''),
+          409,
+          'QC_REJECTS_SETTLED',
+        )
+      }
+      for (const l of d.lines) {
+        if (!(l.rejectedQty > 0)) continue
+        await regrade(tx, {
+          itemId: l.itemId,
+          warehouseId: l.warehouseId,
+          qty: l.rejectedQty,
+          from: REJECTED_GRADE,
+          to: 'A',
+          referenceType: 'GRN_QC_CANCELLED',
+          referenceId: row.id,
+          when: now,
+          notes: `QC of ${row.grn.grnNumber} cancelled: ${reason}`,
+        })
+      }
+    }
     for (const l of d.lines) {
       if (!(l.rejectedQty > 0) || !d.rejectWarehouseId) continue
       const back = await recordMovement(tx, {
@@ -423,6 +508,145 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
     message: out.moved
       ? `QC of ${out.grnNumber} cancelled — its rejected goods are back where they were received.`
       : `QC of ${out.grnNumber} cancelled.`,
+  })
+})
+
+// ── Rejected goods ──────────────────────────────────────────────────────────
+
+/**
+ * Everything a quality check rejected, and what became of it: still held,
+ * used after all, or sent back to the supplier. `view=held` for only what is
+ * still waiting for a decision.
+ */
+router.get('/rejected', requirePermission(MODULE, 'view'), async (req, res) => {
+  const heldOnly = req.query.view !== 'all'
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : ''
+  const checks = await prisma.inwardQC.findMany({
+    where: { result: { in: ['CONDITIONAL_PASS', 'FAIL'] } },
+    orderBy: { inspectionDate: 'desc' },
+    take: 1000,
+    select: {
+      id: true,
+      inspectionDate: true,
+      inspectedBy: true,
+      checklistData: true,
+      grn: {
+        select: {
+          id: true,
+          grnNumber: true,
+          grnDate: true,
+          challanNo: true,
+          po: { select: { poNumber: true, supplier: { select: { id: true, name: true } } } },
+        },
+      },
+    },
+  })
+  type Row = { check: (typeof checks)[number]; d: QcData; l: QcLine }
+  const rows: Row[] = []
+  for (const check of checks) {
+    const d = readQc(check.checklistData)
+    if (!d || d.cancelled) continue
+    for (const l of d.lines) if (l.rejectedQty > 0) rows.push({ check, d, l })
+  }
+  const itemIds = [...new Set(rows.map((r) => r.l.itemId))]
+  const storeIds = [...new Set(rows.flatMap((r) => [r.l.warehouseId, r.d.rejectWarehouseId].filter((x): x is string => !!x)))]
+  const grnLineIds = rows.map((r) => r.l.grnLineId)
+  const [items, stores, billLines] = await Promise.all([
+    prisma.item.findMany({ where: { id: { in: itemIds } }, select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } }),
+    prisma.warehouse.findMany({ where: { id: { in: storeIds } }, select: { id: true, name: true } }),
+    prisma.purchaseInvoiceLine.findMany({
+      where: { grnLineId: { in: grnLineIds }, bill: { status: { not: 'CANCELLED' } } },
+      select: { grnLineId: true, bill: { select: { id: true, billNumber: true, supplierInvoiceNo: true } } },
+    }),
+  ])
+  const itemOf = new Map(items.map((i) => [i.id, i]))
+  const storeOf = new Map(stores.map((s) => [s.id, s.name]))
+  const billOf = new Map(billLines.map((b) => [b.grnLineId, b.bill]))
+  const shaped = rows
+    .map(({ check, d, l }) => {
+      const item = itemOf.get(l.itemId)
+      const held = d.hold === 'SAME_STORE' ? heldOf(l) : null
+      return {
+        qcId: check.id,
+        grnLineId: l.grnLineId,
+        checkedOn: check.inspectionDate,
+        checkedBy: check.inspectedBy,
+        grn: { id: check.grn.id, grnNumber: check.grn.grnNumber, grnDate: check.grn.grnDate, challanNo: check.grn.challanNo, poNumber: check.grn.po.poNumber },
+        supplier: check.grn.po.supplier,
+        item: { id: l.itemId, code: item?.code ?? '', name: item?.name ?? '', unit: item?.uom?.symbol ?? '' },
+        store: { id: l.warehouseId, name: storeOf.get(l.warehouseId) ?? '' },
+        // Where they are kept: held in the same store, or moved to a reject godown.
+        heldIn: d.hold === 'SAME_STORE' ? 'SAME_STORE' : d.rejectWarehouseId ? 'GODOWN' : 'NOTED',
+        godown: d.rejectWarehouseId ? (storeOf.get(d.rejectWarehouseId) ?? null) : null,
+        rejected: l.rejectedQty,
+        used: l.usedQty ?? 0,
+        returned: l.returnedQty ?? 0,
+        held,
+        reason: l.reasonName ?? l.reason ?? null,
+        note: l.reason ?? null,
+        bill: billOf.get(l.grnLineId) ?? null,
+        events: l.events ?? [],
+      }
+    })
+    .filter((r) => !heldOnly || (r.held ?? r.rejected) > 0.0005)
+    .filter((r) => !q || [r.grn.grnNumber, r.grn.challanNo, r.grn.poNumber, r.supplier.name, r.item.code, r.item.name, r.store.name, r.reason].some((v) => (v ?? '').toLowerCase().includes(q)))
+  const all = rows.filter(({ d, l }) => d.hold === 'SAME_STORE' && heldOf(l) > 0.0005)
+  res.json({
+    success: true,
+    data: shaped,
+    summary: { heldLines: all.length, heldReceipts: new Set(all.map((r) => r.check.grn.id)).size },
+  })
+})
+
+const useSchema = z.object({
+  grnLineId: z.string().min(1),
+  qty: z.number().positive('Say how much is used after all'),
+  reason: z.string().trim().min(5, 'Say why it can be used after all — at least a few words').max(500),
+})
+
+/**
+ * Rejected goods used after all — the shade is close enough for this order,
+ * the supplier agreed a rate cut — back into good stock where they are.
+ */
+router.post('/:id/use', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = useSchema.parse(req.body)
+  const out = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM ld_erp.inward_qc WHERE id = ${req.params.id} FOR UPDATE`
+    const row = await tx.inwardQC.findUnique({ where: { id: req.params.id }, include: { grn: { select: { grnNumber: true } } } })
+    if (!row) throw new AppError('That check does not exist', 404, 'NOT_FOUND')
+    const d = readQc(row.checklistData)
+    if (!d || d.cancelled) throw new AppError('That check is cancelled', 409, 'QC_CANCELLED')
+    if (d.hold !== 'SAME_STORE') {
+      throw new AppError('These rejected goods were moved to a reject godown. Move them back with a stock transfer.', 409, 'NOT_HELD')
+    }
+    const l = d.lines.find((x) => x.grnLineId === data.grnLineId)
+    if (!l || !(l.rejectedQty > 0)) throw new AppError('That line was not rejected on this check', 400, 'NOT_REJECTED')
+    const held = heldOf(l)
+    if (data.qty > held + 0.0005) throw new AppError(`Only ${held} is still held as rejected on this line.`, 400, 'MORE_THAN_HELD')
+    const qty = round3(data.qty)
+    const now = new Date()
+    await regrade(tx, {
+      itemId: l.itemId,
+      warehouseId: l.warehouseId,
+      qty,
+      from: REJECTED_GRADE,
+      to: 'A',
+      referenceType: 'GRN_QC_USED',
+      referenceId: row.id,
+      when: now,
+      notes: `Rejected on QC of ${row.grn.grnNumber}, used after all: ${data.reason}`,
+    })
+    l.usedQty = round3((l.usedQty ?? 0) + qty)
+    l.events = [...(l.events ?? []), { at: now.toISOString(), by: req.user?.name ?? '', kind: 'USED', qty, note: data.reason }]
+    await tx.inwardQC.update({ where: { id: row.id }, data: { checklistData: d as unknown as Prisma.InputJsonValue } })
+    const item = await tx.item.findUnique({ where: { id: l.itemId }, select: { name: true, uom: { select: { symbol: true } } } })
+    return { row, qty, item, left: heldOf(l) }
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'InwardQC', entityId: out.row.id, after: { used: out.qty, grnLineId: data.grnLineId, reason: data.reason } })
+  const unit = out.item?.uom?.symbol ?? ''
+  res.json({
+    success: true,
+    message: `${out.qty} ${unit} of ${out.item?.name ?? 'the item'} from ${out.row.grn.grnNumber} is back in good stock.${out.left > 0 ? ` ${out.left} ${unit} is still held as rejected.` : ''}`,
   })
 })
 

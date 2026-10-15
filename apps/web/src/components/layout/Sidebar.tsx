@@ -107,6 +107,9 @@ const navItems: NavItem[] = [
       { label: 'Purchase Enquiries', href: '/purchase/enquiries' },
       { label: 'Purchase Orders', href: '/purchase/orders' },
       { label: 'Goods Receipt (GRN)', href: '/purchase/grn' },
+      /* Right after the receipt: what its quality check rejected, held until it
+         goes back or is used after all. */
+      { label: 'Rejected Goods', href: '/purchase/rejected' },
       { label: 'Purchase Bills', href: '/purchase/bills' },
       /* After the bill, because a return is always raised against one — and
          before the notes, because the challan comes first and writes the

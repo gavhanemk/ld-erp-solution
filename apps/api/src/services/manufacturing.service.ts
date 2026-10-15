@@ -281,7 +281,8 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     itemIds.length
       ? db.stockLedger.groupBy({
           by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],
-          where: { itemId: { in: itemIds } },
+          // Goods a quality check rejected are held apart, not in stock to ask for.
+          where: { itemId: { in: itemIds }, grade: { not: 'R' } },
           _sum: { inQty: true, outQty: true },
         })
       : Promise.resolve([]),
