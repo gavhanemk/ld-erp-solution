@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { ChevronRight, Route, Search } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
-import { cn, formatDate } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { Pagination } from '@/components/tables/Pagination'
 import { useAppSettings } from '@/lib/appSettings'
 import { describe, STYLE_STATE, type StyleRow } from './track'
@@ -26,9 +26,9 @@ interface ListResponse {
 }
 
 /**
- * Every style, with the routing it follows and where it stands: a coloured
- * dot, the step under way or next, and how many steps are done. A row opens
- * the style's page, where each step is started and stopped.
+ * Every style, with the routing it follows and where it stands on the floor:
+ * a coloured dot, the first step not yet done, and how many steps are done.
+ * A row opens the style's page.
  */
 export function StyleTrackList({ reloadKey, onError }: { reloadKey: number; onError: (m: string | null) => void }) {
   const { rowsPerPage } = useAppSettings()
@@ -142,9 +142,9 @@ export function StyleTrackList({ reloadKey, onError }: { reloadKey: number; onEr
                       <Route size={12} className="shrink-0" aria-hidden />
                       {r.routing ? (
                         <>
-                          <span className="font-mono">{r.routing.code}</span>
+                          <span className="text-foreground/80">{r.routing.name}</span>
                           <span>
-                            v{r.routing.version} · {r.routing.steps} {r.routing.steps === 1 ? 'step' : 'steps'}
+                            {r.routing.fabric ? `· ${r.routing.fabric} ` : ''}· v{r.routing.version} · {r.routing.steps} {r.routing.steps === 1 ? 'step' : 'steps'}
                             {r.routing.applies === 'CATEGORY' ? ' · shared by its category' : r.routing.applies === 'ANY' ? ' · shared by any style' : ''}
                           </span>
                         </>
@@ -176,7 +176,6 @@ export function StyleTrackList({ reloadKey, onError }: { reloadKey: number; onEr
                     ) : (
                       <p className="text-muted-foreground text-right text-xs">—</p>
                     )}
-                    {r.lastTouched && <p className="text-muted-foreground mt-0.5 text-right text-[11px]">{formatDate(r.lastTouched)}</p>}
                   </div>
 
                   {/* On a phone the state goes under the name instead of in its own column. */}

@@ -336,6 +336,8 @@ model User {
   styleStepsStarted    StyleStepRun[]              @relation("StyleStepStartedBy")
   styleStepsStopped    StyleStepRun[]              @relation("StyleStepStoppedBy")
   styleStepsSkipped    StyleStepRun[]              @relation("StyleStepSkippedBy")
+  routingsCreated      Routing[]                   @relation("RoutingCreatedBy")
+  routingsUpdated      Routing[]                   @relation("RoutingUpdatedBy")
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
@@ -786,6 +788,7 @@ model Item {
   quoteLines          SalesQuotationLine[]       @relation("QuoteLineItem")
   packages StockPackage[] @relation("ItemPackages")
   garments Garment[] @relation("GarmentItem")
+  routings Routing[] @relation("RoutingFabric")
 }
 
 model Style {
@@ -4245,23 +4248,37 @@ model Workstation {
 /// particular one that fits, and keeps a copy of its steps (MOStep), so
 /// editing a routing later never changes an order already on the floor.
 model Routing {
-  id        String   @id @default(cuid())
-  code      String   @unique
-  name      String
-  styleId   String?
-  style     Style?   @relation(fields: [styleId], references: [id], onDelete: Restrict)
+  id           String   @id @default(cuid())
+  /// Made by the system from the style (RT-<style code>) and no longer typed:
+  /// orders, BOMs and messages still name a routing by it.
+  code         String   @unique
+  name         String
+  styleId      String?
+  style        Style?   @relation(fields: [styleId], references: [id], onDelete: Restrict)
   /// A style category (Style.category) this routing serves, when it is not
   /// for one style.
-  category  String?
+  category     String?
+  /// The cloth the garment is cut from: one of the fabric items in stock
+  /// (an item filed under a "Fabric" category). Optional — a routing shared
+  /// by a category or by any style has no one fabric.
+  fabricItemId String?
+  fabric       Item?    @relation("RoutingFabric", fields: [fabricItemId], references: [id], onDelete: SetNull)
   /// Goes up by one each time the steps change, so an order can say which
   /// version of the routing it was given.
-  version   Int      @default(1)
+  version      Int      @default(1)
   /// Locked routings cannot be edited while orders are running against them.
-  isLocked  Boolean  @default(false)
-  isActive  Boolean  @default(true)
-  notes     String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isLocked     Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  notes        String?
+  createdAt    DateTime @default(now())
+  /// Who made it, and who changed it last — shown beside updatedAt. Any save
+  /// counts: the steps, the name, locking, stopping or starting its use.
+  /// Empty on routings made before 15 Oct 2026 that nobody has changed since.
+  createdById  String?
+  createdBy    User?    @relation("RoutingCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedAt    DateTime @updatedAt
+  updatedById  String?
+  updatedBy    User?    @relation("RoutingUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
 
   steps    RoutingStep[]
   boms     BOM[]
@@ -4269,6 +4286,7 @@ model Routing {
   stepRuns StyleStepRun[]
 
   @@index([styleId])
+  @@index([fabricItemId])
   @@map("routings")
 }
 
@@ -4297,9 +4315,13 @@ model RoutingStep {
   @@map("routing_steps")
 }
 
-/// When one style's work at one step of its routing started and stopped, as
-/// pressed by hand on the style's page under Masters → Routings. Separate from
-/// the floor's own counts, which come from the piece ledger and are never typed.
+/// A note on one step of one style's routing, written on the style's page
+/// under Masters → Routings.
+///
+/// It also held a Start and a Stop pressed by hand, and steps left out, until
+/// 15 Oct 2026, when the business took the timer off the page: the floor's own
+/// records say where a style stands. The times and who pressed them stay on
+/// the rows already written, for the record; nothing writes them now.
 ///
 /// Kept by process, not by routing step: a routing's steps are written afresh
 /// on every save, so a link to a step would be lost on the next edit, while

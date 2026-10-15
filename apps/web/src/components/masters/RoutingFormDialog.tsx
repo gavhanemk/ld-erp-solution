@@ -8,14 +8,17 @@ import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
+import { changed } from './routing/track'
 
 /**
  * A routing: the ordered path a garment takes through the factory.
  *
  * For one style, for every style of a category (all formal shirts), or for
- * any style. Each step is a process done by its department — on our floor or
- * at an outside unit — and says who may leave it out, and whether it is a
- * check.
+ * any style, and cut from one fabric — picked from the fabric items in stock,
+ * with how much is on hand beside each. Nobody types a code; the system makes
+ * one from the style. Each step is a process done by its department — on our
+ * floor or at an outside unit — and says who may leave it out, and whether it
+ * is a check.
  *
  * Laid out as one short row per step — the process, where it is done, the
  * unit and the rate, which are what a person scans for — with the rest of the
@@ -49,20 +52,50 @@ export interface RoutingStep {
   workstation?: { id: string; name: string; type: string } | null
 }
 
+type Person = { id: string; name: string } | null
+
 export interface Routing {
   id: string
+  /** Made by the system from the style; no longer typed or shown here. */
   code: string
   name: string
   styleId: string | null
   category: string | null
+  fabricItemId?: string | null
+  fabric?: { id: string; code: string; name: string; uom?: { symbol: string } | null } | null
   version: number
   isLocked: boolean
   isActive: boolean
   notes: string | null
+  createdAt?: string
+  updatedAt?: string
+  createdBy?: Person
+  updatedBy?: Person
   style?: { id: string; code: string; name: string } | null
   steps?: RoutingStep[]
-  _count?: { mos: number }
+  _count?: { mos: number; boms?: number }
 }
+
+/** A fabric item with stock records, as GET /masters/routings/fabrics lists it. */
+interface Fabric {
+  id: string
+  code: string
+  name: string
+  uom: string
+  onHand: number
+  customers: number
+  /** Not among the fabrics with stock any more, but this routing has it. */
+  missing?: boolean
+}
+
+const qty = (n: number, uom: string) => `${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })} ${uom}`
+/** What the fabric picker says under a fabric's name: how much is in the godown. */
+const stockLine = (f: Fabric) =>
+  f.missing
+    ? 'Not in the stock records now'
+    : f.onHand + f.customers <= 0
+      ? 'None in stock now'
+      : [f.onHand > 0 ? `${qty(f.onHand, f.uom)} in stock` : null, f.customers > 0 ? `${qty(f.customers, f.uom)} customers'` : null].filter(Boolean).join(' · ')
 
 interface Operation {
   id: string
@@ -158,8 +191,9 @@ export function RoutingFormDialog({
   const [ops, setOps] = useState<Operation[]>([])
   const [units, setUnits] = useState<Unit[]>([])
   const [styles, setStyles] = useState<StyleOption[]>([])
-  const [code, setCode] = useState('')
+  const [fabrics, setFabrics] = useState<Fabric[]>([])
   const [name, setName] = useState('')
+  const [fabricItemId, setFabricItemId] = useState('')
   const [applies, setApplies] = useState<Applies>('STYLE')
   const [styleId, setStyleId] = useState('')
   const [category, setCategory] = useState('')
@@ -178,8 +212,8 @@ export function RoutingFormDialog({
   useEffect(() => {
     if (!open) return
     const from = record ?? preset?.from ?? null
-    setCode(record?.code ?? '')
     setName(record?.name ?? (preset?.from ? preset.from.name : ''))
+    setFabricItemId(from?.fabricItemId ?? '')
     setApplies(record ? (record.styleId ? 'STYLE' : record.category ? 'CATEGORY' : 'ANY') : 'STYLE')
     setStyleId(record?.styleId ?? preset?.styleId ?? '')
     setCategory(record?.category ?? '')
@@ -198,14 +232,16 @@ export function RoutingFormDialog({
       masterResource<Operation>('operations').list({ limit: 300, active: true, sort: 'sortOrder', order: 'asc' }),
       masterResource<Unit>('workstations').list({ limit: 300, active: true }),
       masterResource<StyleOption>('styles').list({ limit: 500, active: true }),
+      api.get<{ data: Fabric[] }>('/masters/routings/fabrics'),
     ])
-      .then(([o, w, s]) => {
+      .then(([o, w, s, f]) => {
         if (!alive) return
         setOps((o as Paginated<Operation>).data)
         setUnits((w as Paginated<Unit>).data)
         setStyles((s as Paginated<StyleOption>).data)
+        setFabrics(f.data)
       })
-      .catch(() => alive && setError('Could not load the processes and units. Is the API running?'))
+      .catch(() => alive && setError('Could not load the processes, units and fabrics. Is the API running?'))
     return () => {
       alive = false
     }
@@ -235,6 +271,13 @@ export function RoutingFormDialog({
     return map
   }, [ops, record, preset])
   const processOptions = useMemo(() => [...opById.values()], [opById])
+  // The fabrics with stock records — and the routing's own, the same way as
+  // its processes, if it has since dropped off that list.
+  const fabricOptions = useMemo(() => {
+    const own = (record ?? preset?.from)?.fabric
+    if (!own || fabrics.some((f) => f.id === own.id)) return fabrics
+    return [...fabrics, { id: own.id, code: own.code, name: own.name, uom: own.uom?.symbol ?? '', onHand: 0, customers: 0, missing: true }]
+  }, [fabrics, record, preset])
   const categories = useMemo(() => [...new Set(styles.map((s) => s.category?.trim()).filter(Boolean) as string[])].sort(), [styles])
 
   if (!open) return null
@@ -292,32 +335,31 @@ export function RoutingFormDialog({
   }
 
   const kinds = rows.map((r) => opById.get(r.operationId)?.kind)
-  const blocker = !code.trim()
-    ? 'Give it a code.'
-    : !name.trim()
-      ? 'Give it a name.'
-      : applies === 'STYLE' && !styleId
-        ? 'Pick the style it is for.'
-        : applies === 'CATEGORY' && !category.trim()
-          ? 'Say which category of styles it is for.'
-          : rows.some((r) => !r.operationId)
-            ? 'Pick a process on every step.'
-            : kinds[0] !== 'CUTTING'
-              ? 'Start with cutting: that is where the pieces are made.'
-              : kinds.filter((k) => k === 'CUTTING').length > 1
-                ? 'Cut once: only one cutting step.'
-                : null
+  const blocker = !name.trim()
+    ? 'Give it a name.'
+    : applies === 'STYLE' && !styleId
+      ? 'Pick the style it is for.'
+      : applies === 'CATEGORY' && !category.trim()
+        ? 'Say which category of styles it is for.'
+        : rows.some((r) => !r.operationId)
+          ? 'Pick a process on every step.'
+          : kinds[0] !== 'CUTTING'
+            ? 'Start with cutting: that is where the pieces are made.'
+            : kinds.filter((k) => k === 'CUTTING').length > 1
+              ? 'Cut once: only one cutting step.'
+              : null
   const noCheck = rows.length > 0 && !rows.some((r, i) => r.isQcStep || kinds[i] === 'QC')
 
   const save = async () => {
     if (blocker) return
     setSaving(true)
     setError(null)
+    // No code: the API makes one from the style.
     const payload = {
-      code: code.trim(),
       name: name.trim(),
       styleId: applies === 'STYLE' ? styleId : null,
       category: applies === 'CATEGORY' ? category.trim() : null,
+      fabricItemId: fabricItemId || null,
       notes: notes.trim() || null,
       isActive,
       steps: rows.map((r, i) => ({
@@ -357,10 +399,16 @@ export function RoutingFormDialog({
   return (
     <FormFrame
       icon={Route}
-      title={isEdit ? `Edit ${record?.code}` : 'New routing'}
+      title={isEdit ? `Edit ${record?.name}` : 'New routing'}
       subtitle={
-        isEdit
-          ? `Version ${record?.version}${record?._count?.mos ? ` · ${record._count.mos} ${record._count.mos === 1 ? 'order has' : 'orders have'} a copy of its steps, which a change here does not touch` : ''}`
+        isEdit && record
+          ? [
+              `Version ${record.version}`,
+              changed(record),
+              record._count?.mos ? `${record._count.mos} ${record._count.mos === 1 ? 'order has' : 'orders have'} a copy of its steps, which a change here does not touch` : null,
+            ]
+              .filter(Boolean)
+              .join(' · ')
           : preset?.from
             ? `Starting from the steps of ${preset.from.code}. Change what this style does differently.`
             : 'The steps a garment goes through, in order. Orders take a copy when they are planned.'
@@ -389,13 +437,20 @@ export function RoutingFormDialog({
 
       <Section icon={Route} title="Routing">
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-6">
-          <label className="block lg:col-span-1">
-            <span className="form-label">Code</span>
-            <input className="form-input font-mono" value={code} placeholder="RT-SH-WASH" onChange={(e) => setCode(e.target.value.toUpperCase())} />
-          </label>
-          <label className="block lg:col-span-3">
+          <label className="block lg:col-span-2">
             <span className="form-label">Name</span>
             <input className="form-input" value={name} placeholder="Shirt with washing" onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="block lg:col-span-2">
+            <span className="form-label">Fabric</span>
+            <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)} aria-label="Fabric">
+              <option value="">{fabricOptions.length ? 'Select…' : 'No fabric in stock records'}</option>
+              {fabricOptions.map((f) => (
+                <option key={f.id} value={f.id} data-sub={stockLine(f)}>
+                  {f.name}
+                </option>
+              ))}
+            </SmartSelect>
           </label>
           <div className="sm:col-span-2 lg:col-span-2">
             <span className="form-label">For</span>

@@ -88,7 +88,7 @@ were rejected. Do not collapse screens or merge steps without asking.
 | Screen | Path | What it is |
 |---|---|---|
 | Manufacturing Orders | `/production/orders` | The MO. Its **Production** section shows the three steps in order — materials issued, stages loaded, process forms by job card — and opens any sheet |
-| Routings | `/masters/routings` | Opens on the **Styles** tab: each style, the routing it follows, and where it stands. A style's page (`/masters/routings/style/[id]`) has a **Start** and **Stop** for each step and the units completed there. **All routings** is the second tab. Process Master is under Masters |
+| Routings | `/masters/routings` | Opens on the **Styles** tab: each style, the routing it follows, and where it stands. A style's page (`/masters/routings/style/[id]`) shows each step's state and units completed, both from the floor (no Start/Stop since 15 Oct). **All routings** is the second tab: make, edit, lock, stop using or delete a routing, with its fabric and who changed it last. Process Master is under Masters |
 | Job Cards | `/production/job-cards` | One per colour: header (order no., project ID, fabric quality, design no., metres, average, ratio, lot) and its forms |
 | Process Transfers | `/production/transfers` | Tabs: to count in · short · at outside units · received · all. Count in, settle, print, cancel |
 | Production Stages | `/production/stages` | **Every stage on one screen**, a tab each (cutting first, then process-master order) with the work waiting there; a row opens the job card's sheet |
@@ -119,7 +119,8 @@ card, or the job-work challan), `/print/bundles` (stickers, Code 128 drawn by
 | `services/jobCard.service.ts` | `ensureJobCards`, the job card lists, `stageSheets` / `stageTabs`, `jobCardDetail` (everything a sheet shows) |
 | `services/floorView.service.ts` | `flowSummary` — the route, figures, bundles, transfers and job work of an MO, or of one job card |
 | `routes/productionFloor.routes.ts` | The floor's endpoints, mounted under `/api/production` |
-| `services/styleTrack.service.ts` | Routings by style: which routing a style follows, each step's Start / Stop / left out (`style_step_runs`, pressed by hand), and units completed per step, read from `stepFigures` over the style's order lines. **Separate from the ledger**: it never writes `wip_*`, and nothing on the floor reads it |
+| `services/styleTrack.service.ts` | Routings by style: which routing a style follows, and each step's state and units completed, read from `stepFigures` over the style's order lines (closed orders left out). Writes only a step's note (`style_step_runs`); never `wip_*` |
+| `services/routing.service.ts` | The routing master: `createRouting` / `updateRouting` / `deleteRouting` (code made from the style; who made and changed it; delete refused while an order or BOM uses it), and `fabricStock` — the fabric items with stock, for the form |
 | `routes/styleTracking.routes.ts` | Its endpoints, mounted at `/api/masters/style-tracking` |
 | `routes/production.routes.ts` | MOs, requisitions, the older cutting endpoints. `release()` makes the job cards |
 
@@ -283,12 +284,14 @@ Run both after any change to `wip.service.ts`, `floor.service.ts`,
 `cutting.service.ts` or `jobCard.service.ts`. They are the fastest way to know
 nothing appears, vanishes or gets counted twice.
 
-A third covers the per-style Start / Stop under Masters → Routings — its rules,
-and that its units completed match `stepFigures`. Run it after any change to
-`styleTrack.service.ts` or to `stepFigures`:
+Two more cover Masters → Routings: the style's page — that each step's state
+and units completed are the floor's own (`stepFigures`) — and the routing
+master itself. Run them after any change to `styleTrack.service.ts`,
+`routing.service.ts` or `stepFigures`:
 
 ```bash
-npx tsx ../../tools/check-style-tracking.ts     # 26 checks — start order, undo, leaving out, units
+npx tsx ../../tools/check-style-tracking.ts     # 17 checks — states and units from the floor, notes, list
+npx tsx ../../tools/check-routing-master.ts     # 27 checks — code, fabric, who changed it, delete
 ```
 
 The demo data: **MO-2627-0001** was taken from quotation to finished goods with

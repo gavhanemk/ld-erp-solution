@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z, ZodError } from 'zod'
 import { prisma } from '@ld-erp/database'
 import { crudRouter, type DeleteUse } from '../lib/crud'
-import { checkRouteSteps } from '../services/route.service'
+import { createRouting, deleteRouting, fabricStock, routingInclude, updateRouting } from '../services/routing.service'
 import { buildTemplate, planImport, readSheet, runImport } from '../services/itemImport.service'
 import * as categoryImport from '../services/categoryImport.service'
 import * as styleImport from '../services/styleImport.service'
@@ -64,7 +64,6 @@ import {
   updateBankAccountSchema,
   updateWarehouseSchema,
   updateWorkstationSchema,
-  routingStepSchema,
   gstin,
   stateCode,
 } from '../schemas/master.schemas'
@@ -1097,10 +1096,10 @@ router.use(
     // Where each process is used, so nobody switches off one a routing needs.
     include: { department: true, _count: { select: { routingSteps: true, moSteps: true } } },
     beforeDeactivate: async (before) => {
-      const used = await prisma.routing.findMany({ where: { isActive: true, steps: { some: { operationId: before.id } } }, select: { code: true }, orderBy: { code: 'asc' } })
+      const used = await prisma.routing.findMany({ where: { isActive: true, steps: { some: { operationId: before.id } } }, select: { name: true }, orderBy: { name: 'asc' } })
       if (used.length) {
         throw new AppError(
-          `${before.name} is a stage in ${used.length === 1 ? 'routing' : 'routings'} ${used.map((r) => r.code).join(', ')}. Take it out of ${used.length === 1 ? 'that routing' : 'those routings'} in Production → Routings first, then switch it off.`,
+          `${before.name} is a stage in ${used.length === 1 ? 'routing' : 'routings'} ${used.map((r) => `"${r.name}"`).join(', ')}. Take it out of ${used.length === 1 ? 'that routing' : 'those routings'} in Masters → Routings first, then switch it off.`,
           409,
           'IN_USE',
         )
@@ -2029,19 +2028,6 @@ router.use(
 // Routings — header plus ordered steps, so they need their own handlers
 // ─────────────────────────────────────────────────────────────
 
-const routingInclude = {
-  style: { select: { id: true, code: true, name: true } },
-  steps: {
-    orderBy: { sequence: 'asc' as const },
-    include: {
-      operation: { select: { id: true, name: true, code: true, kind: true } },
-      department: { select: { id: true, name: true } },
-      workstation: { select: { id: true, name: true, type: true } },
-    },
-  },
-  _count: { select: { mos: true } },
-}
-
 router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 25))
@@ -2064,6 +2050,7 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
         { category: { contains: q, mode: 'insensitive' } },
         { style: { name: { contains: q, mode: 'insensitive' } } },
         { style: { code: { contains: q, mode: 'insensitive' } } },
+        { fabric: { name: { contains: q, mode: 'insensitive' } } },
       ],
     })
   }
@@ -2087,218 +2074,67 @@ router.get('/routings', requirePermission(MODULE, 'view'), async (req, res) => {
   })
 })
 
+/** The fabrics a routing can be cut from: fabric items with stock records, and what is on hand. */
+router.get('/routings/fabrics', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await fabricStock(prisma) })
+})
+
 router.get('/routings/:id', requirePermission(MODULE, 'view'), async (req, res) => {
   const row = await prisma.routing.findUnique({ where: { id: req.params.id }, include: routingInclude })
   if (!row) throw new AppError('Routing not found', 404, 'NOT_FOUND')
   res.json({ success: true, data: row })
 })
 
-/** A step as saved: what the database takes. */
-const stepRow = (s: z.infer<typeof routingStepSchema>) => ({
-  sequence: s.sequence,
-  operationId: s.operationId,
-  departmentId: s.departmentId,
-  workstationId: s.workstationId ?? null,
-  smv: s.smv ?? null,
-  ratePerPiece: s.ratePerPiece ?? null,
-  isQcStep: s.isQcStep,
-  execution: s.execution,
-  skip: s.skip,
-  instructions: s.instructions?.trim() || null,
-})
-
-/** The steps as a comparable string, so a save that changes nothing keeps the version. */
-const stepsSignature = (steps: Array<ReturnType<typeof stepRow>>) =>
-  JSON.stringify(
-    [...steps]
-      .sort((a, b) => a.sequence - b.sequence)
-      .map((s) => [s.operationId, s.departmentId, s.workstationId, s.smv == null ? null : Number(s.smv), s.ratePerPiece == null ? null : Number(s.ratePerPiece), s.isQcStep, s.execution, s.skip, s.instructions]),
-  )
+const ROUTING_TX = { timeout: 20_000, maxWait: 10_000 }
 
 router.post('/routings', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createRoutingSchema.parse(req.body)
-  await assertRoutingRefsExist(data.steps, data.styleId || null)
-  const warnings = await checkRouteSteps(prisma, [...data.steps].sort((a, b) => a.sequence - b.sequence))
-
-  const created = await prisma.routing.create({
-    data: {
-      code: data.code,
-      name: data.name,
-      styleId: data.styleId || null,
-      category: data.styleId ? null : data.category?.trim() || null,
-      notes: data.notes ?? null,
-      isActive: data.isActive ?? true,
-      steps: { create: data.steps.map(stepRow) },
-    },
-    include: routingInclude,
-  })
+  const { routing, message } = await prisma.$transaction((tx) => createRouting(tx, data, req.user!.id), ROUTING_TX)
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'CREATE',
     entityType: 'Routing',
-    entityId: created.id,
-    after: created,
+    entityId: routing.id,
+    after: routing,
   })
 
-  res.status(201).json({ success: true, message: [`${created.code} saved.`, ...warnings].join(' '), data: created })
+  res.status(201).json({ success: true, message, data: routing })
 })
 
 router.patch('/routings/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = updateRoutingSchema.parse(req.body)
-
-  const before = await prisma.routing.findUnique({ where: { id: req.params.id }, include: routingInclude })
-  if (!before) throw new AppError('Routing not found', 404, 'NOT_FOUND')
-
-  // A locked routing has orders running against it; changing the steps midway
-  // would silently rewrite how work already in progress is supposed to flow.
-  if (before.isLocked && data.steps) {
-    throw new AppError(
-      'This routing is locked because orders are running against it. Unlock it first.',
-      400,
-      'ROUTING_LOCKED',
-    )
-  }
-
-  // Style or category: setting one clears the other.
-  const styleId = data.styleId !== undefined ? data.styleId || null : data.category?.trim() ? null : before.styleId
-  const category = styleId ? null : data.category !== undefined ? data.category?.trim() || null : before.category
-  let warnings: string[] = []
-  if (data.steps) {
-    await assertRoutingRefsExist(data.steps, styleId)
-    warnings = await checkRouteSteps(prisma, [...data.steps].sort((a, b) => a.sequence - b.sequence))
-  } else if (styleId && styleId !== before.styleId) {
-    await assertRoutingRefsExist([], styleId)
-  }
-  // Orders keep the steps they were given; a new version is what new orders get.
-  const changed = !!data.steps && stepsSignature(data.steps.map(stepRow)) !== stepsSignature(before.steps.map((s) => ({ ...s, smv: s.smv == null ? null : Number(s.smv), ratePerPiece: s.ratePerPiece == null ? null : Number(s.ratePerPiece) })))
-
-  const after = await prisma.$transaction(async (tx) => {
-    if (data.steps) {
-      await tx.routingStep.deleteMany({ where: { routingId: before.id } })
-      await tx.routingStep.createMany({ data: data.steps.map((s) => ({ ...stepRow(s), routingId: before.id })) })
-    }
-    return tx.routing.update({
-      where: { id: before.id },
-      data: {
-        ...(data.code ? { code: data.code } : {}),
-        ...(data.name ? { name: data.name } : {}),
-        styleId,
-        category,
-        ...(changed ? { version: { increment: 1 } } : {}),
-        ...(data.notes !== undefined ? { notes: data.notes ?? null } : {}),
-        ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
-        ...(data.isLocked !== undefined ? { isLocked: data.isLocked } : {}),
-      },
-      include: routingInclude,
-    })
-  })
+  const { before, routing, message } = await prisma.$transaction((tx) => updateRouting(tx, req.params.id, data, req.user!.id), ROUTING_TX)
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'UPDATE',
     entityType: 'Routing',
-    entityId: after.id,
+    entityId: routing.id,
     before,
-    after,
+    after: routing,
   })
 
-  const message = changed
-    ? `${after.code} is now version ${after.version}. Orders already planned keep the steps they were given.`
-    : `${after.code} saved.`
-  res.json({ success: true, message: [message, ...warnings].join(' '), data: after })
+  res.json({ success: true, message, data: routing })
 })
 
+/**
+ * Deletes a routing for good, when no order or BOM uses it. One that is used
+ * is stopped instead (PATCH isActive: false), which the list offers beside it.
+ */
 router.delete('/routings/:id', requirePermission(MODULE, 'delete'), async (req: AuthRequest, res) => {
-  const before = await prisma.routing.findUnique({ where: { id: req.params.id } })
-  if (!before) throw new AppError('Routing not found', 404, 'NOT_FOUND')
-
-  const after = await prisma.routing.update({ where: { id: before.id }, data: { isActive: false } })
+  const { before, message } = await prisma.$transaction((tx) => deleteRouting(tx, req.params.id), ROUTING_TX)
 
   await writeAuditLog(req, {
     module: MODULE,
     action: 'DELETE',
     entityType: 'Routing',
-    entityId: after.id,
+    entityId: before.id,
     before,
-    after,
   })
 
-  res.json({ success: true, message: `Routing "${before.name}" is no longer offered.` })
+  res.json({ success: true, message })
 })
-
-/**
- * Prisma would reject a bad id with a foreign-key error that means nothing to
- * the person filling in the form, so the references are checked up front.
- */
-async function assertRoutingRefsExist(
-  steps: Array<{ operationId: string; departmentId: string; workstationId?: string | null }>,
-  styleId: string | null,
-): Promise<void> {
-  if (styleId) {
-    const style = await prisma.style.findUnique({ where: { id: styleId }, select: { id: true } })
-    if (!style) throw new AppError('That style no longer exists', 400, 'INVALID_STYLE')
-  }
-
-  const operationIds = [...new Set(steps.map((s) => s.operationId))]
-  const departmentIds = [...new Set(steps.map((s) => s.departmentId))]
-  const workstationIds = [...new Set(steps.map((s) => s.workstationId).filter(Boolean))] as string[]
-
-  const [operations, departments, workstations] = await Promise.all([
-    prisma.operation.findMany({
-      where: { id: { in: operationIds } },
-      select: { id: true, name: true, departmentId: true },
-    }),
-    prisma.department.findMany({ where: { id: { in: departmentIds } }, select: { id: true, name: true } }),
-    workstationIds.length
-      ? prisma.workstation.findMany({
-          where: { id: { in: workstationIds } },
-          select: { id: true, name: true, departmentId: true },
-        })
-      : Promise.resolve([]),
-  ])
-
-  if (operations.length !== operationIds.length) {
-    throw new AppError('One of the operations no longer exists', 400, 'INVALID_OPERATION')
-  }
-  if (departments.length !== departmentIds.length) {
-    throw new AppError('One of the departments no longer exists', 400, 'INVALID_DEPARTMENT')
-  }
-  if (workstations.length !== workstationIds.length) {
-    throw new AppError('One of the workstations no longer exists', 400, 'INVALID_WORKSTATION')
-  }
-
-  // A step is done by one department, with that department's operation on
-  // that department's machine. A cutting operation booked to Accounts, on a
-  // stitching workstation, used to save, and the floor's piece-rates and
-  // loading were then worked out against the wrong department.
-  // Names for every department involved, the operations' and workstations'
-  // own as well as the steps', so a message can say which one it should be.
-  const involved = [...new Set([...operations.map((o) => o.departmentId), ...workstations.map((w) => w.departmentId)])]
-  const named = await prisma.department.findMany({ where: { id: { in: involved } }, select: { id: true, name: true } })
-  const deptName = new Map([...departments, ...named].map((d) => [d.id, d.name]))
-  const op = new Map(operations.map((o) => [o.id, o]))
-  const ws = new Map(workstations.map((w) => [w.id, w]))
-  steps.forEach((step, i) => {
-    const here = deptName.get(step.departmentId) ?? 'this department'
-    const o = op.get(step.operationId)!
-    if (o.departmentId !== step.departmentId) {
-      throw new AppError(
-        `Step ${i + 1}: ${o.name} is a ${deptName.get(o.departmentId) ?? 'different department'} operation, not ${here}. Pick the department it belongs to, or another operation.`,
-        400,
-        'STEP_DEPARTMENT_MISMATCH',
-      )
-    }
-    const w = step.workstationId ? ws.get(step.workstationId) : undefined
-    if (w && w.departmentId !== step.departmentId) {
-      throw new AppError(
-        `Step ${i + 1}: ${w.name} is not a ${here} workstation. Pick one of ${here}'s, or leave it empty.`,
-        400,
-        'STEP_WORKSTATION_MISMATCH',
-      )
-    }
-  })
-}
 
 // ─────────────────────────────────────────────────────────────
 // Company — single record, so it gets read + update only
