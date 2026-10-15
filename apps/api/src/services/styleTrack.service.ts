@@ -1,40 +1,43 @@
-import type { Prisma, PrismaClient, StyleStepRun } from '@prisma/client'
+import type { Prisma, PrismaClient } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { stepFigures } from './floor.service'
 
 /**
- * A style's progress through its routing, as the floor reports it by hand: a
- * Start and a Stop for each step, pressed on the style's page under Masters →
- * Routings. Separate from the piece ledger (wip.service), which counts pieces
- * and is never typed; the units completed shown beside each step are read from
- * that ledger here, never stored.
+ * A style's progress through its routing, for Masters → Routings: every step
+ * of the routing it follows, with where the work stands there and the pieces
+ * completed — both read from the floor's own ledger (wip.service), across
+ * every order line of the style, and never typed here.
  *
- * Rules, settled with the business on 12 Oct:
- * - A step starts once the step before it has started — steps overlap on the
- *   floor, so stitching can start while cutting is still going.
- * - One start and one stop per step.
- * - A step can be left out before it starts, under the routing's own rule for
- *   that step (anyone / a production manager / never).
- * - Undo is for production:edit, with a reason, and only in order: the last
- *   thing done to a step, and never a start a later step depends on.
+ * Until 15 Oct 2026 the style's page also had a Start and a Stop for each
+ * step, pressed by hand, with steps left out and undone. The business took
+ * that off: the floor's records already say where a style stands. A note on a
+ * step is still kept (StyleStepRun.note); the times already pressed stay on
+ * their rows and are not shown.
  */
 
 type Db = PrismaClient | Prisma.TransactionClient
 type Tx = Prisma.TransactionClient
 
-/** What the routing editor and the step tracker both need of a routing. */
+const person = { select: { id: true, name: true } } as const
+
+/** What the routing editor and the style's page both need of a routing. */
 export const trackRoutingSelect = {
   id: true,
   code: true,
   name: true,
   styleId: true,
   category: true,
+  fabricItemId: true,
   version: true,
   isActive: true,
   isLocked: true,
   notes: true,
+  createdAt: true,
   updatedAt: true,
   style: { select: { id: true, code: true, name: true } },
+  fabric: { select: { id: true, code: true, name: true, uom: { select: { symbol: true } } } },
+  createdBy: person,
+  updatedBy: person,
   steps: {
     orderBy: { sequence: 'asc' as const },
     select: {
@@ -54,20 +57,20 @@ export const trackRoutingSelect = {
       workstation: { select: { id: true, name: true, type: true } },
     },
   },
-  _count: { select: { mos: true } },
+  _count: { select: { mos: true, boms: true } },
 } satisfies Prisma.RoutingSelect
 
 type TrackRouting = Prisma.RoutingGetPayload<{ select: typeof trackRoutingSelect }>
-type TrackStep = TrackRouting['steps'][number]
 export type Applies = 'STYLE' | 'CATEGORY' | 'ANY'
 
+/** A step across all the style's orders: the floor's own word for each order, put together. */
 export type StepState = 'NOT_STARTED' | 'IN_PROGRESS' | 'DONE' | 'SKIPPED'
-export type StyleState = 'NO_ROUTING' | 'NOT_STARTED' | 'IN_PROGRESS' | 'WAITING' | 'DONE'
+export type StyleState = 'NO_ROUTING' | 'NOT_STARTED' | 'IN_PROGRESS' | 'DONE'
 
-/** The key a step's run is kept under: its process, and which time the process comes on the route. */
+/** The key a step is matched under: its process, and which time the process comes on the route. */
 export const runKey = (operationId: string, occurrence: number) => `${operationId}#${occurrence}`
 
-/** Numbers each step by how many times its process has come up so far, so a repeated process keeps two records. */
+/** Numbers each step by how many times its process has come up so far, so a repeated process is told apart. */
 export function withOccurrence<T extends { operationId: string }>(steps: T[]): Array<T & { occurrence: number }> {
   const seen = new Map<string, number>()
   return steps.map((s) => {
@@ -76,11 +79,6 @@ export function withOccurrence<T extends { operationId: string }>(steps: T[]): A
     return { ...s, occurrence: n }
   })
 }
-
-type RunTimes = Pick<StyleStepRun, 'startedAt' | 'stoppedAt' | 'skippedAt'>
-
-export const stateOf = (run?: RunTimes | null): StepState =>
-  !run ? 'NOT_STARTED' : run.skippedAt ? 'SKIPPED' : run.stoppedAt ? 'DONE' : run.startedAt ? 'IN_PROGRESS' : 'NOT_STARTED'
 
 /**
  * Which routing a style follows: its own, then its category's, then one for
@@ -108,55 +106,121 @@ export async function trackedRoutings(db: Db, styles: Array<{ id: string; catego
   return out
 }
 
-/** The routing's steps, each with its record and what it may do next. */
-function stepsWithRuns(routing: TrackRouting | null, runs: StyleStepRun[]) {
-  if (!routing) return []
-  const byKey = new Map(runs.map((r) => [runKey(r.operationId, r.occurrence), r]))
-  const steps = withOccurrence(routing.steps).map((s) => {
-    const run = byKey.get(runKey(s.operationId, s.occurrence)) ?? null
-    return { step: s, run, state: stateOf(run) }
-  })
-  return steps.map((x, i) => {
-    // The step before, counting only those not left out.
-    const before = steps.slice(0, i).filter((p) => p.state !== 'SKIPPED').pop() ?? null
-    const startBlockedBy = x.state === 'NOT_STARTED' && before && before.state === 'NOT_STARTED' ? before.step.operation.name : null
-    return { ...x, before, startBlockedBy }
-  })
+// ─── The floor's figures ──────────────────────────────────────
+
+interface LineFloor {
+  /** The order has its stages; one without has nothing on the floor yet. */
+  staged: boolean
+  /** The order is completed — short on purpose, too — so every step of it is done. */
+  finished: boolean
+  steps: Map<string, { state: StepState; completed: number }>
 }
 
-type Tracked = ReturnType<typeof stepsWithRuns>
+interface StyleFloor {
+  planned: number
+  lines: LineFloor[]
+  orders: Array<{ moId: string; moNumber: string; status: string; color: string; planned: number; staged: boolean }>
+}
 
-/** Where the style as a whole stands, and the step to show beside it. */
-export function overallOf(steps: Tracked) {
-  if (!steps.length) return { state: 'NO_ROUTING' as StyleState, step: null as string | null, since: null as Date | null, done: 0, total: 0 }
+/**
+ * Each style's order lines, with every step's state and pieces completed as
+ * the floor's stage sheets show them. A closed order is listed but left out
+ * of the figures, as it is everywhere else that counts what is planned.
+ */
+async function floorOf(db: Db, styleIds: string[]) {
+  const out = new Map<string, StyleFloor>()
+  if (!styleIds.length) return out
+  const lines = await db.mOLine.findMany({
+    where: { styleId: { in: styleIds } },
+    select: {
+      id: true,
+      styleId: true,
+      color: true,
+      totalQty: true,
+      mo: {
+        select: {
+          id: true,
+          moNumber: true,
+          status: true,
+          steps: { select: { id: true, sequence: true, operationId: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } },
+        },
+      },
+    },
+    orderBy: { mo: { createdAt: 'desc' } },
+  })
+  for (const line of lines) {
+    const f = out.get(line.styleId) ?? { planned: 0, lines: [], orders: [] }
+    out.set(line.styleId, f)
+    const staged = line.mo.steps.length > 0
+    f.orders.push({ moId: line.mo.id, moNumber: line.mo.moNumber, status: line.mo.status, color: line.color, planned: line.totalQty, staged })
+    if (line.mo.status === 'CLOSED') continue
+    f.planned += line.totalQty
+    const steps = new Map<string, { state: StepState; completed: number }>()
+    if (staged) {
+      const figures = new Map((await stepFigures(db, line.mo.id, line.mo.steps, line.totalQty, line.id)).map((x) => [x.stepId, x]))
+      for (const s of withOccurrence([...line.mo.steps].sort((a, b) => a.sequence - b.sequence))) {
+        const x = figures.get(s.id)
+        steps.set(runKey(s.operationId, s.occurrence), { state: (x?.state ?? 'NOT_STARTED') as StepState, completed: x?.completed ?? 0 })
+      }
+    }
+    f.lines.push({ staged, finished: line.mo.status === 'COMPLETED', steps })
+  }
+  return out
+}
+
+/**
+ * One step of the routing across the style's orders: done when every order
+ * is done there, not started when none has begun, in progress otherwise. An
+ * order whose route has no such step does not count; one not yet staged has
+ * not started it.
+ */
+function stepAcross(key: string, floor: StyleFloor | undefined): { state: StepState; completed: number } {
+  const states: StepState[] = []
+  let completed = 0
+  for (const l of floor?.lines ?? []) {
+    if (!l.staged) {
+      states.push('NOT_STARTED')
+      continue
+    }
+    const here = l.steps.get(key)
+    if (!here) continue
+    completed += here.completed
+    states.push(l.finished && here.state !== 'SKIPPED' ? 'DONE' : here.state)
+  }
+  const live = states.filter((s) => s !== 'SKIPPED')
+  const state: StepState = !states.length
+    ? 'NOT_STARTED'
+    : !live.length
+      ? 'SKIPPED'
+      : live.every((s) => s === 'DONE')
+        ? 'DONE'
+        : live.every((s) => s === 'NOT_STARTED')
+          ? 'NOT_STARTED'
+          : 'IN_PROGRESS'
+  return { state, completed }
+}
+
+/** The routing's steps, each with where it stands on the floor. */
+function stepsOnFloor(routing: TrackRouting | null, floor: StyleFloor | undefined) {
+  if (!routing) return []
+  return withOccurrence(routing.steps).map((step) => ({ step, ...stepAcross(runKey(step.operationId, step.occurrence), floor) }))
+}
+
+/** Where the style as a whole stands, and the step to show beside it: the first one not yet done. */
+export function overallOf(steps: Array<{ step: { operation: { name: string } }; state: StepState }>, planned: number) {
+  if (!steps.length) return { state: 'NO_ROUTING' as StyleState, step: null as string | null, done: 0, total: 0, planned }
   const live = steps.filter((s) => s.state !== 'SKIPPED')
   const done = live.filter((s) => s.state === 'DONE').length
   const total = live.length
-  const going = steps.filter((s) => s.state === 'IN_PROGRESS')
-  if (going.length) {
-    // The furthest step under way is where the style has got to.
-    const at = going[going.length - 1]
-    return { state: 'IN_PROGRESS' as StyleState, step: at.step.operation.name, since: at.run!.startedAt, done, total }
-  }
-  if (done === total) {
-    const last = live.map((s) => s.run!.stoppedAt!).sort((a, b) => b.getTime() - a.getTime())[0] ?? null
-    return { state: 'DONE' as StyleState, step: null, since: last, done, total }
-  }
-  const next = live.find((s) => s.state === 'NOT_STARTED')!
-  if (done === 0) return { state: 'NOT_STARTED' as StyleState, step: next.step.operation.name, since: null, done, total }
-  // Some steps finished, none under way: waiting for the next one to start.
-  const lastStop = live.filter((s) => s.run?.stoppedAt).map((s) => s.run!.stoppedAt!).sort((a, b) => b.getTime() - a.getTime())[0] ?? null
-  return { state: 'WAITING' as StyleState, step: next.step.operation.name, since: lastStop, done, total }
+  if (total && done === total) return { state: 'DONE' as StyleState, step: null, done, total, planned }
+  if (live.every((s) => s.state === 'NOT_STARTED')) return { state: 'NOT_STARTED' as StyleState, step: live[0]?.step.operation.name ?? null, done, total, planned }
+  const at = live.find((s) => s.state !== 'DONE')!
+  return { state: 'IN_PROGRESS' as StyleState, step: at.step.operation.name, done, total, planned }
 }
 
 // ─── The list ─────────────────────────────────────────────────
 
-const STATE_FILTERS: Record<string, StyleState[]> = {
-  IN_PROGRESS: ['IN_PROGRESS', 'WAITING'],
-  NOT_STARTED: ['NOT_STARTED'],
-  DONE: ['DONE'],
-  NO_ROUTING: ['NO_ROUTING'],
-}
+const STATES: StyleState[] = ['IN_PROGRESS', 'NOT_STARTED', 'DONE', 'NO_ROUTING']
 
 /**
  * Every style with its routing and where it stands. Worked out in memory:
@@ -181,85 +245,37 @@ export async function listStyles(db: Db, opts: { q?: string; state?: string; pag
     select: { id: true, code: true, name: true, category: true, colors: true, isActive: true },
     orderBy: { code: 'asc' },
   })
-  const [routings, runs] = await Promise.all([
-    trackedRoutings(db, styles),
-    db.styleStepRun.findMany({ where: { styleId: { in: styles.map((s) => s.id) } } }),
-  ])
+  const [routings, floor] = await Promise.all([trackedRoutings(db, styles), floorOf(db, styles.map((s) => s.id))])
 
   const rows = styles.map((s) => {
     const t = routings.get(s.id) ?? null
-    const own = runs.filter((r) => r.styleId === s.id)
-    const overall = overallOf(stepsWithRuns(t?.routing ?? null, own))
-    const lastTouched = own
-      .flatMap((r) => [r.startedAt, r.stoppedAt, r.skippedAt])
-      .filter((d): d is Date => !!d)
-      .sort((a, b) => b.getTime() - a.getTime())[0] ?? null
+    const f = floor.get(s.id)
     return {
       style: s,
       routing: t
-        ? { id: t.routing.id, code: t.routing.code, name: t.routing.name, version: t.routing.version, applies: t.applies, steps: t.routing.steps.length, alternatives: t.alternatives }
+        ? {
+            id: t.routing.id,
+            code: t.routing.code,
+            name: t.routing.name,
+            version: t.routing.version,
+            applies: t.applies,
+            steps: t.routing.steps.length,
+            alternatives: t.alternatives,
+            fabric: t.routing.fabric?.name ?? null,
+          }
         : null,
-      overall,
-      lastTouched,
+      overall: overallOf(stepsOnFloor(t?.routing ?? null, f), f?.planned ?? 0),
     }
   })
 
-  const counts = Object.fromEntries(Object.entries(STATE_FILTERS).map(([k, states]) => [k, rows.filter((r) => states.includes(r.overall.state)).length]))
-  const wanted = opts.state && STATE_FILTERS[opts.state] ? STATE_FILTERS[opts.state] : null
-  const filtered = wanted ? rows.filter((r) => wanted.includes(r.overall.state)) : rows
+  const counts = Object.fromEntries(STATES.map((k) => [k, rows.filter((r) => r.overall.state === k).length]))
+  const wanted = STATES.find((k) => k === opts.state)
+  const filtered = wanted ? rows.filter((r) => r.overall.state === wanted) : rows
   const start = (opts.page - 1) * opts.limit
   return { rows: filtered.slice(start, start + opts.limit), total: filtered.length, counts: { ALL: rows.length, ...counts } }
 }
 
 // ─── One style ────────────────────────────────────────────────
-
-/**
- * Pieces completed at each process of the route, for this style, from the
- * floor's ledger: every order line of the style whose order has its stages,
- * summed process by process — so the figure is the one the stage sheets show.
- */
-async function unitsByStep(db: Db, styleId: string) {
-  const lines = await db.mOLine.findMany({
-    where: { styleId },
-    select: {
-      id: true,
-      color: true,
-      totalQty: true,
-      mo: {
-        select: {
-          id: true,
-          moNumber: true,
-          status: true,
-          steps: { select: { id: true, sequence: true, operationId: true, kind: true, isQcStep: true, skippedAt: true, name: true, execution: true } },
-        },
-      },
-    },
-    orderBy: { mo: { createdAt: 'desc' } },
-  })
-  const completed = new Map<string, number>()
-  for (const line of lines) {
-    if (!line.mo.steps.length) continue
-    const figures = await stepFigures(db, line.mo.id, line.mo.steps, line.totalQty, line.id)
-    const done = new Map(figures.map((f) => [f.stepId, f.completed]))
-    for (const s of withOccurrence([...line.mo.steps].sort((a, b) => a.sequence - b.sequence))) {
-      const key = runKey(s.operationId, s.occurrence)
-      completed.set(key, (completed.get(key) ?? 0) + (done.get(s.id) ?? 0))
-    }
-  }
-  return {
-    completed,
-    orders: lines.map((l) => ({
-      moId: l.mo.id,
-      moNumber: l.mo.moNumber,
-      status: l.mo.status,
-      color: l.color,
-      planned: l.totalQty,
-      staged: l.mo.steps.length > 0,
-    })),
-  }
-}
-
-const userName = { select: { id: true, name: true } } as const
 
 export async function styleDetail(db: Db, styleId: string) {
   const style = await db.style.findUnique({
@@ -278,195 +294,79 @@ export async function styleDetail(db: Db, styleId: string) {
   })
   if (!style) throw new AppError('Style not found', 404, 'NOT_FOUND')
 
-  const [routings, runs, units] = await Promise.all([
+  const [routings, notes, floor] = await Promise.all([
     trackedRoutings(db, [style]),
-    db.styleStepRun.findMany({
-      where: { styleId },
-      include: { startedBy: userName, stoppedBy: userName, skippedBy: userName },
-    }),
-    unitsByStep(db, styleId),
+    db.styleStepRun.findMany({ where: { styleId, note: { not: null } }, select: { operationId: true, occurrence: true, note: true, updatedAt: true } }),
+    floorOf(db, [styleId]),
   ])
   const tracked = routings.get(style.id) ?? null
-  const steps = stepsWithRuns(tracked?.routing ?? null, runs)
-  const onRoute = new Set(steps.map((s) => runKey(s.step.operationId, s.step.occurrence)))
-  const planned = units.orders.reduce((n, o) => n + o.planned, 0)
+  const f = floor.get(styleId)
+  const steps = stepsOnFloor(tracked?.routing ?? null, f)
+  const noteOf = new Map(notes.map((n) => [runKey(n.operationId, n.occurrence), n]))
 
   return {
     style,
     routing: tracked?.routing ?? null,
     applies: tracked?.applies ?? null,
     alternatives: tracked?.alternatives ?? 0,
-    overall: overallOf(steps),
-    steps: steps.map(({ step, run, state, startBlockedBy }) => ({
-      key: runKey(step.operationId, step.occurrence),
-      operationId: step.operationId,
-      occurrence: step.occurrence,
-      sequence: step.sequence,
-      name: step.operation.name,
-      kind: step.operation.kind,
-      isQcStep: step.isQcStep || step.operation.kind === 'QC',
-      execution: step.execution,
-      skip: step.operation.kind === 'CUTTING' ? 'NEVER' : step.skip,
-      department: step.department,
-      workstation: step.workstation,
-      ratePerPiece: step.ratePerPiece,
-      instructions: step.instructions,
-      state,
-      startBlockedBy,
-      run,
-      completed: units.completed.get(runKey(step.operationId, step.occurrence)) ?? 0,
-    })),
-    // Records for processes the routing no longer has: kept, and shown as history.
-    history: runs.filter((r) => !onRoute.has(runKey(r.operationId, r.occurrence))),
-    production: { planned, orders: units.orders },
+    overall: overallOf(steps, f?.planned ?? 0),
+    steps: steps.map(({ step, state, completed }) => {
+      const key = runKey(step.operationId, step.occurrence)
+      return {
+        key,
+        operationId: step.operationId,
+        occurrence: step.occurrence,
+        sequence: step.sequence,
+        name: step.operation.name,
+        kind: step.operation.kind,
+        isQcStep: step.isQcStep || step.operation.kind === 'QC',
+        execution: step.execution,
+        skip: step.operation.kind === 'CUTTING' ? 'NEVER' : step.skip,
+        department: step.department,
+        workstation: step.workstation,
+        ratePerPiece: step.ratePerPiece,
+        instructions: step.instructions,
+        state,
+        completed,
+        note: noteOf.get(key)?.note ?? null,
+        noteAt: noteOf.get(key)?.updatedAt ?? null,
+      }
+    }),
+    production: { planned: f?.planned ?? 0, orders: f?.orders ?? [] },
   }
 }
 
-// ─── Start, stop, leave out, undo ─────────────────────────────
+// ─── Notes ────────────────────────────────────────────────────
 
-/** Two people pressing on the same style at once are taken one after the other. */
+/** Two people writing on the same style at once are taken one after the other. */
 async function lockStyle(tx: Tx, styleId: string) {
   const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM ld_erp.styles WHERE id = ${styleId} FOR UPDATE`
   if (!rows.length) throw new AppError('Style not found', 404, 'NOT_FOUND')
 }
 
-/** The style, its routing, and the one step being acted on, read under the lock. */
-async function loadStep(tx: Tx, styleId: string, operationId: string, occurrence: number) {
+/** Writes, changes or clears the note on one step of the style's routing. */
+export async function noteStep(tx: Tx, styleId: string, operationId: string, occurrence: number, note: string | null) {
   await lockStyle(tx, styleId)
   const style = await tx.style.findUniqueOrThrow({ where: { id: styleId }, select: { id: true, code: true, category: true } })
   const tracked = (await trackedRoutings(tx, [style])).get(styleId) ?? null
   if (!tracked) throw new AppError(`${style.code} has no routing yet. Make one first.`, 409, 'NO_ROUTING')
-  const runs = await tx.styleStepRun.findMany({ where: { styleId } })
-  const steps = stepsWithRuns(tracked.routing, runs)
-  const index = steps.findIndex((s) => s.step.operationId === operationId && s.step.occurrence === occurrence)
-  if (index < 0) {
+  const step = withOccurrence(tracked.routing.steps).find((s) => s.operationId === operationId && s.occurrence === occurrence)
+  if (!step) {
     throw new AppError('That step is no longer on this style\'s routing — it may just have been changed. Refresh the page.', 404, 'STEP_NOT_ON_ROUTING')
   }
-  return { style, routing: tracked.routing, steps, index, here: steps[index] }
-}
 
-/** What a record keeps of the step as it was when first touched. */
-const snapshot = (routing: TrackRouting, step: TrackStep) => ({
-  routingId: routing.id,
-  routingVersion: routing.version,
-  stepName: step.operation.name,
-  sequence: step.sequence,
-})
-
-/** "2 days 3 hours", "45 minutes" — how long a step took, in words. */
-export function took(from: Date, to: Date): string {
-  const minutes = Math.max(0, Math.round((to.getTime() - from.getTime()) / 60000))
-  const days = Math.floor(minutes / 1440)
-  const hours = Math.floor((minutes % 1440) / 60)
-  const mins = minutes % 60
-  const part = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`
-  if (days) return hours ? `${part(days, 'day')} ${part(hours, 'hour')}` : part(days, 'day')
-  if (hours) return mins ? `${part(hours, 'hour')} ${part(mins, 'minute')}` : part(hours, 'hour')
-  return part(mins, 'minute')
-}
-
-type Who = { userId: string; mayApprove: boolean }
-
-export async function startStep(tx: Tx, styleId: string, operationId: string, occurrence: number, by: Who) {
-  const { style, routing, here } = await loadStep(tx, styleId, operationId, occurrence)
-  const name = here.step.operation.name
-  if (here.state === 'SKIPPED') throw new AppError(`${name} is left out for ${style.code}. Put it back first.`, 409, 'STEP_SKIPPED')
-  if (here.run?.startedAt) throw new AppError(`${name} has already been started.`, 409, 'ALREADY_STARTED')
-  if (here.startBlockedBy) {
-    throw new AppError(`Start ${here.startBlockedBy} first: a step starts once the one before it has started.`, 409, 'PREVIOUS_NOT_STARTED')
-  }
-  const now = new Date()
-  const before = here.run
-  const run = await tx.styleStepRun.upsert({
-    where: { styleId_operationId_occurrence: { styleId, operationId, occurrence } },
-    create: { styleId, operationId, occurrence, ...snapshot(routing, here.step), startedAt: now, startedById: by.userId },
-    update: { ...snapshot(routing, here.step), startedAt: now, startedById: by.userId },
-  })
-  return { before, run, message: `${name} started for ${style.code}.` }
-}
-
-export async function stopStep(tx: Tx, styleId: string, operationId: string, occurrence: number, by: Who) {
-  const { style, here } = await loadStep(tx, styleId, operationId, occurrence)
-  const name = here.step.operation.name
-  const before = here.run
-  if (!before?.startedAt) throw new AppError(`${name} has not been started, so it cannot be stopped.`, 409, 'NOT_STARTED')
-  if (before.stoppedAt) throw new AppError(`${name} has already been stopped.`, 409, 'ALREADY_STOPPED')
-  const now = new Date()
-  const run = await tx.styleStepRun.update({ where: { id: before.id }, data: { stoppedAt: now, stoppedById: by.userId } })
-  return { before, run, message: `${name} stopped for ${style.code}, ${took(before.startedAt, now)} after it started.` }
-}
-
-export async function leaveOutStep(tx: Tx, styleId: string, operationId: string, occurrence: number, reason: string, by: Who) {
-  const { style, routing, here } = await loadStep(tx, styleId, operationId, occurrence)
-  const name = here.step.operation.name
-  const rule = here.step.operation.kind === 'CUTTING' ? 'NEVER' : here.step.skip
-  if (rule === 'NEVER') throw new AppError(`${name} cannot be left out: every piece goes through it.`, 409, 'CANNOT_SKIP')
-  if (rule === 'WITH_APPROVAL' && !by.mayApprove) {
-    throw new AppError(`${name} is a required step: only a production manager can leave it out.`, 403, 'NEEDS_APPROVAL')
-  }
-  if (here.state === 'SKIPPED') throw new AppError(`${name} is already left out.`, 409, 'ALREADY_SKIPPED')
-  if (here.run?.startedAt) throw new AppError(`${name} has started, so it can no longer be left out.`, 409, 'ALREADY_STARTED')
-  const before = here.run
-  const now = new Date()
-  const run = await tx.styleStepRun.upsert({
-    where: { styleId_operationId_occurrence: { styleId, operationId, occurrence } },
-    create: { styleId, operationId, occurrence, ...snapshot(routing, here.step), skippedAt: now, skippedById: by.userId, skipReason: reason },
-    update: { ...snapshot(routing, here.step), skippedAt: now, skippedById: by.userId, skipReason: reason },
-  })
-  return { before, run, message: `${name} left out for ${style.code}.` }
-}
-
-/**
- * Takes back the last thing done to a step: putting a left-out step back, a
- * stop, or a start. A start that a later step has followed is refused — that
- * later step is undone first, so the rule "starts once the one before has" is
- * never left broken.
- */
-export async function undoStep(tx: Tx, styleId: string, operationId: string, occurrence: number, by: Who) {
-  const { style, steps, index, here } = await loadStep(tx, styleId, operationId, occurrence)
-  const name = here.step.operation.name
-  const run = here.run
-  if (!run || (!run.startedAt && !run.skippedAt)) throw new AppError(`Nothing has been recorded on ${name} to undo.`, 409, 'NOTHING_TO_UNDO')
-
-  let data: Prisma.StyleStepRunUpdateInput
-  let what: string
-  if (run.skippedAt) {
-    const rule = here.step.operation.kind === 'CUTTING' ? 'NEVER' : here.step.skip
-    if (rule === 'WITH_APPROVAL' && !by.mayApprove) {
-      throw new AppError(`${name} is a required step: only a production manager can put it back.`, 403, 'NEEDS_APPROVAL')
-    }
-    data = { skippedAt: null, skippedBy: { disconnect: true }, skipReason: null }
-    what = `${name} is back on ${style.code}'s route.`
-  } else if (run.stoppedAt) {
-    data = { stoppedAt: null, stoppedBy: { disconnect: true } }
-    what = `${name}'s stop is undone: it is in progress again.`
-  } else {
-    const later = steps.slice(index + 1).find((s) => s.run?.startedAt)
-    if (later) throw new AppError(`Undo ${later.step.operation.name} first: it started after ${name}.`, 409, 'LATER_STEP_STARTED')
-    data = { startedAt: null, startedBy: { disconnect: true } }
-    what = `${name}'s start is undone: it has not started.`
-  }
-
-  const after = await tx.styleStepRun.update({ where: { id: run.id }, data })
-  // A record with nothing left on it — no start, no leaving out, no note — goes.
-  if (!after.startedAt && !after.skippedAt && !after.note) {
-    await tx.styleStepRun.delete({ where: { id: run.id } })
-    return { before: run, run: null, message: what }
-  }
-  return { before: run, run: after, message: what }
-}
-
-export async function noteStep(tx: Tx, styleId: string, operationId: string, occurrence: number, note: string | null) {
-  const { routing, here } = await loadStep(tx, styleId, operationId, occurrence)
-  const before = here.run
+  const before = await tx.styleStepRun.findUnique({ where: { styleId_operationId_occurrence: { styleId, operationId, occurrence } } })
   if (!before && !note) return { before, run: null, message: 'Nothing to save.' }
+  // A row that holds nothing but the note goes with it; one that still has
+  // times pressed before the timer was taken off keeps them.
   if (before && !note && !before.startedAt && !before.skippedAt) {
     await tx.styleStepRun.delete({ where: { id: before.id } })
     return { before, run: null, message: 'Note removed.' }
   }
+  const snapshot = { routingId: tracked.routing.id, routingVersion: tracked.routing.version, stepName: step.operation.name, sequence: step.sequence }
   const run = await tx.styleStepRun.upsert({
     where: { styleId_operationId_occurrence: { styleId, operationId, occurrence } },
-    create: { styleId, operationId, occurrence, ...snapshot(routing, here.step), note },
+    create: { styleId, operationId, occurrence, ...snapshot, note },
     update: { note },
   })
   return { before, run, message: note ? 'Note saved.' : 'Note removed.' }

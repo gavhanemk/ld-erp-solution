@@ -10,9 +10,9 @@ import { StyleTrackList } from '@/components/masters/routing/StyleTrackList'
 
 /**
  * Routings, by style first: every style with the routing it follows and where
- * its work stands, each opening the style's page — where each step is started
- * and stopped by hand. The routings themselves, shared ones included, are on
- * the second tab, to edit, lock or stop using.
+ * its work stands on the floor, each opening the style's page. The routings
+ * themselves, shared ones included, are on the second tab, to edit, lock,
+ * stop using or delete.
  *
  * A manufacturing order still loads the stages of the routing that fits its
  * style once its materials are issued, and keeps its own copy; editing a
@@ -90,8 +90,8 @@ export default function RoutingsPage() {
       )}
 
       <p className="text-muted-foreground text-xs">
-        Start and stop each step on a style&apos;s page. A manufacturing order loads the stages of the routing for its style once its materials are issued, and can change
-        them for itself. Changing a routing makes a new version for orders to come; orders already running keep theirs.
+        A style&apos;s page shows where each step stands, from the production floor&apos;s records. A manufacturing order loads the stages of the routing for its style once its
+        materials are issued, and can change them for itself. Changing a routing makes a new version for orders to come; orders already running keep theirs.
       </p>
 
       <RoutingFormDialog

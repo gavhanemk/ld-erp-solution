@@ -950,11 +950,14 @@ export const routingStepSchema = z.object({
 })
 
 const routingFields = z.object({
-  code,
+  /** Made by the API from the style when left out, which the form now always does. */
+  code: code.optional(),
   name,
   /** For one style; or, with `category`, every style filed under it; with neither, any style. */
   styleId: z.string().optional().nullable(),
   category: z.string().trim().max(60).optional().nullable(),
+  /** The fabric it is cut from: a fabric item, from GET /masters/routings/fabrics. */
+  fabricItemId: z.string().optional().nullable(),
   notes: optionalText,
   isActive,
   steps: z
