@@ -10,6 +10,7 @@ import { StepInput } from '@/components/ui/StepInput'
 import { formatDate } from '@/lib/utils'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 import { ScanIssue } from '@/components/packages/ScanIssue'
+import { packCount } from '@/components/packages/packageTypes'
 
 /**
  * Working on an approved requisition: three forms in one window, one tab each.
@@ -77,7 +78,8 @@ interface Order {
   unitRate?: number
   qty: number
   receivedQty: number
-  receipts?: Array<{ grnNumber: string; grnDate: string; qty: number }>
+  /** Each goods receipt against it: what came, what the gate refused, and what its quality check passed and rejected (null: not checked). */
+  receipts?: Array<{ grnNumber: string; grnDate: string; qty: number; refused?: number; qc?: { passed: number; rejected: number } | null }>
 }
 interface Data {
   lines: Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
@@ -90,6 +92,8 @@ interface Data {
     otherOpen: Array<{ poNumber: string; supplierName: string; qty: number; receivedQty: number; deliveryDate: string | null; forMr: string | null }>
   }>
   events: Array<{ at: string; who: string; action: string; handedOver: string[] | null; reservedNow?: string[] | null; plan: unknown; closeReason: string | null }>
+  /** The stickered rolls and boxes of these items on the racks, store by store. */
+  packs?: Array<{ itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; packType: string; n: number; qty: number; racks: string[] | null }>
 }
 
 const PO_STATUS: Record<string, string> = {
@@ -197,7 +201,18 @@ export function ProcessDialog({
           }
         }
       const stores = [...by.values()]
-        .map((s) => ({ ...s, free: r3(Math.max(0, s.onHand - s.others)) }))
+        .map((s) => {
+          const p = data.packs?.find(
+            (x) => x.itemId === l.item.id && x.warehouseId === s.id && (theirs ? x.ownerCustomerId === l.ownerCustomer?.id : x.ownership === 'OWNED'),
+          )
+          return {
+            ...s,
+            free: r3(Math.max(0, s.onHand - s.others)),
+            racks: p?.racks ?? [],
+            // "3 rolls" only when the rolls are all of the stock there; a rejected roll held apart would make it a wrong count.
+            packs: p && Math.abs(p.qty - s.onHand) < 0.001 ? packCount(p.n, p.packType) : null,
+          }
+        })
         .sort((a, c) => c.own - a.own || (a.id === l.warehouse.id ? -1 : c.id === l.warehouse.id ? 1 : c.free - a.free))
       const buys = data.itemBuys?.find((x) => x.itemId === l.item.id)
       const cat = l.item.category
@@ -431,6 +446,124 @@ export function ProcessDialog({
 
   const dash = <span className="text-muted-foreground">—</span>
   const small = 'text-[11px] text-muted-foreground'
+
+  /** Where it can be picked up: "Fabric Warehouse · 3 rolls · rack B-3". */
+  const whereOf = (r: Row) =>
+    r.stores
+      .filter((s) => s.free > 0)
+      .slice(0, 2)
+      .map((s) => [s.name, s.packs, s.racks.length ? `rack ${s.racks.join(', ')}` : null].filter(Boolean).join(' · '))
+      .join('; ')
+
+  const grnLinks = (r: Row) =>
+    r.orders
+      .flatMap((o) => o.receipts ?? [])
+      .map((g, i) => (
+        <Fragment key={`${g.grnNumber}-${i}`}>
+          {i > 0 && ', '}
+          <a href={`/purchase/grn?q=${encodeURIComponent(g.grnNumber)}`} target="_blank" rel="noreferrer" className="font-mono text-primary hover:underline">
+            {g.grnNumber}
+          </a>{' '}
+          {formatDate(g.grnDate)}
+        </Fragment>
+      ))
+
+  /**
+   * The item's whole journey in one line, so nobody has to remember a code or
+   * open another screen: asked → on the indent → PO raised → received → quality
+   * check → ready in the store → issued (and gone out of the store). Steps for
+   * buying show only when it was bought.
+   */
+  const journeyOf = (r: Row) => {
+    type Tone = 'done' | 'now' | 'wait' | 'bad' | 'todo'
+    const u = r.unit
+    const steps: Array<{ label: string; value: string; sub?: ReactNode; tone: Tone }> = [
+      { label: 'Asked', value: `${fmt(r.asked)} ${u}`, sub: `by ${mr.department.name}, ${formatDate(mr.requestDate)}`, tone: 'done' },
+    ]
+    if (!r.theirs && (r.onIndent > 0 || r.ordered > 0)) {
+      const receipts = r.orders.flatMap((o) => o.receipts ?? [])
+      const checked = receipts.filter((g) => g.qc)
+      const passed = r3(checked.reduce((t, g) => t + (g.qc?.passed ?? 0), 0))
+      const rejected = r3(checked.reduce((t, g) => t + (g.qc?.rejected ?? 0), 0))
+      const refused = r3(receipts.reduce((t, g) => t + (g.refused ?? 0), 0))
+      const noPo = r3(Math.max(0, r.onIndent - r.ordered))
+      const toCome = r3(Math.max(0, r.ordered - r.received))
+      const dueBy = r.orders
+        .filter((o) => o.receivedQty + 1e-9 < o.qty)
+        .map((o) => o.deliveryDate)
+        .filter((d): d is string => !!d)
+        .sort()[0]
+      const suppliers = [...new Set(r.orders.map((o) => o.supplierName).filter(Boolean))].join(', ')
+      steps.push({ label: 'On indent', value: `${fmt(Math.max(r.onIndent, r.ordered))} ${u}`, sub: noPo > 0 ? `${fmt(noPo)} ${u} still needs a PO` : 'for the buyer', tone: 'done' })
+      steps.push(
+        r.ordered > 0
+          ? { label: 'PO raised', value: `${fmt(r.ordered)} ${u}`, sub: <>{poLinks(r)}{suppliers ? ` · ${suppliers}` : ''}</>, tone: noPo > 0 ? 'wait' : 'done' }
+          : { label: 'PO raised', value: 'Not yet', sub: 'the buyer raises it from the indent', tone: 'todo' },
+      )
+      steps.push(
+        r.received > 0
+          ? { label: 'Received', value: `${fmt(r.received)} ${u}`, sub: <>{grnLinks(r)}{toCome > 0 ? ` · ${fmt(toCome)} ${u} still to come` : ''}</>, tone: toCome > 0 ? 'wait' : 'done' }
+          : { label: 'Received', value: 'Not yet', sub: r.ordered > 0 ? (dueBy ? `due ${formatDate(dueBy)}` : 'waiting for the supplier') : 'after the PO', tone: 'todo' },
+      )
+      if (r.received > 0)
+        steps.push(
+          checked.length
+            ? {
+                label: 'Quality check',
+                value: rejected > 0 ? `${fmt(passed)} ${u} passed` : 'Passed',
+                sub: rejected > 0 ? `${fmt(rejected)} ${u} rejected — kept apart, never issued` : `${fmt(passed)} ${u} passed`,
+                tone: rejected > 0 ? 'bad' : 'done',
+              }
+            : { label: 'Quality check', value: 'Not checked', sub: refused > 0 ? `${fmt(refused)} ${u} refused at the gate` : 'optional — taken in as received', tone: 'todo' },
+        )
+    }
+    if (r.owed > 0) {
+      const short = r3(Math.max(0, r.owed - r.free))
+      steps.push(
+        r.free > 0
+          ? { label: 'Ready to issue', value: `${fmt(Math.min(r.free, r.owed))} ${u}`, sub: [whereOf(r), short > 0 ? `${fmt(short)} ${u} short` : null].filter(Boolean).join(' · '), tone: 'now' }
+          : { label: 'Ready to issue', value: 'Nothing yet', sub: `${fmt(short)} ${u} short`, tone: 'todo' },
+      )
+    }
+    steps.push(
+      r.issued > 0
+        ? {
+            label: 'Issued',
+            value: `${fmt(r.issued)} ${u}`,
+            sub: r.owed > 0 ? `to ${mr.department.name} · ${fmt(r.owed)} ${u} still to give` : `to ${mr.department.name} · out of the store`,
+            tone: r.owed > 0 ? 'wait' : 'done',
+          }
+        : { label: 'Issued', value: 'Not yet', sub: `to ${mr.department.name}`, tone: 'todo' },
+    )
+    const box: Record<Tone, string> = {
+      done: 'border-emerald-500/30 bg-emerald-500/10',
+      now: 'border-primary/50 bg-primary/10',
+      wait: 'border-amber-500/40 bg-amber-500/10',
+      bad: 'border-red-500/30 bg-red-500/10',
+      todo: 'border-dashed border-border',
+    }
+    const head: Record<Tone, string> = {
+      done: 'text-emerald-600',
+      now: 'text-primary',
+      wait: 'text-amber-600',
+      bad: 'text-red-500',
+      todo: 'text-muted-foreground',
+    }
+    return (
+      <div className="flex flex-wrap items-stretch gap-1">
+        {steps.map((s, i) => (
+          <Fragment key={s.label}>
+            {i > 0 && <ChevronRight size={14} className="shrink-0 self-center text-muted-foreground" aria-hidden />}
+            <div className={`min-w-[7rem] max-w-[16rem] rounded-lg border px-2.5 py-1.5 ${box[s.tone]}`}>
+              <div className={`text-[10px] font-semibold uppercase tracking-wide ${head[s.tone]}`}>{s.label}</div>
+              <div className={`text-sm font-semibold tabular-nums ${s.tone === 'todo' ? 'text-muted-foreground' : 'text-foreground'}`}>{s.value}</div>
+              {s.sub && <div className="text-[11px] leading-snug text-muted-foreground">{s.sub}</div>}
+            </div>
+          </Fragment>
+        ))}
+      </div>
+    )
+  }
   const ariaWord = tab === 'issue' ? 'Issue' : tab === 'reserve' ? 'Reserve' : 'Buy (indent)'
 
   const itemCell = (r: Row) => {
@@ -877,6 +1010,11 @@ export function ProcessDialog({
                         <td className="px-3 py-1.5 align-top">{qtyBox(r)}</td>
                         <td className="px-3 py-2.5 align-top">{statusCell(r)}</td>
                       </tr>
+                      <tr>
+                        <td colSpan={heads.length} className="px-3 pb-3 pt-0">
+                          {journeyOf(r)}
+                        </td>
+                      </tr>
                       {open[r.l.id] && (
                         <tr className="border-t border-border/60 bg-secondary/40">
                           <td colSpan={heads.length} className="px-4 py-3">
@@ -912,6 +1050,7 @@ export function ProcessDialog({
                       </div>
                     )}
                   </div>
+                  {journeyOf(r)}
                   <div className="grid grid-cols-2 items-start gap-3">
                     <div>
                       <div className={mini}>{qtyHead}</div>

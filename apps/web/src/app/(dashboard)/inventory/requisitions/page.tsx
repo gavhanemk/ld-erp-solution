@@ -115,10 +115,11 @@ const qtyFmt = (v: number) =>
  * Where a requisition stands. One word each, in the order they happen, so the
  * status filter and the figures read the same as the badge on the row.
  */
-type StageKey = 'approval' | 'handover' | 'partly' | 'purchase' | 'issued' | 'closed' | 'cancelled' | 'refused'
+type StageKey = 'approval' | 'arrived' | 'handover' | 'partly' | 'purchase' | 'issued' | 'closed' | 'cancelled' | 'refused'
 
 const STAGE: Record<StageKey, { label: string; cls: string; who: string }> = {
   approval: { label: 'Waiting for approval', cls: 'badge-warning', who: 'Approver' },
+  arrived: { label: 'Arrived — ready to issue', cls: 'badge-success', who: 'Store' },
   handover: { label: 'To be issued', cls: 'badge-info', who: 'Store' },
   partly: { label: 'Part issued', cls: 'badge-warning', who: 'Store' },
   purchase: { label: 'Waiting for purchase', cls: 'badge-info', who: 'Buyer' },
@@ -129,7 +130,7 @@ const STAGE: Record<StageKey, { label: string; cls: string; who: string }> = {
 }
 const STAGE_ORDER = Object.keys(STAGE) as StageKey[]
 /** Still somebody's to do. */
-const OPEN_STAGES: StageKey[] = ['approval', 'handover', 'partly', 'purchase']
+const OPEN_STAGES: StageKey[] = ['approval', 'arrived', 'handover', 'partly', 'purchase']
 
 function stageKey(mr: Requisition): StageKey {
   if (mr.closedAt) return mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'closed' : 'cancelled'
@@ -139,7 +140,8 @@ function stageKey(mr: Requisition): StageKey {
   // Everything still owed is on the indent: the next move is the buyer's.
   const owedLines = mr.lines.filter((l) => Number(l.issuedQty) < Number(l.requestedQty))
   if (owedLines.length && owedLines.every((l) => buyQtyOf(l) >= Number(l.requestedQty) - Number(l.issuedQty) - 1e-9))
-    return 'purchase'
+    // Bought, and some of it is now in the store: the store's move, not the buyer's.
+    return owedLines.some((l) => (l.available ?? 0) > 0) ? 'arrived' : 'purchase'
   return partlyIssued(mr) ? 'partly' : 'handover'
 }
 
@@ -161,6 +163,8 @@ function nextStep(mr: Requisition, key: StageKey, isMine: boolean, iApproved: bo
           ? 'You raised it. As admin you can approve it yourself, or leave it for someone else.'
           : 'You raised it, so somebody else has to approve it — on this screen or from the dashboard.'
         : 'Yours to approve or refuse.'
+    case 'arrived':
+      return 'The goods bought for it have come in and are in the store. Press Process to issue them.'
     case 'purchase':
       return `${mr.lines.some((l) => Number(l.issuedQty) > 0) ? 'Part issued; the rest' : 'What is owed'} is on the indent for the buyer. When it arrives on a goods receipt, press Process to issue it.`
     case 'partly': {
@@ -505,7 +509,7 @@ function RequisitionsScreen() {
     const byStage = rows.filter((mr) => passes(mr, 'stage'))
     const inStage = (keys: StageKey[]) => byStage.filter((mr) => keys.includes(fact(mr).stage))
     const approval = inStage(['approval'])
-    const handover = inStage(['handover', 'partly'])
+    const handover = inStage(['arrived', 'handover', 'partly'])
     const purchase = inStage(['purchase'])
     const late = rows.filter((mr) => passes(mr, 'need') && fact(mr).need === 'late')
     // Totals per unit across the requisitions, never adding metres to pieces.
@@ -883,14 +887,14 @@ function RequisitionsScreen() {
           label="To be issued"
           value={String(figures.handover)}
           sub={
-            isSet('stage', ['handover', 'partly'])
+            isSet('stage', ['arrived', 'handover', 'partly'])
               ? 'showing only these · click to show all'
               : figures.handover
                 ? `${figures.handoverQty ?? 'nothing'} for the store to give`
                 : 'nothing waiting at the store'
           }
-          onClick={() => toggleTo('stage', ['handover', 'partly'])}
-          active={isSet('stage', ['handover', 'partly'])}
+          onClick={() => toggleTo('stage', ['arrived', 'handover', 'partly'])}
+          active={isSet('stage', ['arrived', 'handover', 'partly'])}
         />
         <KpiTile
           icon={ShoppingCart}

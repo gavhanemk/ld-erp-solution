@@ -45,10 +45,10 @@ export const cameLine = (p: FoundPackage) =>
 export const wentLine = (p: FoundPackage) =>
   p.went.map((w) => [w.mr, w.mo ? `→ ${w.mo}` : null, w.so ? `(${w.so})` : null].filter(Boolean).join(' ')).join(', ')
 
-/** A typed sticker number as the code it is: "57", "pk 57" → PK-000057. */
+/** A typed sticker number as the code it is: "57", "pk 57" → PK-0057 (the server also finds an older PK-000057). */
 const asCode = (t: string) => {
   const m = t.trim().match(/^(?:pk)?[-\s]?(\d{1,9})$/i)
-  return m ? `PK-${m[1].padStart(6, '0')}` : null
+  return m ? `PK-${String(Number(m[1])).padStart(4, '0')}` : null
 }
 /** What a scanner gun or a phone's QR reader sends: left alone, never second-guessed. */
 const looksScanned = (t: string) => /^https?:\/\//i.test(t.trim()) || /^(PK|G)-?\d{4,}$/i.test(t.trim())

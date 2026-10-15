@@ -5,7 +5,7 @@ import { CheckCircle2, Loader2, Printer, ScanLine } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
 import { StepInput } from '@/components/ui/StepInput'
 import { StickerScanner } from './StickerSearch'
-import { STATUS, printLabels, qtyText, type PackageDetail } from './packageTypes'
+import { STATUS, packCount, printLabels, qtyText, type PackageDetail } from './packageTypes'
 
 type Waiting = PackageDetail['requisitions'][number]
 
@@ -16,6 +16,10 @@ interface Issued {
   qty: number
   left: number
   unit: string
+  /** "roll", "box": what it was. */
+  kind: string
+  lot: string | null
+  store: string
 }
 
 /**
@@ -84,7 +88,10 @@ export function ScanIssue({
     setError(null)
     try {
       const res = await api.post<{ message: string; data: PackageDetail }>(`/packages/${pkg.id}/issue`, { mrId, lineId: line.lineId, qty: n })
-      setIssued((list) => [{ id: pkg.id, code: pkg.code, item: pkg.item.name, qty: n, left: res.data.qty, unit: pkg.unit }, ...list])
+      setIssued((list) => [
+        { id: pkg.id, code: pkg.code, item: pkg.item.name, qty: n, left: res.data.qty, unit: pkg.unit, kind: packCount(1, pkg.packType).replace(/^1 /, ''), lot: pkg.lotNo, store: pkg.warehouse.name },
+        ...list,
+      ])
       setPkg(null)
       setLine(null)
       setQty('')
@@ -118,11 +125,13 @@ export function ScanIssue({
       {pkg && line && (
         <div className="flex flex-wrap items-end gap-3 rounded-lg border border-primary/40 bg-primary/5 p-3">
           <div className="min-w-0 flex-1">
-            <div className="font-mono text-sm font-semibold text-foreground">{pkg.code}</div>
-            <div className="truncate text-sm text-foreground">{pkg.item.name}</div>
+            <div className="truncate text-sm font-semibold text-foreground">{pkg.item.name}</div>
             <div className="text-xs text-muted-foreground">
-              {qtyText(pkg.qty)} {pkg.unit} on it · {pkg.warehouse.name} · {qtyText(line.owed)} {pkg.unit} still needed
+              A {packCount(1, pkg.packType).replace(/^1 /, '')} of {qtyText(pkg.qty)} {pkg.unit}
+              {pkg.lotNo ? ` · lot ${pkg.lotNo}` : ''} · {pkg.warehouse.name}
+              {pkg.rack ? `, rack ${pkg.rack}` : ''} · {qtyText(line.owed)} {pkg.unit} still needed
             </div>
+            <div className="font-mono text-[11px] text-muted-foreground">sticker {pkg.code}</div>
           </div>
           <label className="text-xs text-muted-foreground">
             How much goes
@@ -165,10 +174,15 @@ export function ScanIssue({
             <li key={`${d.code}-${i}`} className="flex flex-wrap items-center gap-2 px-3 py-2">
               <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />
               <span className="min-w-0 flex-1">
-                <span className="font-mono font-semibold text-foreground">{d.code}</span>{' '}
+                <span className="font-semibold text-foreground">
+                  {qtyText(d.qty)} {d.unit} {d.item}
+                </span>{' '}
                 <span className="text-muted-foreground">
-                  · {qtyText(d.qty)} {d.unit} issued · {d.left > 0 ? `${qtyText(d.left)} ${d.unit} left on it` : 'now empty'}
-                </span>
+                  {d.left > 0
+                    ? `issued from a ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''} — ${qtyText(d.left)} ${d.unit} left on it in ${d.store}`
+                    : `issued — the whole ${d.kind}${d.lot ? ` (lot ${d.lot})` : ''}, now out of ${d.store}`}
+                </span>{' '}
+                <span className="font-mono text-[11px] text-muted-foreground">{d.code}</span>
               </span>
               {d.left > 0 && (
                 <button type="button" className="btn-secondary h-8 px-2.5 text-xs" onClick={() => printLabels([d.id])} title="The old sticker still shows what it held before">

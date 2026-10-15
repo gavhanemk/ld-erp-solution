@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { normaliseCode, normaliseRack, packageRules, round3, setRack } from './package.service'
+import { codeCandidates, normaliseCode, normaliseRack, packageRules, round3, setRack } from './package.service'
 import { afterCountDecided } from './stockCountHooks.service'
 import { createAdjustment } from '../routes/inventory.routes'
 
@@ -162,11 +162,15 @@ function shapeScan(s: ScanRow, warehouseId: string) {
 export async function scanPackage(tx: Prisma.TransactionClient, countId: string, raw: string, userId: string | null, rackRaw?: string | null) {
   const c = await lockCount(tx, countId)
   mustBeOpen(c)
-  const code = normaliseCode(raw)
+  // The sticker's own code, short or from before codes were shortened.
+  const pkg = await tx.stockPackage.findFirst({
+    where: { code: { in: codeCandidates(raw) } },
+    select: { id: true, code: true, status: true, warehouseId: true, qty: true, rack: true },
+  })
+  const code = pkg?.code ?? normaliseCode(raw)
   const had = await tx.stockCountScan.findUnique({ where: { countId_code: { countId, code } }, select: { scannedAt: true, scannedBy: { select: { name: true } } } })
   if (had) throw new AppError(`${code} is already counted — at ${clock(had.scannedAt)}${had.scannedBy ? ` by ${had.scannedBy.name}` : ''}.`, 409, 'ALREADY_SCANNED')
   const rack = normaliseRack(rackRaw)
-  const pkg = await tx.stockPackage.findUnique({ where: { code }, select: { id: true, status: true, warehouseId: true, qty: true, rack: true } })
   const result = !pkg ? 'UNKNOWN' : pkg.status !== 'IN_STOCK' ? 'NOT_IN_STOCK' : pkg.warehouseId === c.warehouseId ? 'FOUND' : 'ELSEWHERE'
   // Found on this rack: that is where it is now.
   if (pkg && result === 'FOUND' && rack) {

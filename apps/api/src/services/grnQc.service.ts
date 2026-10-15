@@ -195,6 +195,34 @@ export async function qcRejectedByGrnLine(
   return out
 }
 
+/**
+ * What the quality check passed and rejected on each receipt line, from the
+ * checks not cancelled. A line with no entry was never checked — QC is
+ * optional, so that is not a fault.
+ */
+export async function qcByGrnLine(
+  tx: Prisma.TransactionClient,
+  grnLineIds: string[]
+): Promise<Map<string, { passed: number; rejected: number }>> {
+  const out = new Map<string, { passed: number; rejected: number }>()
+  if (!grnLineIds.length) return out
+  const checks = await tx.inwardQC.findMany({
+    where: { grn: { lines: { some: { id: { in: grnLineIds } } } } },
+    select: { checklistData: true },
+  })
+  const wanted = new Set(grnLineIds)
+  for (const c of checks) {
+    const d = readQc(c.checklistData)
+    if (!d || d.cancelled) continue
+    for (const l of d.lines) {
+      if (!wanted.has(l.grnLineId)) continue
+      const prev = out.get(l.grnLineId) ?? { passed: 0, rejected: 0 }
+      out.set(l.grnLineId, { passed: prev.passed + l.approvedQty, rejected: prev.rejected + l.rejectedQty })
+    }
+  }
+  return out
+}
+
 /** The short form the receipt list carries: enough for a badge and an action. */
 export function qcSummaryOf(
   rows: Array<{ id: string; result: string; inspectionDate: Date; checklistData: unknown }>

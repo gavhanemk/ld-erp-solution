@@ -13,10 +13,14 @@ import { balanceOf, lockedBalanceOf } from './stock.service'
 
 export const round3 = (n: number) => Math.round(n * 1000) / 1000
 
-/** PK-000123: what the sticker carries and what a person reads off it. */
+/**
+ * PK-0123: what the sticker carries and what a person reads off it. Four
+ * digits, short enough to say aloud, running longer past 9999. Stickers
+ * printed before carry six (PK-000123); they still read — see codeCandidates.
+ */
 export async function nextPackageCode(tx: Prisma.TransactionClient): Promise<string> {
   const [row] = await tx.$queryRaw<Array<{ n: bigint }>>`SELECT nextval('ld_erp.stock_package_code_seq') AS n`
-  return `PK-${String(Number(row.n)).padStart(6, '0')}`
+  return `PK-${String(Number(row.n)).padStart(4, '0')}`
 }
 
 /**
@@ -30,9 +34,23 @@ export function normaliseCode(raw: string): string {
   let s = raw.trim()
   if (s.includes('/')) s = s.split('/').filter(Boolean).pop() ?? s
   s = s.toUpperCase().replace(/\s+/g, '')
-  const digits = s.match(/^PK-?(\d{1,9})$/)
-  if (digits) return `PK-${digits[1].padStart(6, '0')}`
+  // "PK-0057", "pk57", or the bare number under the QR: "57".
+  const digits = s.match(/^(?:PK-?)?(\d{1,9})$/)
+  if (digits) return `PK-${String(Number(digits[1])).padStart(4, '0')}`
   return s
+}
+
+/**
+ * The codes a scanned or typed sticker number can be on: PK-0123 now, or
+ * PK-000123 on a sticker printed before codes were shortened. One number is
+ * only ever one of the two — the count behind them never goes back.
+ */
+export function codeCandidates(raw: string): string[] {
+  const code = normaliseCode(raw)
+  const m = code.match(/^PK-(\d+)$/)
+  if (!m) return [code]
+  const n = String(Number(m[1]))
+  return [...new Set([`PK-${n.padStart(4, '0')}`, `PK-${n.padStart(6, '0')}`])]
 }
 
 /**
