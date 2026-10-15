@@ -3,7 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   ChevronDown, ChevronRight, History, Loader2, Lock, PackageCheck, ShoppingCart, CheckCircle2, Warehouse, ShoppingBag,
-  FileText, CircleAlert, type LucideIcon,
+  FileText, CircleAlert, ClipboardList, type LucideIcon,
 } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -390,14 +390,25 @@ export function ProcessDialog({
     // Ready means the store can give all that is still owed; an item with only
     // some of it is "partly", told apart so the count never promises more than the racks hold.
     const partly = live.filter((r) => r.free > 0 && short(r))
+    // With Purchase, told by the PO it is on, or that it waits on the indent for one.
+    const onPo = live.filter((r) => short(r) && r.ordered > 0 && r.received + 1e-9 < r.ordered)
+    const indentOnly = live.filter((r) => short(r) && r.ordered <= 0 && r.onIndent > 0)
+    const pos = [...new Set(onPo.flatMap((r) => r.orders.filter((o) => o.receivedQty + 1e-9 < o.qty).map((o) => o.poNumber)))]
+    const purchaseText = [
+      onPo.length ? (pos.length <= 1 ? `on ${pos[0] ?? 'a PO'}` : `${onPo.length} on ${pos.length} POs`) : null,
+      indentOnly.length ? `${indentOnly.length} on the indent, no PO yet` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ')
     return {
       items: rows.length,
       pending: live.length,
       ready: live.filter((r) => !short(r)).length,
       partly: partly.length,
-      partlyText: partly.length === 1 ? `1 partly: ${fmt(partly[0].free)} of ${fmt(partly[0].owed)} ${partly[0].unit} in store` : `${partly.length} partly in store`,
+      partlyText: partly.length === 1 ? `1 partly · ${fmt(partly[0].free)} of ${fmt(partly[0].owed)} ${partly[0].unit}` : `${partly.length} partly in store`,
       toBuy: live.filter((r) => short(r) && !withPurchase(r) && !r.theirs).length,
       withPurchase: live.filter((r) => short(r) && withPurchase(r)).length,
+      purchaseText,
       done: rows.length - live.length,
     }
   }, [rows])
@@ -406,8 +417,23 @@ export function ProcessDialog({
   const requested = useMemo(() => {
     const byUnit = new Map<string, number>()
     for (const r of rows) byUnit.set(r.unit, r3((byUnit.get(r.unit) ?? 0) + r.asked))
-    return [...byUnit].map(([u, q]) => `${fmt(q)} ${u}`)
+    return [...byUnit].map(([u, q]) => ({ u, q }))
   }, [rows])
+
+  // The whole requisition in one unit, when all its items share one: the totals row and the issued bar.
+  const totals = useMemo(() => {
+    const unit = rows.length > 0 && rows.every((r) => r.unit === rows[0].unit) ? rows[0].unit : null
+    const sum = (f: (r: Row) => number) => r3(rows.reduce((t, r) => t + f(r), 0))
+    return {
+      unit,
+      asked: sum((r) => r.asked),
+      issued: sum((r) => r.issued),
+      free: sum((r) => r.free),
+      short: sum((r) => Math.max(0, r.owed - r.free)),
+      ordered: sum((r) => r.ordered),
+    }
+  }, [rows])
+  const itemsWord = (n: number) => (n === 1 ? 'item' : 'items')
 
   const daysLeft = mr.requiredDate ? Math.round((Date.parse(dayKey(mr.requiredDate)) - Date.parse(dayKey(new Date()))) / 86_400_000) : null
   const late = daysLeft != null && daysLeft < 0 && summary.pending > 0
@@ -622,7 +648,7 @@ export function ProcessDialog({
           className="mt-1 inline-flex items-center gap-0.5 text-[11px] font-medium text-primary hover:underline"
           aria-expanded={isOpen}
         >
-          {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {isOpen ? 'Hide details' : 'Details — journey, stock, purchases'}
+          {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {isOpen ? 'Hide details' : 'Details'}
         </button>
       </>
     )
@@ -714,6 +740,14 @@ export function ProcessDialog({
         </div>
       )
     const lock = lockOf(r)
+    // Nothing to enter: a dash, and the reason only where the row does not already say it.
+    if (lock)
+      return (
+        <div className="py-1.5 md:text-right">
+          <span className="text-muted-foreground">—</span>
+          {lock !== 'Nothing in store' && lock !== 'All issued' && <div className={small}>{lock}</div>}
+        </div>
+      )
     const v = num(qty[tab][r.l.id] ?? '')
     const from = tab !== 'buy' && v > 0 ? [...spread(r, v).entries()] : []
     return (
@@ -726,19 +760,15 @@ export function ProcessDialog({
             max={tab === 'buy' ? undefined : r3(Math.min(r.owed, r.free))}
             placeholder="0"
             onValueChange={(x) => set(tab, r.l.id, x)}
-            disabled={!!lock || saving}
+            disabled={saving}
             aria-label={`${ariaWord} quantity for ${r.l.item.name}`}
           />
           <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground">{r.unit}</span>
         </div>
-        {lock ? (
-          <div className={`mt-0.5 text-right ${small}`}>{lock}</div>
-        ) : (
-          from.length > 0 && (
-            <div className={`mt-0.5 text-right ${small}`}>
-              from {from.map(([id, q]) => `${r.stores.find((s) => s.id === id)?.name}${from.length > 1 ? ` ${fmt(q)}` : ''}`).join(' + ')}
-            </div>
-          )
+        {from.length > 0 && (
+          <div className={`mt-0.5 text-right ${small}`}>
+            from {from.map(([id, q]) => `${r.stores.find((s) => s.id === id)?.name}${from.length > 1 ? ` ${fmt(q)}` : ''}`).join(' + ')}
+          </div>
         )}
       </>
     )
@@ -762,12 +792,16 @@ export function ProcessDialog({
 
   const detailsOf = (r: Row) => {
     const buy = standing(r).buy
+    const block = 'rounded-lg border border-border bg-card px-3 py-2.5'
     return (
       <div className="space-y-3">
-      {journeyOf(r)}
-      <div className="grid gap-4 text-xs md:grid-cols-3">
-        <div>
-          <p className="mb-1 font-semibold text-foreground">Stock by store</p>
+      <div>
+        <p className={`mb-1.5 ${mini}`}>Journey</p>
+        {journeyOf(r)}
+      </div>
+      <div className="grid gap-2 text-xs md:grid-cols-3">
+        <div className={block}>
+          <p className={`mb-1.5 ${mini}`}>Stock by store</p>
           {r.stores.length ? (
             <table className="w-full">
               <thead className="text-[10px] uppercase text-muted-foreground">
@@ -796,8 +830,8 @@ export function ProcessDialog({
             <p className="mt-1 text-muted-foreground">Kept aside for others: {r.stores.flatMap((s) => s.holders).join(', ')}</p>
           )}
         </div>
-        <div>
-          <p className="mb-1 font-semibold text-foreground">Purchase orders for this requisition</p>
+        <div className={block}>
+          <p className={`mb-1.5 ${mini}`}>Purchase orders for this requisition</p>
           {r.orders.length ? (
             <ul className="space-y-1 text-muted-foreground">
               {r.orders.map((o) => (
@@ -823,8 +857,8 @@ export function ProcessDialog({
             </p>
           )}
         </div>
-        <div>
-          <p className="mb-1 font-semibold text-foreground">Last purchase</p>
+        <div className={block}>
+          <p className={`mb-1.5 ${mini}`}>Last purchase</p>
           {r.lastBuy ? (
             <p className="text-muted-foreground">
               {r.lastBuy.supplierName} at <b className="text-foreground">{inr(r.lastBuy.unitRate)}/{r.unit}</b> on {r.lastBuy.poNumber}, {formatDate(r.lastBuy.poDate)}
@@ -851,8 +885,10 @@ export function ProcessDialog({
   const td = 'px-3 py-2.5 text-right tabular-nums align-top'
   const mini = 'text-[10px] font-semibold uppercase tracking-wide text-muted-foreground'
 
-  // Items, not quantities: "1 ready in store" is one item, whatever its amount.
-  const boxes: Array<{ n: number; label: string; note: string; icon: LucideIcon; tint: string; num: string; buy?: boolean }> = [
+  // Items, not quantities: "1 of 4 items ready in store" is one item, whatever its amount.
+  // The first box is the quantity; every other box counts items, and says so.
+  const allDone = summary.done === summary.items
+  const boxes: Array<{ n: number; label: string; note: string; icon: LucideIcon; tint: string; num: string; buy?: boolean; bar?: number }> = [
     {
       n: summary.ready,
       label: 'Ready in store',
@@ -861,17 +897,43 @@ export function ProcessDialog({
       tint: 'bg-emerald-500/15 text-emerald-600',
       num: 'text-emerald-600',
     },
-    { n: summary.toBuy, label: 'Short — to buy', note: 'not on the indent yet', icon: ShoppingBag, tint: 'bg-red-500/15 text-red-500', num: 'text-red-500', buy: true },
-    { n: summary.withPurchase, label: 'With Purchase', note: 'on the indent or a PO', icon: FileText, tint: 'bg-sky-500/15 text-sky-600', num: 'text-sky-600' },
+    {
+      n: summary.toBuy,
+      label: 'Short — to buy',
+      note: summary.toBuy ? 'not on the indent yet' : 'nothing left to buy',
+      icon: ShoppingBag,
+      tint: 'bg-red-500/15 text-red-500',
+      num: 'text-red-500',
+      buy: true,
+    },
+    {
+      n: summary.withPurchase,
+      label: 'With Purchase',
+      note: summary.purchaseText || 'nothing waiting on Purchase',
+      icon: FileText,
+      tint: 'bg-sky-500/15 text-sky-600',
+      num: 'text-sky-600',
+    },
     {
       n: summary.done,
       label: 'Issued in full',
-      note: `of ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`,
-      icon: summary.done === summary.items ? CheckCircle2 : CircleAlert,
-      tint: summary.done === summary.items ? 'bg-emerald-500/15 text-emerald-600' : 'bg-amber-500/15 text-amber-600',
-      num: 'text-foreground',
+      // In pieces when the items share a unit, so it reads against the first box.
+      note: totals.unit
+        ? `${fmt(totals.issued)} of ${fmt(totals.asked)} ${totals.unit} issued`
+        : allDone
+          ? 'everything handed over'
+          : `${summary.pending} ${itemsWord(summary.pending)} still to give`,
+      icon: allDone ? CheckCircle2 : CircleAlert,
+      tint: allDone ? 'bg-emerald-500/15 text-emerald-600' : 'bg-amber-500/15 text-amber-600',
+      num: allDone ? 'text-emerald-600' : 'text-foreground',
+      bar: totals.unit && totals.asked > 0 ? totals.issued / totals.asked : summary.items ? summary.done / summary.items : 0,
     },
   ]
+
+  // What the quantity column adds up to on the open tab.
+  const enteredTotal = r3(
+    rows.reduce((t, r) => t + (tab === 'buy' && coveredByPo(r) ? r.ordered : lockOf(r) ? 0 : num(qty[tab][r.l.id] ?? '') || 0), 0),
+  )
 
   return (
     <FormFrame
@@ -942,25 +1004,42 @@ export function ProcessDialog({
         )}
       </div>
 
-      {/* Where it stands: how much was asked for, then the items, counted. */}
+      {/* Where it stands: how much was asked for, across how many items; then those items, counted. */}
       {data && (
         <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
-          <div className="col-span-2 flex items-center gap-3 rounded-xl border border-primary/50 bg-primary/10 px-3 py-2.5 md:col-span-1">
+          <div className="col-span-2 flex items-center gap-3 rounded-xl border border-primary/40 bg-primary/5 px-3 py-2.5 md:col-span-1">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
-              <ShoppingCart size={19} />
+              <ClipboardList size={19} />
             </span>
             <div className="min-w-0">
-              <div className="break-words text-lg font-bold leading-tight tabular-nums text-foreground">{requested.join(' + ') || '—'}</div>
-              <div className="text-sm text-muted-foreground">Requested qty</div>
+              <div className="break-words text-xl font-bold leading-tight tabular-nums text-foreground">
+                {requested.length
+                  ? requested.map((x, i) => (
+                      <Fragment key={x.u}>
+                        {i > 0 && ' + '}
+                        {fmt(x.q)} <span className="text-sm font-semibold text-muted-foreground">{x.u}</span>
+                      </Fragment>
+                    ))
+                  : '—'}
+              </div>
+              <div className="text-sm font-semibold text-foreground">Requested qty</div>
+              <div className={small}>
+                across {summary.items} {itemsWord(summary.items)}
+              </div>
             </div>
           </div>
           {boxes.map((b) => (
-            <div key={b.label} className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
-              <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${b.n > 0 ? b.tint : 'bg-secondary text-muted-foreground'}`}>
+            <div key={b.label} className="relative flex items-center gap-3 overflow-hidden rounded-xl border border-border bg-card px-3 py-2.5">
+              <span className={`hidden h-10 w-10 shrink-0 items-center justify-center rounded-full sm:flex ${b.n > 0 ? b.tint : 'bg-secondary text-muted-foreground'}`}>
                 <b.icon size={19} />
               </span>
               <div className="min-w-0">
-                <div className={`text-xl font-bold leading-tight tabular-nums ${b.n > 0 ? b.num : 'text-foreground'}`}>{b.n}</div>
+                <div className="flex items-baseline gap-1">
+                  <span className={`text-xl font-bold leading-tight tabular-nums ${b.n > 0 ? b.num : 'text-foreground'}`}>{b.n}</span>
+                  <span className="text-xs text-muted-foreground">
+                    of {summary.items} {itemsWord(summary.items)}
+                  </span>
+                </div>
                 <div className="text-sm font-semibold text-foreground">{b.label}</div>
                 <div className={small}>
                   {b.buy && b.n > 0 && tab !== 'buy' ? (
@@ -972,111 +1051,117 @@ export function ProcessDialog({
                   )}
                 </div>
               </div>
+              {b.bar != null && (
+                <div className="absolute inset-x-0 bottom-0 h-1 bg-secondary" aria-hidden>
+                  <div className="h-full bg-emerald-500" style={{ width: `${Math.min(100, Math.round(b.bar * 100))}%` }} />
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      {/* Three forms, one tab each. */}
-      <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
-        {TABS.map((t) => {
-          const count = !data ? 0 : t.key === 'issue' ? summary.ready : t.key === 'buy' ? summary.toBuy : 0
-          return (
-            <button
-              key={t.key}
-              type="button"
-              role="tab"
-              aria-selected={tab === t.key}
-              onClick={() => {
-                setTab(t.key)
-                setError(null)
-              }}
-              className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-2 text-sm transition-colors ${
-                tab === t.key ? 'bg-card font-semibold text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              <t.icon size={15} className="hidden shrink-0 sm:block" />
-              <span className="truncate sm:hidden">{t.short}</span>
-              <span className="hidden truncate sm:inline">{t.label}</span>
-              {count > 0 && (
-                <span
-                  className={`rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${t.key === 'buy' ? 'bg-red-500/15 text-red-500' : 'bg-emerald-500/15 text-emerald-600'}`}
-                >
-                  {count}
-                </span>
-              )}
-            </button>
-          )
-        })}
-      </div>
-      <p className="-mt-1 px-1 text-xs text-muted-foreground">{current.what}</p>
+      {/* The work: three forms, one tab each, heading the items they act on. */}
+      <div className="rounded-xl border border-border bg-card">
+        <div className="flex gap-1 rounded-t-xl border-b border-border bg-secondary/50 px-2" role="tablist">
+          {TABS.map((t) => {
+            const count = !data ? 0 : t.key === 'issue' ? summary.ready : t.key === 'buy' ? summary.toBuy : 0
+            const on = tab === t.key
+            return (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={on}
+                onClick={() => {
+                  setTab(t.key)
+                  setError(null)
+                }}
+                className={`-mb-px flex min-w-0 flex-1 items-center justify-center gap-1.5 border-b-2 px-3 py-2.5 text-sm transition-colors sm:flex-none sm:px-4 ${
+                  on ? 'border-primary font-semibold text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <t.icon size={15} className={`hidden shrink-0 sm:block ${on ? 'text-primary' : ''}`} />
+                <span className="truncate sm:hidden">{t.short}</span>
+                <span className="hidden truncate sm:inline">{t.label}</span>
+                {count > 0 && (
+                  <span
+                    className={`rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${t.key === 'buy' ? 'bg-red-500/15 text-red-500' : 'bg-emerald-500/15 text-emerald-600'}`}
+                  >
+                    {count}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
 
-      {tab === 'buy' && data && (() => {
-        const short = rows.filter((r) => r.owed > 0 && !r.theirs && shortOf(r) > 0)
-        if (!short.length || !short.every(coveredByPo)) return null
-        const pos = [...new Map(short.flatMap((r) => r.orders).map((o) => [o.poId, o])).values()]
-        return (
-          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-foreground">
-            <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />
-            Everything short is already on order — nothing more to buy.
-            {pos.map((o) => (
-              <span key={o.poId} className="inline-flex items-center gap-1.5">
-                <a href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`} target="_blank" rel="noreferrer" className="font-mono text-xs font-semibold text-primary hover:underline">
-                  {o.poNumber}
-                </a>
-                <span className={`${PO_BADGE[o.status ?? ''] ?? 'badge-neutral'} text-[10px]`}>{PO_STATUS[o.status ?? ''] ?? o.status}</span>
-                {o.deliveryDate && <span className={small}>due {formatDate(o.deliveryDate)}</span>}
-              </span>
-            ))}
-          </p>
-        )
-      })()}
-
-      {notice && (
-        <p className="flex items-start gap-2 rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-foreground">
-          <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" /> {notice}
-        </p>
-      )}
-
-      {tab === 'issue' &&
-        data &&
-        (!canIssue ? (
-          <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-foreground">
-            You raised or approved this requisition, so somebody else in the store issues it. You can still keep items aside and buy.
-          </p>
-        ) : summary.pending === 0 ? (
-          <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-foreground">Everything on this requisition has been issued.</p>
-        ) : summary.ready + summary.partly > 0 ? (
-          // Approved, so it can be handed over by scanning: stock comes down with each sticker.
-          <ScanIssue
-            mrId={mr.id}
-            mrNumber={mr.mrNumber}
-            itemIds={mr.lines.map((l) => l.item.id)}
-            onIssued={(message) => {
-              setNotice(message)
-              onDone(message)
-              void read()
-            }}
-          />
-        ) : (
-          <div className="rounded-lg border border-dashed border-border bg-secondary/40 px-4 py-3 text-sm">
-            <p className="font-medium text-foreground">Nothing on this requisition is in the store yet, so there is nothing to issue.</p>
-            <p className="mt-0.5 text-muted-foreground">
-              {summary.toBuy > 0 ? (
-                <>
-                  Put what is short on the indent for Purchase.{' '}
-                  <button type="button" className="font-medium text-primary hover:underline" onClick={() => setTab('buy')}>
-                    Buy what&apos;s short →
-                  </button>
-                </>
-              ) : (
-                'It is with Purchase. Issue it here when the goods come in.'
-              )}
+        <div className="space-y-3 border-b border-border px-4 py-3">
+          <p className="text-xs text-muted-foreground">{current.what}</p>
+          {tab === 'buy' && data && (() => {
+            const short = rows.filter((r) => r.owed > 0 && !r.theirs && shortOf(r) > 0)
+            if (!short.length || !short.every(coveredByPo)) return null
+            const pos = [...new Map(short.flatMap((r) => r.orders).map((o) => [o.poId, o])).values()]
+            return (
+              <p className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-foreground">
+                <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />
+                Everything short is already on order — nothing more to buy.
+                {pos.map((o) => (
+                  <span key={o.poId} className="inline-flex items-center gap-1.5">
+                    <a href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`} target="_blank" rel="noreferrer" className="font-mono text-xs font-semibold text-primary hover:underline">
+                      {o.poNumber}
+                    </a>
+                    <span className={`${PO_BADGE[o.status ?? ''] ?? 'badge-neutral'} text-[10px]`}>{PO_STATUS[o.status ?? ''] ?? o.status}</span>
+                    {o.deliveryDate && <span className={small}>due {formatDate(o.deliveryDate)}</span>}
+                  </span>
+                ))}
+              </p>
+            )
+          })()}
+          {notice && (
+            <p className="flex items-start gap-2 rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-foreground">
+              <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" /> {notice}
             </p>
-          </div>
-        ))}
+          )}
+          {tab === 'issue' &&
+            data &&
+            (!canIssue ? (
+              <p className="rounded-lg bg-amber-500/15 px-3 py-2 text-sm text-foreground">
+                You raised or approved this requisition, so somebody else in the store issues it. You can still keep items aside and buy.
+              </p>
+            ) : summary.pending === 0 ? (
+              <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-foreground">Everything on this requisition has been issued.</p>
+            ) : summary.ready + summary.partly > 0 ? (
+              // Approved, so it can be handed over by scanning: stock comes down with each sticker.
+              <ScanIssue
+                mrId={mr.id}
+                mrNumber={mr.mrNumber}
+                itemIds={mr.lines.map((l) => l.item.id)}
+                onIssued={(message) => {
+                  setNotice(message)
+                  onDone(message)
+                  void read()
+                }}
+              />
+            ) : (
+              <div className="rounded-lg border border-dashed border-border bg-secondary/40 px-4 py-3 text-sm">
+                <p className="font-medium text-foreground">Nothing on this requisition is in the store yet, so there is nothing to issue.</p>
+                <p className="mt-0.5 text-muted-foreground">
+                  {summary.toBuy > 0 ? (
+                    <>
+                      Put what is short on the indent for Purchase.{' '}
+                      <button type="button" className="font-medium text-primary hover:underline" onClick={() => setTab('buy')}>
+                        Buy what&apos;s short →
+                      </button>
+                    </>
+                  ) : (
+                    'It is with Purchase. Issue it here when the goods come in.'
+                  )}
+                </p>
+              </div>
+            ))}
+        </div>
 
-      <div className="overflow-hidden rounded-xl border border-border bg-card">
         {!data ? (
           <p className="px-3 py-10 text-center text-sm text-muted-foreground">Reading the stock…</p>
         ) : (
@@ -1095,7 +1180,7 @@ export function ProcessDialog({
                 <tbody>
                   {rows.map((r) => (
                     <Fragment key={r.l.id}>
-                      <tr className="border-t border-border">
+                      <tr className="border-t border-border transition-colors hover:bg-secondary/20">
                         <td className="px-3 py-2.5 align-top">{itemCell(r)}</td>
                         <td className={td}>{neededCell(r)}</td>
                         <td className={td}>{storeCell(r)}</td>
@@ -1118,6 +1203,46 @@ export function ProcessDialog({
                     </Fragment>
                   ))}
                 </tbody>
+                {/* The same figures added up, so the table reads against the boxes at the top. */}
+                {totals.unit && rows.length > 1 && (
+                  <tfoot>
+                    <tr className="border-t-2 border-border bg-secondary/40">
+                      <td className="px-3 py-2.5 font-semibold text-foreground">
+                        Total <span className={small}>· {rows.length} items</span>
+                      </td>
+                      <td className={td}>
+                        <span className="font-semibold text-foreground">{fmt(totals.asked)}</span> <span className={small}>{totals.unit}</span>
+                      </td>
+                      <td className={td}>
+                        <span className="font-semibold text-foreground">{fmt(totals.free)}</span> <span className={small}>{totals.unit}</span>
+                      </td>
+                      {tab === 'buy' && (
+                        <>
+                          <td className={td}>{totals.short > 0 ? <span className="font-semibold text-foreground">{fmt(totals.short)}</span> : dash}</td>
+                          <td className="px-3 py-2.5 align-top tabular-nums">
+                            {totals.ordered > 0 ? (
+                              <>
+                                <span className="font-semibold text-foreground">{fmt(totals.ordered)}</span> <span className={small}>{totals.unit} on PO</span>
+                              </>
+                            ) : (
+                              dash
+                            )}
+                          </td>
+                        </>
+                      )}
+                      <td className={td}>
+                        {enteredTotal > 0 ? (
+                          <>
+                            <span className="font-semibold text-foreground">{fmt(enteredTotal)}</span> <span className={small}>{totals.unit}</span>
+                          </>
+                        ) : (
+                          dash
+                        )}
+                      </td>
+                      <td />
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
 
@@ -1159,14 +1284,14 @@ export function ProcessDialog({
             </div>
           </>
         )}
+        <p className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">
+          {tab === 'issue'
+            ? 'Stock kept aside for this requisition goes first; the store each quantity comes from shows under the box.'
+            : tab === 'reserve'
+              ? 'Keep aside is the total to hold for the item. Change it, or set 0 to let it go.'
+              : 'The indent quantity is the total to buy for the item. It replaces what is on the indent, and cannot go below what is already on a PO.'}
+        </p>
       </div>
-      <p className="px-1 text-[11px] text-muted-foreground">
-        {tab === 'issue'
-          ? 'Stock kept aside for this requisition goes first; the store each quantity comes from shows under the box.'
-          : tab === 'reserve'
-            ? 'Keep aside is the total to hold for the item. Change it, or set 0 to let it go.'
-            : 'The indent quantity is the total to buy for the item. It replaces what is on the indent, and cannot go below what is already on a PO.'}
-      </p>
 
       {/* What has happened so far, folded away. */}
       {data && data.events.length > 0 && (

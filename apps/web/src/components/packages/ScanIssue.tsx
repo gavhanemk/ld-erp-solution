@@ -105,7 +105,7 @@ export function ScanIssue({
   }
 
   return (
-    <div className="relative z-20 space-y-3 rounded-xl border border-border bg-card p-3">
+    <div className="relative z-20 space-y-3">
       <p className="flex flex-wrap items-center gap-x-2 text-sm">
         <ScanLine size={16} className="text-primary" />
         <span className="font-semibold text-foreground">Scan items to issue</span>
