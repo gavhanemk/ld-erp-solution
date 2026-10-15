@@ -224,7 +224,7 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
     baseKey: string
     /** Whose the plan would say without the switch. */
     defaultOwnership: 'OWNED' | 'CUSTOMER_OWNED'
-    item: { id: string; code: string; name: string; type: string; uom: string | null }
+    item: { id: string; code: string; name: string; type: string; uom: string | null; category: string }
     ownership: 'OWNED' | 'CUSTOMER_OWNED'
     ownerCustomerId: string | null
     department: { id: string; name: string } | null
@@ -256,7 +256,14 @@ export async function materialPlan(db: Db, moId: string, opts: { swap?: Set<stri
         key,
         baseKey,
         defaultOwnership: (byDefault ? 'CUSTOMER_OWNED' : 'OWNED') as Row['defaultOwnership'],
-        item: { id: b.componentItem.id, code: b.componentItem.code, name: b.componentItem.name, type: b.componentItem.type, uom: b.componentItem.uom?.symbol ?? null },
+        item: {
+          id: b.componentItem.id,
+          code: b.componentItem.code,
+          name: b.componentItem.name,
+          type: b.componentItem.type,
+          uom: b.componentItem.uom?.symbol ?? null,
+          category: [cat?.parent?.name, cat?.name].filter(Boolean).join(' › '),
+        },
         ownership,
         ownerCustomerId,
         department: b.department,
