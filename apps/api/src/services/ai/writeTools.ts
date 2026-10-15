@@ -991,12 +991,12 @@ const WRITES: WriteDefinition[] = [
     tool: {
       name: 'decide_document',
       description:
-        'Approve or refuse a purchase order, sales order or material requisition that is waiting. Find the number with get_pending_approvals first.',
+        'Approve or refuse a sales order or material requisition that is waiting. Purchase orders have no approval step. Find the number with get_pending_approvals first.',
       needs: null,
       parameters: {
         type: 'object',
         properties: {
-          number: { type: 'string', description: 'The document number, e.g. PO-2627-0001' },
+          number: { type: 'string', description: 'The document number, e.g. SO-2627-0001' },
           decision: { type: 'string', description: 'What to do', enum: ['approve', 'reject'] },
           reason: { type: 'string', description: 'Why it is being refused. Required to refuse.' },
           ...CONFIRM_PARAM,
@@ -1052,35 +1052,9 @@ const WRITES: WriteDefinition[] = [
   },
 ]
 
-/** One waiting document, whichever of the three kinds it is. */
+/** One waiting document: a sales order or a requisition. Purchase orders are never approved. */
 async function findDocument(number: string) {
   const trimmed = number.trim()
-
-  const po = await prisma.purchaseOrder.findFirst({
-    where: { poNumber: like(trimmed), deletedAt: null },
-    include: { supplier: { select: { name: true } } },
-  })
-  if (po) {
-    return {
-      id: po.id,
-      number: po.poNumber,
-      module: 'purchase',
-      entityType: 'PurchaseOrder',
-      raisedById: po.createdById,
-      before: po,
-      describe: `${po.supplier.name}, ₹${Number(po.totalAmount).toLocaleString('en-IN')}`,
-      decide: async (approve: boolean, userId: string, reason: string | null) => {
-        if (po.approvedAt) throw new Error(`${po.poNumber} is already approved.`)
-        if (po.status === 'CANCELLED') throw new Error(`${po.poNumber} is cancelled.`)
-        return prisma.purchaseOrder.update({
-          where: { id: po.id },
-          data: approve
-            ? { approvedById: userId, approvedAt: new Date() }
-            : { status: 'CANCELLED', notes: [po.notes, `Refused: ${reason}`].filter(Boolean).join('\n') },
-        })
-      },
-    }
-  }
 
   const so = await prisma.salesOrder.findFirst({
     where: { soNumber: like(trimmed) },

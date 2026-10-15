@@ -23,7 +23,7 @@ import {
 
 interface Approval {
   id: string
-  type: 'PO' | 'SO' | 'MR'
+  type: 'SO' | 'MR'
   number: string
   description: string
   amount: number
@@ -32,7 +32,6 @@ interface Approval {
 }
 
 const TYPE_LABEL: Record<Approval['type'], string> = {
-  PO: 'Purchase order',
   SO: 'Sales order',
   MR: 'Material requisition',
 }
@@ -53,7 +52,6 @@ export default function ApprovalsScreen() {
   // The server governs approval by the module the document belongs to, so the
   // buttons follow the same rule rather than a rule of their own.
   const moduleFor: Record<Approval['type'], string> = {
-    PO: 'purchase',
     SO: 'sales',
     MR: 'inventory',
   }

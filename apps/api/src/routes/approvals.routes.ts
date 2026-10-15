@@ -12,12 +12,12 @@ import { stickersNote } from '../services/stickers.service'
 
 const router = Router()
 
-const documentType = z.enum(['PO', 'SO', 'MR', 'ADJ'])
+// Purchase orders are not here: purchase has no approval step.
+const documentType = z.enum(['SO', 'MR', 'ADJ'])
 type DocumentType = z.infer<typeof documentType>
 
 /** Which permission module governs each document type. */
 const MODULE_FOR: Record<DocumentType, string> = {
-  PO: 'purchase',
   SO: 'sales',
   MR: 'inventory',
   ADJ: 'inventory',
@@ -108,23 +108,6 @@ async function approve(
   admin = false,
   creditReleaseReason?: string | null,
 ) {
-  if (type === 'PO') {
-    const before = await prisma.purchaseOrder.findUnique({ where: { id } })
-    if (!before || before.deletedAt) {
-      throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
-    }
-    if (before.approvedAt) {
-      throw new AppError('This purchase order is already approved', 409, 'ALREADY_APPROVED')
-    }
-
-    const after = await prisma.purchaseOrder.update({
-      where: { id },
-      // SENT is the first post-approval state: the PO can now go to the supplier.
-      data: { status: 'SENT', approvedById: userId, approvedAt: new Date() },
-    })
-    return { entityType: 'PurchaseOrder', number: before.poNumber, before, after }
-  }
-
   if (type === 'SO') {
     // Draft only, never by the person who raised it, and a credit hold needs a
     // reason. The assistant approves through the same function.
@@ -164,19 +147,6 @@ async function approve(
 }
 
 async function reject(type: DocumentType, id: string, reason: string, userId: string) {
-  if (type === 'PO') {
-    const before = await prisma.purchaseOrder.findUnique({ where: { id } })
-    if (!before || before.deletedAt) {
-      throw new AppError('Purchase order not found', 404, 'NOT_FOUND')
-    }
-
-    const after = await prisma.purchaseOrder.update({
-      where: { id },
-      data: { status: 'CANCELLED', notes: appendReason(before.notes, reason) },
-    })
-    return { entityType: 'PurchaseOrder', number: before.poNumber, before, after }
-  }
-
   if (type === 'SO') {
     // A confirmed order is cancelled or short-closed, not rejected.
     const { before, after } = await rejectSalesOrder(id, userId, reason)
@@ -208,12 +178,6 @@ async function reject(type: DocumentType, id: string, reason: string, userId: st
   })
   const after = await prisma.materialRequisition.findUniqueOrThrow({ where: { id } })
   return { entityType: 'MaterialRequisition', number: before.mrNumber, before, after }
-}
-
-/** Keeps whatever the document already said and records why it was refused. */
-function appendReason(existing: string | null, reason: string): string {
-  const line = `Rejected: ${reason}`
-  return existing ? `${existing}\n${line}` : line
 }
 
 export default router
