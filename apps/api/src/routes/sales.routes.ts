@@ -88,7 +88,8 @@ const salesOrderLineSchema = z.object({
 /** The order as the form sends it, before the checks that span its lines. */
 const salesOrderBaseSchema = z.object({
   customerId: z.string().min(1, 'Pick a customer'),
-  brandId: z.string().min(1, 'Pick a brand'),
+  /** Not asked on the form: worked out from the garments' styles when left out (brandOf). */
+  brandId: z.string().min(1).optional().nullable(),
   orderDate: z.coerce.date().optional(),
   deliveryDate: z.coerce.date().optional().nullable(),
   customerPORef: z.string().max(60).optional().nullable(),
@@ -578,24 +579,62 @@ router.get('/customers/:id/last-rates', requirePermission(MODULE, 'view'), async
 type OrderInput = z.infer<typeof createSalesOrderSchema>
 
 /**
+ * The brand an order is booked under, which the form no longer asks for.
+ *
+ * VHAGAR is a brand of LD Cotton Mills, not a company of its own, so every
+ * sale is LD Cotton's; the brand only says whose label the garments carry,
+ * for the dashboard and the reports. That is in the styles: an order whose
+ * every garment is a VHAGAR style is a VHAGAR order, anything else (a mix,
+ * a customer's own label, a garment with no style, job work) the mill's own.
+ */
+async function brandOf(
+  tx: Prisma.TransactionClient,
+  data: OrderInput,
+  itemById: Map<string, { style: { brandType: string } | null }>,
+): Promise<string> {
+  const brands = await tx.brand.findMany({ where: { isActive: true }, select: { id: true, type: true }, orderBy: { createdAt: 'asc' } })
+  const own = brands.find((b) => b.type === 'LD_COTTON_MILLS') ?? brands[0]
+  if (!own) throw new AppError('No brand is set up. Add LD Cotton Mills in Masters → Brands.', 400, 'NO_BRAND')
+  const vhagar = brands.find((b) => b.type === 'VHAGAR')
+  if (!vhagar || data.isJobWork) return own.id
+  // A style number typed on the line is the garment's style when the master
+  // has it; else the item's own.
+  const typed = [...new Set(data.lines.map((l) => l.styleCode?.trim()).filter((c): c is string => Boolean(c)))]
+  const styles = typed.length
+    ? await tx.style.findMany({ where: { OR: typed.map((code) => ({ code: { equals: code, mode: 'insensitive' as const } })) }, select: { code: true, brandType: true } })
+    : []
+  const typedType = new Map(styles.map((s) => [s.code.toLowerCase(), s.brandType as string]))
+  const allVhagar = data.lines.every((l) => {
+    const code = l.styleCode?.trim()
+    return ((code && typedType.get(code.toLowerCase())) || itemById.get(l.itemId)?.style?.brandType) === 'VHAGAR'
+  })
+  return allVhagar ? vhagar.id : own.id
+}
+
+/**
  * Checks an order and prices it.
  *
  * The one road both a new order and an edited draft go down, so the two can
  * never be priced two ways. Returns the header's fields and the lines ready
  * to create; the number is the caller's business.
  */
-export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInput) {
-  const [customer, brand] = await Promise.all([
-    tx.customer.findUnique({ where: { id: data.customerId }, select: { name: true, isActive: true } }),
-    tx.brand.findUnique({ where: { id: data.brandId }, select: { name: true, isActive: true } }),
-  ])
+export async function prepareOrder(
+  tx: Prisma.TransactionClient,
+  data: OrderInput,
+  /** A quotation is priced by the piece; an order is split into sizes. */
+  opts: { piecesOnly?: boolean } = {},
+) {
+  const customer = await tx.customer.findUnique({ where: { id: data.customerId }, select: { name: true, isActive: true } })
   if (!customer) throw new AppError('That customer does not exist', 400, 'BAD_CUSTOMER')
   // A blacklisted customer can still have a draft: the approver decides.
   if (!customer.isActive) {
     throw new AppError(`${customer.name} is switched off. Reactivate them in Masters to order for them.`, 400, 'INACTIVE')
   }
-  if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
-  if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
+  // An order cannot be shipped before it is placed.
+  const dayOf = (d: Date) => d.toISOString().slice(0, 10)
+  if (data.deliveryDate && dayOf(data.deliveryDate) < dayOf(data.orderDate ?? new Date())) {
+    throw new AppError('The shipment / delivery date is before the order date.', 400, 'BAD_DATE')
+  }
 
   const items = await tx.item.findMany({
     where: { id: { in: [...new Set(data.lines.map((l) => l.itemId))] } },
@@ -607,10 +646,15 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       hsnCode: true,
       color: true,
       taxRate: { select: { rate: true } },
-      style: { select: { code: true, sizeGroupId: true } },
+      style: { select: { code: true, sizeGroupId: true, brandType: true } },
     },
   })
   const itemById = new Map(items.map((i) => [i.id, i]))
+
+  const brandId = data.brandId || (await brandOf(tx, data, itemById))
+  const brand = await tx.brand.findUnique({ where: { id: brandId }, select: { name: true, isActive: true } })
+  if (!brand) throw new AppError('That brand does not exist', 400, 'BAD_BRAND')
+  if (!brand.isActive) throw new AppError(`The brand ${brand.name} is switched off`, 400, 'INACTIVE')
 
   const sizeIds = [...new Set(data.lines.flatMap((l) => l.sizes?.map((s) => s.sizeId) ?? []))]
   const sizes = sizeIds.length
@@ -643,6 +687,11 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
       runs.add(size.sizeGroupId)
     }
     if (runs.size > 1) throw new AppError(`Line ${i + 1}: the sizes come from two different size runs`, 400, 'BAD_SIZE')
+    // A garment made in sizes is ordered in sizes: the size-wise figures are
+    // what cutting, stock and dispatch all work from.
+    if (!opts.piecesOnly && item.style?.sizeGroupId && !(l.sizes ?? []).some((s) => s.qty > 0)) {
+      throw new AppError(`Line ${i + 1}: ${item.code} is made in sizes. Enter its pieces size by size.`, 400, 'NEEDS_SIZES')
+    }
   })
 
   const { placeOfSupplyCode, isIntraState } = await resolvePlaceOfSupply(tx, data.customerId, data.placeOfSupplyCode)
@@ -710,7 +759,7 @@ export async function prepareOrder(tx: Prisma.TransactionClient, data: OrderInpu
 
   const header = {
     customerId: data.customerId,
-    brandId: data.brandId,
+    brandId,
     deliveryDate: data.deliveryDate ?? null,
     customerPORef: data.customerPORef ?? null,
     customerPODate: data.customerPODate ?? null,
