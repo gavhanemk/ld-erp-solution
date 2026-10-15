@@ -242,6 +242,13 @@ export function ProcessDialog({
   }, [mr.lines, data])
   type Row = (typeof rows)[number]
 
+  /** What the store cannot give of what is still owed. */
+  const shortOf = (r: Row) => r3(Math.max(0, r.owed - r.free))
+  /** Already on a PO for at least what is short: nothing more to buy. */
+  const coveredByPo = (r: Row) => r.ordered > 0 && r.owed > 0 && r.ordered + 1e-9 >= shortOf(r)
+  /** No indent box on the Buy tab: nothing owed, the customer's own, or a PO covers it. */
+  const noBuyBox = (r: Row) => r.owed <= 0 || r.theirs || coveredByPo(r)
+
   // Each tab starts filled in: issue what stock covers, the reservation as it
   // stands, and the indent as it stands (or what stock cannot cover).
   useEffect(() => {
@@ -253,8 +260,9 @@ export function ProcessDialog({
       const give = canIssue ? Math.max(0, Math.min(r.owed - onOrder, r.free)) : 0
       issue[r.l.id] = give > 0 ? String(r3(give)) : ''
       reserve[r.l.id] = r.reserved > 0 ? String(r.reserved) : ''
-      const short = r3(Math.max(0, r.owed - r.free))
-      const b = r.theirs ? 0 : r.onIndent > 0 || r.ordered > 0 ? Math.max(r.onIndent, r.ordered) : short
+      // Only what is short, never below what is already on a PO. Where nothing
+      // is to be bought the indent stays as it is, so pressing Save changes nothing there.
+      const b = noBuyBox(r) ? r.onIndent : Math.max(shortOf(r), r.ordered)
       buy[r.l.id] = b > 0 ? String(r3(b)) : ''
     }
     setQty({ issue, reserve, buy })
@@ -297,7 +305,7 @@ export function ProcessDialog({
         else if (v > r.free + 1e-9) problems.push(`${name}: only ${fmt(r.free)} ${r.unit} is in stock.`)
         work.push({ r, v })
       } else {
-        if (Math.abs(v - r.onIndent) < 1e-9) continue
+        if (noBuyBox(r) || Math.abs(v - r.onIndent) < 1e-9) continue
         if (r.theirs && v > 0) problems.push(`${name}: the customer's own material is never bought.`)
         else if (v + 1e-9 < r.ordered) problems.push(`${name}: ${fmt(r.ordered)} ${r.unit} is already on a PO, so the indent cannot go below that.`)
         work.push({ r, v })
@@ -379,10 +387,15 @@ export function ProcessDialog({
     const live = rows.filter((r) => r.owed > 0)
     const short = (r: Row) => r.free + 1e-9 < r.owed
     const withPurchase = (r: Row) => (r.ordered > 0 ? r.received + 1e-9 < r.ordered : r.onIndent > 0)
+    // Ready means the store can give all that is still owed; an item with only
+    // some of it is "partly", told apart so the count never promises more than the racks hold.
+    const partly = live.filter((r) => r.free > 0 && short(r))
     return {
       items: rows.length,
       pending: live.length,
-      ready: live.filter((r) => r.free > 0).length,
+      ready: live.filter((r) => !short(r)).length,
+      partly: partly.length,
+      partlyText: partly.length === 1 ? `1 partly: ${fmt(partly[0].free)} of ${fmt(partly[0].owed)} ${partly[0].unit} in store` : `${partly.length} partly in store`,
       toBuy: live.filter((r) => short(r) && !withPurchase(r) && !r.theirs).length,
       withPurchase: live.filter((r) => short(r) && withPurchase(r)).length,
       done: rows.length - live.length,
@@ -438,7 +451,9 @@ export function ProcessDialog({
     tab === 'buy'
       ? r.theirs
         ? "Customer's own — not bought"
-        : null
+        : r.owed <= 0
+          ? 'All issued'
+          : null
       : r.owed <= 0
         ? 'All issued'
         : tab === 'issue'
@@ -657,16 +672,30 @@ export function ProcessDialog({
 
   const shortCell = (r: Row) => {
     const s = r3(Math.max(0, r.owed - r.free))
-    return s > 0 ? <span className="text-base font-semibold text-red-500">{fmt(s)}</span> : dash
+    // Short but already on a PO is being taken care of: not red.
+    return s > 0 ? <span className={`text-base font-semibold ${coveredByPo(r) ? 'text-foreground' : 'text-red-500'}`}>{fmt(s)}</span> : dash
   }
 
+  const PO_BADGE: Record<string, string> = { DRAFT: 'badge-neutral', SENT: 'badge-info', PARTIALLY_RECEIVED: 'badge-warning', COMPLETED: 'badge-success' }
   const orderCell = (r: Row) =>
-    r.ordered > 0 ? (
-      <>
-        <span className="font-semibold text-foreground">{fmt(r.ordered)}</span>
-        <div className={small}>{fmt(r.received)} come in</div>
-        <div className="text-[11px]">{poLinks(r)}</div>
-      </>
+    r.orders.length ? (
+      <div className="space-y-1.5 text-left">
+        {r.orders.map((o) => (
+          <div key={o.poId}>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <a href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`} target="_blank" rel="noreferrer" className="font-mono text-xs font-semibold text-primary hover:underline">
+                {o.poNumber}
+              </a>
+              <span className={`${PO_BADGE[o.status ?? ''] ?? 'badge-neutral'} text-[10px]`}>{PO_STATUS[o.status ?? ''] ?? o.status}</span>
+            </div>
+            <div className={small}>
+              {fmt(o.receivedQty)} of {fmt(o.qty)} {r.unit} received
+              {o.deliveryDate && o.receivedQty + 1e-9 < o.qty ? ` · due ${formatDate(o.deliveryDate)}` : ''}
+            </div>
+            {o.supplierName && <div className={small}>{o.supplierName}</div>}
+          </div>
+        ))}
+      </div>
     ) : r.onIndent > 0 ? (
       <span className={small}>on the indent, no PO yet</span>
     ) : (
@@ -674,6 +703,16 @@ export function ProcessDialog({
     )
 
   const qtyBox = (r: Row) => {
+    // Bought already: what is on order, in place of a box nobody needs to touch.
+    if (tab === 'buy' && coveredByPo(r))
+      return (
+        <div className="text-right">
+          <div className="text-sm font-semibold tabular-nums text-foreground">
+            {fmt(r.ordered)} <span className={small}>{r.unit}</span>
+          </div>
+          <div className="text-[11px] text-emerald-600">fully on PO</div>
+        </div>
+      )
     const lock = lockOf(r)
     const v = num(qty[tab][r.l.id] ?? '')
     const from = tab !== 'buy' && v > 0 ? [...spread(r, v).entries()] : []
@@ -707,10 +746,11 @@ export function ProcessDialog({
 
   const statusCell = (r: Row) => {
     const st = standing(r)
+    const rest = tab === 'buy' && r.orders.length ? (r.free > 0 ? `${fmt(r.free)} ${r.unit} in store now` : null) : st.rest
     return (
       <>
         <span className={st.cls}>{st.text}</span>
-        {st.rest && <div className={`mt-1 ${small}`}>{st.rest}</div>}
+        {rest && <div className={`mt-1 ${small}`}>{rest}</div>}
         {st.buy > 0 && tab !== 'buy' && (
           <button type="button" className="mt-1 block text-[11px] font-medium text-primary hover:underline" onClick={() => setTab('buy')}>
             Buy {fmt(st.buy)} {r.unit} →
@@ -804,7 +844,7 @@ export function ProcessDialog({
     { label: 'Item' },
     { label: 'Requested', right: true },
     { label: 'Available', right: true },
-    ...(tab === 'buy' ? [{ label: 'Short', right: true }, { label: 'On order', right: true }] : []),
+    ...(tab === 'buy' ? [{ label: 'Short', right: true }, { label: 'On order', width: '13rem' }] : []),
     { label: qtyHead, right: true, width: '10rem' },
     { label: 'Status' },
   ]
@@ -813,7 +853,14 @@ export function ProcessDialog({
 
   // Items, not quantities: "1 ready in store" is one item, whatever its amount.
   const boxes: Array<{ n: number; label: string; note: string; icon: LucideIcon; tint: string; num: string; buy?: boolean }> = [
-    { n: summary.ready, label: 'Ready in store', note: 'can be issued now', icon: Warehouse, tint: 'bg-emerald-500/15 text-emerald-600', num: 'text-emerald-600' },
+    {
+      n: summary.ready,
+      label: 'Ready in store',
+      note: summary.partly ? summary.partlyText : summary.ready ? 'can be issued in full now' : 'nothing in full yet',
+      icon: Warehouse,
+      tint: 'bg-emerald-500/15 text-emerald-600',
+      num: 'text-emerald-600',
+    },
     { n: summary.toBuy, label: 'Short — to buy', note: 'not on the indent yet', icon: ShoppingBag, tint: 'bg-red-500/15 text-red-500', num: 'text-red-500', buy: true },
     { n: summary.withPurchase, label: 'With Purchase', note: 'on the indent or a PO', icon: FileText, tint: 'bg-sky-500/15 text-sky-600', num: 'text-sky-600' },
     {
@@ -964,6 +1011,27 @@ export function ProcessDialog({
       </div>
       <p className="-mt-1 px-1 text-xs text-muted-foreground">{current.what}</p>
 
+      {tab === 'buy' && data && (() => {
+        const short = rows.filter((r) => r.owed > 0 && !r.theirs && shortOf(r) > 0)
+        if (!short.length || !short.every(coveredByPo)) return null
+        const pos = [...new Map(short.flatMap((r) => r.orders).map((o) => [o.poId, o])).values()]
+        return (
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-foreground">
+            <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />
+            Everything short is already on order — nothing more to buy.
+            {pos.map((o) => (
+              <span key={o.poId} className="inline-flex items-center gap-1.5">
+                <a href={`/purchase/orders?q=${encodeURIComponent(o.poNumber)}`} target="_blank" rel="noreferrer" className="font-mono text-xs font-semibold text-primary hover:underline">
+                  {o.poNumber}
+                </a>
+                <span className={`${PO_BADGE[o.status ?? ''] ?? 'badge-neutral'} text-[10px]`}>{PO_STATUS[o.status ?? ''] ?? o.status}</span>
+                {o.deliveryDate && <span className={small}>due {formatDate(o.deliveryDate)}</span>}
+              </span>
+            ))}
+          </p>
+        )
+      })()}
+
       {notice && (
         <p className="flex items-start gap-2 rounded-lg bg-emerald-500/15 px-3 py-2 text-sm text-foreground">
           <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" /> {notice}
@@ -978,7 +1046,7 @@ export function ProcessDialog({
           </p>
         ) : summary.pending === 0 ? (
           <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-foreground">Everything on this requisition has been issued.</p>
-        ) : summary.ready > 0 ? (
+        ) : summary.ready + summary.partly > 0 ? (
           // Approved, so it can be handed over by scanning: stock comes down with each sticker.
           <ScanIssue
             mrId={mr.id}
@@ -1034,7 +1102,7 @@ export function ProcessDialog({
                         {tab === 'buy' && (
                           <>
                             <td className={td}>{shortCell(r)}</td>
-                            <td className={td}>{orderCell(r)}</td>
+                            <td className="px-3 py-2.5 align-top">{orderCell(r)}</td>
                           </>
                         )}
                         <td className="px-3 py-1.5 align-top">{qtyBox(r)}</td>
