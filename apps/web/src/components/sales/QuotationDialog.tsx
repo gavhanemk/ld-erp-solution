@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertCircle, Calculator, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Tag, Trash2, User, X } from 'lucide-react'
+import { AlertCircle, Calculator, FileText, Hash, Loader2, Lock, Package, Pencil, Plus, Save, Send, StickyNote, Trash2, User, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { fetchEveryPage } from '@/lib/export'
 import { formatRupees } from '@/lib/utils'
@@ -172,7 +172,6 @@ export function QuotationDialog({
   useEffect(() => setMounted(true), [])
 
   const [customers, setCustomers] = useState<CustomerOption[]>([])
-  const [brands, setBrands] = useState<Array<{ id: string; name: string; type: string }>>([])
   const [items, setItems] = useState<ItemOption[]>([])
   const [styles, setStyles] = useState<StyleOption[]>([])
   const [newStyle, setNewStyle] = useState<{ key: string; typed: string } | null>(null)
@@ -181,7 +180,6 @@ export function QuotationDialog({
   const [bomLoading, setBomLoading] = useState<string | null>(null)
   const [saved, setSaved] = useState<SavedQuote | null>(null)
   const [customerId, setCustomerId] = useState('')
-  const [brandId, setBrandId] = useState('')
   const [quoteDate, setQuoteDate] = useState(today())
   const [validUntil, setValidUntil] = useState(inDays(15))
   const [isJobWork, setIsJobWork] = useState(false)
@@ -227,23 +225,20 @@ export function QuotationDialog({
     setLoading(true)
     void (async () => {
       try {
-        const [c, b, it, st, q] = await Promise.all([
+        const [c, it, st, q] = await Promise.all([
           fetchEveryPage<CustomerOption>((p) => `/masters/customers?active=true&limit=200&page=${p}`),
-          api.get<{ data: Array<{ id: string; name: string; type: string }> }>('/masters/brands?active=true&limit=200'),
           fetchEveryPage<ItemOption>((p) => `/masters/items?type=FINISHED_GOOD&active=true&limit=200&page=${p}&sort=name&order=asc`),
           api.get<{ data: StyleOption[] }>('/sales/quotations/styles'),
           quoteId ? api.get<{ data: SavedQuote }>(`/sales/quotations/${quoteId}`) : Promise.resolve(null),
         ])
         if (!alive) return
         setCustomers([...c.rows].sort((x, y) => x.name.localeCompare(y.name)))
-        setBrands(b.data)
         setItems(it.rows)
         setStyles(st.data)
         if (q) {
           const s = q.data
           setSaved(s)
           setCustomerId(s.customerId)
-          setBrandId(s.brandId)
           setQuoteDate(day(s.quoteDate))
           setValidUntil(day(s.validUntil))
           setIsJobWork(s.isJobWork)
@@ -265,8 +260,6 @@ export function QuotationDialog({
               rateFromBom: false,
             }))
           )
-        } else {
-          setBrandId((b.data.find((x) => x.type === 'LD_COTTON_MILLS') ?? b.data[0])?.id ?? '')
         }
       } catch (err) {
         if (alive) setError(err instanceof ApiError ? err.message : 'Could not load the customers and items.')
@@ -390,19 +383,17 @@ export function QuotationDialog({
   const noItem = filled.find((p) => !p.l.itemId)
   const blocker = !customerId
     ? 'Choose the customer.'
-    : !brandId
-      ? 'Choose a brand.'
-      : filled.length === 0
-        ? 'Add at least one garment.'
-        : noItem
-          ? `Choose the item ${noItem.l.styleCode || 'each line'} is billed as — it carries the HSN code and GST.`
-          : filled.find((p) => p.bom && !p.l.unitPrice.trim())
-            ? `${filled.find((p) => p.bom && !p.l.unitPrice.trim())?.l.styleCode} has no selling price on its BOM yet. Use "Set price on BOM" under its rate.`
-            : filled.find((p) => p.qty <= 0 || p.l.unitPrice.trim() === '')
-              ? 'Every line needs pieces and a rate.'
-              : validUntil && validUntil < quoteDate
-                ? 'It cannot expire before it is made.'
-                : null
+    : filled.length === 0
+      ? 'Add at least one garment.'
+      : noItem
+        ? `Choose the item ${noItem.l.styleCode || 'each line'} is billed as — it carries the HSN code and GST.`
+        : filled.find((p) => p.bom && !p.l.unitPrice.trim())
+          ? `${filled.find((p) => p.bom && !p.l.unitPrice.trim())?.l.styleCode} has no selling price on its BOM yet. Use "Set price on BOM" under its rate.`
+          : filled.find((p) => p.qty <= 0 || p.l.unitPrice.trim() === '')
+            ? 'Every line needs pieces and a rate.'
+            : validUntil && validUntil < quoteDate
+              ? 'It cannot expire before it is made.'
+              : null
 
   const save = async (send: boolean) => {
     if (blocker) return
@@ -410,7 +401,6 @@ export function QuotationDialog({
     setError(null)
     const body = {
       customerId,
-      brandId,
       quoteDate,
       validUntil: validUntil || null,
       isJobWork,
@@ -511,20 +501,10 @@ export function QuotationDialog({
                       <option value="job">Job work (customer&apos;s fabric)</option>
                     </SmartSelect>
                   </Field>
-                  <Field label="Brand" icon={Tag} htmlFor="qt-brand" required>
-                    <SmartSelect id="qt-brand" className="form-input pl-9" value={brandId} onChange={(e) => setBrandId(e.target.value)}>
-                      <option value="">Choose a brand</option>
-                      {brands.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name}
-                        </option>
-                      ))}
-                    </SmartSelect>
-                  </Field>
                   <Field label="Valid until" htmlFor="qt-valid">
                     <input id="qt-valid" type="date" className="form-input" value={validUntil} min={quoteDate} onChange={(e) => setValidUntil(e.target.value)} />
                   </Field>
-                  <Field label="Buyer's reference" htmlFor="qt-ref" className="sm:col-span-2">
+                  <Field label="Buyer's reference" htmlFor="qt-ref" className="sm:col-span-2 lg:col-span-3">
                     <input id="qt-ref" className="form-input" maxLength={80} value={customerRef} placeholder="Their enquiry, email or tech pack" onChange={(e) => setCustomerRef(e.target.value)} />
                   </Field>
                   <Field label="Salesperson" htmlFor="qt-sp" className="sm:col-span-2">
@@ -717,7 +697,7 @@ export function QuotationDialog({
                   fields={styleFormFields}
                   initialValues={{
                     ...(newStyle?.typed ? { code: newStyle.typed.toUpperCase() } : {}),
-                    brandType: brands.find((x) => x.id === brandId)?.type === 'VHAGAR' ? 'VHAGAR' : 'LD_COTTON_MILLS',
+                    brandType: 'LD_COTTON_MILLS',
                     isActive: true,
                   }}
                   title="Style"

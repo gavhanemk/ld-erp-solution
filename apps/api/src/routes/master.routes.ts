@@ -56,6 +56,7 @@ import {
   updateRoutingSchema,
   updateSizeGroupSchema,
   updateSizeSchema,
+  sizeRunSchema,
   updateStyleSchema,
   updateSupplierSchema,
   updateUomSchema,
@@ -1523,6 +1524,142 @@ router.use(
 // ─────────────────────────────────────────────────────────────
 // Shop floor and commercial masters
 // ─────────────────────────────────────────────────────────────
+
+/*
+ * A size run is edited as one thing: its name and every size in it, as rows
+ * in the order they go across a cutting sheet, saved together. A size's
+ * position is its row's place in the list, so nobody types sequence numbers.
+ *
+ * A size kept is updated where it stands, because orders, BOMs, stock and
+ * bundles point at it (a new code shows on them too). A row taken out is
+ * deleted, but not one any of those use: that document would lose its size.
+ */
+const SIZE_USES = {
+  soLineSizes: ['sales order line', 'sales order lines'],
+  moLineSizes: ['manufacturing order line', 'manufacturing order lines'],
+  bomLineSizes: ['BOM line', 'BOM lines'],
+  baseSizeBoms: ['BOM as its base size', 'BOMs as their base size'],
+  stockLedger: ['stock entry', 'stock entries'],
+  fgrLines: ['finished goods receipt line', 'finished goods receipt lines'],
+  challanSizes: ['delivery challan line', 'delivery challan lines'],
+  creditSizes: ['credit note line', 'credit note lines'],
+  transferLines: ['stock transfer line', 'stock transfer lines'],
+  adjustmentLines: ['stock adjustment line', 'stock adjustment lines'],
+  jobWorkLines: ['job-work challan line', 'job-work challan lines'],
+  bundles: ['bundle', 'bundles'],
+} as const
+type SizeUse = keyof typeof SIZE_USES
+const SIZE_USE_COUNT = Object.fromEntries(Object.keys(SIZE_USES).map((k) => [k, true])) as Record<SizeUse, true>
+
+/** How many documents use a size, and which, e.g. "12 sales order lines, 1 bundle". */
+function sizeUses(counts: Record<SizeUse, number>) {
+  const keys = (Object.keys(SIZE_USES) as SizeUse[]).filter((k) => counts[k] > 0)
+  return {
+    uses: keys.reduce((s, k) => s + counts[k], 0),
+    usedOn: keys.map((k) => `${counts[k]} ${SIZE_USES[k][counts[k] === 1 ? 0 : 1]}`).join(', ') || null,
+  }
+}
+
+/** A run's sizes in order, each with what uses it, for the run's form. */
+router.get('/size-groups/:id/sizes', requirePermission(MODULE, 'view'), async (req, res) => {
+  const sizes = await prisma.size.findMany({
+    where: { sizeGroupId: req.params.id },
+    orderBy: { sequence: 'asc' },
+    include: { _count: { select: SIZE_USE_COUNT } },
+  })
+  res.json({
+    success: true,
+    data: sizes.map(({ _count, ...s }) => ({ ...s, ...sizeUses(_count) })),
+  })
+})
+
+async function saveSizeRun(req: AuthRequest, id: string | null) {
+  const data = sizeRunSchema.parse(req.body)
+  const name = data.name.trim()
+  if (!name) throw new AppError('Give the size run a name.', 400, 'VALIDATION_ERROR')
+  const clash = await prisma.sizeGroup.findFirst({
+    where: { name: { equals: name, mode: 'insensitive' }, ...(id ? { NOT: { id } } : {}) },
+    select: { id: true },
+  })
+  if (clash) throw new AppError(`There is already a size run called ${name}.`, 409, 'DUPLICATE_ENTRY')
+
+  const rows = data.sizes.map((s, i) => ({ id: s.id || null, code: s.code, label: s.label || s.code, sequence: i + 1 }))
+  // "XL" and "xl" are the same size to anyone reading a cutting sheet.
+  const seen = new Set<string>()
+  for (const r of rows) {
+    if (seen.has(r.code.toUpperCase())) throw new AppError(`${r.code} is in the list twice.`, 400, 'DUPLICATE_SIZE')
+    seen.add(r.code.toUpperCase())
+  }
+
+  const before = id
+    ? await prisma.sizeGroup.findUnique({
+        where: { id },
+        include: { sizes: { orderBy: { sequence: 'asc' }, include: { _count: { select: SIZE_USE_COUNT } } } },
+      })
+    : null
+  if (id && !before) throw new AppError('Size run not found', 404, 'NOT_FOUND')
+  const old = new Map((before?.sizes ?? []).map((s) => [s.id, s]))
+  const stray = rows.find((r) => r.id && !old.has(r.id))
+  if (stray) {
+    throw new AppError(`${stray.code} is no longer in this size run. Close the form and open it again.`, 409, 'STALE')
+  }
+  const kept = new Set(rows.map((r) => r.id))
+  const gone = (before?.sizes ?? []).filter((s) => !kept.has(s.id))
+  const inUse = gone.map((s) => ({ s, ...sizeUses(s._count) })).filter((x) => x.uses > 0)
+  if (inUse.length) {
+    throw new AppError(
+      `${inUse.map((x) => `${x.s.label} is on ${x.usedOn}`).join('; ')}, so it cannot be taken out of the run.`,
+      409,
+      'SIZE_IN_USE',
+    )
+  }
+
+  const after = await prisma.$transaction(
+    async (tx) => {
+      const run = { name, gender: data.gender ?? null, ...(data.isActive !== undefined ? { isActive: data.isActive } : {}) }
+      const group = id ? await tx.sizeGroup.update({ where: { id }, data: run }) : await tx.sizeGroup.create({ data: run })
+      if (gone.length) await tx.size.deleteMany({ where: { id: { in: gone.map((s) => s.id) } } })
+      // Codes may swap between rows (S and M typed the wrong way round), and
+      // a run cannot hold a code twice even for a moment, so the sizes being
+      // renamed step aside first.
+      const renamed = rows.filter((r) => r.id && old.get(r.id)!.code !== r.code)
+      for (const r of renamed) await tx.size.update({ where: { id: r.id! }, data: { code: `~${r.id}` } })
+      for (const r of rows) {
+        const was = r.id ? old.get(r.id)! : null
+        if (!was) {
+          await tx.size.create({ data: { sizeGroupId: group.id, code: r.code, label: r.label, sequence: r.sequence } })
+        } else if (was.code !== r.code || was.label !== r.label || was.sequence !== r.sequence) {
+          await tx.size.update({ where: { id: was.id }, data: { code: r.code, label: r.label, sequence: r.sequence } })
+        }
+      }
+      return tx.sizeGroup.findUniqueOrThrow({
+        where: { id: group.id },
+        include: { sizes: { orderBy: { sequence: 'asc' } }, _count: { select: { styles: true } } },
+      })
+    },
+    { timeout: 20000 },
+  )
+
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: id ? 'UPDATE' : 'CREATE',
+    entityType: 'SizeGroup',
+    entityId: after.id,
+    ...(before ? { before: { ...before, sizes: before.sizes.map(({ _count, ...s }) => s) } } : {}),
+    after,
+  })
+  return after
+}
+
+router.post('/size-groups/with-sizes', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const run = await saveSizeRun(req, null)
+  res.status(201).json({ success: true, message: `${run.name} saved with ${run.sizes.length} sizes.`, data: run })
+})
+
+router.patch('/size-groups/:id/with-sizes', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const run = await saveSizeRun(req, req.params.id)
+  res.json({ success: true, message: `${run.name} saved with ${run.sizes.length} sizes.`, data: run })
+})
 
 router.use(
   '/size-groups',

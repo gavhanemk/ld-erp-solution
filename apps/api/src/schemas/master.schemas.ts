@@ -809,6 +809,23 @@ export const createSizeSchema = z.object({
 })
 export const updateSizeSchema = createSizeSchema.partial()
 
+/**
+ * A size run and its sizes, saved together from the one form. The sizes come
+ * in the order they go across a cutting sheet; a row with an id is a size kept.
+ */
+export const sizeRunSchema = createSizeGroupSchema.extend({
+  sizes: z
+    .array(
+      z.object({
+        id: z.string().min(1).optional().nullable(),
+        code: z.string().trim().min(1, 'Every size needs a code').max(20),
+        label: z.string().trim().max(40).optional().nullable(),
+      }),
+    )
+    .min(1, 'Add at least one size')
+    .max(60),
+})
+
 export const createWorkstationSchema = z
   .object({
     // Left out on a new record: the server makes one up. Still validated when
