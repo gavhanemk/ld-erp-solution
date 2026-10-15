@@ -2,7 +2,8 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  ChevronDown, ChevronRight, History, Loader2, Lock, PackageCheck, ShoppingCart, CheckCircle2, type LucideIcon,
+  ChevronDown, ChevronRight, History, Loader2, Lock, PackageCheck, ShoppingCart, CheckCircle2, Warehouse, ShoppingBag,
+  FileText, CircleAlert, type LucideIcon,
 } from 'lucide-react'
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -19,10 +20,12 @@ import { packCount } from '@/components/packages/packageTypes'
  *   Keep aside       — reserve items in the store for this order
  *   Buy what's short — put items on the indent for Purchase
  *
- * At the top, in plain words: which order and MO it is for, who asked and who
- * approved, when it is needed; then four counts — ready in store, short,
- * with Purchase, issued. Each item shows what is still needed, what the store
- * has, and what happens next, and opens for its stock and purchase history.
+ * At the top, in plain words and on one line: which order and MO it is for,
+ * who asked and who approved, when it is needed. Then five figures: how much
+ * was requested, and how many items are ready in store, short, with Purchase,
+ * and issued in full. Each item shows what was requested, what is available,
+ * how much to issue and where it stands; "Details" opens its journey (asked →
+ * bought → ready → issued) and its stock and purchase history.
  * Each tab is its own form with its own save button; the window stays open
  * after a save and every tab reads the same fresh figures. Which rack a
  * quantity comes from is worked out: where it is reserved for this line
@@ -117,12 +120,13 @@ const TABS: Array<{ key: ProcessTab; label: string; short: string; icon: LucideI
   { key: 'buy', label: "Buy what's short", short: 'Buy', icon: ShoppingCart, what: 'Put what the store cannot give on the indent. The buyer raises the PO from Purchase Orders → New order → Select from indent.', button: 'Save indent' },
 ]
 
-/** One fact about the requisition: a small label over its value, never cut short. */
-function Fact({ label, children, bad, wide }: { label: string; children: ReactNode; bad?: boolean; wide?: boolean }) {
+/** One fact about the requisition: a small label, its value, and a line under it. Never cut short. */
+function Fact({ label, children, sub, bad }: { label: string; children: ReactNode; sub?: ReactNode; bad?: boolean }) {
   return (
-    <div className={`min-w-0 ${wide ? 'col-span-2 lg:col-span-4' : ''}`}>
-      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className={`break-words font-medium ${bad ? 'text-red-500' : 'text-foreground'}`}>{children}</div>
+    <div className="min-w-0 px-0 lg:px-4 lg:first:pl-0">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className={`mt-0.5 break-words font-semibold ${bad ? 'text-red-500' : 'text-foreground'}`}>{children}</div>
+      {sub && <div className="break-words text-sm text-muted-foreground">{sub}</div>}
     </div>
   )
 }
@@ -385,12 +389,17 @@ export function ProcessDialog({
     }
   }, [rows])
 
+  // How much was asked for, in its units: "238.36 pcs", or "120 pcs + 40 mtr".
+  const requested = useMemo(() => {
+    const byUnit = new Map<string, number>()
+    for (const r of rows) byUnit.set(r.unit, r3((byUnit.get(r.unit) ?? 0) + r.asked))
+    return [...byUnit].map(([u, q]) => `${fmt(q)} ${u}`)
+  }, [rows])
+
   const daysLeft = mr.requiredDate ? Math.round((Date.parse(dayKey(mr.requiredDate)) - Date.parse(dayKey(new Date()))) / 86_400_000) : null
   const late = daysLeft != null && daysLeft < 0 && summary.pending > 0
-  const due =
-    daysLeft == null
-      ? 'Not given'
-      : `${formatDate(mr.requiredDate!)} · ${daysLeft < 0 ? `${-daysLeft} ${daysLeft === -1 ? 'day' : 'days'} late` : daysLeft === 0 ? 'today' : daysLeft === 1 ? 'tomorrow' : `in ${daysLeft} days`}`
+  const dueIn =
+    daysLeft == null ? null : daysLeft < 0 ? `${-daysLeft} ${daysLeft === -1 ? 'day' : 'days'} late` : daysLeft === 0 ? 'today' : daysLeft === 1 ? 'tomorrow' : `in ${daysLeft} days`
 
   const poLinks = (r: Row) =>
     r.orders.map((o, i) => (
@@ -598,7 +607,7 @@ export function ProcessDialog({
           className="mt-1 inline-flex items-center gap-0.5 text-[11px] font-medium text-primary hover:underline"
           aria-expanded={isOpen}
         >
-          {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {isOpen ? 'Hide details' : 'Details'}
+          {isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />} {isOpen ? 'Hide details' : 'Details — journey, stock, purchases'}
         </button>
       </>
     )
@@ -606,16 +615,10 @@ export function ProcessDialog({
 
   const neededCell = (r: Row) => (
     <>
-      {r.owed > 0 ? (
-        <>
-          <span className="text-base font-semibold text-foreground">{fmt(r.owed)}</span> <span className={small}>{r.unit}</span>
-        </>
-      ) : (
-        dash
-      )}
+      <span className="text-base font-semibold text-foreground">{fmt(r.asked)}</span> <span className={small}>{r.unit}</span>
       {r.issued > 0 && (
         <div className={small}>
-          {fmt(r.issued)} of {fmt(r.asked)} issued
+          {fmt(r.issued)} issued{r.owed > 0 ? ` · ${fmt(r.owed)} still to give` : ''}
         </div>
       )}
       {r.reserved > 0 && r.owed > 0 && (
@@ -720,6 +723,8 @@ export function ProcessDialog({
   const detailsOf = (r: Row) => {
     const buy = standing(r).buy
     return (
+      <div className="space-y-3">
+      {journeyOf(r)}
       <div className="grid gap-4 text-xs md:grid-cols-3">
         <div>
           <p className="mb-1 font-semibold text-foreground">Stock by store</p>
@@ -790,26 +795,35 @@ export function ProcessDialog({
           )}
         </div>
       </div>
+      </div>
     )
   }
 
-  const qtyHead = tab === 'issue' ? 'Issue now' : tab === 'reserve' ? 'Keep aside' : 'Buy (indent qty)'
+  const qtyHead = tab === 'issue' ? 'Issue qty' : tab === 'reserve' ? 'Keep aside' : 'Buy (indent qty)'
   const heads: Array<{ label: string; right?: boolean; width?: string }> = [
     { label: 'Item' },
-    { label: 'Still needed', right: true },
-    { label: 'In store', right: true },
+    { label: 'Requested', right: true },
+    { label: 'Available', right: true },
     ...(tab === 'buy' ? [{ label: 'Short', right: true }, { label: 'On order', right: true }] : []),
     { label: qtyHead, right: true, width: '10rem' },
-    { label: 'What next' },
+    { label: 'Status' },
   ]
   const td = 'px-3 py-2.5 text-right tabular-nums align-top'
   const mini = 'text-[10px] font-semibold uppercase tracking-wide text-muted-foreground'
 
-  const boxes = [
-    { n: summary.ready, label: 'Ready in store', note: 'can be issued now', on: 'border-emerald-500/30 bg-emerald-500/10', num: 'text-emerald-600' },
-    { n: summary.toBuy, label: 'Short — to buy', note: 'not on the indent yet', on: 'border-red-500/30 bg-red-500/10', num: 'text-red-500', buy: true },
-    { n: summary.withPurchase, label: 'With Purchase', note: 'on the indent or a PO', on: 'border-sky-500/30 bg-sky-500/10', num: 'text-sky-600' },
-    { n: summary.done, label: 'Issued in full', note: `of ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`, on: 'border-border bg-secondary/50', num: 'text-foreground' },
+  // Items, not quantities: "1 ready in store" is one item, whatever its amount.
+  const boxes: Array<{ n: number; label: string; note: string; icon: LucideIcon; tint: string; num: string; buy?: boolean }> = [
+    { n: summary.ready, label: 'Ready in store', note: 'can be issued now', icon: Warehouse, tint: 'bg-emerald-500/15 text-emerald-600', num: 'text-emerald-600' },
+    { n: summary.toBuy, label: 'Short — to buy', note: 'not on the indent yet', icon: ShoppingBag, tint: 'bg-red-500/15 text-red-500', num: 'text-red-500', buy: true },
+    { n: summary.withPurchase, label: 'With Purchase', note: 'on the indent or a PO', icon: FileText, tint: 'bg-sky-500/15 text-sky-600', num: 'text-sky-600' },
+    {
+      n: summary.done,
+      label: 'Issued in full',
+      note: `of ${summary.items} ${summary.items === 1 ? 'item' : 'items'}`,
+      icon: summary.done === summary.items ? CheckCircle2 : CircleAlert,
+      tint: summary.done === summary.items ? 'bg-emerald-500/15 text-emerald-600' : 'bg-amber-500/15 text-amber-600',
+      num: 'text-foreground',
+    },
   ]
 
   return (
@@ -819,6 +833,7 @@ export function ProcessDialog({
       subtitle={`${mr.department.name} asked for ${mr.lines.length} ${mr.lines.length === 1 ? 'item' : 'items'}${mo ? ` for ${mo.moNumber}` : ''}${mr.so ? ` · ${mr.so.customer.name}` : ''}`}
       width="max-w-7xl"
       primary={saveButton}
+      primaryInHeader={false}
       footer={
         <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
           Close
@@ -836,64 +851,79 @@ export function ProcessDialog({
       onClose={onClose}
       busy={saving}
     >
-      {/* What it is for, and who has had a hand in it — in full, nothing cut short. */}
-      <div className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-xl border border-border bg-card px-4 py-3 text-sm lg:grid-cols-4">
-        <Fact label="For order">
-          {mr.so ? (
-            <>
+      {/* What it is for, and who has had a hand in it — on one line, nothing cut short. */}
+      <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm">
+        <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-7 lg:gap-x-0 lg:divide-x lg:divide-border">
+          <Fact label="For order" sub={mr.so?.customer.name}>
+            {mr.so ? (
               <a href={`/sales/orders?q=${encodeURIComponent(mr.so.soNumber)}`} target="_blank" rel="noreferrer" className="font-mono text-primary hover:underline">
                 {mr.so.soNumber}
-              </a>{' '}
-              · {mr.so.customer.name}
-            </>
-          ) : (
-            'No sales order'
-          )}
-        </Fact>
-        <Fact label="Manufacturing order">
-          {mo ? (
-            <a href={`/production/orders?open=${mo.id}`} target="_blank" rel="noreferrer" className="font-mono text-primary hover:underline">
-              {mo.moNumber}
-            </a>
-          ) : (
-            'Not from an MO'
-          )}
-          {shared.style && <span className="text-muted-foreground"> · style {shared.style}</span>}
-        </Fact>
-        <Fact label="Department asking">
-          {mr.department.name}
-          {shared.purpose && shared.purpose.toLowerCase() !== mr.department.name.toLowerCase() && (
-            <span className="text-muted-foreground"> · {forText(shared.purpose)}</span>
-          )}
-        </Fact>
-        <Fact label="From store">{shared.store ?? 'Different stores — see each item'}</Fact>
-        <Fact label="Raised by">
-          {mr.raisedBy?.name ?? '—'} <span className="text-muted-foreground">· {formatDate(mr.requestDate)}</span>
-        </Fact>
-        <Fact label="Approved by">{mr.approvedBy?.name ?? 'Not yet'}</Fact>
-        <Fact label="Needed by" bad={late}>
-          {due}
-        </Fact>
-        {note && <Fact label="Note">{note}</Fact>}
+              </a>
+            ) : (
+              'No sales order'
+            )}
+          </Fact>
+          <Fact label="Manufacturing order" sub={shared.style ? `style ${shared.style}` : null}>
+            {mo ? (
+              <a href={`/production/orders?open=${mo.id}`} target="_blank" rel="noreferrer" className="font-mono text-primary hover:underline">
+                {mo.moNumber}
+              </a>
+            ) : (
+              'Not from an MO'
+            )}
+          </Fact>
+          <Fact
+            label="Department asking"
+            sub={shared.purpose && shared.purpose.toLowerCase() !== mr.department.name.toLowerCase() ? forText(shared.purpose) : null}
+          >
+            {mr.department.name}
+          </Fact>
+          <Fact label="From store">{shared.store ?? 'Different stores — see each item'}</Fact>
+          <Fact label="Raised by" sub={formatDate(mr.requestDate)}>
+            {mr.raisedBy?.name ?? '—'}
+          </Fact>
+          <Fact label="Approved by">{mr.approvedBy?.name ?? 'Not yet'}</Fact>
+          <Fact label="Needed by" sub={dueIn} bad={late}>
+            {mr.requiredDate ? formatDate(mr.requiredDate) : 'Not given'}
+          </Fact>
+        </div>
+        {note && (
+          <p className="mt-3 border-t border-border pt-2 text-sm">
+            <span className="text-muted-foreground">Note: </span>
+            <span className="text-foreground">{note}</span>
+          </p>
+        )}
       </div>
 
-      {/* Where it stands, in four counts. */}
+      {/* Where it stands: how much was asked for, then the items, counted. */}
       {data && (
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
+          <div className="col-span-2 flex items-center gap-3 rounded-xl border border-primary/50 bg-primary/10 px-3 py-2.5 md:col-span-1">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
+              <ShoppingCart size={19} />
+            </span>
+            <div className="min-w-0">
+              <div className="break-words text-lg font-bold leading-tight tabular-nums text-foreground">{requested.join(' + ') || '—'}</div>
+              <div className="text-sm text-muted-foreground">Requested qty</div>
+            </div>
+          </div>
           {boxes.map((b) => (
-            <div key={b.label} className={`rounded-xl border px-3 py-2 ${b.n > 0 ? b.on : 'border-border bg-card'}`}>
-              <div className="flex items-baseline gap-2">
-                <span className={`text-2xl font-bold tabular-nums ${b.n > 0 ? b.num : 'text-muted-foreground'}`}>{b.n}</span>
-                <span className="text-sm font-semibold text-foreground">{b.label}</span>
-              </div>
-              <div className={`${small} ${b.buy && b.n > 0 && tab !== 'buy' ? '' : 'hidden sm:block'}`}>
-                {b.buy && b.n > 0 && tab !== 'buy' ? (
-                  <button type="button" className="font-medium text-primary hover:underline" onClick={() => setTab('buy')}>
-                    Put them on the indent →
-                  </button>
-                ) : (
-                  b.note
-                )}
+            <div key={b.label} className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5">
+              <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${b.n > 0 ? b.tint : 'bg-secondary text-muted-foreground'}`}>
+                <b.icon size={19} />
+              </span>
+              <div className="min-w-0">
+                <div className={`text-xl font-bold leading-tight tabular-nums ${b.n > 0 ? b.num : 'text-foreground'}`}>{b.n}</div>
+                <div className="text-sm font-semibold text-foreground">{b.label}</div>
+                <div className={small}>
+                  {b.buy && b.n > 0 && tab !== 'buy' ? (
+                    <button type="button" className="font-medium text-primary hover:underline" onClick={() => setTab('buy')}>
+                      Put them on the indent →
+                    </button>
+                  ) : (
+                    b.note
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -1010,11 +1040,6 @@ export function ProcessDialog({
                         <td className="px-3 py-1.5 align-top">{qtyBox(r)}</td>
                         <td className="px-3 py-2.5 align-top">{statusCell(r)}</td>
                       </tr>
-                      <tr>
-                        <td colSpan={heads.length} className="px-3 pb-3 pt-0">
-                          {journeyOf(r)}
-                        </td>
-                      </tr>
                       {open[r.l.id] && (
                         <tr className="border-t border-border/60 bg-secondary/40">
                           <td colSpan={heads.length} className="px-4 py-3">
@@ -1035,11 +1060,11 @@ export function ProcessDialog({
                   <div>{itemCell(r)}</div>
                   <div className={`grid gap-2 ${tab === 'buy' ? 'grid-cols-3' : 'grid-cols-2'}`}>
                     <div>
-                      <div className={mini}>Still needed</div>
+                      <div className={mini}>Requested</div>
                       {neededCell(r)}
                     </div>
                     <div>
-                      <div className={mini}>In store</div>
+                      <div className={mini}>Available</div>
                       {storeCell(r)}
                     </div>
                     {tab === 'buy' && (
@@ -1050,14 +1075,13 @@ export function ProcessDialog({
                       </div>
                     )}
                   </div>
-                  {journeyOf(r)}
                   <div className="grid grid-cols-2 items-start gap-3">
                     <div>
                       <div className={mini}>{qtyHead}</div>
                       {qtyBox(r)}
                     </div>
                     <div>
-                      <div className={mini}>What next</div>
+                      <div className={mini}>Status</div>
                       {statusCell(r)}
                     </div>
                   </div>

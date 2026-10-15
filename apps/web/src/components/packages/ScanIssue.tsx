@@ -108,8 +108,8 @@ export function ScanIssue({
     <div className="relative z-20 space-y-3 rounded-xl border border-border bg-card p-3">
       <p className="flex flex-wrap items-center gap-x-2 text-sm">
         <ScanLine size={16} className="text-primary" />
-        <span className="font-semibold text-foreground">Scan stickers to issue</span>
-        <span className="text-muted-foreground">— each one comes out of stock the moment you press Issue.</span>
+        <span className="font-semibold text-foreground">Scan items to issue</span>
+        <span className="text-xs text-muted-foreground">each sticker comes out of stock the moment you press Issue</span>
       </p>
       {/* Typing finds this requisition's own items in stock: a word, a lot, a challan, a supplier. */}
       <StickerScanner

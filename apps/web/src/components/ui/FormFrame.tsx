@@ -28,6 +28,7 @@ export function FormFrame({
   onClose,
   busy = false,
   width = 'max-w-5xl',
+  primaryInHeader = true,
   children,
 }: {
   icon: LucideIcon
@@ -44,6 +45,8 @@ export function FormFrame({
   /** While saving, Escape and the close button do nothing. */
   busy?: boolean
   width?: string
+  /** False keeps the main button in the footer only, for a window busy enough without it twice. */
+  primaryInHeader?: boolean
   children: React.ReactNode
 }) {
   // Escape closes, and the page behind must not scroll while the form is up.
@@ -86,7 +89,7 @@ export function FormFrame({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <div className="hidden md:block">{primary}</div>
+            {primaryInHeader && <div className="hidden md:block">{primary}</div>}
             <button
               type="button"
               onClick={onClose}
