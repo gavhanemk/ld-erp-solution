@@ -319,11 +319,89 @@ function labelWhere(query: Record<string, unknown>): Prisma.GarmentWhereInput {
   }
 }
 
+type Journey = {
+  cut: { date: Date; ref: string | null; by: string | null } | null
+  steps: Array<{ name: string; check: boolean; outside: boolean; done: boolean; date: Date | null; by: string | null; challan: string | null }>
+  packed: { date: Date; ref: string | null; store: string | null } | null
+}
+
+/**
+ * How each bundle was made, read off the floor's own ledger: cut when, by
+ * whom and on which challan; every stage in route order, done or not, who
+ * did or checked it — the outside unit and its job-work challan for one done
+ * outside — and when it was packed into finished goods. One read for all the
+ * bundles of a print run: 300 shirts are 16 bundles.
+ */
+async function journeysOf(bundleIds: string[], moIds: string[]): Promise<Map<string, Journey>> {
+  const out = new Map<string, Journey>()
+  if (!bundleIds.length) return out
+  const [steps, entries] = await Promise.all([
+    prisma.mOStep.findMany({
+      where: { moId: { in: moIds }, skippedAt: null },
+      orderBy: { sequence: 'asc' },
+      select: { id: true, moId: true, name: true, kind: true, isQcStep: true, execution: true },
+    }),
+    prisma.wipEntry.findMany({
+      where: { bundleId: { in: bundleIds }, qty: { gt: 0 }, event: { reversedAt: null, type: { not: 'REVERSAL' } } },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        bundleId: true,
+        stepId: true,
+        bucket: true,
+        event: {
+          select: {
+            type: true,
+            eventDate: true,
+            personName: true,
+            vendor: { select: { name: true } },
+            transfer: { select: { transferNumber: true } },
+            cuttingOrder: { select: { cutOrderNumber: true, cutterName: true, cutDate: true } },
+            fgReceipt: { select: { fgrNumber: true, receiptDate: true, warehouse: { select: { name: true } } } },
+          },
+        },
+      },
+    }),
+  ])
+  const stepsOf = new Map<string, typeof steps>()
+  for (const s of steps) stepsOf.set(s.moId, [...(stepsOf.get(s.moId) ?? []), s])
+  const bundles = await prisma.productionBundle.findMany({ where: { id: { in: bundleIds } }, select: { id: true, moId: true } })
+  for (const b of bundles) {
+    const mine = entries.filter((e) => e.bundleId === b.id)
+    const cutE = mine.find((e) => e.event.type === 'CUT')?.event
+    const packE = mine.find((e) => e.event.type === 'PACK')?.event
+    out.set(b.id, {
+      cut: cutE ? { date: cutE.cuttingOrder?.cutDate ?? cutE.eventDate, ref: cutE.cuttingOrder?.cutOrderNumber ?? null, by: cutE.cuttingOrder?.cutterName ?? cutE.personName } : null,
+      steps: (stepsOf.get(b.moId) ?? []).map((s) => {
+        const here = mine.filter((e) => e.stepId === s.id)
+        // Done at a stage: the last time pieces of this bundle were counted done
+        // (passed, at a check) or packed there.
+        const done = [...here].reverse().find((e) => e.bucket === 'DONE' || e.bucket === 'PACKED')?.event
+        // Sent out to it: the challan and the unit.
+        const sent = here.find((e) => e.event.type === 'DISPATCH' && e.event.vendor)?.event ?? here.find((e) => e.event.type === 'DISPATCH')?.event
+        const outside = s.execution === 'OUTSOURCED' || Boolean(sent?.vendor)
+        return {
+          name: s.name,
+          check: s.isQcStep || s.kind === 'QC',
+          outside,
+          done: Boolean(done) || (s.kind === 'CUTTING' && Boolean(cutE)),
+          date: done?.eventDate ?? (s.kind === 'CUTTING' ? (cutE?.eventDate ?? null) : null),
+          by: outside ? (done?.vendor?.name ?? sent?.vendor?.name ?? done?.personName ?? null) : (done?.personName ?? (s.kind === 'CUTTING' ? (cutE?.cuttingOrder?.cutterName ?? null) : null)),
+          challan: outside ? (sent?.transfer?.transferNumber ?? null) : null,
+        }
+      }),
+      packed: packE?.fgReceipt ? { date: packE.fgReceipt.receiptDate, ref: packE.fgReceipt.fgrNumber, store: packE.fgReceipt.warehouse?.name ?? null } : null,
+    })
+  }
+  return out
+}
+
 /** For printing: every label the query names, with what goes on it. */
 router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   const where = labelWhere(req.query)
   if (!req.query.ids && !req.query.moId && req.query.trace !== '1') throw new AppError('Choose the order or the pieces to print', 400, 'NO_FILTER')
   const retail = req.query.retail === '1'
+  // The full-detail tag: everything about the piece, its making included.
+  const detail = req.query.detail === '1'
   const [company, rows] = await Promise.all([
     prisma.company.findFirst({
       select: { name: true, legalName: true, address: true, city: true, state: true, pincode: true, phone: true, email: true, customerCare: true, countryOfOrigin: true, logoUrl: true },
@@ -337,6 +415,7 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         code: true,
         grade: true,
         printCount: true,
+        moId: true,
         itemId: true,
         sizeId: true,
         item: {
@@ -348,7 +427,7 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           },
         },
         size: { select: { code: true } },
-        fgReceipt: { select: { receiptDate: true } },
+        fgReceipt: { select: { receiptDate: true, fgrNumber: true, warehouse: { select: { name: true } } } },
         mo: {
           select: {
             moNumber: true,
@@ -356,7 +435,15 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
             so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } },
           },
         },
-        bundle: { select: { code: true, cuttingOrder: { select: { lotNo: true } }, moLine: { select: { jobCard: { select: { lotNo: true } } } } } },
+        bundle: {
+          select: {
+            id: true,
+            code: true,
+            qty: true,
+            cuttingOrder: { select: { lotNo: true } },
+            moLine: { select: { jobCard: { select: { lotNo: true, jobCardNumber: true, fabricQuality: true } } } },
+          },
+        },
         // The delivery challan it is on or went out on, once it is scanned onto one.
         dc: { select: { dcNumber: true, status: true } },
       },
@@ -367,13 +454,19 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   const barcodes = retail
     ? await prisma.$transaction((tx) => barcodesFor(tx, rows.map((g) => ({ itemId: g.itemId, sizeId: g.sizeId })), (req as AuthRequest).user?.id ?? null), { timeout: 60_000 })
     : new Map<string, { ean: string; mrp: number | null }>()
+  const journeys = detail
+    ? await journeysOf(
+        [...new Set(rows.map((g) => g.bundle?.id).filter((x): x is string => !!x))],
+        [...new Set(rows.map((g) => g.moId))],
+      )
+    : new Map<string, Journey>()
   const mfd = (d: Date) => `${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`
   res.json({
     success: true,
     data: {
       company: company?.name ?? '',
       // Who made and sells it, for the retail label's legal lines.
-      maker: retail
+      maker: retail || detail
         ? {
             name: company?.legalName || company?.name || '',
             address: [company?.address, company?.city, company?.state, company?.pincode].filter(Boolean).join(', '),
@@ -410,6 +503,22 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         lot: g.bundle?.cuttingOrder?.lotNo ?? g.bundle?.moLine?.jobCard?.lotNo ?? null,
         challan: g.dc && g.dc.status !== 'CANCELLED' ? g.dc.dcNumber : null,
         printed: g.printCount > 0,
+        ...(detail
+          ? {
+              detail: {
+                mrp: g.item.style?.mrp == null ? null : Number(g.item.style.mrp),
+                fabric: g.bundle?.moLine?.jobCard?.fabricQuality || g.item.style?.fabricType || null,
+                composition: g.item.style?.composition || null,
+                washCare: g.item.style?.washCare ?? [],
+                jobCard: g.bundle?.moLine?.jobCard?.jobCardNumber ?? null,
+                bundle: g.bundle ? { code: g.bundle.code, qty: g.bundle.qty } : null,
+                packedOn: g.fgReceipt.receiptDate,
+                fgr: g.fgReceipt.fgrNumber,
+                store: g.fgReceipt.warehouse?.name ?? null,
+                journey: g.bundle ? (journeys.get(g.bundle.id) ?? null) : null,
+              },
+            }
+          : {}),
       })),
     },
   })

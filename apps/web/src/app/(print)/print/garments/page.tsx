@@ -28,6 +28,23 @@ interface Label {
   printed: boolean
   /** The retail tag's lines, sent when the retail tag is chosen. */
   retail?: { logoUrl: string | null; ean: string | null; mrp: number | null; composition: string | null; washCare: string[]; mfd: string }
+  /** The full-detail tag's lines: the piece, its order, and how it was made. */
+  detail?: {
+    mrp: number | null
+    fabric: string | null
+    composition: string | null
+    washCare: string[]
+    jobCard: string | null
+    bundle: { code: string; qty: number } | null
+    packedOn: string
+    fgr: string
+    store: string | null
+    journey: {
+      cut: { date: string; ref: string | null; by: string | null } | null
+      steps: Array<{ name: string; check: boolean; outside: boolean; done: boolean; date: string | null; by: string | null; challan: string | null }>
+      packed: { date: string; ref: string | null; store: string | null } | null
+    } | null
+  }
 }
 
 /** Who made and sells it: the retail tag's legal lines. */
@@ -38,13 +55,14 @@ interface Maker {
   origin: string
 }
 
-type Layout = 'tag' | 'poly' | 'sheet' | 'retail'
-type TrackingLayout = Exclude<Layout, 'retail'>
+type Layout = 'tag' | 'poly' | 'sheet' | 'retail' | 'detail'
+type TrackingLayout = Exclude<Layout, 'retail' | 'detail'>
 /** What a piece's own code is printed as: a QR for a phone camera, a barcode for a handheld scanner, or both. */
 type Codes = 'both' | 'qr' | 'bar'
 const CODES: Record<Codes, string> = { both: 'QR code and barcode', qr: 'QR code only', bar: 'Barcode only' }
 
 const SIZES: Record<Layout, { label: string; page: string }> = {
+  detail: { label: 'Full detail tag — order and making, 100 × 75 mm', page: '100mm 75mm' },
   retail: { label: 'Retail tag with MRP and barcode, 50 × 75 mm', page: '50mm 75mm' },
   tag: { label: 'Hang tag / sticker, 50 × 25 mm', page: '50mm 25mm' },
   poly: { label: 'Polybag sticker, 75 × 50 mm', page: '75mm 50mm' },
@@ -225,6 +243,125 @@ function RetailTag({ g, maker }: { g: Label; maker: Maker }) {
   )
 }
 
+const shortDay = (d: string | null | undefined) =>
+  d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' }) : '—'
+/** The bundle's own number, without the order in front: MO-2627-0001-B003 → B003. */
+const bundleNo = (code: string) => code.split('-').pop() ?? code
+
+/**
+ * The final garment tag in full: everything about one piece on one 100 × 75
+ * mm label. What it is (style, colour, size, grade, fabric, MRP), whose it is
+ * (customer, their PO, our order, MO and job card), and how it was made — the
+ * lot and bundle, when and by whom it was cut and on which challan, the
+ * outside unit and job-work challan for a stage done outside, who passed each
+ * check, every stage of the route ticked, and when it was packed. Its QR and
+ * barcode are its own short code, which opens the rest on a phone.
+ */
+function DetailTag({ g, maker }: { g: Label; maker: Maker }) {
+  const d = g.detail
+  const j = d?.journey
+  const outside = (j?.steps ?? []).filter((s) => s.outside)
+  const checks = (j?.steps ?? []).filter((s) => s.check && s.done)
+  // Document numbers never break at their hyphens: CUT/2627-0001/01 stays whole.
+  const row = (k: string, v: string) => (
+    <div className="dt-row">
+      <span className="dt-k">{k}</span>
+      <span className="dt-v">{v.replace(/-/g, '‑')}</span>
+    </div>
+  )
+  return (
+    <div className="sticker dt">
+      <div className="dt-head">
+        <span style={{ fontSize: '8pt', fontWeight: 800, letterSpacing: '.06em', ...clip }}>{g.brand.toUpperCase()}</span>
+        <span className="gm-id" style={{ fontSize: '11pt' }}>
+          {g.code}
+        </span>
+        <span className={g.grade === 'B' ? 'dt-grade dt-grade-b' : 'dt-grade'}>Grade {g.grade || 'A'}</span>
+      </div>
+      <div className="dt-top">
+        <div style={{ flexShrink: 0, textAlign: 'center' }}>
+          <QrCode text={g.code} size="21mm" />
+        </div>
+        <div className="dt-prod">
+          <div style={{ fontSize: '8.6pt', fontWeight: 800, lineHeight: 1.15, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+            {g.description}
+          </div>
+          <div style={{ fontSize: '6.2pt', ...clip }}>
+            <b>Style</b> {g.style} · <b>SKU</b> {g.sku}
+          </div>
+          <div className="dt-size-row">
+            <span style={{ fontSize: '6.2pt', fontWeight: 700, ...clip }}>{g.color}</span>
+            <span style={{ fontSize: '5.6pt', fontWeight: 700, color: '#444' }}>SIZE</span>
+            <span className="dt-size">{g.size || '—'}</span>
+            {d?.mrp != null && (
+              <span style={{ fontSize: '6.2pt', marginLeft: 'auto', whiteSpace: 'nowrap' }}>
+                <b>MRP ₹</b> {money(d.mrp)}
+              </span>
+            )}
+          </div>
+          {(d?.fabric || d?.composition) && (
+            <div style={{ fontSize: '5.8pt', ...clip }}>
+              <b>Fabric</b> {[d?.fabric, d?.composition].filter(Boolean).join(' · ')}
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="dt-rows">
+        {row('Order', [g.buyer, g.poRef ? `PO ${g.poRef}` : null, g.soNumber, g.moNumber, d?.jobCard ? bundleNo(d.jobCard) : null].filter(Boolean).join(' · ') || 'For stock')}
+        {row(
+          'Cut',
+          [
+            g.lot ? `Lot ${g.lot}` : null,
+            d?.bundle ? `Bundle ${bundleNo(d.bundle.code)} (${d.bundle.qty} pcs)` : null,
+            j?.cut ? `${shortDay(j.cut.date)}${j.cut.by ? `, ${j.cut.by}` : ''}` : null,
+            j?.cut?.ref,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        )}
+        {outside.length > 0 &&
+          row(
+            'Outside',
+            outside.map((s) => [s.name, s.by, s.challan].filter(Boolean).join(' · ')).join(' | '),
+          )}
+        {checks.length > 0 &&
+          row(
+            'Passed',
+            checks.map((s) => `${s.name} ✓${s.by ? ` ${s.by}` : ''}`).join(' · ') + (checks.at(-1)?.date ? ` (${shortDay(checks.at(-1)!.date)})` : ''),
+          )}
+        {row('Packed', [shortDay(j?.packed?.date ?? d?.packedOn), j?.packed?.ref ?? d?.fgr, j?.packed?.store ?? d?.store].filter(Boolean).join(' · '))}
+        {g.challan && row('Challan', g.challan)}
+      </div>
+      {j?.steps.length ? (
+        <div className="dt-route">
+          {j.steps.map((s, i) => (
+            <span key={i} style={{ opacity: s.done ? 1 : 0.45 }}>
+              {i > 0 && ' › '}
+              {s.done ? '✓' : '○'}
+              {s.name}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <div className="dt-foot">
+        <div style={{ width: '46mm', height: '7.5mm', flexShrink: 0 }}>
+          <Code128 text={g.code} />
+        </div>
+        <div style={{ minWidth: 0, flex: 1, textAlign: 'right' }}>
+          {d?.washCare.length ? (
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <WashCareIcons codes={d.washCare} size="3.4mm" />
+            </div>
+          ) : null}
+          <div style={{ fontSize: '4.8pt', lineHeight: 1.2, ...clip }}>
+            Made in {maker.origin} · {maker.name}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /**
  * Garment labels for printing, one per piece. Opening the page prints
  * nothing; when the print box is opened the labels are counted as printed,
@@ -240,6 +377,7 @@ function Labels() {
 
   const qs = params.toString()
   const retail = layout === 'retail'
+  const detail = layout === 'detail'
   useEffect(() => {
     if (!params.get('moId') && !params.get('ids') && params.get('trace') !== '1') {
       setError('Open the labels from Garment Tags or Track & Trace.')
@@ -247,12 +385,12 @@ function Labels() {
     }
     // The retail tag also brings each piece's MRP, barcode and care symbols.
     api
-      .get<{ data: { company: string; maker: Maker | null; garments: Label[] } }>(`/garments/labels?${qs}${retail ? '&retail=1' : ''}`)
+      .get<{ data: { company: string; maker: Maker | null; garments: Label[] } }>(`/garments/labels?${qs}${retail ? '&retail=1' : ''}${detail ? '&detail=1' : ''}`)
       .then((r) => setData(r.data))
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the garments.'))
-    // The query string, and whether it is the retail tag, are the whole of what this page shows.
+    // The query string, and which tag is chosen, are the whole of what this page shows.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qs, retail])
+  }, [qs, retail, detail])
 
   useEffect(() => {
     try {
@@ -344,6 +482,21 @@ function Labels() {
         .roll.tag .sticker { width: 50mm; height: 25mm; padding: 1.5mm 2mm; border: 0.2mm dashed #bbb; }
         .roll.poly .sticker { width: 75mm; height: 50mm; padding: 2.5mm 3mm; border: 0.2mm dashed #bbb; }
         .roll.retail .sticker { width: 50mm; height: 75mm; padding: 2.5mm 3mm; border: 0.2mm dashed #bbb; }
+        .roll.detail .sticker { width: 100mm; height: 75mm; padding: 2.5mm 3mm; border: 0.2mm dashed #bbb; }
+        .dt { display: flex; flex-direction: column; gap: 0.9mm; }
+        .dt-head { display: flex; align-items: center; justify-content: space-between; gap: 2mm; border-bottom: 0.35mm solid #000; padding-bottom: 0.7mm; }
+        .dt-grade { font-size: 6pt; font-weight: 700; border: 0.25mm solid #000; padding: 0 1mm; white-space: nowrap; }
+        .dt-grade-b { background: #000; color: #fff; }
+        .dt-top { display: flex; gap: 2.5mm; align-items: center; }
+        .dt-prod { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 0.5mm; }
+        .dt-size-row { display: flex; align-items: center; gap: 1.2mm; min-width: 0; }
+        .dt-size { border: 0.4mm solid #000; padding: 0 1.8mm; font-size: 13pt; font-weight: 800; line-height: 1.1; }
+        .dt-rows { display: flex; flex-direction: column; gap: 0.35mm; border-top: 0.2mm solid #999; padding-top: 0.7mm; }
+        .dt-row { display: flex; gap: 1.5mm; font-size: 5.7pt; line-height: 1.25; min-width: 0; }
+        .dt-k { flex-shrink: 0; width: 10mm; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; color: #333; font-size: 5pt; padding-top: 0.15mm; }
+        .dt-v { min-width: 0; flex: 1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .dt-route { font-size: 5pt; line-height: 1.3; border-top: 0.2mm solid #999; padding-top: 0.6mm; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+        .dt-foot { display: flex; align-items: flex-end; gap: 2mm; margin-top: auto; }
         .rt { display: flex; flex-direction: column; gap: 0.7mm; }
         .rt-brand { display: flex; align-items: center; justify-content: center; height: 8mm; border-bottom: 0.3mm solid #000; padding-bottom: 0.5mm; }
         .rt-size { display: flex; align-items: center; justify-content: center; gap: 1.5mm; }
@@ -374,8 +527,8 @@ function Labels() {
             ))}
           </select>
         </label>
-        {/* The retail tag has its own barcode, the EAN-13 the billing counter scans. */}
-        {!retail && (
+        {/* The retail tag has its own barcode, the EAN-13 the billing counter scans; the full-detail tag carries both codes. */}
+        {!retail && !detail && (
           <label>
             Codes
             <select value={codes} onChange={(e) => pickCodes(e.target.value as Codes)}>
@@ -401,6 +554,12 @@ function Labels() {
             ))}
           </div>
         ))
+      ) : layout === 'detail' ? (
+        <div className="roll detail">
+          {data.garments.map((g) => (
+            <DetailTag key={g.id} g={g} maker={data.maker ?? { name: data.company, address: '', care: '', origin: 'India' }} />
+          ))}
+        </div>
       ) : layout === 'retail' ? (
         <div className="roll retail">
           {data.garments.map((g) => (
