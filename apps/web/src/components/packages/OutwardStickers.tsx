@@ -80,6 +80,25 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
   const fresh = chosen.reduce((n, { p, qty }) => n + (qty < p.qty - 1e-9 ? (plan?.moves ? 2 : 1) : 0), 0)
   const count = (plan?.lines.length ?? 0) + fresh
 
+  /*
+   * Not printing still brings the rolls and boxes in line: the stock has
+   * already gone, so their stickers come down with it now, not on some later
+   * issue. Closing the window any way does the same.
+   */
+  const skip = async () => {
+    if (!plan || saving) return
+    if (!chosen.length || problem) return onClose()
+    setSaving(true)
+    try {
+      await api.post('/packages/outward/apply', { type: source.type, id: source.id, q: source.q ?? null, takes: chosen.map(({ p, qty }) => ({ packageId: p.id, qty })) })
+      onDone(`No labels printed. The stickers on ${plan.spots.map((s) => s.item).join(', ')} now match the stock.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not update the stickers.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const print = async () => {
     if (!plan) return
     setSaving(true)
@@ -214,7 +233,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
       icon={Tags}
       title={`Labels for ${plan.number}`}
       subtitle={`${plan.lines.length} ${plan.lines.length === 1 ? 'item' : 'items'} ${verb} to ${plan.to}. The stock is already updated; these labels only mark the goods.`}
-      onClose={onClose}
+      onClose={() => void skip()}
       busy={saving}
       error={error}
       width="max-w-2xl"
@@ -225,7 +244,7 @@ export function OutwardStickers({ source, onClose, onDone }: { source: OutwardRe
         </button>
       }
       footer={
-        <button type="button" className="btn-secondary" onClick={onClose} disabled={saving}>
+        <button type="button" className="btn-secondary" onClick={() => void skip()} disabled={saving}>
           Not now
         </button>
       }

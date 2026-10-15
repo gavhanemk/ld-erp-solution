@@ -49,6 +49,7 @@ import {
   transferSchema,
 } from '../schemas/inventory.schemas'
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
+import { fillJobCardBlanks } from '../services/jobCard.service'
 
 const router = Router()
 const MODULE = 'inventory'
@@ -2160,6 +2161,8 @@ export async function issueRequisition(
     where: { id: mr.id },
     include: mrInclude,
   })
+  // Material handed to an order: its job cards learn the fabric's lot.
+  if (after.mo?.id) await fillJobCardBlanks(tx, after.mo.id)
   return { after, handedOver, stillOwed }
 }
 

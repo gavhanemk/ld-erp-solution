@@ -28,6 +28,7 @@ import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service
 import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, restickStickers, sourceRefOf } from '../services/stickers.service'
 import { lockedBalanceOf } from '../services/stock.service'
 import { findOptions, findPackages, findSchema } from '../services/packageFind.service'
+import { fillJobCardBlanks } from '../services/jobCard.service'
 
 /*
  * Labelled packages of stock and what is done to them by scanning.
@@ -750,6 +751,11 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
     { timeout: 60_000, maxWait: 20_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: data.takes[0]?.packageId ?? doc.id, after: { outward: doc.number, takes: data.takes } })
+  // The rolls now say which order they went to: its job cards can take their lot.
+  if (data.type === 'MR' && data.takes.length) {
+    const mr = await prisma.materialRequisition.findUnique({ where: { id: data.id }, select: { moId: true } })
+    if (mr?.moId) await prisma.$transaction((tx) => fillJobCardBlanks(tx, mr.moId!), { timeout: 30_000 })
+  }
   res.json({
     success: true,
     message: data.takes.length ? `Packages brought up to date with ${doc.number}.` : `Labels for ${doc.number}.`,

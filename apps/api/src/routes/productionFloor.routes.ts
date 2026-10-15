@@ -41,7 +41,7 @@ import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { createCutting, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
-import { ensureJobCards, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
+import { ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
  * The floor: an order's stages, its job cards and their department sheets
@@ -568,6 +568,9 @@ router.get('/job-cards', requirePermission(MODULE, 'view'), async (req, res) => 
 
 /** GET /job-cards/:id — the job card and everything its sheets show. */
 router.get('/job-cards/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  // Anything the order has learnt since the card was made fills its blanks.
+  const card = await prisma.jobCard.findUnique({ where: { id: req.params.id }, select: { moId: true } })
+  if (card) await prisma.$transaction((tx) => fillJobCardBlanks(tx, card.moId), { timeout: 30_000 })
   res.json({ success: true, data: await jobCardDetail(prisma, req.params.id) })
 })
 

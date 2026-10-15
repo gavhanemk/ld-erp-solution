@@ -76,6 +76,94 @@ export async function ensureJobCards(tx: Tx, moId: string) {
       },
     })
   }
+  await fillJobCardBlanks(tx, moId)
+}
+
+/** The sizes cut in their smallest whole ratio: 30, 60, 80 pieces → "38:3 40:6 42:8". */
+function ratioOf(sizes: Array<{ qty: number; size: { code: string; sequence: number } }>) {
+  const live = sizes.filter((z) => z.qty > 0).sort((a, b) => a.size.sequence - b.size.sequence)
+  if (!live.length) return null
+  const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a)
+  const g = live.reduce((t, z) => gcd(t, z.qty), 0) || 1
+  return live.map((z) => `${z.size.code}:${z.qty / g}`).join(' ')
+}
+
+/**
+ * Fills the blanks of an order's job cards from what is already known, so the
+ * floor never retypes it: the buyer's PO no. as the order no., the sales order
+ * as the project ID, the lot the fabric came in (from the rolls issued to the
+ * order, else the rolls bought for it), the size ratio and the order's note.
+ * Only blanks — whatever somebody typed stays. Run when the cards are made,
+ * when material is issued to the order, and when a card is opened.
+ */
+export async function fillJobCardBlanks(tx: Tx, moId: string) {
+  const mo = await tx.manufacturingOrder.findUnique({
+    where: { id: moId },
+    select: {
+      moNumber: true,
+      notes: true,
+      so: { select: { soNumber: true, customerPORef: true } },
+      materialRequisitions: { select: { id: true } },
+      jobCards: {
+        select: {
+          id: true,
+          orderNo: true,
+          projectId: true,
+          lotNo: true,
+          ratio: true,
+          notes: true,
+          moLine: { select: { sizes: { select: { qty: true, size: { select: { code: true, sequence: true } } } } } },
+        },
+      },
+    },
+  })
+  if (!mo?.jobCards.length) return
+  const blank = (v: string | null) => !v?.trim()
+  const needLot = mo.jobCards.some((c) => blank(c.lotNo))
+  let lot: string | null = null
+  if (needLot) {
+    const fabric = {
+      OR: [
+        { category: { name: { contains: 'fabric', mode: 'insensitive' as const } } },
+        { category: { parent: { name: { contains: 'fabric', mode: 'insensitive' as const } } } },
+      ],
+    }
+    const mrIds = mo.materialRequisitions.map((m) => m.id)
+    // The fabric rolls handed over against the order's requisitions…
+    const issued = mrIds.length
+      ? await tx.stockPackage.findMany({
+          where: { lotNo: { not: null }, item: fabric, moves: { some: { referenceType: 'MATERIAL_REQUISITION', referenceId: { in: mrIds } } } },
+          select: { lotNo: true },
+          distinct: ['lotNo'],
+        })
+      : []
+    // …or, before any is issued, the rolls received on orders bought for it.
+    const bought = issued.length
+      ? []
+      : await tx.stockPackage.findMany({
+          where: {
+            lotNo: { not: null },
+            item: fabric,
+            grnLineId: { in: (await tx.gRNLine.findMany({ where: { poLine: { mrLine: { mr: { moId } } } }, select: { id: true } })).map((g) => g.id) },
+          },
+          select: { lotNo: true },
+          distinct: ['lotNo'],
+        })
+    const lots = [...issued, ...bought].map((p) => p.lotNo!).filter(Boolean)
+    lot = lots.length ? lots.slice(0, 3).join(', ').slice(0, 60) : null
+  }
+  for (const c of mo.jobCards) {
+    const data: Record<string, string> = {}
+    if (blank(c.orderNo) && mo.so?.customerPORef) data.orderNo = mo.so.customerPORef
+    if (blank(c.projectId)) data.projectId = mo.so?.soNumber ?? mo.moNumber
+    if (blank(c.lotNo) && lot) data.lotNo = lot
+    if (blank(c.ratio)) {
+      const r = ratioOf(c.moLine.sizes)
+      if (r) data.ratio = r.slice(0, 120)
+    }
+    if (blank(c.notes) && mo.notes?.trim()) data.notes = mo.notes.trim().slice(0, 1000)
+    if (Object.keys(data).length) await tx.jobCard.update({ where: { id: c.id }, data })
+  }
 }
 
 const text = (max: number) => z.string().trim().max(max).optional().nullable()

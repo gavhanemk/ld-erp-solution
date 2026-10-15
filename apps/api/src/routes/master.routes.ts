@@ -1095,6 +1095,16 @@ router.use(
     defaultSort: { field: 'sortOrder', order: 'asc' },
     // Where each process is used, so nobody switches off one a routing needs.
     include: { department: true, _count: { select: { routingSteps: true, moSteps: true } } },
+    beforeDeactivate: async (before) => {
+      const used = await prisma.routing.findMany({ where: { isActive: true, steps: { some: { operationId: before.id } } }, select: { code: true }, orderBy: { code: 'asc' } })
+      if (used.length) {
+        throw new AppError(
+          `${before.name} is a stage in ${used.length === 1 ? 'routing' : 'routings'} ${used.map((r) => r.code).join(', ')}. Take it out of ${used.length === 1 ? 'that routing' : 'those routings'} in Production → Routings first, then switch it off.`,
+          409,
+          'IN_USE',
+        )
+      }
+    },
   }),
 )
 

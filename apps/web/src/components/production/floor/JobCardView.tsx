@@ -127,8 +127,13 @@ export function JobCardView({ jobCardId, onClose, onChanged }: { jobCardId: stri
                 {field('ratio', 'Ratio', { placeholder: 'M1 L2 XL2 2XL1' })}
                 {field('notes', 'Note')}
               </div>
+              <p className="text-muted-foreground mt-3 text-xs">
+                Filled in from the order: order no. from the buyer&apos;s PO on the sales order, project ID the sales order, description, fabric and
+                design from the order line, metres and average from the BOM, lot no. from the fabric rolls issued, ratio from the size quantities,
+                note from the manufacturing order. Change any of them for this card.
+              </p>
               {(d.line?.sizes.length ?? 0) > 0 && (
-                <p className="text-muted-foreground mt-3 text-xs tabular-nums">
+                <p className="text-muted-foreground mt-1 text-xs tabular-nums">
                   Count by size: {d.line!.sizes.map((z) => `${z.code} ${pcs(z.qty)}`).join(' · ')} — {pcs(d.line!.totalQty)} pcs
                 </p>
               )}
