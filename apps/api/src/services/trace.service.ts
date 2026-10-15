@@ -1,7 +1,7 @@
 import { prisma, type Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { normaliseGarmentCode } from './garment.service'
-import { stepFigures } from './floor.service'
+import { stepFigures, type FigureStep } from './floor.service'
 import type { garmentDetail } from '../routes/garments.routes'
 
 /*
@@ -402,6 +402,100 @@ const moSelect = {
 } as const
 
 /**
+ * The order item by item: each line of each manufacturing order — one style
+ * in one colour — with how far it has got (ordered, cut, into finished goods,
+ * in the store, despatched), where its pieces are on the floor now, and the
+ * same size by size. The whole-order figures add these up.
+ */
+async function itemsOf(mos: Array<{ id: string; moNumber: string; steps: FigureStep[] }>) {
+  const moIds = mos.map((m) => m.id)
+  if (!moIds.length) return []
+  const [lines, cuts, garments, fg] = await Promise.all([
+    prisma.mOLine.findMany({
+      where: { moId: { in: moIds } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        moId: true,
+        color: true,
+        totalQty: true,
+        style: { select: { id: true, code: true, name: true } },
+        soLine: { select: { description: true } },
+        sizes: { select: { qty: true, size: { select: { id: true, code: true, sequence: true } } } },
+      },
+    }),
+    prisma.cuttingOrder.findMany({ where: { moId: { in: moIds }, status: { not: 'CANCELLED' } }, select: { moId: true, moLineId: true, actualPieces: true, sizeBreakup: true } }),
+    prisma.garment.groupBy({ by: ['moLineId', 'sizeId', 'status'], where: { moId: { in: moIds } }, _count: { _all: true } }),
+    prisma.finishedGoodsReceiptLine.findMany({
+      where: { receipt: { moId: { in: moIds }, cancelledAt: null } },
+      select: { itemId: true, sizeId: true, qty: true, receipt: { select: { moId: true } } },
+    }),
+  ])
+  // The finished-goods item each line makes: its style in its colour.
+  const items = lines.length
+    ? await prisma.item.findMany({
+        where: { OR: lines.map((l) => ({ styleId: l.style.id, color: { equals: l.color, mode: 'insensitive' as const } })) },
+        select: { id: true, styleId: true, color: true },
+      })
+    : []
+  const linesOf = (moId: string) => lines.filter((l) => l.moId === moId)
+
+  return Promise.all(
+    lines.map(async (l) => {
+      const mo = mos.find((m) => m.id === l.moId)!
+      const only = linesOf(l.moId).length === 1
+      const mine = <T extends { moLineId?: string | null; moId?: string }>(r: T) => r.moLineId === l.id || (!r.moLineId && only && r.moId === l.moId)
+      const myCuts = cuts.filter(mine)
+      const cutBy = new Map<string, number>()
+      for (const c of myCuts) {
+        const b = c.sizeBreakup && typeof c.sizeBreakup === 'object' ? (c.sizeBreakup as Record<string, number>) : {}
+        for (const [sizeId, q] of Object.entries(b)) cutBy.set(sizeId, (cutBy.get(sizeId) ?? 0) + Number(q))
+      }
+      const itemIds = new Set(items.filter((i) => i.styleId === l.style.id && (i.color ?? '').toLowerCase() === l.color.toLowerCase()).map((i) => i.id))
+      const myFg = fg.filter((r) => r.receipt.moId === l.moId && (itemIds.has(r.itemId) || (only && !itemIds.size)))
+      const g = (status?: string, sizeId?: string) =>
+        garments
+          .filter((x) => (x.moLineId === l.id || (!x.moLineId && only)) && (!status || x.status === status) && (sizeId === undefined || x.sizeId === sizeId))
+          .reduce((t, x) => t + x._count._all, 0)
+      // Where its pieces are on the floor now, step by step.
+      const nowAt = mo.steps.length
+        ? (await stepFigures(prisma, l.moId, mo.steps, l.totalQty, l.id))
+            .map((f) => ({ step: mo.steps.find((x) => x.id === f.stepId)?.name ?? '', qty: f.inHand + f.inTransit + f.atVendor + f.waiting + f.inRework, outside: f.atVendor > 0 }))
+            .filter((x) => x.qty > 0)
+        : []
+      return {
+        key: l.id,
+        moId: l.moId,
+        moNumber: mo.moNumber,
+        styleId: l.style.id,
+        style: l.style.code,
+        name: l.style.name,
+        color: l.color,
+        description: l.soLine?.description ?? null,
+        ordered: l.totalQty,
+        cut: myCuts.reduce((t, c) => t + c.actualPieces, 0),
+        intoFg: myFg.reduce((t, r) => t + n(r.qty), 0),
+        tagged: g() - g('VOID'),
+        inStore: g('IN_STOCK') + g('PACKED'),
+        despatched: g('DISPATCHED'),
+        scrapped: g('SCRAPPED'),
+        nowAt,
+        sizes: [...l.sizes]
+          .sort((a, b) => a.size.sequence - b.size.sequence)
+          .map((z) => ({
+            code: z.size.code,
+            ordered: z.qty,
+            cut: cutBy.get(z.size.id) ?? 0,
+            intoFg: myFg.filter((r) => r.sizeId === z.size.id).reduce((t, r) => t + n(r.qty), 0),
+            inStore: g('IN_STOCK', z.size.id) + g('PACKED', z.size.id),
+            despatched: g('DISPATCHED', z.size.id),
+          })),
+      }
+    }),
+  )
+}
+
+/**
  * An order's whole story: a sales order with every manufacturing order on it,
  * or one manufacturing order — what was asked for, how far each step has got,
  * where every tagged piece is, and everything that happened, in order.
@@ -438,7 +532,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   }
   const moIds = mos.map((m) => m.id)
 
-  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans] = await Promise.all([
+  const [stages, pieces, materials, cuts, transfers, qcEvents, receipts, challans, items] = await Promise.all([
     Promise.all(
       mos.map(async (m) => ({
         moId: m.id,
@@ -517,6 +611,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
           },
         })
       : Promise.resolve([]),
+    itemsOf(mos),
   ])
 
   const steps: Step[] = []
@@ -620,6 +715,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
       delivered: so ? so.lines.reduce((s, l) => s + n(l.deliveredQty), 0) : null,
     },
     stages,
+    items,
     pieces,
     materials: materials.lines,
     timeline: steps.slice(-400),
