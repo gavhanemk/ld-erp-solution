@@ -994,12 +994,15 @@ export async function assertIndentLines(
     if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${m.item.name} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
     const toBuy = Number(m.purchaseQty ?? m.requestedQty)
     const ordered = m.poLines.reduce((s, l) => s + Number(l.qty), 0)
-    const qty = asked.reduce((s, l) => s + l.qty, 0)
-    if (qty > toBuy - ordered + 1e-9) {
+    // Ordering more than the indent asked is allowed — a full roll, the
+    // supplier's minimum — as the Indent Items window says: the indent only
+    // counts what it asked for. An indent already ordered in full has nothing
+    // left to buy against it; more goes on a line of its own.
+    if (toBuy - ordered <= 1e-9) {
       throw new AppError(
-        `${m.item.name}: ${m.mr.mrNumber} needs ${Math.max(0, toBuy - ordered)} more bought, and this orders ${qty} against it. Order any extra on a line of its own.`,
+        `${m.item.name}: everything ${m.mr.mrNumber} asked to buy is already on order. Order more on a line of its own, not against the indent.`,
         400,
-        'MORE_THAN_INDENT',
+        'INDENT_ORDERED',
       )
     }
   }
