@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { Loader2, Undo2, Boxes } from 'lucide-react'
+import { Loader2, Undo2, Boxes, Ban, History } from 'lucide-react'
 import { api, ApiError, masterResource } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { Section } from '@/components/purchase/Section'
@@ -14,7 +14,25 @@ import type { InwardRef } from '@/components/packages/InwardStickers'
  * spare buttons after stitching. Against the requisition it was issued on, so
  * the order's issued figure becomes what it actually used. Goes back into
  * stock as whoever's it was — a customer's leftover stays the customer's.
+ *
+ * Under it, the returns already made on this requisition, each with its own
+ * number, and a Cancel for one entered by mistake.
  */
+
+interface EarlierReturn {
+  id: string
+  returnNumber: string
+  returnDate: string
+  reason: string | null
+  by: string | null
+  cancelledAt: string | null
+  cancelledBy: string | null
+  cancelReason: string | null
+  lines: Array<{ item: string; unit: string; qty: number; store: string }>
+}
+
+const when = (d: string) =>
+  new Date(d).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'Asia/Kolkata' })
 
 interface ReturnLine {
   id: string
@@ -48,13 +66,35 @@ export function FloorReturnDialog({
   const [reason, setReason] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [earlier, setEarlier] = useState<EarlierReturn[]>([])
+  const [undoing, setUndoing] = useState<string | null>(null)
 
   useEffect(() => {
     masterResource<{ id: string; name: string }>('warehouses')
       .list({ limit: 100, active: true })
       .then((r) => setStores(r.data))
       .catch(() => setStores([]))
-  }, [])
+    api
+      .get<{ data: EarlierReturn[] }>(`/inventory/requisitions/${mr.id}/floor-returns`)
+      .then((r) => setEarlier(r.data))
+      .catch(() => setEarlier([]))
+  }, [mr.id])
+
+  /** A return entered by mistake: what it put back in the store comes out again. */
+  const cancelReturn = async (f: EarlierReturn) => {
+    const why = prompt(`Why is ${f.returnNumber} being cancelled?\n\nWhat it put back into the store comes out again, and ${mr.mrNumber} shows it as still with the floor.`)
+    if (!why || why.trim().length < 5) return
+    setUndoing(f.id)
+    setError(null)
+    try {
+      const res = await api.patch<{ message?: string }>(`/inventory/floor-returns/${f.id}/cancel`, { reason: why.trim() })
+      onSaved(res.message ?? `${f.returnNumber} cancelled.`)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not cancel it.')
+    } finally {
+      setUndoing(null)
+    }
+  }
 
   const lines = open.filter((x) => num(qty[x.l.id] ?? '') > 0)
   const over = lines.find((x) => num(qty[x.l.id] ?? '') > x.left + 1e-9)
@@ -157,11 +197,55 @@ export function FloorReturnDialog({
             </table>
           </div>
         )}
-        <label className="mt-3 block">
-          <span className="form-label">Note</span>
-          <input className="form-input" maxLength={300} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Leftover after cutting" />
-        </label>
+        {open.length > 0 && (
+          <label className="mt-3 block">
+            <span className="form-label">Note</span>
+            <input className="form-input" maxLength={300} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Leftover after cutting" />
+          </label>
+        )}
       </Section>
+
+      {earlier.length > 0 && (
+        <Section icon={History} title="Returned already">
+          <ul className="divide-border -my-1 divide-y">
+            {earlier.map((f) => (
+              <li key={f.id} className={`flex flex-wrap items-start gap-x-4 gap-y-1 py-2 text-sm ${f.cancelledAt ? 'opacity-60' : ''}`}>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className={`text-foreground font-mono text-xs font-semibold ${f.cancelledAt ? 'line-through' : ''}`}>{f.returnNumber}</span>
+                    <span className="text-muted-foreground text-xs">
+                      {when(f.returnDate)}
+                      {f.by ? ` · ${f.by}` : ''}
+                    </span>
+                    {f.cancelledAt && <span className="badge-danger">Cancelled</span>}
+                  </div>
+                  <div className="text-foreground">{f.lines.map((l) => `${fmt(l.qty)} ${l.unit} ${l.item} into ${l.store}`).join(', ')}</div>
+                  {f.cancelledAt ? (
+                    <div className="text-muted-foreground text-xs">
+                      Cancelled {when(f.cancelledAt)}
+                      {f.cancelledBy ? ` by ${f.cancelledBy}` : ''}
+                      {f.cancelReason ? `: ${f.cancelReason}` : ''}
+                    </div>
+                  ) : (
+                    f.reason && <div className="text-muted-foreground text-xs">{f.reason}</div>
+                  )}
+                </div>
+                {!f.cancelledAt && (
+                  <button
+                    type="button"
+                    className="btn-secondary h-8 px-2.5 text-xs text-red-500"
+                    onClick={() => void cancelReturn(f)}
+                    disabled={undoing === f.id || saving}
+                    title="Entered by mistake: take it back"
+                  >
+                    {undoing === f.id ? <Loader2 size={13} className="animate-spin" /> : <Ban size={13} />} Cancel
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
     </FormFrame>
   )
 }

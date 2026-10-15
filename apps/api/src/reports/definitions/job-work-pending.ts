@@ -79,7 +79,7 @@ export const jobWorkPending: ReportDefinition = {
         challan: {
           select: { challanNumber: true, challanDate: true, process: true, expectedBackOn: true, jobWorker: { select: { name: true } } },
         },
-        returnLines: { select: { consumedQty: true, wastedQty: true, jobWorkReturn: { select: { returnDate: true } } } },
+        returnLines: { where: { jobWorkReturn: { cancelledAt: null } }, select: { consumedQty: true, wastedQty: true, jobWorkReturn: { select: { returnDate: true } } } },
       },
     })
 

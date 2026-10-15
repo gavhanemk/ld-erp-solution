@@ -632,9 +632,12 @@ function RequisitionsScreen() {
       actions.push({ key: 'refuse', label: 'Refuse', icon: <X size={14} />, onClick: () => setAsking({ mr, kind: 'reject' }), danger: true })
     if (mr.status === 'APPROVED')
       actions.push({ key: 'slip', label: 'Print issue slip', icon: <Printer size={14} />, href: `/print/material-issue/${mr.id}`, newTab: true })
-    // Leftover from the floor goes back against the requisition it was issued on.
-    if (can('inventory', 'create') && mr.lines.some((l) => Number(l.issuedQty) - Number(l.returnedQty ?? 0) > 1e-9))
-      actions.push({ key: 'return', label: 'Return unused to store', icon: <Undo2 size={14} />, onClick: () => setReturning(mr) })
+    // Leftover from the floor goes back against the requisition it was issued on;
+    // the same window lists the returns made, to cancel one entered by mistake.
+    const canReturn = mr.lines.some((l) => Number(l.issuedQty) - Number(l.returnedQty ?? 0) > 1e-9)
+    const hasReturns = mr.lines.some((l) => Number(l.returnedQty ?? 0) > 1e-9)
+    if (can('inventory', 'create') && (canReturn || hasReturns))
+      actions.push({ key: 'return', label: canReturn ? 'Return unused to store' : 'Returns from the floor', icon: <Undo2 size={14} />, onClick: () => setReturning(mr) })
     if (mayClose(mr, isMine))
       actions.push({
         key: 'close',

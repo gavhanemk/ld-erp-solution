@@ -356,6 +356,9 @@ model User {
   jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
   jobWorkCancelled     JobWorkChallan[] @relation("JobWorkChallanCancelledBy")
   jobWorkReturnsTaken  JobWorkReturn[]  @relation("JobWorkReturnReceivedBy")
+  jobWorkReturnsCancelled JobWorkReturn[] @relation("JobWorkReturnCancelledBy")
+  floorReturnsMade     FloorReturn[]    @relation("FloorReturnBy")
+  floorReturnsCancelled FloorReturn[]   @relation("FloorReturnCancelledBy")
   fgReceiptsMade       FinishedGoodsReceipt[] @relation("FGRCreatedBy")
   fgReceiptsCancelled  FinishedGoodsReceipt[] @relation("FGRCancelledBy")
   challansMade         DeliveryChallan[]      @relation("DCCreatedBy")
@@ -2682,9 +2685,49 @@ model MaterialRequisition {
 
   @@index([status])
   reservations StockReservation[]
+  floorReturns FloorReturn[] @relation("FloorReturns")
 
   @@index([soId])
   @@map("material_requisitions")
+}
+
+/// Leftover material back from the floor against a requisition: which lines,
+/// how much, into which store. A document of its own so that one entered by
+/// mistake can be cancelled, and its stock and stickers come back off.
+model FloorReturn {
+  id            String              @id @default(cuid())
+  returnNumber  String              @unique
+  mrId          String
+  mr            MaterialRequisition @relation("FloorReturns", fields: [mrId], references: [id])
+  returnDate    DateTime            @default(now())
+  reason        String?
+  createdById   String?
+  createdBy     User?               @relation("FloorReturnBy", fields: [createdById], references: [id])
+  createdAt     DateTime            @default(now())
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?               @relation("FloorReturnCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason  String?
+
+  lines FloorReturnLine[]
+
+  @@index([mrId])
+  @@map("floor_returns")
+}
+
+model FloorReturnLine {
+  id          String                  @id @default(cuid())
+  returnId    String
+  floorReturn FloorReturn             @relation(fields: [returnId], references: [id], onDelete: Cascade)
+  mrLineId    String
+  mrLine      MaterialRequisitionLine @relation("FloorReturnLines", fields: [mrLineId], references: [id])
+  itemId      String
+  warehouseId String
+  qty         Decimal                 @db.Decimal(10, 3)
+
+  @@index([returnId])
+  @@index([mrLineId])
+  @@map("floor_return_lines")
 }
 
 model MaterialRequisitionLine {
@@ -2749,6 +2792,7 @@ model MaterialRequisitionLine {
   returnedQty  Decimal             @default(0) @db.Decimal(10, 3)
   @@index([fulfilment])
   reservations StockReservation[]
+  floorReturnLines FloorReturnLine[] @relation("FloorReturnLines")
   @@map("material_requisition_lines")
 }
 
@@ -3211,6 +3255,12 @@ model JobWorkReturn {
   receivedById   String?
   receivedBy     User?          @relation("JobWorkReturnReceivedBy", fields: [receivedById], references: [id])
   createdAt      DateTime       @default(now())
+  /// Cancelled when it was entered by mistake: its stock movements are
+  /// reversed and its lines no longer count against the challan.
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelledBy    User?          @relation("JobWorkReturnCancelledBy", fields: [cancelledById], references: [id])
+  cancelReason   String?
 
   lines JobWorkReturnLine[]
 

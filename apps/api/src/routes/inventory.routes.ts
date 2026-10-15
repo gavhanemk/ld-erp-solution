@@ -2784,6 +2784,7 @@ const jobWorkInclude = {
   returns: {
     include: {
       receivedBy: { select: { id: true, name: true } },
+      cancelledBy: { select: { id: true, name: true } },
       debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] as Array<'CANCELLED' | 'REJECTED'> } }, select: { id: true, noteNumber: true, status: true } },
       lines: {
         include: { item: itemLineSelect, warehouse: { select: { id: true, name: true } } },
@@ -3745,9 +3746,10 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
             },
           },
           returnLines: {
+            where: { jobWorkReturn: { cancelledAt: null } },
             include: {
               item: { select: { id: true, name: true, uom: { select: { symbol: true } } } },
-              jobWorkReturn: { select: { returnNumber: true, returnDate: true, _count: { select: { debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] as Array<'CANCELLED' | 'REJECTED'> } } } } } } },
+              jobWorkReturn: { select: { id: true, returnNumber: true, returnDate: true, _count: { select: { debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] as Array<'CANCELLED' | 'REJECTED'> } } } } } } },
             },
           },
         },
@@ -3819,6 +3821,8 @@ router.get('/job-work/lines', requirePermission(MODULE, 'view'), async (_req, re
         // A cancelled challan brought everything back to the store it left.
         stillOutQty: c.status === 'CANCELLED' ? 0 : Math.max(0, r3(sent - settled)),
         returnNumbers: [...new Set(l.returnLines.map((r) => r.jobWorkReturn.returnNumber))],
+        // Each receipt once, for cancelling one entered by mistake.
+        returns: [...new Map(l.returnLines.map((r) => [r.jobWorkReturn.id, { id: r.jobWorkReturn.id, returnNumber: r.jobWorkReturn.returnNumber }])).values()],
         lastReturnAt: dates.length ? new Date(Math.max(...dates)) : null,
         // Each return on its own day, for charting what came back when.
         settledBy: l.returnLines.map((r) => ({ at: r.jobWorkReturn.returnDate, qty: Number(r.consumedQty) })),
@@ -3884,7 +3888,8 @@ async function stillOut(tx: Prisma.TransactionClient, challanId: string) {
 
   const sums = await tx.jobWorkReturnLine.groupBy({
     by: ['challanLineId'],
-    where: { challanLineId: { in: challan.lines.map((l) => l.id) } },
+    // A cancelled receipt settles nothing: what it said came back is out again.
+    where: { challanLineId: { in: challan.lines.map((l) => l.id) }, jobWorkReturn: { cancelledAt: null } },
     _sum: { consumedQty: true },
   })
   const consumed = new Map(sums.map((s) => [s.challanLineId, Number(s._sum.consumedQty ?? 0)]))
@@ -4112,6 +4117,23 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
   })
   if (!mr) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
   const back: string[] = []
+  // A document of its own, so one return can be told from the next and cancelled alone.
+  const returnNumber = await nextDocumentNumber(tx, 'FR', new Date())
+  const doc = await tx.floorReturn.create({
+    data: {
+      returnNumber,
+      mrId: mr.id,
+      reason: data.reason ?? null,
+      createdById: userId,
+      lines: {
+        create: data.lines.map((r) => {
+          const line = mr.lines.find((l) => l.id === r.lineId)
+          if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}`, 400, 'BAD_LINE')
+          return { mrLineId: line.id, itemId: line.itemId, warehouseId: r.warehouseId, qty: r.qty }
+        }),
+      },
+    },
+  })
   for (const r of data.lines) {
     const line = mr.lines.find((l) => l.id === r.lineId)
     if (!line) throw new AppError(`One of those lines is not on ${mr.mrNumber}`, 400, 'BAD_LINE')
@@ -4143,14 +4165,252 @@ export async function returnFromFloor(tx: Prisma.TransactionClient, mrId: string
       unitRate: Math.round(rate * 100) / 100,
       referenceType: 'MR_RETURN',
       referenceId: mr.id,
-      notes: `Back from ${mr.department.name} on ${mr.mrNumber}${data.reason ? `: ${data.reason}` : ''}`,
+      notes: `${returnNumber}: back from ${mr.department.name} on ${mr.mrNumber}${data.reason ? `: ${data.reason}` : ''}`,
     })
     await tx.materialRequisitionLine.update({ where: { id: line.id }, data: { returnedQty: { increment: r.qty } } })
     back.push(`${round3(r.qty)} ${line.item.uom?.symbol ?? ''} ${line.item.name} into ${wh.name}`.replace(/\s+/g, ' '))
   }
-  void userId
-  return { mrNumber: mr.mrNumber, back }
+  return { mrNumber: mr.mrNumber, back, returnNumber, returnId: doc.id }
 }
+
+/**
+ * Takes back a floor return entered by mistake: what it put into the store
+ * comes out again, its lines are no longer counted as returned, and its
+ * stickers come off. Refused once what came back has been issued again or
+ * sent on — the store would end up below what is on the rack.
+ */
+export async function cancelFloorReturn(tx: Prisma.TransactionClient, id: string, reason: string, userId: string | null) {
+  await lockRow(tx, 'floorReturn', id)
+  const fr = await tx.floorReturn.findUnique({
+    where: { id },
+    include: {
+      lines: { include: { mrLine: { select: { id: true, ownership: true, ownerCustomerId: true, returnedQty: true, item: { select: { name: true, uom: { select: { symbol: true } } } } } } } },
+      mr: { select: { id: true, mrNumber: true } },
+    },
+  })
+  if (!fr) throw new AppError('That floor return does not exist', 404, 'NOT_FOUND')
+  if (fr.cancelledAt) throw new AppError(`${fr.returnNumber} is already cancelled.`, 400, 'ALREADY_CANCELLED')
+  await lockRow(tx, 'requisition', fr.mrId)
+
+  for (const l of fr.lines) {
+    const qty = Number(l.qty)
+    const ownership = l.mrLine.ownership
+    const owner = l.mrLine.ownerCustomerId
+    const unit = l.mrLine.item.uom?.symbol ?? ''
+    // First in, first out: once more has gone out of the store since than it
+    // held before this came back, what came back has been used.
+    const [b] = await tx.$queryRaw<Array<{ before: number; outs: number }>>`
+      SELECT
+        COALESCE(SUM("inQty" - "outQty") FILTER (WHERE "createdAt" < ${fr.createdAt}), 0)::float8 AS before,
+        COALESCE(SUM("outQty") FILTER (WHERE "createdAt" >= ${fr.createdAt}), 0)::float8 AS outs
+      FROM ld_erp.stock_ledger
+      WHERE "itemId" = ${l.itemId} AND "warehouseId" = ${l.warehouseId}
+        AND ownership = ${ownership}::ld_erp."StockOwnership"
+        AND "ownerCustomerId" IS NOT DISTINCT FROM ${owner}::text
+        AND "sizeId" IS NULL AND grade = 'A'`
+    const used = round3(Math.min(qty, Math.max(0, Number(b.outs) - Number(b.before))))
+    if (used > 0.0005) {
+      throw new AppError(
+        `${used} ${unit} of the ${l.mrLine.item.name} that came back on ${fr.returnNumber} has already gone out of the store again, so the return cannot be taken back. Correct the stock with a stock adjustment instead.`,
+        409,
+        'STOCK_ALREADY_USED',
+      )
+    }
+    // Its own stickers come off first, whole ones made since it came back, so
+    // taking the stock out does not take another roll's sticker down instead.
+    const mine = await tx.stockPackage.findMany({
+      where: {
+        sourceType: 'MR_RETURN',
+        sourceId: fr.mrId,
+        itemId: l.itemId,
+        warehouseId: l.warehouseId,
+        ownership,
+        ownerCustomerId: owner,
+        status: 'IN_STOCK',
+        createdAt: { gte: fr.createdAt },
+      },
+      select: { id: true, qty: true, initialQty: true, warehouseId: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    let left = qty
+    for (const p of mine) {
+      const q = Number(p.qty)
+      if (Math.abs(q - Number(p.initialQty)) > 0.0005 || q > left + 0.0005) continue
+      await tx.stockPackage.update({ where: { id: p.id }, data: { status: 'VOID', qty: 0 } })
+      await tx.stockPackageMove.create({
+        data: {
+          packageId: p.id,
+          type: 'VOIDED',
+          qty: -q,
+          balanceAfter: 0,
+          warehouseId: p.warehouseId,
+          referenceType: 'MR_RETURN_CANCELLED',
+          referenceId: fr.mrId,
+          referenceNumber: fr.returnNumber,
+          notes: `${fr.returnNumber} cancelled: ${reason}`,
+          createdById: userId,
+        },
+      })
+      left = round3(left - q)
+    }
+    await recordMovement(tx, {
+      itemId: l.itemId,
+      warehouseId: l.warehouseId,
+      ownership,
+      ownerCustomerId: owner,
+      transactionType: 'RETURN',
+      direction: 'OUT',
+      qty,
+      referenceType: 'MR_RETURN_CANCELLED',
+      referenceId: fr.mrId,
+      notes: `${fr.returnNumber} cancelled: ${reason}`,
+      earlierDate: 'move-up',
+    })
+    await tx.materialRequisitionLine.update({ where: { id: l.mrLineId }, data: { returnedQty: { decrement: qty } } })
+  }
+  return tx.floorReturn.update({
+    where: { id: fr.id },
+    data: { cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },
+    include: { mr: { select: { id: true, mrNumber: true } } },
+  })
+}
+
+/** PATCH /api/inventory/floor-returns/:id/cancel — a floor return entered by mistake. */
+router.patch('/floor-returns/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = cancelJobWorkChallanSchema.parse(req.body ?? {})
+  const after = await prisma.$transaction((tx) => cancelFloorReturn(tx, req.params.id, reason, req.user?.id ?? null), { timeout: 60_000 })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'FloorReturn', entityId: after.id, after })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'MaterialRequisition', entityId: after.mrId, after: { floorReturnCancelled: after.returnNumber, reason } })
+  res.json({ success: true, message: `${after.returnNumber} cancelled: what it brought back is out of the store again, and ${after.mr.mrNumber} shows it as still with the floor.`, data: after })
+})
+
+/** GET /api/inventory/requisitions/:id/floor-returns — what has come back from the floor on it. */
+router.get('/requisitions/:id/floor-returns', requirePermission(MODULE, 'view'), async (req, res) => {
+  const rows = await prisma.floorReturn.findMany({
+    where: { mrId: req.params.id },
+    orderBy: { createdAt: 'desc' },
+    include: {
+      createdBy: { select: { name: true } },
+      cancelledBy: { select: { name: true } },
+      lines: { include: { mrLine: { select: { item: { select: { name: true, code: true, uom: { select: { symbol: true } } } } } } } },
+    },
+  })
+  const stores = new Map(
+    (await prisma.warehouse.findMany({ where: { id: { in: [...new Set(rows.flatMap((r) => r.lines.map((l) => l.warehouseId)))] } }, select: { id: true, name: true } })).map((w) => [w.id, w.name]),
+  )
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      id: r.id,
+      returnNumber: r.returnNumber,
+      returnDate: r.returnDate,
+      reason: r.reason,
+      by: r.createdBy?.name ?? null,
+      cancelledAt: r.cancelledAt,
+      cancelledBy: r.cancelledBy?.name ?? null,
+      cancelReason: r.cancelReason,
+      lines: r.lines.map((l) => ({ item: l.mrLine.item.name, code: l.mrLine.item.code, unit: l.mrLine.item.uom?.symbol ?? '', qty: Number(l.qty), store: stores.get(l.warehouseId) ?? '' })),
+    })),
+  })
+})
+
+/**
+ * PATCH /api/inventory/job-work/returns/:id/cancel
+ *
+ * A job-work receipt entered by mistake. What it brought into our store goes
+ * out again, and what it settled is back at the job worker, still to come.
+ * Refused once what came in has been used, or once the job worker has been
+ * charged for damage on it — the debit note goes first.
+ */
+router.patch('/job-work/returns/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = cancelJobWorkChallanSchema.parse(req.body ?? {})
+  const result = await prisma.$transaction(
+    async (tx) => {
+      await lockRow(tx, 'jobWorkReturn', req.params.id)
+      const before = await tx.jobWorkReturn.findUnique({
+        where: { id: req.params.id },
+        include: {
+          lines: true,
+          challan: { select: { id: true, challanNumber: true, jobWorker: { select: { name: true } } } },
+          debitNotes: { where: { status: { notIn: ['CANCELLED', 'REJECTED'] } }, select: { noteNumber: true } },
+        },
+      })
+      if (!before) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+      if (before.cancelledAt) throw new AppError(`${before.returnNumber} is already cancelled.`, 400, 'ALREADY_CANCELLED')
+      if (before.debitNotes.length) {
+        throw new AppError(
+          `${before.debitNotes.map((d) => d.noteNumber).join(', ')} charges ${before.challan.jobWorker.name} for damage on ${before.returnNumber}. Cancel the debit note first.`,
+          409,
+          'CHARGED',
+        )
+      }
+      // The challan's status is worked out again below: held while that happens.
+      await lockRow(tx, 'jobWorkChallan', before.challanId)
+      await assertStockUnused(tx, {
+        referenceId: before.id,
+        label: before.returnNumber,
+        suggestion: 'Send what is left back on a new challan, or correct the stock with a stock adjustment.',
+      })
+      const why = `${before.returnNumber} cancelled: ${reason}`
+      // Its stickers come off first, so taking the goods out does not take another receipt's down instead.
+      await withdrawStickers(tx, { type: 'JOB_WORK_RETURN', id: before.id, ref: before.returnNumber }, why, req.user?.id ?? null)
+      const rows = await tx.stockLedger.findMany({ where: { referenceType: 'JOB_WORK_RETURN', referenceId: before.id }, orderBy: { createdAt: 'asc' } })
+      // What came into our store goes out first; then what it settled is back on the unit's floor.
+      for (const r of rows.filter((x) => Number(x.inQty) > 0)) {
+        await recordMovement(tx, {
+          itemId: r.itemId,
+          warehouseId: r.warehouseId,
+          sizeId: r.sizeId,
+          grade: r.grade,
+          ownership: r.ownership,
+          ownerCustomerId: r.ownerCustomerId,
+          transactionType: 'PRODUCTION',
+          direction: 'OUT',
+          qty: Number(r.inQty),
+          referenceType: 'JOB_WORK_RETURN_CANCELLED',
+          referenceId: before.id,
+          notes: why,
+          earlierDate: 'move-up',
+        })
+      }
+      for (const r of rows.filter((x) => Number(x.outQty) > 0)) {
+        await recordMovement(tx, {
+          itemId: r.itemId,
+          warehouseId: r.warehouseId,
+          sizeId: r.sizeId,
+          grade: r.grade,
+          ownership: r.ownership,
+          ownerCustomerId: r.ownerCustomerId,
+          transactionType: 'PRODUCTION',
+          direction: 'IN',
+          qty: Number(r.outQty),
+          unitRate: Number(r.unitRate ?? 0),
+          referenceType: 'JOB_WORK_RETURN_CANCELLED',
+          referenceId: before.id,
+          notes: why,
+          earlierDate: 'move-up',
+        })
+      }
+      const cancelled = await tx.jobWorkReturn.update({
+        where: { id: before.id },
+        data: { cancelledAt: new Date(), cancelledById: req.user?.id ?? null, cancelReason: reason },
+      })
+      // Counted again without this receipt: the challan may be open again.
+      const after = await stillOut(tx, before.challanId)
+      const anyOut = after.some((o) => o.outstanding > 0)
+      const anyBack = after.some((o) => o.consumed > 0)
+      await tx.jobWorkChallan.update({ where: { id: before.challanId }, data: { status: anyOut ? (anyBack ? 'PARTLY_BACK' : 'SENT') : 'CLOSED' } })
+      return { before, cancelled }
+    },
+    { timeout: 60_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'JobWorkReturn', entityId: result.cancelled.id, before: result.before, after: result.cancelled })
+  res.json({
+    success: true,
+    message: `${result.before.returnNumber} cancelled. What it brought in is out of the store again, and ${result.before.challan.challanNumber} shows it as still at ${result.before.challan.jobWorker.name}.`,
+    data: result.cancelled,
+  })
+})
 
 /** POST /api/inventory/requisitions/:id/return — leftover material back from the floor. */
 router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -4182,7 +4442,7 @@ router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), asy
     b.qty = round3(b.qty + Number(before._sum.initialQty ?? 0))
   }
   const made = await autoStickers({ sourceType: 'MR_RETURN', sourceId: req.params.id, lines: [...back.values()] }, req.user?.id ?? null)
-  res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.${stickersNote(made.count)}`, data: result, made })
+  res.json({ success: true, message: `${result.returnNumber}: back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.${stickersNote(made.count)}`, data: result, made })
 })
 
 /**
@@ -4272,7 +4532,7 @@ router.patch(
         throw new AppError(`${before.challanNumber} is already cancelled.`, 400, 'ALREADY_CANCELLED')
       }
 
-      const returned = await tx.jobWorkReturn.count({ where: { challanId: before.id } })
+      const returned = await tx.jobWorkReturn.count({ where: { challanId: before.id, cancelledAt: null } })
       if (returned > 0) {
         throw new AppError(
           `Some of ${before.challanNumber} has already come back, so it cannot be cancelled. Record what is left as a return instead.`,

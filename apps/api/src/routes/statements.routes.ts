@@ -34,7 +34,7 @@ function bucketOf(type: string | null): Bucket {
   if (!type) return 'adjusted'
   if (type.startsWith('CUSTOMER_GRN')) return 'received'
   if (type.startsWith('CUSTOMER_RETURN')) return 'returned'
-  if (type === 'MATERIAL_REQUISITION' || type === 'MR_RETURN' || type.startsWith('CUTTING') || type.startsWith('FG_RECEIPT')) return 'production'
+  if (type === 'MATERIAL_REQUISITION' || type.startsWith('MR_RETURN') || type.startsWith('CUTTING') || type.startsWith('FG_RECEIPT')) return 'production'
   if (type.startsWith('JOB_WORK')) return 'jobwork'
   if (type.startsWith('DELIVERY_CHALLAN') || type.startsWith('CREDIT_NOTE')) return 'dispatched'
   if (type.startsWith('STOCK_TRANSFER')) return 'moved'
@@ -118,7 +118,7 @@ router.get('/customer/:customerId', requirePermission(MODULE, 'view'), async (re
     select: {
       itemId: true,
       qty: true,
-      returnLines: { select: { consumedQty: true, wastedQty: true } },
+      returnLines: { where: { jobWorkReturn: { cancelledAt: null } }, select: { consumedQty: true, wastedQty: true } },
       challan: { select: { challanNumber: true, challanDate: true, process: true, expectedBackOn: true, jobWorker: { select: { name: true } } } },
       item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
     },
@@ -286,6 +286,7 @@ router.get('/job-worker/:supplierId', requirePermission(MODULE, 'view'), async (
             size: { select: { code: true } },
             item: { select: { code: true, name: true, uom: { select: { symbol: true } } } },
             returnLines: {
+              where: { jobWorkReturn: { cancelledAt: null } },
               select: {
                 consumedQty: true,
                 receivedQty: true,

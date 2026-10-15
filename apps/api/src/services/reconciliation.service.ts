@@ -59,7 +59,7 @@ export async function orderReconciliation(db: Db, soId: string) {
       select: { fabricItemId: true, fabricUsed: true, wastage: true, actualPieces: true },
     }),
     db.finishedGoodsReceiptLine.findMany({ where: { receipt: { soId, cancelledAt: null } }, select: { qty: true, grade: true } }),
-    db.jobWorkReturnLine.findMany({ where: { jobWorkReturn: { challan: { soId } } }, select: { damagedQty: true } }),
+    db.jobWorkReturnLine.findMany({ where: { jobWorkReturn: { challan: { soId }, cancelledAt: null } }, select: { damagedQty: true } }),
     db.salesOrder.count({ where: { customerId: so.customerId, isJobWork: true, status: { notIn: ['COMPLETED', 'CANCELLED', 'DRAFT'] }, id: { not: soId } } }),
   ])
 

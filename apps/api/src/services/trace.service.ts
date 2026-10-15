@@ -1114,7 +1114,7 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
   })
   const moved = mrs.length
     ? await db.stockLedger.findMany({
-        where: { referenceType: { in: ['MATERIAL_REQUISITION', 'MR_RETURN'] }, referenceId: { in: mrs.map((m) => m.id) } },
+        where: { referenceType: { in: ['MATERIAL_REQUISITION', 'MR_RETURN', 'MR_RETURN_CANCELLED'] }, referenceId: { in: mrs.map((m) => m.id) } },
         select: { referenceId: true, referenceType: true, transactionDate: true, createdAt: true, inQty: true, outQty: true, item: { select: { name: true, uom: { select: { symbol: true } } } } },
         orderBy: { createdAt: 'asc' },
       })
@@ -1135,14 +1135,16 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
     }
     for (const list of batches.values()) {
       const back = list[0].referenceType === 'MR_RETURN'
+      // A floor return entered by mistake and taken back.
+      const undone = list[0].referenceType === 'MR_RETURN_CANCELLED'
       const what = list.map((m) => amount(Number(back ? m.inQty : m.outQty), m.item.uom?.symbol, m.item.name)).join(', ')
       steps.push({
         at: list[0].createdAt,
         phase: 'material',
-        title: back ? 'Materials returned to the store' : 'Materials issued',
-        detail: back ? what : `${what} to ${r.department.name}`,
+        title: back ? 'Materials returned to the store' : undone ? 'Floor return cancelled' : 'Materials issued',
+        detail: back || undone ? what : `${what} to ${r.department.name}`,
         ref: r.mrNumber,
-        by: back ? null : r.issuedBy?.name,
+        by: back || undone ? null : r.issuedBy?.name,
       })
     }
   }

@@ -19,6 +19,8 @@ const TABLES = {
   requisition: 'material_requisitions',
   inwardQc: 'inward_qc',
   purchaseBill: 'purchase_invoices',
+  jobWorkReturn: 'job_work_returns',
+  floorReturn: 'floor_returns',
 } as const
 
 /**

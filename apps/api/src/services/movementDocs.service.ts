@@ -62,11 +62,11 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
       FROM ld_erp.job_work_returns jr
       JOIN ld_erp.job_work_challans jc ON jc.id = jr."challanId"
       JOIN ld_erp.suppliers sp ON sp.id = jc."jobWorkerId"
-      WHERE s."referenceType" = 'JOB_WORK_RETURN' AND jr.id = s."referenceId"
+      WHERE s."referenceType" IN ('JOB_WORK_RETURN', 'JOB_WORK_RETURN_CANCELLED') AND jr.id = s."referenceId"
     UNION ALL
     SELECT mr."mrNumber", 'department', d.id, d.name
       FROM ld_erp.material_requisitions mr JOIN ld_erp.departments d ON d.id = mr."departmentId"
-      WHERE s."referenceType" IN ('MATERIAL_REQUISITION', 'MR_RETURN') AND mr.id = s."referenceId"
+      WHERE s."referenceType" IN ('MATERIAL_REQUISITION', 'MR_RETURN', 'MR_RETURN_CANCELLED') AND mr.id = s."referenceId"
     UNION ALL
     SELECT t."transferNumber", 'store', ow.id, ow.name
       FROM ld_erp.stock_transfers t
@@ -118,6 +118,7 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   JOB_WORK_CHALLAN: 'Sent for job work',
   JOB_WORK_CHALLAN_CANCELLED: 'Job work challan cancelled',
   JOB_WORK_RETURN: 'Back from job work',
+  JOB_WORK_RETURN_CANCELLED: 'Job work receipt cancelled',
   PurchaseReturn: 'Returned to supplier',
   PurchaseNote: 'Purchase note',
   STOCK_ADJUSTMENT: 'Stock adjustment',
@@ -127,6 +128,7 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   STOCK_TRANSFER_CANCELLED: 'Store transfer cancelled',
   MATERIAL_REQUISITION: 'Issued to production',
   MR_RETURN: 'Back from the floor',
+  MR_RETURN_CANCELLED: 'Floor return cancelled',
   FG_RECEIPT: 'Finished goods in',
   FG_RECEIPT_CANCEL: 'Finished goods receipt cancelled',
   CUTTING: 'Cut panels in',
