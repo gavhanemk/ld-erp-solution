@@ -2951,6 +2951,19 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
 
   const header = await getPrintHeader('GRN')
 
+  // How each line came packed: the stickers made for it on receipt, one per
+  // roll, bale or box. A sticker withdrawn or re-split is not a package that
+  // arrived; one cut from another later is not one either.
+  const stickers = await prisma.stockPackage.findMany({
+    where: { grnLineId: { in: grn.lines.map((l) => l.id) }, parentId: null, status: { not: 'VOID' } },
+    select: { grnLineId: true, packType: true, initialQty: true },
+    orderBy: { code: 'asc' },
+  })
+  const packsOf = (lineId: string) => {
+    const mine = stickers.filter((p) => p.grnLineId === lineId)
+    return mine.length ? { count: mine.length, packType: mine[0].packType, sizes: mine.map((p) => Number(p.initialQty)) } : null
+  }
+
   /*
    * The order decides the tax split, not this receipt.
    *
@@ -2973,6 +2986,7 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
 
     return {
       ...l,
+      packs: packsOf(l.id),
       discountPct,
       gstPct,
       gross: round2(gross),

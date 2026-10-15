@@ -127,6 +127,19 @@ const PACK_NOUNS: Array<{ value: string; label: string }> = [
 const round3 = (n: number) => Math.round(n * 1000) / 1000
 const qtyFmt = (n: number) => String(round3(n))
 
+const PACK_ONE: Record<string, string> = {
+  BUNDLE: 'bundle',
+  ROLL: 'roll',
+  BOX: 'box',
+  CARTON: 'carton',
+  BAG: 'bag',
+  PACKET: 'packet',
+  OTHER: 'package',
+}
+/** "5 rolls", "1 roll". */
+const packWord = (type: string, n: number) =>
+  `${n} ${n === 1 ? (PACK_ONE[type] ?? 'package') : (PACK_NOUNS.find((x) => x.value === type)?.label ?? 'Packages').toLowerCase()}`
+
 /**
  * The packages a store row came in, as quantities — a sticker each. "5" of
  * 500 is five of 100, the last taking what does not divide; typed sizes are
@@ -162,15 +175,25 @@ function PackedAs({
   const qtys = packQtysOf(alloc)
   const total = round3(qtys.reduce((sum, q) => sum + q, 0))
   const type = alloc.packType || pack?.packType || 'BUNDLE'
-  const noun = (PACK_NOUNS.find((n) => n.value === type)?.label ?? 'Packages').toLowerCase()
   const mismatch = alloc.exact && qtys.length > 0 && Math.abs(total - received) > 0.0005
+  const count = <b className="text-foreground font-semibold">{packWord(type, qtys.length)}</b>
 
-  let hint: string | null = null
+  let hint: React.ReactNode = null
   if (alloc.exact) {
-    hint = qtys.length ? `${qtys.length} ${noun}, ${qtyFmt(total)} of ${qtyFmt(received)} ${unit}` : 'Type each one, e.g. 100, 98.5, 101'
+    hint = qtys.length ? (
+      <>
+        {count}, {qtyFmt(total)} of {qtyFmt(received)} {unit}
+      </>
+    ) : (
+      'Type each one, e.g. 100, 98.5, 101'
+    )
   } else if (qtys.length) {
     const last = qtys[qtys.length - 1]
-    hint = last === qtys[0] ? `${qtyFmt(qtys[0])} ${unit} each` : `${qtyFmt(qtys[0])} ${unit} each, last ${qtyFmt(last)}`
+    hint = (
+      <>
+        {count} · {qtyFmt(qtys[0])} {unit} each{last !== qtys[0] ? `, last ${qtyFmt(last)}` : ''}
+      </>
+    )
   } else if (received > 0) {
     hint = pack?.perPack ? `Empty: ${Math.ceil(received / pack.perPack)} stickers` : 'Empty: 1 sticker for all'
   }
@@ -784,6 +807,8 @@ export function ReceiveGoodsDialog({
   const [grnTime, setGrnTime] = useState('')
   const [notes, setNotes] = useState('')
   const [delivery, setDelivery] = useState<Delivery>(BLANK_DELIVERY)
+  /** Somebody typed the Packages box, so it no longer follows the rows. */
+  const [packagesTyped, setPackagesTyped] = useState(false)
 
   /*
    * Which of the supplier's addresses this delivery's own paperwork names.
@@ -1051,6 +1076,7 @@ export function ReceiveGoodsDialog({
         setOverReceiptReason(g.overReceiptReason ?? '')
         setGrnDate(toDateInput(g.grnDate))
         setGrnTime(toTimeInput(g.grnDate))
+        setPackagesTyped(g.packageCount != null)
         setDelivery({
           gateEntryNo: g.gateEntryNo ?? '',
           gateEntryDate: toDateInput(g.gateEntryDate),
@@ -1168,6 +1194,34 @@ export function ReceiveGoodsDialog({
   )
 
   const setField = (patch: Partial<Delivery>) => setDelivery((prev) => ({ ...prev, ...patch }))
+
+  /*
+   * How many packages came off the vehicle, counted from the rows' "Packed
+   * as" — a sticker each. The Packages box follows it until somebody types a
+   * number of their own; clearing the box hands it back.
+   */
+  const packSummary = useMemo(() => {
+    const byType = new Map<string, number>()
+    for (const line of order?.lines ?? []) {
+      if (line.pack?.tracked === false) continue
+      for (const alloc of entries[line.id] ?? []) {
+        const received = num(alloc.received)
+        if (received <= 0) continue
+        const n = packQtysOf(alloc).length || (line.pack?.perPack ? Math.ceil(received / line.pack.perPack) : 1)
+        const type = alloc.packType || line.pack?.packType || 'BUNDLE'
+        byType.set(type, (byType.get(type) ?? 0) + n)
+      }
+    }
+    return {
+      total: [...byType.values()].reduce((t, n) => t + n, 0),
+      text: [...byType.entries()].map(([t, n]) => packWord(t, n)).join(', '),
+    }
+  }, [order, entries])
+  useEffect(() => {
+    if (packagesTyped) return
+    const v = packSummary.total > 0 ? String(packSummary.total) : ''
+    setDelivery((d) => (d.packageCount === v ? d : { ...d, packageCount: v }))
+  }, [packSummary.total, packagesTyped])
 
   const save = async () => {
     setError(null)
@@ -1334,7 +1388,7 @@ export function ReceiveGoodsDialog({
     opts: {
       type?: string
       placeholder?: string
-      help?: string
+      help?: React.ReactNode
       min?: number
       /** Refused on save, and said so before the press rather than after it. */
       required?: boolean
@@ -1369,6 +1423,7 @@ export function ReceiveGoodsDialog({
           // not hold a letter. "-" alone is let through rather than bounced
           // on the first keystroke of a number that has not been typed yet.
           if (opts.min != null && raw !== '-' && Number(raw) < opts.min) return
+          if (field === 'packageCount') setPackagesTyped(raw.trim() !== '')
           setField({ [field]: raw } as Partial<Delivery>)
         }}
         placeholder={opts.placeholder}
@@ -1706,7 +1761,11 @@ export function ReceiveGoodsDialog({
               {paper('Packages', 'packageCount', {
                 type: 'number',
                 placeholder: '0',
-                help: 'Bales, cartons or rolls off the vehicle',
+                help: packSummary.total
+                  ? packagesTyped && num(delivery.packageCount) !== packSummary.total
+                    ? `Packed as below says ${packSummary.text}`
+                    : `From Packed as below: ${packSummary.text}`
+                  : 'Bales, cartons or rolls off the vehicle',
                 min: 0,
               })}
 
