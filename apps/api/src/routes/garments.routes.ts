@@ -403,9 +403,11 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   const retail = req.query.retail === '1'
   // The full-detail tag: everything about the piece, its making included.
   const detail = req.query.detail === '1'
+  // Our standard sticker, in the buyers' format: MRP, month made, who markets it.
+  const standard = req.query.standard === '1'
   const [company, rows] = await Promise.all([
     prisma.company.findFirst({
-      select: { name: true, legalName: true, address: true, city: true, state: true, pincode: true, phone: true, email: true, customerCare: true, countryOfOrigin: true, logoUrl: true },
+      select: { name: true, legalName: true, address: true, city: true, state: true, pincode: true, phone: true, email: true, website: true, customerCare: true, countryOfOrigin: true, logoUrl: true },
     }),
     prisma.garment.findMany({
       where,
@@ -461,18 +463,34 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         [...new Set(rows.map((g) => g.moId))],
       )
     : new Map<string, Journey>()
+  // The MRP each size carries on its barcode, read as it stands — nothing is given here.
+  const sizeMrp = standard
+    ? new Map(
+        (
+          await prisma.retailBarcode.findMany({
+            where: { itemId: { in: [...new Set(rows.map((g) => g.itemId))] } },
+            select: { itemId: true, sizeId: true, mrp: true },
+          })
+        ).map((b) => [skuKey(b.itemId, b.sizeId), b.mrp == null ? null : Number(b.mrp)]),
+      )
+    : new Map<string, number | null>()
   const mfd = (d: Date) => `${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`
   res.json({
     success: true,
     data: {
       company: company?.name ?? '',
       // Who made and sells it, for the retail label's legal lines.
-      maker: retail || detail
+      maker: retail || detail || standard
         ? {
             name: company?.legalName || company?.name || '',
             address: [company?.address, company?.city, company?.state, company?.pincode].filter(Boolean).join(', '),
             care: company?.customerCare || [company?.phone, company?.email].filter(Boolean).join(' · '),
             origin: company?.countryOfOrigin || 'India',
+            // The standard sticker's own lines.
+            customerCare: company?.customerCare || null,
+            phone: company?.phone || null,
+            email: company?.email || null,
+            website: company?.website || null,
           }
         : null,
       garments: rows.map((g) => ({
@@ -504,6 +522,14 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
         lot: g.bundle?.cuttingOrder?.lotNo ?? g.bundle?.moLine?.jobCard?.lotNo ?? null,
         challan: g.dc && g.dc.status !== 'CANCELLED' ? g.dc.dcNumber : null,
         printed: g.printCount > 0,
+        ...(standard
+          ? {
+              standard: {
+                mrp: sizeMrp.get(skuKey(g.itemId, g.sizeId)) ?? (g.item.style?.mrp == null ? null : Number(g.item.style.mrp)),
+                mfd: mfd(g.fgReceipt.receiptDate),
+              },
+            }
+          : {}),
         ...(detail
           ? {
               detail: {

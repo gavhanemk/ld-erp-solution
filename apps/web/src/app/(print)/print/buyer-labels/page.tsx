@@ -4,88 +4,8 @@ import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { api, ApiError } from '@/lib/api'
 import { PrintToolbar } from '@/components/print/PrintSheet'
-import { Code128 } from '@/components/packages/Code128'
+import { BARCODE_STICKER_CSS, BarcodeSticker, type StickerFace } from '@/components/print/BarcodeSticker'
 import { buyerBarcode, mfdText, parseCounts, type BuyerLabelData } from '@/components/inventory/buyerLabels'
-
-interface Sticker {
-  key: string
-  code: string
-  brand: string
-  articleColour: string
-  product: string
-  mfd: string
-  netQty: number
-  mrp: number | null
-  sizeText: string
-  sizeRef: string
-  marketedBy: string[]
-  complaints: string
-  tollFree: string
-  email: string
-  website: string
-  refNo: string | null
-}
-
-const money = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false })
-
-/**
- * One buyer sticker, laid out as the buyer's own: the barcode with its text
- * under it at the top left, the brand and the article-colour at the top
- * right; product, month and year made, MRP inclusive of taxes, size and the
- * brand's own size; net quantity and who markets it on the right; the
- * consumer-complaints lines along the bottom.
- */
-function BuyerSticker({ s }: { s: Sticker }) {
-  return (
-    <div className="bl">
-      <div className="bl-top">
-        <div className="bl-code">
-          <Code128 text={s.code} height="9mm" />
-          <div className="bl-codetext">{s.code}</div>
-        </div>
-        <div className="bl-brand">
-          <div className="bl-brandname">{s.brand}</div>
-          <div className="bl-article">{s.articleColour}</div>
-        </div>
-      </div>
-      <div className="bl-mid">
-        <div className="bl-left">
-          <div>
-            PRODUCT :&nbsp; <span className="bl-val">{s.product}</span>
-          </div>
-          <div>Mfg. Month &amp; Year : {s.mfd}</div>
-          <div className="bl-mrp">MRP: ₹ {s.mrp != null ? money(s.mrp) : '—'}</div>
-          <div className="bl-incl">(Incl. of all taxes)</div>
-          <div>
-            Size :&nbsp;&nbsp; <span className="bl-val">{s.sizeText}</span>
-          </div>
-          <div>
-            Brand Ref. :&nbsp;&nbsp; <span className="bl-val">{s.sizeRef}</span>
-          </div>
-        </div>
-        <div className="bl-right">
-          <div className="bl-net">
-            NET QTY.:&nbsp;&nbsp;&nbsp; {s.netQty} N
-          </div>
-          <div className="bl-mkt">
-            {s.marketedBy.map((line, i) => (
-              <div key={i}>{line}</div>
-            ))}
-          </div>
-        </div>
-      </div>
-      <div className="bl-foot">
-        {s.complaints && <div>For Consumer Complaints: {s.complaints}</div>}
-        {s.tollFree && <div>Toll Free no. : {s.tollFree}</div>}
-        <div className="bl-mailrow">
-          <span>{s.email ? `E-Mail : ${s.email}` : ''}</span>
-          {s.refNo && <span className="bl-ref">{s.refNo}</span>}
-        </div>
-        {s.website && <div>Website : {s.website}</div>}
-      </div>
-    </div>
-  )
-}
 
 /** Buyer stickers for an order, nine to an A4 sheet, as many of each size as the setup window asked for. */
 function Sheets() {
@@ -112,11 +32,11 @@ function Sheets() {
   const mfd = new Date(data.mfd)
   const p = data.profile
   const refNo = p.refSource === 'PO' ? data.so.poRef : p.refSource === 'FIXED' ? p.refValue || null : null
-  const stickers: Sticker[] = []
+  const stickers: StickerFace[] = []
   for (const l of data.lines) {
     for (const z of l.sizes) {
       const n = counts[`${l.soLineId}~${z.sizeId}`] ?? 0
-      const one: Omit<Sticker, 'key'> = {
+      const one: Omit<StickerFace, 'key'> = {
         code: buyerBarcode(p.barcodePattern, { position: z.position, code: z.code, article: l.info.article, colour: l.info.colour, mfd }),
         brand: p.brand || data.customer.name,
         articleColour: [l.info.article, l.info.colour].filter(Boolean).join('-'),
@@ -125,10 +45,12 @@ function Sheets() {
         netQty: l.info.packQty,
         mrp: l.info.mrp,
         sizeText: p.sizes[z.sizeId]?.text || z.text,
-        sizeRef: p.sizes[z.sizeId]?.ref ?? z.ref,
+        refLabel: 'Brand Ref.',
+        refValue: p.sizes[z.sizeId]?.ref ?? z.ref,
         marketedBy: p.marketedBy.split('\n').map((x) => x.trim()).filter(Boolean),
         complaints: p.complaints,
-        tollFree: p.tollFree,
+        phoneLabel: 'Toll Free no.',
+        phone: p.tollFree,
         email: p.email,
         website: p.website,
         refNo,
@@ -137,7 +59,7 @@ function Sheets() {
     }
   }
   if (!stickers.length) return <p style={{ padding: 48, color: '#fff' }}>No stickers asked for. Set how many of each size in the buyer stickers window.</p>
-  const pages: Sticker[][] = []
+  const pages: StickerFace[][] = []
   for (let i = 0; i < stickers.length; i += 9) pages.push(stickers.slice(i, i + 9))
 
   return (
@@ -155,37 +77,10 @@ function Sheets() {
           font-size: 13px; font-weight: 600; text-decoration: none; cursor: pointer;
         }
         .print-toolbar .tb-primary { background: #173a6c; border-color: #173a6c; color: #fff; }
-        .bl-sheet { width: 297mm; height: 210mm; margin: 0 auto 12px; background: #fff; display: grid;
-                    grid-template-columns: repeat(3, 99mm); grid-template-rows: repeat(3, 70mm); box-sizing: border-box; }
-        .bl { box-sizing: border-box; width: 99mm; height: 70mm; padding: 4.5mm 4mm 3mm 4.5mm; overflow: hidden; color: #000; background: #fff;
-              font-family: Arial, Helvetica, sans-serif; font-weight: 700; font-size: 7.8pt; line-height: 1.2; border: 0.2mm dashed #ccc;
-              display: flex; flex-direction: column; }
-        .bl-top { display: flex; align-items: flex-start; gap: 3mm; }
-        .bl-code { width: 51mm; flex-shrink: 0; }
-        .bl-codetext { text-align: center; font-size: 7pt; font-weight: 400; letter-spacing: .02em; margin-top: 0.3mm; }
-        .bl-brand { flex: 1; min-width: 0; text-align: right; }
-        .bl-brandname { font-size: 18pt; line-height: 1; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .bl-article { font-size: 10.5pt; margin-top: 1.2mm; white-space: nowrap; }
-        .bl-mid { display: flex; gap: 2mm; margin-top: 1.4mm; }
-        .bl-left { width: 44mm; flex-shrink: 0; }
-        .bl-left > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .bl-val { font-weight: 700; }
-        .bl-mrp { font-size: 12pt; margin-top: 0.7mm; line-height: 1.05; }
-        .bl-incl { font-size: 6.3pt; margin-bottom: 0.5mm; }
-        .bl-right { flex: 1; min-width: 0; }
-        .bl-net { font-size: 8pt; margin-top: 3.8mm; margin-bottom: 2.8mm; white-space: nowrap; }
-        .bl-mkt { font-size: 6.9pt; line-height: 1.14; }
-        .bl-mkt > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .bl-mkt > div:first-child { font-size: 7.4pt; }
-        .bl-foot { font-size: 6.6pt; line-height: 1.22; margin-top: 1.2mm; }
-        .bl-mailrow { display: flex; justify-content: space-between; gap: 2mm; }
-        .bl-ref { font-size: 8pt; margin-right: 9mm; }
+        ${BARCODE_STICKER_CSS}
         @media print {
           .no-print { display: none !important; }
           html, body { background: #fff !important; }
-          .bl-sheet { margin: 0; break-after: page; }
-          .bl { border: 0; }
-          .bl, .bl * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         }
         @page { size: A4 landscape; margin: 0; }
       `}</style>
@@ -196,7 +91,7 @@ function Sheets() {
       {pages.map((page, i) => (
         <div key={i} className="bl-sheet">
           {page.map((s) => (
-            <BuyerSticker key={s.key} s={s} />
+            <BarcodeSticker key={s.key} s={s} />
           ))}
         </div>
       ))}

@@ -8,6 +8,7 @@ import { QrCode } from '@/components/packages/QrCode'
 import { Code128 } from '@/components/packages/Code128'
 import { Ean13 } from '@/components/packages/Ean13'
 import { WashCareIcons } from '@/components/packages/WashCare'
+import { BARCODE_STICKER_CSS, BarcodeSticker, addressLines, type StickerFace } from '@/components/print/BarcodeSticker'
 
 interface Label {
   id: string
@@ -28,6 +29,8 @@ interface Label {
   printed: boolean
   /** The retail tag's lines, sent when the retail tag is chosen. */
   retail?: { logoUrl: string | null; ean: string | null; mrp: number | null; composition: string | null; washCare: string[]; mfd: string }
+  /** The standard sticker's lines: MRP and month made. */
+  standard?: { mrp: number | null; mfd: string }
   /** The full-detail tag's lines: the piece, its order, and how it was made. */
   detail?: {
     mrp: number | null
@@ -53,20 +56,25 @@ interface Maker {
   address: string
   care: string
   origin: string
+  customerCare?: string | null
+  phone?: string | null
+  email?: string | null
+  website?: string | null
 }
 
-type Layout = 'tag' | 'poly' | 'sheet' | 'retail' | 'detail'
-type TrackingLayout = Exclude<Layout, 'retail' | 'detail'>
+type Layout = 'standard' | 'tag' | 'poly' | 'sheet' | 'retail' | 'detail'
+type TrackingLayout = Exclude<Layout, 'retail' | 'detail' | 'standard'>
 /** What a piece's own code is printed as: a QR for a phone camera, a barcode for a handheld scanner, or both. */
 type Codes = 'both' | 'qr' | 'bar'
 const CODES: Record<Codes, string> = { both: 'QR code and barcode', qr: 'QR code only', bar: 'Barcode only' }
 
 const SIZES: Record<Layout, { label: string; page: string }> = {
+  standard: { label: 'Standard sticker — A4, 9 a page', page: 'A4 landscape' },
   detail: { label: 'Full detail tag — order and making, 100 × 75 mm', page: '100mm 75mm' },
   retail: { label: 'Retail tag with MRP and barcode, 50 × 75 mm', page: '50mm 75mm' },
   tag: { label: 'Hang tag / sticker, 50 × 25 mm', page: '50mm 25mm' },
   poly: { label: 'Polybag sticker, 75 × 50 mm', page: '75mm 50mm' },
-  sheet: { label: 'A4 sheet, 24 a page (70 × 37 mm)', page: 'A4' },
+  sheet: { label: 'Small tags — A4, 24 a page (70 × 37 mm)', page: 'A4' },
 }
 
 const clip = { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } as const
@@ -363,6 +371,36 @@ function DetailTag({ g, maker }: { g: Label; maker: Maker }) {
 }
 
 /**
+ * Our own garment in the buyers' sticker format: its own code as the barcode,
+ * the brand and style, product, month made, net quantity 1, MRP, size and
+ * colour, and our company as the one who markets it and hears complaints —
+ * every line from Settings → Company.
+ */
+function standardFace(g: Label, maker: Maker): StickerFace {
+  return {
+    key: g.id,
+    code: g.code,
+    brand: g.brand,
+    // The style alone, as the buyer's article code sits there; the colour has its own line.
+    articleColour: g.style,
+    product: g.description,
+    mfd: g.standard?.mfd ?? '—',
+    netQty: 1,
+    mrp: g.standard?.mrp ?? null,
+    sizeText: g.grade === 'B' ? `${g.size || '—'} (B-grade)` : g.size || '—',
+    refLabel: 'Colour',
+    refValue: g.color,
+    marketedBy: [maker.name.toUpperCase(), ...addressLines(maker.address)],
+    complaints: maker.customerCare || [maker.name, maker.address].filter(Boolean).join(', '),
+    phoneLabel: 'Customer care no.',
+    phone: maker.phone ?? '',
+    email: maker.email ?? '',
+    website: maker.website ?? '',
+    refNo: g.poRef ?? g.soNumber ?? g.moNumber,
+  }
+}
+
+/**
  * Garment labels for printing, one per piece. Opening the page prints
  * nothing; when the print box is opened the labels are counted as printed,
  * so the order screen can tell new labels from reprints.
@@ -371,13 +409,14 @@ function Labels() {
   const params = useSearchParams()
   const [data, setData] = useState<{ company: string; maker: Maker | null; garments: Label[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [layout, setLayout] = useState<Layout>('tag')
+  const [layout, setLayout] = useState<Layout>('standard')
   const [codes, setCodes] = useState<Codes>('both')
   const marked = useRef(false)
 
   const qs = params.toString()
   const retail = layout === 'retail'
   const detail = layout === 'detail'
+  const standard = layout === 'standard'
   useEffect(() => {
     if (!params.get('moId') && !params.get('ids') && params.get('trace') !== '1') {
       setError('Open the labels from Garment Tags or Track & Trace.')
@@ -385,16 +424,16 @@ function Labels() {
     }
     // The retail tag also brings each piece's MRP, barcode and care symbols.
     api
-      .get<{ data: { company: string; maker: Maker | null; garments: Label[] } }>(`/garments/labels?${qs}${retail ? '&retail=1' : ''}${detail ? '&detail=1' : ''}`)
+      .get<{ data: { company: string; maker: Maker | null; garments: Label[] } }>(`/garments/labels?${qs}${retail ? '&retail=1' : ''}${detail ? '&detail=1' : ''}${standard ? '&standard=1' : ''}`)
       .then((r) => setData(r.data))
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the garments.'))
     // The query string, and which tag is chosen, are the whole of what this page shows.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qs, retail, detail])
+  }, [qs, retail, detail, standard])
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('garment-label-layout') as Layout | null
+      const saved = localStorage.getItem('garment-label-layout-2') as Layout | null
       if (saved && saved in SIZES) setLayout(saved)
       const savedCodes = localStorage.getItem('garment-label-codes') as Codes | null
       if (savedCodes && savedCodes in CODES) setCodes(savedCodes)
@@ -418,7 +457,7 @@ function Labels() {
   const pick = (l: Layout) => {
     setLayout(l)
     try {
-      localStorage.setItem('garment-label-layout', l)
+      localStorage.setItem('garment-label-layout-2', l)
     } catch {
       /* fine without it */
     }
@@ -513,6 +552,7 @@ function Labels() {
           .roll .sticker { border: 0 !important; break-after: page; }
           .sticker, .sticker * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         }
+        ${standard ? BARCODE_STICKER_CSS : ''}
         @page { size: ${SIZES[layout].page}; margin: 0; }
       `}</style>
       <PrintToolbar backHref="/inventory/garment-tags" backLabel="Garment Tags" copies={1} fileName={`Garment labels ${data.garments[0].code}`} />
@@ -528,7 +568,7 @@ function Labels() {
           </select>
         </label>
         {/* The retail tag has its own barcode, the EAN-13 the billing counter scans; the full-detail tag carries both codes. */}
-        {!retail && !detail && (
+        {!retail && !detail && !standard && (
           <label>
             Codes
             <select value={codes} onChange={(e) => pickCodes(e.target.value as Codes)}>
@@ -551,6 +591,14 @@ function Labels() {
           <div key={i} className="sheet">
             {page.map((g) => (
               <GarmentLabel key={g.id} g={g} layout="sheet" codes={codes} />
+            ))}
+          </div>
+        ))
+      ) : standard ? (
+        Array.from({ length: Math.ceil(data.garments.length / 9) }, (_, i) => data.garments.slice(i * 9, i * 9 + 9)).map((page, i) => (
+          <div key={i} className="bl-sheet">
+            {page.map((g) => (
+              <BarcodeSticker key={g.id} s={standardFace(g, data.maker ?? { name: data.company, address: '', care: '', origin: 'India' })} />
             ))}
           </div>
         ))
