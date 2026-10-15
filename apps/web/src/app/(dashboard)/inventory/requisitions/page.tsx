@@ -81,6 +81,8 @@ interface Requisition {
   approvedBy: { id: string; name: string } | null
   /** The sales order the material is for, and its customer. */
   so?: { id: string; soNumber: string; customer: { id: string; name: string } } | null
+  /** The manufacturing order it was raised from, when it was. */
+  mo?: { id: string; moNumber: string } | null
   issuedBy: { id: string; name: string } | null
   /** Cancelled, or closed with part still owed: nothing more is issued. */
   closedAt: string | null
