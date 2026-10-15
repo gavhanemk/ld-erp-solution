@@ -57,6 +57,8 @@ const BUCKET_LABEL: Record<string, string> = {
   PACKED: 'packed',
   PACKED_B: 'packed B-grade',
 }
+/** Pieces that did not simply pass: what a history should always show. */
+const PROBLEM_BUCKETS = new Set(['REWORK', 'DAMAGED', 'REJECTED', 'SHORT', 'B_GRADE', 'SCRAPPED'])
 
 /** Orders whose pieces can be tagged: switched on, or with pieces received into finished goods. */
 router.get('/orders', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -859,17 +861,52 @@ export async function garmentDetail(id: string) {
         orderBy: { createdAt: 'asc' },
       })
     : []
-  const byEvent = new Map<string, { date: Date; type: string; step: string; check: boolean; changes: string[]; ref: string | null; by: string | null; reversed: boolean }>()
+  const byEvent = new Map<
+    string,
+    {
+      date: Date
+      type: string
+      /** The event as recorded: DISPATCH, RECEIVE, PROCESS… */
+      kind: string
+      step: string
+      /** Where the pieces left from, for a send. */
+      from: string | null
+      /** How many pieces arrived somewhere. */
+      qty: number
+      /** What went wrong, in words: "2 for rework". */
+      problems: string[]
+      check: boolean
+      changes: string[]
+      ref: string | null
+      by: string | null
+      /** The outside unit, when the work went out. */
+      vendor: string | null
+      /** Who did it on our side. */
+      person: string | null
+      reversed: boolean
+    }
+  >()
   for (const e of entries) {
     const ev = byEvent.get(e.event.id) ?? {
       date: e.event.eventDate,
       type: EVENT_LABEL[e.event.type] ?? e.event.type,
+      kind: e.event.type,
       step: e.step.name,
+      from: null,
+      qty: 0,
+      problems: [],
       check: false,
       changes: [],
       ref: e.event.transfer?.transferNumber ?? e.event.fgReceipt?.fgrNumber ?? null,
       by: e.event.vendor?.name ?? e.event.personName ?? e.event.createdBy?.name ?? null,
+      vendor: e.event.vendor?.name ?? null,
+      person: e.event.personName ?? e.event.createdBy?.name ?? null,
       reversed: Boolean(e.event.reversedAt),
+    }
+    if (e.qty < 0 && !ev.from) ev.from = e.step.name
+    if (e.qty > 0) {
+      ev.qty += e.qty
+      if (PROBLEM_BUCKETS.has(e.bucket)) ev.problems.push(`${e.qty} ${BUCKET_LABEL[e.bucket] ?? e.bucket.toLowerCase()}`)
     }
     // What arrived somewhere, which is what a reader follows: "+20 done",
     // at the stage it arrived at — a send names where it went, not where it left.

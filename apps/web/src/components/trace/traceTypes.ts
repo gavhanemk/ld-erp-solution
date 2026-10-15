@@ -28,6 +28,8 @@ export interface Step {
   ref?: string | null
   by?: string | null
   undone?: boolean
+  /** A detail — counted in, worked on, an approval — shown only with "Every step". */
+  minor?: boolean
 }
 
 /** What is open on the screen, and the link that opens it again. */

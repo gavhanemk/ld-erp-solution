@@ -36,8 +36,8 @@ export async function recordAudit(
   ipAddress: string | null,
   entry: AuditEntry,
 ): Promise<void> {
-  try {
-    await prisma.auditLog.create({
+  const write = () =>
+    prisma.auditLog.create({
       data: {
         userId,
         module: entry.module,
@@ -49,10 +49,44 @@ export async function recordAudit(
         ipAddress,
       },
     })
+  try {
+    await write()
+  } catch (first) {
+    // A dropped connection is the usual cause: one more try a moment later.
+    try {
+      await new Promise((r) => setTimeout(r, 500))
+      await write()
+      return
+    } catch (err) {
+      logger.error(
+        `Audit write failed for ${entry.entityType}:${entry.entityId} — ${(err as Error).message} (first try: ${(first as Error).message})`,
+      )
+      await tellAdmins(entry, (err as Error).message)
+    }
+  }
+}
+
+/**
+ * A change that went through with no audit row is something an administrator
+ * should hear about, not only the server log: a bell notification to each,
+ * naming the record, so it can be looked at while people still remember it.
+ */
+async function tellAdmins(entry: AuditEntry, why: string) {
+  try {
+    const admins = await prisma.user.findMany({ where: { role: { name: 'Admin' }, status: 'ACTIVE' }, select: { id: true } })
+    if (!admins.length) return
+    await prisma.notification.createMany({
+      data: admins.map((a) => ({
+        userId: a.id,
+        channel: 'IN_APP' as const,
+        type: 'AUDIT_MISSED',
+        title: 'A change was not written to the audit trail',
+        message: `${entry.action.toLowerCase()} of ${entry.entityType} ${entry.entityId} (${entry.module}) was saved, but its audit entry could not be: ${why.slice(0, 200)}`,
+        metadata: { module: entry.module, entityType: entry.entityType, entityId: entry.entityId },
+      })),
+    })
   } catch (err) {
-    logger.error(
-      `Audit write failed for ${entry.entityType}:${entry.entityId} — ${(err as Error).message}`,
-    )
+    logger.error(`Could not tell the admins about a missed audit entry — ${(err as Error).message}`)
   }
 }
 

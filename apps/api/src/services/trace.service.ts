@@ -23,6 +23,11 @@ export interface Step {
   by?: string | null
   /** Undone afterwards: shown, but greyed out. */
   undone?: boolean
+  /**
+   * A detail rather than a step of the journey — counted in, worked on, an
+   * approval, a reprint. Left out of the plain history; "Every step" shows it.
+   */
+  minor?: boolean
 }
 
 const byTime = (a: Step, b: Step) => a.at.getTime() - b.at.getTime()
@@ -114,6 +119,9 @@ export async function search(raw: string): Promise<Hit[]> {
 }
 
 // ── One garment ─────────────────────────────────────────────────────────────
+
+/** Tag events that are bookkeeping rather than a step of the piece's journey. */
+const MINOR_TAG_EVENTS = new Set(['UNPACKED', 'ON_CHALLAN', 'OFF_CHALLAN', 'SCRAP_REFUSED'])
 
 const TAG_EVENT: Record<string, { phase: Phase; title: string }> = {
   TAGGED: { phase: 'tag', title: 'Tag made for this piece' },
@@ -210,22 +218,68 @@ function assemble(
       ref: so.soNumber,
       by: so.createdBy?.name,
     })
-    if (so.approvedAt) steps.push({ at: so.approvedAt, phase: 'order', title: 'Order approved', ref: so.soNumber, by: so.approvedBy?.name })
+    if (so.approvedAt) steps.push({ at: so.approvedAt, phase: 'order', title: 'Order approved', ref: so.soNumber, by: so.approvedBy?.name, minor: true })
   }
   steps.push({ at: g.mo.createdAt, phase: 'order', title: `Manufacturing order ${g.mo.moNumber} raised`, ref: g.mo.moNumber, by: g.mo.createdBy?.name })
   steps.push(...materials.steps)
-  // The bundle it was sewn in, step by step through the floor.
+  // The bundle it was sewn in, through the floor. Read as a chain of
+  // handovers — cut, sent from cutting to fusing, from fusing to stitching —
+  // with anything that went wrong on the way. Counting in and working on a
+  // bundle are kept as details, for "Every step".
+  const inBundle = detail.bundle ? ` · bundle ${detail.bundle.code}` : ''
   for (const e of detail.production) {
-    const cut = e.type === 'Cut'
-    steps.push({
-      at: new Date(e.date),
-      phase: cut ? 'cutting' : e.check ? 'qc' : 'production',
-      title: cut ? 'Cut' : `${e.type} · ${e.step}`,
-      detail: `${detail.bundle ? `Bundle ${detail.bundle.code}: ` : ''}${e.changes.join(', ')}`,
-      ref: e.ref,
-      by: e.by,
-      undone: e.reversed,
-    })
+    const at = new Date(e.date)
+    const base = { at, ref: e.ref, by: e.by, undone: e.reversed, minor: e.reversed }
+    const pcs = `${e.qty} ${e.qty === 1 ? 'pc' : 'pcs'}`
+    switch (e.kind) {
+      case 'CUT':
+        steps.push({ ...base, phase: 'cutting', title: 'Cut', detail: detail.bundle ? `${pcs} in bundle ${detail.bundle.code}` : pcs })
+        break
+      case 'DISPATCH': {
+        // Work given to an outside unit names the unit: that is where the pieces are.
+        const to = e.vendor ? `${e.vendor} (${e.step})` : e.step
+        steps.push({
+          ...base,
+          by: e.person,
+          phase: 'production',
+          title: e.from && e.from !== e.step ? `Sent from ${e.from} to ${to}` : `Sent to ${to}`,
+          detail: pcs,
+        })
+        break
+      }
+      case 'VENDOR_RETURN':
+        steps.push({ ...base, by: e.person, phase: 'production', title: `Back from ${e.vendor ?? 'the outside unit'}`, detail: `${pcs} into ${e.step}` })
+        break
+      case 'PACK':
+        steps.push({ ...base, phase: 'store', title: 'Packed into finished goods', detail: `${pcs}${inBundle}`, minor: true })
+        break
+      case 'SHORT':
+      case 'EXCESS':
+      case 'SETTLE':
+        steps.push({ ...base, phase: 'production', title: `${e.type} at ${e.step}`, detail: e.changes.join(', ') })
+        break
+      case 'PROCESS':
+      case 'DECIDE':
+      case 'REWORK_DONE': {
+        // A check that found something always shows; one that passed it all
+        // is told by the next "sent", so it is a detail.
+        const trouble = e.problems.length > 0
+        steps.push({
+          ...base,
+          phase: e.check ? 'qc' : 'production',
+          title: e.check ? (trouble ? `Problem found at ${e.step}` : `Passed ${e.step}`) : e.kind === 'REWORK_DONE' ? `Rework done at ${e.step}` : `Worked at ${e.step}`,
+          // At a check, "done" means passed.
+          detail: (e.check ? e.changes.map((c) => c.replace(/ done$/, ' passed')) : e.changes).join(', '),
+          minor: e.reversed || !trouble,
+        })
+        break
+      }
+      case 'RECEIVE':
+        steps.push({ ...base, phase: 'production', title: `Counted in at ${e.step}`, detail: `${pcs}${inBundle}`, minor: true })
+        break
+      default:
+        steps.push({ ...base, phase: 'production', title: `${e.type} · ${e.step}`, detail: `${e.changes.join(', ')}${inBundle}`, minor: true })
+    }
   }
   steps.push({
     at: new Date(detail.receipt.receiptDate),
@@ -238,7 +292,7 @@ function assemble(
   })
   for (const e of detail.events) {
     const t = TAG_EVENT[e.type] ?? { phase: 'store' as Phase, title: e.type }
-    steps.push({ at: new Date(e.at), phase: t.phase, title: t.title, detail: e.notes, ref: e.referenceNumber, by: e.by })
+    steps.push({ at: new Date(e.at), phase: t.phase, title: t.title, detail: e.notes, ref: e.referenceNumber, by: e.by, minor: MINOR_TAG_EVENTS.has(e.type) })
   }
   if (detail.lastPrintedAt) {
     steps.push({
@@ -246,6 +300,7 @@ function assemble(
       phase: 'tag',
       title: detail.printCount > 1 ? `Label printed (${detail.printCount} times, last here)` : 'Label printed',
       ref: detail.code,
+      minor: true,
     })
   }
   if (dc) {
@@ -617,7 +672,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   const steps: Step[] = []
   if (so) {
     steps.push({ at: so.createdAt, phase: 'order', title: `Order ${so.soNumber} booked`, detail: [so.customer.name, so.customerPORef ? `their PO ${so.customerPORef}` : null].filter(Boolean).join(' · '), ref: so.soNumber, by: so.createdBy?.name })
-    if (so.approvedAt) steps.push({ at: so.approvedAt, phase: 'order', title: 'Order approved', ref: so.soNumber, by: so.approvedBy?.name })
+    if (so.approvedAt) steps.push({ at: so.approvedAt, phase: 'order', title: 'Order approved', ref: so.soNumber, by: so.approvedBy?.name, minor: true })
   }
   for (const m of mos) {
     const what = m.lines.map((l) => `${l.style.code} ${l.color} ${l.totalQty} pcs`).join(', ')
@@ -640,17 +695,29 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   for (const t of transfers) {
     const sent = t.lines.reduce((s, l) => s + n(l.dispatchedQty), 0)
     const got = t.lines.reduce((s, l) => s + n(l.receivedQty), 0)
+    // Work given to an outside unit names the unit: that is where the pieces are.
+    const to = t.vendor ? `${t.vendor.name} (${t.toStep.name})` : t.toStep.name
     steps.push({
       at: t.dispatchDate,
       phase: 'production',
-      title: `${sent} pcs sent from ${t.fromStep.name} to ${t.toStep.name}${t.isRework ? ' for rework' : ''}`,
-      detail: t.vendor ? `At ${t.vendor.name}` : null,
+      title: `${sent} pcs sent ${t.fromStep.name === t.toStep.name ? '' : `from ${t.fromStep.name} `}to ${to}${t.isRework ? ' for rework' : ''}`,
+      detail: null,
       ref: t.transferNumber,
       by: t.issuedBy ?? t.createdBy?.name,
       undone: Boolean(t.cancelledAt),
     })
     if (t.receivedAt && got > 0) {
-      steps.push({ at: t.receivedAt, phase: 'production', title: `${got} pcs received at ${t.toStep.name}`, detail: t.vendor ? `From ${t.vendor.name}` : null, ref: t.transferNumber, by: t.receivedBy })
+      // Counted in where it went: a detail, unless fewer arrived than were sent.
+      const short = got < sent - 0.0005
+      steps.push({
+        at: t.receivedAt,
+        phase: 'production',
+        title: short ? `Only ${got} of ${sent} pcs arrived at ${t.toStep.name}` : `${got} pcs received at ${t.toStep.name}`,
+        detail: t.vendor ? `From ${t.vendor.name}` : null,
+        ref: t.transferNumber,
+        by: t.receivedBy,
+        minor: !short,
+      })
     }
   }
   for (const e of qcEvents) {
@@ -664,7 +731,17 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
       by.get('B_GRADE') ? `${by.get('B_GRADE')} B-grade` : null,
     ].filter(Boolean)
     if (!said.length) continue
-    steps.push({ at: e.eventDate, phase: 'qc', title: `Checked at ${e.step?.name ?? 'QC'}`, detail: said.join(', '), by: e.personName ?? e.createdBy?.name, undone: Boolean(e.reversedAt) })
+    // All passed is told by the next "sent"; a check that found something always shows.
+    const trouble = said.length > (by.get('DONE') ? 1 : 0)
+    steps.push({
+      at: e.eventDate,
+      phase: 'qc',
+      title: trouble ? `Problem found at ${e.step?.name ?? 'QC'}` : `Passed ${e.step?.name ?? 'QC'}`,
+      detail: said.join(', '),
+      by: e.personName ?? e.createdBy?.name,
+      undone: Boolean(e.reversedAt),
+      minor: !trouble || Boolean(e.reversedAt),
+    })
   }
   for (const r of receipts) {
     const pcs = r.lines.reduce((s, l) => s + n(l.qty), 0)
@@ -672,7 +749,7 @@ export async function orderTrace(kind: 'SO' | 'MO', id: string) {
   }
   for (const c of challans) {
     const pcs = c._count.garments || c.lines.reduce((s, l) => s + n(l.qty), 0)
-    steps.push({ at: c.createdAt, phase: 'despatch', title: 'Delivery challan made', detail: `${pcs} pcs`, ref: c.dcNumber, by: c.createdBy?.name, undone: Boolean(c.cancelledAt) })
+    steps.push({ at: c.createdAt, phase: 'despatch', title: 'Delivery challan made', detail: `${pcs} pcs`, ref: c.dcNumber, by: c.createdBy?.name, undone: Boolean(c.cancelledAt), minor: true })
     if (c.dispatchedAt) steps.push({ at: c.dispatchedAt, phase: 'despatch', title: `${pcs} pcs despatched`, ref: c.dcNumber, by: c.dispatchedBy?.name, undone: Boolean(c.cancelledAt) })
     if (c.deliveredAt) steps.push({ at: c.deliveredAt, phase: 'despatch', title: 'Delivered to the customer', ref: c.dcNumber })
     for (const inv of c.invoices) {
@@ -1045,8 +1122,10 @@ export async function materialsOf(moIds: string[], soId: string | null, db: Pris
 
   const steps: Step[] = []
   for (const r of mrs) {
-    steps.push({ at: r.createdAt, phase: 'material', title: 'Materials asked for', detail: `${r.lines.length} ${r.lines.length === 1 ? 'item' : 'items'} for ${r.department.name}`, ref: r.mrNumber, by: r.raisedBy?.name })
-    if (r.approvedAt) steps.push({ at: r.approvedAt, phase: 'material', title: 'Material request approved', ref: r.mrNumber, by: r.approvedBy?.name })
+    // Asked for: a detail once the store has handed it over, a step while it waits.
+    const handedOver = moved.some((m) => m.referenceId === r.id && m.referenceType === 'MATERIAL_REQUISITION')
+    steps.push({ at: r.createdAt, phase: 'material', title: 'Materials asked for', detail: `${r.lines.length} ${r.lines.length === 1 ? 'item' : 'items'} for ${r.department.name}`, ref: r.mrNumber, by: r.raisedBy?.name, minor: handedOver })
+    if (r.approvedAt) steps.push({ at: r.approvedAt, phase: 'material', title: 'Material request approved', ref: r.mrNumber, by: r.approvedBy?.name, minor: true })
     // What the store handed over, as it happened — a requisition is often issued in parts.
     const mine = moved.filter((m) => m.referenceId === r.id)
     const batches = new Map<string, typeof mine>()

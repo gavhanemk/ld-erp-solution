@@ -5,12 +5,20 @@ import { History } from 'lucide-react'
 import { PHASE, dayKey, fmtDayLong, fmtTime, type Phase, type Step } from './traceTypes'
 
 /**
- * Everything that happened, in order, a day at a time: the time, what
- * happened, the document it happened on and who did it. The chips across the
- * top narrow it to one part of the journey — just the checks, just despatch.
+ * What happened, in order, a day at a time: the time, what happened, the
+ * document it happened on and who did it.
+ *
+ * Plain by default: the steps of the journey — ordered, materials issued,
+ * cut, sent from one process to the next, any problem a check found, into
+ * the store, despatched. "Every step" adds the details in between: counted
+ * in, worked on, approvals, reprints. The chips narrow it to one part of the
+ * journey — just the checks, just despatch.
  */
-export function Timeline({ steps, newestFirst = false }: { steps: Step[]; newestFirst?: boolean }) {
+export function Timeline({ steps: all, newestFirst = false }: { steps: Step[]; newestFirst?: boolean }) {
   const [only, setOnly] = useState<Phase | null>(null)
+  const [every, setEvery] = useState(false)
+  const details = all.filter((s) => s.minor).length
+  const steps = useMemo(() => (every ? all : all.filter((s) => !s.minor)), [all, every])
   const phases = useMemo(() => {
     const count = new Map<Phase, number>()
     for (const s of steps) count.set(s.phase, (count.get(s.phase) ?? 0) + 1)
@@ -30,7 +38,26 @@ export function Timeline({ steps, newestFirst = false }: { steps: Step[]; newest
     <div className="glass-card overflow-hidden p-0">
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
         <History size={16} className="text-primary" />
-        <h3 className="mr-2 text-sm font-semibold text-foreground">Full history</h3>
+        <h3 className="mr-1 text-sm font-semibold text-foreground">History</h3>
+        {details > 0 && (
+          <div className="mr-2 flex rounded-lg border border-border bg-secondary p-0.5 text-xs" role="tablist" aria-label="How much to show">
+            {([
+              { on: false, label: 'Key steps' },
+              { on: true, label: `Every step (+${details})` },
+            ] as const).map((t) => (
+              <button
+                key={t.label}
+                type="button"
+                role="tab"
+                aria-selected={every === t.on}
+                onClick={() => setEvery(t.on)}
+                className={`rounded-md px-2.5 py-1 font-medium transition-colors ${every === t.on ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           onClick={() => setOnly(null)}
@@ -61,7 +88,7 @@ export function Timeline({ steps, newestFirst = false }: { steps: Step[]; newest
                   const ph = PHASE[s.phase]
                   const Icon = ph.icon
                   return (
-                    <li key={i} className={`relative pb-3 pl-5 last:pb-0 ${s.undone ? 'opacity-50' : ''}`}>
+                    <li key={i} className={`relative pb-3 pl-5 last:pb-0 ${s.undone ? 'opacity-50' : s.minor ? 'opacity-70' : ''}`}>
                       <span className="absolute -left-[4.5rem] top-0.5 w-14 text-right text-xs tabular-nums text-muted-foreground">{fmtTime(s.at)}</span>
                       <span className={`absolute -left-[0.6rem] top-0 flex h-5 w-5 items-center justify-center rounded-full ${ph.dot} text-white ring-4 ring-card`}>
                         <Icon size={11} />
