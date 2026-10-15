@@ -90,9 +90,15 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
   const codeLine = [p.itemCode, p.styleNo ? `Style ${p.styleNo}` : null].filter(Boolean).join(' · ')
   const lotLine = [p.lotNo ? `Lot ${p.lotNo}` : roll ? 'No lot' : null, p.challanNo ? `Challan ${p.challanNo}` : null].filter(Boolean).join(' · ')
   const docLine = [p.grnNumber ?? 'Labelled', day(p.date), p.poNumber].filter(Boolean).join(' · ')
-  const where = `${p.store}${p.owner ? ` · ${p.owner}` : ''}`
+  // A customer's material says so across the top, so it is never taken for ours.
+  const where = p.store
   return (
     <div className="sticker pk">
+      {p.owner && (
+        <div className="pk-cust" style={{ fontSize: d.tag }}>
+          Customer material · {p.owner}
+        </div>
+      )}
       <div className="pk-head">
         <span className="pk-id" style={{ fontSize: d.id }}>{p.code}</span>
         {!foot && !tight && (
@@ -167,13 +173,13 @@ function OutSticker({ o, company, layout, codes }: { o: OutLabel; company: strin
   const foot = codes === 'qr' && d.foot
   return (
     <div className="sticker pk">
+      {o.owner && (
+        <div className="pk-cust" style={{ fontSize: d.tag }}>
+          Customer material · {o.owner}
+        </div>
+      )}
       <div className="pk-head">
         <span className="pk-id" style={{ fontSize: d.id }}>{o.docNumber}</span>
-        {!foot && layout !== 'small' && o.owner && (
-          <span className="pk-where" style={{ fontSize: d.tag }}>
-            {o.owner}&apos;s
-          </span>
-        )}
         <span className="pk-tag" style={{ fontSize: d.tag }}>
           {o.tag}
         </span>
@@ -207,7 +213,7 @@ function OutSticker({ o, company, layout, codes }: { o: OutLabel; company: strin
       {foot && (
         <div className="pk-foot" style={{ fontSize: foot }}>
           <span style={clip}>{company}</span>
-          <span style={{ ...clip, textAlign: 'right' }}>{o.owner ? `${o.owner}'s` : ''}</span>
+          <span style={{ ...clip, textAlign: 'right' }}>{o.from}</span>
         </div>
       )}
     </div>
@@ -340,6 +346,9 @@ function Stickers() {
         .pk-head { display: flex; align-items: center; justify-content: space-between; gap: 1.5mm;
                    border-bottom: 0.3mm solid #000; padding-bottom: 0.6mm; margin-bottom: 0.9mm; }
         .pk-id { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-weight: 800; letter-spacing: .02em; line-height: 1; }
+        .pk-cust { flex-shrink: 0; background: #000; color: #fff; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+                   line-height: 1.3; padding: 0.2mm 1mm; margin-bottom: 0.7mm; border-radius: 0.5mm;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .pk-tag { border: 0.25mm solid #000; border-radius: 0.6mm; padding: 0.2mm 0.8mm; font-weight: 700; letter-spacing: .06em; line-height: 1.2; }
         .pk-body { display: flex; flex: 1; min-height: 0; align-items: center; overflow: hidden; }
         .pk-qr { flex-shrink: 0; }

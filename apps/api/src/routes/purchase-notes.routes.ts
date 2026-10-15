@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { Prisma } from '@prisma/client'
 import { prisma } from '@ld-erp/database'
+import { lockRow } from '../lib/lockRow'
 import { AppError } from '../middleware/errorHandler'
 import { requirePermission, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
@@ -894,6 +895,8 @@ function assertTransition(from: string, to: string, noteNumber: string): void {
 
 router.post('/:id/post', requirePermission(MODULE, 'post'), async (req: AuthRequest, res) => {
   const result = await prisma.$transaction(async (tx) => {
+    // Two clicks at once would both find it unposted and move its stock twice.
+    await lockRow(tx, 'purchaseNote', req.params.id)
     const before = await tx.purchaseNote.findUnique({
       where: { id: req.params.id },
       select: {
@@ -1052,6 +1055,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
   const { reason } = reasonBody.parse(req.body ?? {})
 
   const result = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'purchaseNote', req.params.id)
     const before = await tx.purchaseNote.findUnique({
       where: { id: req.params.id },
       select: {

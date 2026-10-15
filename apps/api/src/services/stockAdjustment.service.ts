@@ -77,6 +77,13 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
       referenceId: before.id,
       transactionDate: before.adjustmentDate,
       notes: `${before.adjustmentNumber}${owner}: ${before.reason}`,
+      // Approved now: entered just after the last movement if its count date is earlier.
+      earlierDate: 'move-up',
+      // What was counted is a fact; holds on the stock do not change it.
+      ignoreReservations: true,
+      // A scanned count withdraws the stickers it did not find, just below;
+      // a typed one has its stickers taken down to what is left.
+      stickers: before.source === 'SCAN_COUNT' ? 'caller' : 'auto',
     })
   }
 
@@ -93,24 +100,28 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
 }
 
 export async function rejectAdjustment(id: string, userId: string, reason: string) {
-  const before = await prisma.stockAdjustment.findUnique({ where: { id } })
-  if (!before) throw new AppError('That stock adjustment does not exist', 404, 'NOT_FOUND')
-  const done = await prisma.stockAdjustment.updateMany({
-    where: { id, status: 'PENDING' },
-    data: { status: 'REJECTED', approvedById: userId, approvedAt: new Date(), rejectReason: reason },
-  })
-  if (done.count === 0) {
-    throw new AppError(
-      `${before.adjustmentNumber} is already ${before.status === 'APPROVED' ? 'approved' : 'refused'}.`,
-      409,
-      'ALREADY_DECIDED',
-    )
-  }
-  // Tagged garments it was writing off are free again; a scanned count it came from is closed.
-  await prisma.$transaction(async (tx) => {
+  // All in one: refused, its garments freed and its count closed together, or
+  // none of it — a failure half-way used to leave it refused with its garments
+  // still held.
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM ld_erp.stock_adjustments WHERE id = ${id} FOR UPDATE`
+    const before = await tx.stockAdjustment.findUnique({ where: { id } })
+    if (!before) throw new AppError('That stock adjustment does not exist', 404, 'NOT_FOUND')
+    if (before.status !== 'PENDING') {
+      throw new AppError(
+        `${before.adjustmentNumber} is already ${before.status === 'APPROVED' ? 'approved' : 'refused'}.`,
+        409,
+        'ALREADY_DECIDED',
+      )
+    }
+    await tx.stockAdjustment.update({
+      where: { id },
+      data: { status: 'REJECTED', approvedById: userId, approvedAt: new Date(), rejectReason: reason },
+    })
+    // Tagged garments it was writing off are free again; a scanned count it came from is closed.
     await afterAdjustmentDecided(tx, id, false, userId)
     await afterCountDecided(tx, id, false, userId)
+    const after = await tx.stockAdjustment.findUniqueOrThrow({ where: { id }, include })
+    return { before, after }
   })
-  const after = await prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include })
-  return { before, after }
 }

@@ -6,7 +6,7 @@ import Link from 'next/link'
 import {
   Printer, Plus, Search, RefreshCw, AlertCircle, Ban, X, Download, Loader2, CalendarDays, List,
   LayoutDashboard, PackageCheck, Truck, AlarmClock, ShieldAlert, Recycle, Timer, Send, Factory, Hourglass,
-  LineChart, Target, Users, PieChart as PieIcon, Layers, ArrowRight, FileMinus } from 'lucide-react'
+  LineChart, Target, Users, PieChart as PieIcon, Layers, ArrowRight, FileMinus, FileText } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { SendJobWorkDialog, ReceiveJobWorkDialog } from '@/components/inventory/JobWorkDialogs'
 import { JobWorkDebitNoteDialog } from '@/components/inventory/JobWorkDebitNoteDialog'
@@ -865,6 +865,15 @@ function JobWorkScreen() {
           >
             {exporting ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Export
           </button>
+          {/* One job worker's account: sent, back, wasted, still with them. */}
+          <Link
+            href={`/print/job-work-statement${picked.worker?.length === 1 ? `?jobWorkerId=${picked.worker[0]}` : ''}`}
+            target="_blank"
+            className="btn-secondary"
+            title="What a job worker was sent, what came back and what they still hold"
+          >
+            <FileText size={15} /> Statement
+          </Link>
           <button className="btn-primary" onClick={() => setSending(true)}>
             <Plus size={15} /> Send out
           </button>

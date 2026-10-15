@@ -49,6 +49,21 @@ interface Row {
   subCategoryName: string | null
   departmentName: string | null
   value: number | null
+  /** The number of the document behind it: GRN-0005, JW-2627-0003. */
+  documentNumber: string | null
+  /** Who was on the other side of it. */
+  party: { kind: PartyKind | null; id: string; name: string | null } | null
+}
+
+type PartyKind = 'supplier' | 'customer' | 'jobworker' | 'department' | 'store' | 'production'
+
+const PARTY_KIND: Record<PartyKind, string> = {
+  supplier: 'Supplier',
+  customer: 'Customer',
+  jobworker: 'Job worker',
+  department: 'Issued to',
+  store: 'Other store',
+  production: 'Made on',
 }
 
 interface Summary {
@@ -72,6 +87,7 @@ interface Day {
 
 type FilterKey =
   | 'store' | 'movement' | 'document' | 'direction' | 'owner' | 'category' | 'sub' | 'department' | 'itemType'
+  | 'customer' | 'party' | 'partyKind'
 
 interface Group {
   value: string
@@ -134,7 +150,19 @@ const DOCUMENT: Record<string, string> = {
   STOCK_IN: 'Stock in (no PO)',
   STOCK_TRANSFER: 'Store transfer',
   STOCK_TRANSFER_CANCELLED: 'Store transfer cancelled',
-  MATERIAL_REQUISITION: 'Material requisition',
+  MATERIAL_REQUISITION: 'Issued to production',
+  MR_RETURN: 'Back from the floor',
+  GRN_DELETED: 'Goods receipt deleted',
+  GRN_QC_USED: 'Quality check',
+  STOCK_COUNT: 'Stock count',
+  FG_RECEIPT: 'Finished goods in',
+  FG_RECEIPT_CANCEL: 'Finished goods receipt cancelled',
+  CUTTING: 'Cut panels in',
+  CUTTING_CANCEL: 'Cutting cancelled',
+  DELIVERY_CHALLAN: 'Dispatched',
+  DELIVERY_CHALLAN_CANCEL: 'Dispatch cancelled',
+  CREDIT_NOTE: 'Returned by customer',
+  CREDIT_NOTE_CANCEL: 'Customer return cancelled',
 }
 
 const docLabel = (v: string) =>
@@ -170,6 +198,23 @@ const FILTERS: Array<{
   { key: 'sub', label: 'Sub-category', noneLabel: 'No sub-category', menu: false },
   { key: 'department', label: 'Department', noneLabel: 'No department' },
   { key: 'itemType', label: 'Type', labelOf: (v) => TYPE_LABEL[v] ?? v, menu: false },
+  { key: 'customer', label: "Customer's material", noneLabel: 'Our own material' },
+  { key: 'party', label: 'Party', noneLabel: 'No party' },
+  { key: 'partyKind', label: 'With', labelOf: (v) => PARTY_KIND[v as PartyKind] ?? v, noneLabel: 'Nobody outside', menu: false },
+]
+
+/*
+ * The quick views across the top: whose material, and who it went to or
+ * came from. Each is a set of filters; picking one replaces the ones it
+ * names and leaves the rest alone.
+ */
+const VIEWS: Array<{ key: string; label: string; set: Partial<Record<FilterKey, string[]>> }> = [
+  { key: 'all', label: 'Everything', set: { owner: [], partyKind: [] } },
+  { key: 'own', label: 'Our own material', set: { owner: ['OWNED'], partyKind: [] } },
+  { key: 'customers', label: "Customers' material", set: { owner: ['CUSTOMER_OWNED'], partyKind: [] } },
+  { key: 'jobwork', label: 'Job work', set: { owner: [], partyKind: ['jobworker'] } },
+  { key: 'suppliers', label: 'Suppliers', set: { owner: [], partyKind: ['supplier'] } },
+  { key: 'production', label: 'Issued to production', set: { owner: [], partyKind: ['department'] } },
 ]
 
 const qtyFmt = (v: number) =>
@@ -407,6 +452,13 @@ function LedgerScreen() {
       return { ...p, [key]: cur.includes(value) ? cur.filter((v) => v !== value) : [...cur, value] }
     })
 
+  const viewOn = (v: (typeof VIEWS)[number]) =>
+    Object.entries(v.set).every(([k, want]) => {
+      const have = picked[k as FilterKey] ?? []
+      return have.length === want!.length && want!.every((x) => have.includes(x))
+    })
+  const pickView = (v: (typeof VIEWS)[number]) => setPicked((p) => ({ ...p, ...v.set }))
+
   const chips = FILTERS.flatMap((f) =>
     (picked[f.key] ?? []).map((v) => ({
       key: f.key,
@@ -489,6 +541,9 @@ function LedgerScreen() {
             Time: timeOf(m.transactionDate),
             Movement: MOVEMENT[m.transactionType]?.label ?? m.transactionType,
             Document: m.referenceType ? docLabel(m.referenceType) : '',
+            'Document No': m.documentNumber ?? '',
+            Party: m.party?.name ?? '',
+            'Party Type': m.party?.kind ? PARTY_KIND[m.party.kind] : '',
             'Item Code': m.item.code,
             'Item Name': m.item.name,
             Type: TYPE_LABEL[m.itemType] ?? m.itemType,
@@ -507,10 +562,10 @@ function LedgerScreen() {
           }
         }),
       )
-      sheet['!cols'] = [11, 7, 14, 24, 14, 32, 13, 18, 18, 14, 22, 20, 9, 9, 7, 10, 10, 12, 50].map((wch) => ({ wch }))
+      sheet['!cols'] = [11, 7, 14, 24, 16, 28, 12, 14, 32, 13, 18, 18, 14, 22, 20, 9, 9, 7, 10, 10, 12, 50].map((wch) => ({ wch }))
       const book = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(book, sheet, 'Stock Ledger')
-      XLSX.writeFile(book, `stock-ledger-${iso(new Date())}.xlsx`)
+      XLSX.utils.book_append_sheet(book, sheet, 'Inward & Outward')
+      XLSX.writeFile(book, `inward-outward-${iso(new Date())}.xlsx`)
       if (r.summary.total > r.data.length)
         setError(`The export holds the newest ${r.data.length.toLocaleString('en-IN')} of ${r.summary.total.toLocaleString('en-IN')} movements. Narrow the dates for the rest.`)
     } catch {
@@ -525,12 +580,30 @@ function LedgerScreen() {
   // dropdown lies over whatever is below it.
   const filterBar = (
     <div className="space-y-2 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Quick views">
+        {VIEWS.map((v) => {
+          const on = viewOn(v)
+          return (
+            <button
+              key={v.key}
+              type="button"
+              onClick={() => pickView(v)}
+              aria-pressed={on}
+              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                on ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-secondary text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {v.label}
+            </button>
+          )
+        })}
+      </div>
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex h-10 min-w-[160px] flex-1 items-center gap-2 rounded-lg border border-border bg-secondary px-3">
           <Search size={14} className="text-muted-foreground" />
           <input
             className="bg-transparent border-0 outline-none text-sm flex-1 text-foreground placeholder:text-muted-foreground"
-            placeholder="Search item, code, store, note, customer..."
+            placeholder="Search item, document no., supplier, customer, job worker..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             aria-label="Search the ledger"
@@ -632,7 +705,10 @@ function LedgerScreen() {
       {/* The title, the two tabs beside it, and the buttons on the right: one line. */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4">
-          <h1 className="page-title">Stock Ledger</h1>
+          <div>
+            <h1 className="page-title">Inward &amp; Outward</h1>
+            <p className="text-xs text-muted-foreground">Every movement of stock in and out, with its document and party</p>
+          </div>
           <div className="flex rounded-lg border border-border bg-secondary p-1" role="tablist">
             {([
               { key: 'movements', label: 'Movements', icon: List },
@@ -900,6 +976,8 @@ function LedgerScreen() {
                 <tr className="bg-secondary">
                   <th className="whitespace-nowrap">Time</th>
                   <th className="whitespace-nowrap">What</th>
+                  <th className="whitespace-nowrap">Document</th>
+                  <th className="whitespace-nowrap">Party</th>
                   <th className="whitespace-nowrap">Code</th>
                   <th className="whitespace-nowrap">Item</th>
                   <th className="whitespace-nowrap">Category</th>
@@ -926,7 +1004,7 @@ function LedgerScreen() {
                     const d = byDay.get(day)
                     out.push(
                       <tr key={`day-${day}`} className="bg-secondary/60">
-                        <td colSpan={14} className="py-1.5">
+                        <td colSpan={16} className="py-1.5">
                           <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs">
                             <span className="font-semibold text-foreground">{dayTitle(day)}</span>
                             {d && (
@@ -950,6 +1028,35 @@ function LedgerScreen() {
                           <div className="mt-0.5 text-[10px] text-muted-foreground">{docLabel(r.referenceType)}</div>
                         )}
                       </td>
+                      <td className="whitespace-nowrap">
+                        {r.documentNumber ? (
+                          <button
+                            type="button"
+                            className="font-mono text-xs text-foreground hover:text-teal-500 hover:underline"
+                            onClick={() => setSearch(r.documentNumber!)}
+                            title="Show every movement on this document"
+                          >
+                            {r.documentNumber}
+                          </button>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="min-w-[130px] text-xs">
+                        {r.party ? (
+                          <button
+                            type="button"
+                            className="text-left hover:text-teal-500"
+                            onClick={() => setFilter('party', [r.party!.id])}
+                            title="Show everything with this party"
+                          >
+                            <span className="font-medium text-foreground">{r.party.name}</span>
+                            {r.party.kind && <div className="text-[10px] text-muted-foreground">{PARTY_KIND[r.party.kind]}</div>}
+                          </button>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
                       <td className="whitespace-nowrap font-mono text-xs text-teal-500">{r.item.code}</td>
                       <td className="min-w-[170px]">
                         <Link
@@ -962,10 +1069,18 @@ function LedgerScreen() {
                       <td className="text-xs">{r.mainCategoryName}</td>
                       <td className="text-xs">{r.subCategoryName ?? <span className="text-muted-foreground">—</span>}</td>
                       <td className="text-xs">{r.departmentName ?? <span className="text-muted-foreground">—</span>}</td>
-                      <td className="min-w-[110px] text-xs">
-                        {r.warehouse.name}
+                      <td className="min-w-[150px] text-xs">
+                        <div className="whitespace-nowrap">{r.warehouse.name}</div>
                         {r.ownerCustomer && (
-                          <div className="text-[10px] text-sky-400">{r.ownerCustomer.name}&apos;s material</div>
+                          <button
+                            type="button"
+                            className="mt-0.5 block text-left hover:underline"
+                            onClick={() => setFilter('customer', [r.ownerCustomer!.id])}
+                            title="Show only this customer's material"
+                          >
+                            <span className="badge-info whitespace-nowrap text-[10px]">Customer material</span>
+                            <span className="ml-1 text-[11px] text-sky-500">{r.ownerCustomer.name}</span>
+                          </button>
                         )}
                       </td>
                       <td className="whitespace-nowrap text-right tabular-nums text-emerald-500">

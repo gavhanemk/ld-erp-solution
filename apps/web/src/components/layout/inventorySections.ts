@@ -19,10 +19,12 @@ export const INVENTORY_SECTIONS: InventorySection[] = [
     tabs: [
       { label: 'Stock', href: '/inventory/stock' },
       { label: 'Stock Documents', href: '/inventory/documents' },
-      { label: 'Stock Ledger', href: '/inventory/ledger' },
       { label: 'Stock Count', href: '/inventory/count' },
     ],
   },
+  // Every movement in and out, with its document and party: its own line, so
+  // "where did it go" is one click from anywhere.
+  { label: 'Inward & Outward', tabs: [{ label: 'Inward & Outward', href: '/inventory/ledger' }] },
   { label: 'Material Requisitions', tabs: [{ label: 'Material Requisitions', href: '/inventory/requisitions' }] },
   {
     label: 'Stickers & Scan',

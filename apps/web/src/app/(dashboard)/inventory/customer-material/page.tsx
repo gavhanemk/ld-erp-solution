@@ -888,6 +888,15 @@ function CustomerMaterialScreen() {
           <button className="btn-ghost" onClick={() => void load()} disabled={loading} title="Refresh">
             <RefreshCw size={15} className={loading ? 'animate-spin' : undefined} />
           </button>
+          {/* A customer's whole account of their material, to print or send them. */}
+          <Link
+            href={`/print/customer-material-statement${picked.customer?.length === 1 ? `?customerId=${picked.customer[0]}` : ''}`}
+            target="_blank"
+            className="btn-secondary"
+            title="Everything received, used, returned and still here, for one customer"
+          >
+            <FileText size={15} /> Statement
+          </Link>
           <button className="btn-secondary" onClick={() => setImporting(true)} title="Receipts from a spreadsheet">
             <FileSpreadsheet size={15} /> Import
           </button>
@@ -1490,6 +1499,14 @@ function CustomerMaterialScreen() {
                           </td>
                           <td className="whitespace-nowrap text-right">
                             <div className="flex justify-end gap-1.5">
+                              <Link
+                                href={`/print/customer-material-statement?customerId=${h.customerId}`}
+                                target="_blank"
+                                className="btn-secondary h-7 px-2.5 text-xs"
+                                title={`${h.customerName}'s material statement`}
+                              >
+                                <FileText size={13} /> Statement
+                              </Link>
                               <button
                                 type="button"
                                 className="btn-primary h-7 px-2.5 text-xs"

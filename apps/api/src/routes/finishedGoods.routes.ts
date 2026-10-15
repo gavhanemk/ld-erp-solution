@@ -6,7 +6,8 @@ import { AuthRequest, requirePermission } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
-import { recordMovement } from '../services/stock.service'
+import { assertStockUnused, recordMovement } from '../services/stock.service'
+import { lockRow } from '../lib/lockRow'
 import { syncMoPacked } from '../services/manufacturing.service'
 import { packForReceipt, unpackForReceipt } from '../services/floor.service'
 import { voidForCancelledReceipt } from '../services/garment.service'
@@ -426,9 +427,13 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
 
   const { before, after } = await prisma.$transaction(
     async (tx) => {
+      // Two clicks at once would both find it open and take its pieces out twice.
+      await lockRow(tx, 'fgReceipt', req.params.id)
       const before = await tx.finishedGoodsReceipt.findUnique({ where: { id: req.params.id }, include: receiptInclude })
       if (!before) throw new AppError('Finished goods receipt not found', 404, 'NOT_FOUND')
       if (before.cancelledAt) throw new AppError(`${before.fgrNumber} is already cancelled`, 409, 'ALREADY_CANCELLED')
+      // Pieces already sent out cannot be taken back a second time.
+      await assertStockUnused(tx, { referenceId: before.id, label: before.fgrNumber, suggestion: 'Bring the pieces back first, or correct the stock with a stock adjustment.' })
 
       // What came in is what goes out: the same owner, size and grade.
       const ins = await tx.stockLedger.findMany({ where: { referenceType: 'FG_RECEIPT', referenceId: before.id, inQty: { gt: 0 } } })
@@ -446,6 +451,7 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
           referenceType: 'FG_RECEIPT_CANCEL',
           referenceId: before.id,
           notes: `Cancelled ${before.fgrNumber}: ${reason}`,
+          earlierDate: 'move-up',
         })
       }
       const after = await tx.finishedGoodsReceipt.update({

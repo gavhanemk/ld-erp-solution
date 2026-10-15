@@ -7,6 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { getPrintHeader } from '../lib/printData'
 import {
+  assertStockUnused,
   balanceOf,
   lockedBalanceOf,
   onHand,
@@ -14,6 +15,8 @@ import {
   reorderStatus,
   transferStock,
 } from '../services/stock.service'
+import { lockRow } from '../lib/lockRow'
+import { MOVEMENT_DOC_JOIN, movementDocs } from '../services/movementDocs.service'
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
 import { qcByGrnLine } from '../services/grnQc.service'
@@ -223,6 +226,7 @@ router.get('/dashboard', requirePermission(MODULE, 'view'), async (req, res) => 
  */
 const LEDGER_FILTERS = [
   'store', 'movement', 'document', 'direction', 'owner', 'category', 'sub', 'department', 'itemType',
+  'customer', 'party', 'partyKind',
 ] as const
 type LedgerFilter = (typeof LEDGER_FILTERS)[number]
 
@@ -238,6 +242,11 @@ const LEDGER_VALUE: Record<LedgerFilter, Prisma.Sql> = {
   sub: Prisma.sql`CASE WHEN c."parentId" IS NULL THEN 'none' ELSE c.id END`,
   department: Prisma.sql`COALESCE(i."departmentId", 'none')`,
   itemType: Prisma.sql`i.type::text`,
+  // Whose material it is: a customer's, or 'none' for our own.
+  customer: Prisma.sql`COALESCE(s."ownerCustomerId", 'none')`,
+  // Who was on the other side: the supplier, customer, job worker, department or store.
+  party: Prisma.sql`COALESCE(p."partyId", 'none')`,
+  partyKind: Prisma.sql`COALESCE(p."partyKind", 'none')`,
 }
 
 /** The name to show for a value, where the database holds it. */
@@ -246,6 +255,8 @@ const LEDGER_LABEL: Partial<Record<LedgerFilter, Prisma.Sql>> = {
   category: Prisma.sql`COALESCE(pc.name, c.name)`,
   sub: Prisma.sql`CASE WHEN c."parentId" IS NULL THEN NULL ELSE c.name END`,
   department: Prisma.sql`d.name`,
+  customer: Prisma.sql`oc.name`,
+  party: Prisma.sql`p."partyName" || ' (' || CASE p."partyKind" WHEN 'jobworker' THEN 'job worker' ELSE p."partyKind" END || ')'`,
 }
 
 const LEDGER_FROM = Prisma.sql`
@@ -255,7 +266,8 @@ const LEDGER_FROM = Prisma.sql`
   LEFT JOIN ld_erp.item_categories pc ON pc.id = c."parentId"
   LEFT JOIN ld_erp.departments d ON d.id = i."departmentId"
   JOIN ld_erp.warehouses w       ON w.id = s."warehouseId"
-  LEFT JOIN ld_erp.customers oc  ON oc.id = s."ownerCustomerId"`
+  LEFT JOIN ld_erp.customers oc  ON oc.id = s."ownerCustomerId"
+  ${MOVEMENT_DOC_JOIN}`
 
 /** A filter's picked values from the query string: `store=a,b` or `store=a&store=b`. */
 const pickedOf = (v: unknown): string[] =>
@@ -285,7 +297,8 @@ function ledgerQuery(query: Record<string, unknown>) {
     base.push(Prisma.sql`(
       i.name ILIKE ${like} OR i.code ILIKE ${like} OR w.name ILIKE ${like}
       OR COALESCE(s.notes, '') ILIKE ${like} OR COALESCE(oc.name, '') ILIKE ${like}
-      OR c.name ILIKE ${like} OR COALESCE(pc.name, '') ILIKE ${like} OR COALESCE(d.name, '') ILIKE ${like})`)
+      OR c.name ILIKE ${like} OR COALESCE(pc.name, '') ILIKE ${like} OR COALESCE(d.name, '') ILIKE ${like}
+      OR COALESCE(p.doc, '') ILIKE ${like} OR COALESCE(p."partyName", '') ILIKE ${like})`)
   }
 
   const picked = Object.fromEntries(
@@ -449,9 +462,11 @@ async function ledgerRows(ids: string[]) {
     },
   })
   const byId = new Map(rows.map((r) => [r.id, r]))
+  const docs = await movementDocs(ids)
   return ids.flatMap((id) => {
     const r = byId.get(id)
     if (!r) return []
+    const d = docs.get(id)
     const cat = r.item.category
     const rate = r.unitRate === null ? null : Number(r.unitRate)
     const qty = Number(r.inQty) > 0 ? Number(r.inQty) : Number(r.outQty)
@@ -466,6 +481,10 @@ async function ledgerRows(ids: string[]) {
       departmentName: r.item.department?.name ?? null,
       // What the movement was worth, at the rate it moved at.
       value: rate === null ? null : round2(qty * rate),
+      // The document's own number, and who was on the other side of it. Very
+      // old rows carry their number in place of an id.
+      documentNumber: d?.doc ?? (r.referenceId && /^[A-Z]+-[\w-]+$/.test(r.referenceId) ? r.referenceId : null),
+      party: d?.partyId ? { kind: d.partyKind, id: d.partyId, name: d.partyName } : null,
     }]
   })
 }
@@ -606,13 +625,18 @@ router.post('/opening', requirePermission(MODULE, 'create'), async (req: AuthReq
         itemId: line.itemId,
         warehouseId: data.warehouseId,
       })
-      if (existing.qty !== 0) {
+      // Once, ever: an item that has run out still has its history here, and a
+      // second opening would put stock back in that nothing brought.
+      const history = existing.qty !== 0 ? 1 : await tx.stockLedger.count({ where: { itemId: line.itemId, warehouseId: data.warehouseId } })
+      if (history > 0) {
         const item = await tx.item.findUnique({
           where: { id: line.itemId },
           select: { name: true },
         })
         throw new AppError(
-          `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once. To add stock that came in without a purchase order, use Stock in.`,
+          existing.qty !== 0
+            ? `${item?.name ?? 'That item'} already has ${existing.qty} in ${warehouse.name}. Opening stock can only be entered once. To add stock that came in without a purchase order, use Stock in.`
+            : `${item?.name ?? 'That item'} already has stock history in ${warehouse.name}, so its opening stock was entered before. To add stock that came in without a purchase order, use Stock in.`,
           409,
           'OPENING_ALREADY_SET',
         )
@@ -901,7 +925,13 @@ router.get('/adjustments/:id', requirePermission(MODULE, 'view'), async (req, re
 })
 
 /** The database half of the route below, so it can run inside any transaction (and a rolled-back test). */
-export async function createTransfer(tx: Prisma.TransactionClient, data: z.infer<typeof transferSchema>, userId: string | null) {
+export async function createTransfer(
+  tx: Prisma.TransactionClient,
+  data: z.infer<typeof transferSchema>,
+  userId: string | null,
+  /** A scanned move has moved its own package; a typed one is put right in the labels window after. */
+  opts: { stickers?: 'window' | 'caller' } = {},
+) {
   const when = data.transferDate ?? new Date()
 
   const [from, to] = await Promise.all([
@@ -949,6 +979,7 @@ export async function createTransfer(tx: Prisma.TransactionClient, data: z.infer
       referenceId: created.id,
       transactionDate: when,
       notes: `${transferNumber}: ${from.name} → ${to.name}`,
+      stickers: opts.stickers ?? 'window',
     })
 
     await tx.stockTransferLine.update({
@@ -1049,6 +1080,7 @@ router.patch(
     const { reason } = cancelTransferSchema.parse(req.body ?? {})
 
     const after = await prisma.$transaction(async (tx) => {
+      await lockRow(tx, 'stockTransfer', req.params.id)
       const before = await tx.stockTransfer.findUnique({
         where: { id: req.params.id },
         include: { lines: true, fromWarehouse: true, toWarehouse: true },
@@ -1062,6 +1094,13 @@ router.patch(
           'ALREADY_CANCELLED',
         )
       }
+
+      // What has since been issued or sent on from where it went cannot walk back.
+      await assertStockUnused(tx, {
+        referenceId: before.id,
+        label: before.transferNumber,
+        suggestion: `Move back only what is still in ${before.toWarehouse.name}, with a new transfer.`,
+      })
 
       for (const line of before.lines) {
         await transferStock(tx, {
@@ -1077,6 +1116,7 @@ router.patch(
           referenceId: before.id,
           transactionDate: new Date(),
           notes: `${before.transferNumber} cancelled: ${reason}`,
+          earlierDate: 'move-up',
         })
       }
 
@@ -1981,6 +2021,8 @@ export async function issueRequisition(
   mrId: string,
   body: z.infer<typeof issueRequisitionSchema>,
   user: AuthRequest['user'],
+  /** A scanned issue has taken its own package down; a typed one is put right in the labels window after. */
+  opts: { stickers?: 'window' | 'caller' } = {},
 ) {
   const when = body.issueDate ?? new Date()
 
@@ -2125,6 +2167,8 @@ export async function issueRequisition(
         referenceId: mr.id,
         transactionDate: when,
         notes: `${mr.mrNumber} → ${mr.department.name}${a.warehouseId !== line.warehouseId ? ` (from ${storeNames.get(a.warehouseId)})` : ''}`,
+        reservedFor: [line.id],
+        stickers: opts.stickers ?? 'window',
       })
       handedOver.push(`${qtyText(a.qty)} ${unit} ${line.item.name}${a.warehouseId !== line.warehouseId ? ` from ${storeNames.get(a.warehouseId)}` : ''}`.replace(/\s+/g, ' '))
     }
@@ -3127,6 +3171,7 @@ router.patch(
     const { reason } = cancelCustomerGrnSchema.parse(req.body ?? {})
 
     const after = await prisma.$transaction(async (tx) => {
+      await lockRow(tx, 'customerGrn', req.params.id)
       const before = await tx.customerGRN.findUnique({
         where: { id: req.params.id },
         include: { lines: true },
@@ -3139,6 +3184,21 @@ router.patch(
           'ALREADY_CANCELLED',
         )
       }
+
+      // Material already sent back to the customer against it would be taken out a second time.
+      const returns = await tx.customerMaterialReturn.findMany({ where: { grnId: before.id, cancelledAt: null }, select: { returnNumber: true } })
+      if (returns.length) {
+        throw new AppError(
+          `${returns.map((r) => r.returnNumber).join(', ')} already sent material from ${before.grnNumber} back to the customer. Cancel ${returns.length === 1 ? 'that return' : 'those returns'} first, or leave the receipt as it is.`,
+          409,
+          'RETURNED_AGAINST',
+        )
+      }
+      await assertStockUnused(tx, { referenceId: before.id, label: before.grnNumber, suggestion: 'Send what is left back to the customer with a return instead.' })
+
+      // Its stickers come off with it, first, so taking the material out does
+      // not take another receipt's stickers down in their place.
+      await withdrawStickers(tx, { type: 'CUSTOMER_GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       for (const line of before.lines) {
         const qty = Number(line.receivedQty)
@@ -3156,11 +3216,9 @@ router.patch(
           referenceId: before.id,
           transactionDate: new Date(),
           notes: `${before.grnNumber} cancelled: ${reason}`,
+          earlierDate: 'move-up',
         })
       }
-
-      // Its stickers come off with it: the material went back.
-      await withdrawStickers(tx, { type: 'CUSTOMER_GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       return tx.customerGRN.update({
         where: { id: before.id },
@@ -3290,6 +3348,7 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
       referenceId: doc.id,
       transactionDate: when,
       notes: `${returnNumber}: back to ${customer.name} (${RETURN_REASON_LABEL[data.reason].toLowerCase()})`,
+      stickers: 'window',
     })
   }
 
@@ -3429,6 +3488,7 @@ router.patch(
     const { reason } = cancelCustomerReturnSchema.parse(req.body ?? {})
 
     const after = await prisma.$transaction(async (tx) => {
+      await lockRow(tx, 'customerReturn', req.params.id)
       const before = await tx.customerMaterialReturn.findUnique({
         where: { id: req.params.id },
         include: { lines: true },
@@ -3456,6 +3516,7 @@ router.patch(
           referenceId: before.id,
           transactionDate: new Date(),
           notes: `${before.returnNumber} cancelled: ${reason}`,
+          earlierDate: 'move-up',
         })
       }
 
@@ -3579,6 +3640,7 @@ export async function createJobWorkChallan(tx: Prisma.TransactionClient, data: z
       referenceId: created.id,
       transactionDate: when,
       notes: `${challanNumber}: ${data.process} at ${worker.name}`,
+      stickers: 'window',
     })
 
     await tx.jobWorkChallanLine.update({
@@ -4100,19 +4162,26 @@ router.post('/requisitions/:id/return', requirePermission(MODULE, 'create'), asy
     select: { id: true, itemId: true, ownership: true, ownerCustomerId: true },
   })
   const lineOf = new Map(mrLines.map((l) => [l.id, l]))
-  const made = await autoStickers(
-    {
-      sourceType: 'MR_RETURN',
-      sourceId: req.params.id,
-      lines: data.lines
-        .filter((l) => lineOf.has(l.lineId))
-        .map((l) => {
-          const m = lineOf.get(l.lineId)!
-          return { itemId: m.itemId, warehouseId: l.warehouseId, ownership: m.ownership, ownerCustomerId: m.ownerCustomerId, qty: l.qty }
-        }),
-    },
-    req.user?.id ?? null,
-  )
+  // Stickers are counted per requisition, so an earlier return's stickers
+  // would use up this one's: each key is given what earlier returns already
+  // have stickers for, plus what came back now.
+  const back = new Map<string, { itemId: string; warehouseId: string; ownership: (typeof mrLines)[number]['ownership']; ownerCustomerId: string | null; qty: number }>()
+  for (const l of data.lines) {
+    const m = lineOf.get(l.lineId)
+    if (!m) continue
+    const k = [m.itemId, l.warehouseId, m.ownership, m.ownerCustomerId ?? ''].join('|')
+    const had = back.get(k)
+    if (had) had.qty = round3(had.qty + l.qty)
+    else back.set(k, { itemId: m.itemId, warehouseId: l.warehouseId, ownership: m.ownership, ownerCustomerId: m.ownerCustomerId, qty: l.qty })
+  }
+  for (const b of back.values()) {
+    const before = await prisma.stockPackage.aggregate({
+      where: { sourceType: 'MR_RETURN', sourceId: req.params.id, itemId: b.itemId, warehouseId: b.warehouseId, ownership: b.ownership, ownerCustomerId: b.ownerCustomerId, status: { not: 'VOID' } },
+      _sum: { initialQty: true },
+    })
+    b.qty = round3(b.qty + Number(before._sum.initialQty ?? 0))
+  }
+  const made = await autoStickers({ sourceType: 'MR_RETURN', sourceId: req.params.id, lines: [...back.values()] }, req.user?.id ?? null)
   res.json({ success: true, message: `Back from the floor on ${result.mrNumber}: ${result.back.join(', ')}.${stickersNote(made.count)}`, data: result, made })
 })
 
@@ -4225,6 +4294,7 @@ router.patch(
           referenceId: before.id,
           transactionDate: new Date(),
           notes: `${before.challanNumber} cancelled: ${reason}`,
+          earlierDate: 'move-up',
         })
       }
 

@@ -68,6 +68,25 @@ export interface Movement extends StockKey {
   batchNumber?: string | null
   transactionDate?: Date
   notes?: string | null
+  /**
+   * When the date asked for is earlier than the item's last movement in that
+   * store: 'refuse' (the default) says so; 'move-up' writes it just after that
+   * movement instead. For corrections, cancellations, approvals and
+   * despatches — they happen now, whatever date their document carries.
+   */
+  earlierDate?: 'refuse' | 'move-up'
+  /** Requisition lines whose own holds this movement may take: an issue uses up its own reservation. */
+  reservedFor?: string[]
+  /** A check or a count found it: the stock is what it is, holds or not. */
+  ignoreReservations?: boolean
+  /**
+   * Who keeps the stickers in step when stock goes out. 'auto' (the default)
+   * takes this store's stickers down to what is left, oldest first; 'window'
+   * leaves it to the labels window after the document, where the store says
+   * which rolls went; 'caller' to the caller, which moved a scanned package
+   * itself or handles its own stickers.
+   */
+  stickers?: 'auto' | 'window' | 'caller'
 }
 
 export interface Balance {
@@ -183,7 +202,7 @@ const readableDay = (d: Date) =>
  */
 async function settleDate(
   tx: Prisma.TransactionClient,
-  key: StockKey & { transactionDate?: Date },
+  key: StockKey & { transactionDate?: Date; earlierDate?: 'refuse' | 'move-up' },
 ): Promise<Date> {
   const now = new Date()
   const asked = key.transactionDate ?? now
@@ -208,6 +227,11 @@ async function settleDate(
   `
   const last = rows[0]?.last ?? null
   if (!last) return asked
+
+  // A correction, a cancellation, an approval or a despatch happens now: it
+  // goes in just after the last movement rather than being refused for the
+  // date its document carries.
+  if (key.earlierDate === 'move-up' && asked <= last) return new Date(last.getTime() + 1)
 
   if (indianDay(asked) < indianDay(last)) {
     const [item, warehouse] = await Promise.all([
@@ -300,6 +324,35 @@ export async function recordMovement(
         'INSUFFICIENT_STOCK',
       )
     }
+    // Stock kept aside for a requisition is not free for anything else to
+    // take: a transfer, a job-work challan, a return or a cancellation would
+    // otherwise leave the hold promising stock that is no longer there. The
+    // requisition's own issue may use its own hold; a check or a count states
+    // a fact, and is not refused for it.
+    if (!m.ignoreReservations && (m.ownership ?? 'OWNED') === 'OWNED' && (m.grade ?? 'A') === 'A' && !m.sizeId) {
+      const holds = await tx.$queryRaw<Array<{ qty: number; mrNumber: string; customer: string | null }>>`
+        SELECT r.qty::float8 AS qty, mr."mrNumber", c.name AS customer
+        FROM ld_erp.stock_reservations r
+        JOIN ld_erp.material_requisitions mr ON mr.id = r."mrId"
+        LEFT JOIN ld_erp.customers c ON c.id = r."customerId"
+        WHERE r.status::text = 'ACTIVE' AND r."itemId" = ${m.itemId} AND r."warehouseId" = ${m.warehouseId}
+          AND NOT (r."mrLineId" = ANY(${m.reservedFor ?? []}::text[]))`
+      const held = round3(holds.reduce((t, h) => t + Number(h.qty), 0))
+      const free = round3(Math.max(0, before.qty - held))
+      if (held > 0 && qty > free + 1e-9) {
+        const [item, warehouse] = await Promise.all([
+          tx.item.findUnique({ where: { id: m.itemId }, select: { name: true, uom: { select: { symbol: true } } } }),
+          tx.warehouse.findUnique({ where: { id: m.warehouseId }, select: { name: true } }),
+        ])
+        const unit = item?.uom?.symbol ?? ''
+        const whom = [...new Set(holds.map((h) => (h.customer ? `${h.mrNumber} (${h.customer})` : h.mrNumber)))].join(', ')
+        throw new AppError(
+          `Only ${free} ${unit} of ${item?.name ?? 'that item'} in ${warehouse?.name ?? 'that store'} is free: ${held} ${unit} is kept aside for ${whom}. Take ${free} or less, or release the hold on the requisition first.`.replace(/\s+/g, ' '),
+          400,
+          'RESERVED_STOCK',
+        )
+      }
+    }
     // Stock leaves at what it is carried at. Any other rate would leave value
     // behind that no quantity accounts for.
     unitRate = before.avgRate
@@ -331,7 +384,127 @@ export async function recordMovement(
     },
   })
 
+  if (m.direction === 'OUT' && (m.stickers ?? 'auto') === 'auto' && !m.sizeId) await keepStickersInStep(tx, m)
+
   return { balance: await balanceOf(tx, m), unitRate }
+}
+
+/**
+ * Stickers never claim more than the store holds.
+ *
+ * Stock that goes out by a form rather than a scan — a debit note, a count, a
+ * cancellation, what a job worker used up — leaves its rolls' stickers saying
+ * they are still full. Straight after it, the stickers of that item in that
+ * store are taken down to what is left, the oldest first, as a store issues.
+ * Rejected stock held in the same store still has its rolls, so it counts.
+ */
+async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
+  const ownership = m.ownership ?? 'OWNED'
+  const owner = m.ownerCustomerId ?? null
+  const packages = await tx.stockPackage.findMany({
+    where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK' },
+    orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
+    select: { id: true, qty: true },
+  })
+  if (!packages.length) return
+  const [row] = await tx.$queryRaw<Array<{ qty: number }>>`
+    SELECT COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
+    FROM ld_erp.stock_ledger
+    WHERE "itemId" = ${m.itemId} AND "warehouseId" = ${m.warehouseId}
+      AND ownership = ${ownership}::ld_erp."StockOwnership"
+      AND "ownerCustomerId" IS NOT DISTINCT FROM ${owner}::text
+      AND "sizeId" IS NULL AND grade IN ('A', 'R')`
+  let over = round3(packages.reduce((t, p) => t + Number(p.qty), 0) - Number(row?.qty ?? 0))
+  for (const p of packages) {
+    if (over <= 0.0005) break
+    const take = round3(Math.min(Number(p.qty), over))
+    const left = round3(Number(p.qty) - take)
+    await tx.stockPackage.update({ where: { id: p.id }, data: { qty: left, status: left <= 0.0005 ? 'EMPTY' : 'IN_STOCK' } })
+    await tx.stockPackageMove.create({
+      data: {
+        packageId: p.id,
+        type: 'ISSUED',
+        qty: -take,
+        balanceAfter: left,
+        warehouseId: m.warehouseId,
+        referenceType: m.referenceType,
+        referenceId: m.referenceId,
+        notes: `Stock went out without a scan${m.notes ? ` (${m.notes})` : ''}: the sticker is taken down with it.`,
+      },
+    })
+    over = round3(over - take)
+  }
+}
+
+/**
+ * Whether the stock a document brought in is still all there — refused when
+ * it is not.
+ *
+ * Cancelling, deleting or cutting down a document that brought stock in takes
+ * that stock back out. The store's balance alone does not say it is this
+ * document's goods that are left: with other stock of the item in the store, a
+ * receipt whose rolls were all issued could still be cancelled, and the book
+ * would end up below what is on the rack. So it is read first in, first out —
+ * the document's goods are used once more has gone out of that store since
+ * they came in than the store held before them — unless the document's own
+ * stickers show its rolls still whole on the rack. `take` is how much would
+ * come back out, item by item and store by store; left out, all of it.
+ */
+export async function assertStockUnused(
+  tx: Prisma.TransactionClient,
+  args: { referenceId: string; label: string; take?: Map<string, number>; suggestion?: string },
+) {
+  const keyOf = (r: { itemId: string; warehouseId: string }) => `${r.itemId}|${r.warehouseId}`
+  const mine = await tx.$queryRaw<
+    Array<{ itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; sizeId: string | null; grade: string; net: number; since: Date }>
+  >`
+    SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId", "sizeId", grade,
+           SUM("inQty" - "outQty")::float8 AS net, MIN("createdAt") FILTER (WHERE "inQty" > 0) AS since
+    FROM ld_erp.stock_ledger
+    WHERE "referenceId" = ${args.referenceId}
+    GROUP BY 1, 2, 3, 4, 5, 6
+    HAVING SUM("inQty" - "outQty") > 0.0005`
+  for (const k of mine) {
+    const want = args.take ? (args.take.get(keyOf(k)) ?? 0) : Number(k.net)
+    if (!(want > 0.0005) || !k.since) continue
+    // Its own stickers still whole on the rack prove its goods are there.
+    const own = await tx.stockPackage.findMany({
+      where: { itemId: k.itemId, warehouseId: k.warehouseId, sourceId: args.referenceId, parentId: null, status: { not: 'VOID' } },
+      select: { qty: true, initialQty: true, status: true },
+    })
+    const whole = own.filter((p) => p.status === 'IN_STOCK' && Math.abs(Number(p.qty) - Number(p.initialQty)) < 0.0005).reduce((t, p) => t + Number(p.qty), 0)
+    if (own.length && whole + 0.0005 >= want) continue
+
+    const [b] = await tx.$queryRaw<Array<{ before: number; outs: number }>>`
+      SELECT
+        COALESCE(SUM("inQty" - "outQty") FILTER (WHERE "createdAt" < ${k.since}), 0)::float8 AS before,
+        COALESCE(SUM("outQty") FILTER (WHERE "createdAt" >= ${k.since} AND "referenceId" <> ${args.referenceId}), 0)::float8 AS outs
+      FROM ld_erp.stock_ledger
+      WHERE "itemId" = ${k.itemId} AND "warehouseId" = ${k.warehouseId}
+        AND ownership = ${k.ownership}::ld_erp."StockOwnership"
+        AND "ownerCustomerId" IS NOT DISTINCT FROM ${k.ownerCustomerId}::text
+        AND "sizeId" IS NOT DISTINCT FROM ${k.sizeId}::text AND grade = ${k.grade}`
+    const used = round3(Math.min(Number(k.net), Math.max(0, Number(b.outs) - Number(b.before))))
+    const unused = round3(Number(k.net) - used)
+    if (want <= unused + 0.0005) continue
+
+    const [item, warehouse, went] = await Promise.all([
+      tx.item.findUnique({ where: { id: k.itemId }, select: { name: true, uom: { select: { symbol: true } } } }),
+      tx.warehouse.findUnique({ where: { id: k.warehouseId }, select: { name: true } }),
+      tx.$queryRaw<Array<{ notes: string | null; referenceType: string }>>`
+        SELECT notes, "referenceType" FROM ld_erp.stock_ledger
+        WHERE "itemId" = ${k.itemId} AND "warehouseId" = ${k.warehouseId} AND "createdAt" >= ${k.since}
+          AND "referenceId" <> ${args.referenceId} AND "outQty" > 0
+        ORDER BY "createdAt" LIMIT 3`,
+    ])
+    const unit = item?.uom?.symbol ?? ''
+    const onWhat = went.map((w) => (w.notes ?? w.referenceType).split(':')[0]).join('; ')
+    throw new AppError(
+      `${used} ${unit} of the ${item?.name ?? 'item'} that came in on ${args.label} has already gone out of ${warehouse?.name ?? 'the store'}${onWhat ? ` (${onWhat})` : ''}, so ${args.label} cannot take it back. ${args.suggestion ?? 'Send what is left back with a return, or correct the stock with a stock adjustment.'}`.replace(/\s+/g, ' '),
+      409,
+      'STOCK_ALREADY_USED',
+    )
+  }
 }
 
 /**
@@ -358,6 +531,11 @@ export async function transferStock(
     grade?: string | null
     transactionDate?: Date
     notes?: string | null
+    /** As on a single movement: see `Movement`. Stickers and holds apply to the side it leaves. */
+    stickers?: Movement['stickers']
+    earlierDate?: Movement['earlierDate']
+    reservedFor?: string[]
+    ignoreReservations?: boolean
   },
 ): Promise<void> {
   if (args.fromWarehouseId === args.toWarehouseId) {
@@ -382,6 +560,10 @@ export async function transferStock(
     grade: args.grade,
     transactionDate: args.transactionDate,
     notes: args.notes,
+    stickers: args.stickers,
+    earlierDate: args.earlierDate,
+    reservedFor: args.reservedFor,
+    ignoreReservations: args.ignoreReservations,
   })
 
   await recordMovement(tx, {
@@ -413,6 +595,7 @@ export async function transferStock(
     grade: args.grade,
     transactionDate: args.transactionDate,
     notes: args.notes,
+    earlierDate: args.earlierDate,
   })
 }
 

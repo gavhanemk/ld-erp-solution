@@ -266,6 +266,7 @@ export async function moveGarments(tx: Prisma.TransactionClient, data: { codes: 
     tx,
     { fromWarehouseId: from[0], toWarehouseId: data.toWarehouseId, notes: `${pieces.length} tagged pieces, by scan`, lines: [...lines.values()] },
     userId,
+    { stickers: 'caller' },
   )
   await tx.garment.updateMany({ where: { id: { in: pieces.map((g) => g.id) } }, data: { warehouseId: data.toWarehouseId } })
   await event(tx, pieces.map((g) => g.id), 'TRANSFERRED', { type: 'STOCK_TRANSFER', id: note.id, number: note.transferNumber, notes: `${note.fromWarehouse.name} → ${note.toWarehouse.name}` }, userId)

@@ -204,7 +204,7 @@ export async function positionsOf(tx: Prisma.TransactionClient, spots: StockSpot
         tx.$queryRaw<Array<{ itemId: string; warehouseId: string; ownership: StockOwnership; ownerCustomerId: string | null; qty: number }>>`
           SELECT "itemId", "warehouseId", ownership::text AS ownership, "ownerCustomerId", COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
           FROM ld_erp.stock_ledger
-          WHERE "itemId" = ANY(${itemIds}::text[]) AND "sizeId" IS NULL AND grade = 'A'
+          WHERE "itemId" = ANY(${itemIds}::text[]) AND "sizeId" IS NULL AND grade IN ('A', 'R')
           GROUP BY 1, 2, 3, 4`,
         tx.stockPackage.groupBy({
           by: ['itemId', 'warehouseId', 'ownership', 'ownerCustomerId'],

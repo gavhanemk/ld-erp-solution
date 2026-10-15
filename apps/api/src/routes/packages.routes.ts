@@ -989,7 +989,8 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
       }
 
       // The issue itself, with every rule the Issue screen has.
-      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user)
+      // The scanned package comes down below, by itself: no other sticker is touched.
+      const issued = await issueRequisition(tx, data.mrId, { lines: [{ lineId: data.lineId, issueQty: data.qty, warehouseId: pkg.warehouseId }] }, req.user, { stickers: 'caller' })
 
       const left = round3(Number(pkg.qty) - data.qty)
       await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'EMPTY' : 'IN_STOCK' } })
@@ -1005,11 +1006,19 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
         notes: `To ${issued.after.department?.name ?? 'production'}`,
         userId: req.user?.id ?? null,
       })
-      return { pkg, left, unit, mrNumber: issued.after.mrNumber }
+      return { pkg, left, unit, mrNumber: issued.after.mrNumber, issued }
     },
     { timeout: 60_000, maxWait: 20_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { issued: data.qty, against: result.mrNumber, left: result.left } })
+  // The requisition's own history shows the issue too, as a typed one would.
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'MaterialRequisition',
+    entityId: result.issued.after.id,
+    after: { ...result.issued.after, handedOverNow: result.issued.handedOver, byScanOf: result.pkg.code },
+  })
   res.json({
     success: true,
     message: `${data.qty} ${result.unit} issued from ${result.pkg.code} against ${result.mrNumber}. ${result.left > 0 ? `${result.left} ${result.unit} left in it.` : 'The package is now empty.'}`,
@@ -1040,6 +1049,8 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
           lines: [{ itemId: pkg.itemId, qty: data.qty, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId }],
         },
         req.user?.id ?? null,
+        // The scanned package moves itself below.
+        { stickers: 'caller' },
       )
       const whole = Math.abs(data.qty - Number(pkg.qty)) < 1e-9
       let moved = pkg.id

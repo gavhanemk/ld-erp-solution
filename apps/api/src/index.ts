@@ -31,6 +31,7 @@ import purchaseDashboardRoutes from './routes/purchase-dashboard.routes'
 import purchaseTdsRoutes from './routes/purchase-tds.routes'
 import reportsRoutes from './routes/reports.routes'
 import inventoryRoutes from './routes/inventory.routes'
+import statementRoutes from './routes/statements.routes'
 import packageRoutes from './routes/packages.routes'
 import retailRoutes from './routes/retail.routes'
 import garmentRoutes from './routes/garments.routes'
@@ -297,6 +298,8 @@ app.use('/api/purchase/orders-dashboard', authMiddleware, purchaseDashboardRoute
 app.use('/api/purchase/tds', authMiddleware, purchaseTdsRoutes)
 app.use('/api/purchase', authMiddleware, purchaseRoutes)
 app.use('/api/reports', authMiddleware, reportsRoutes)
+// Statements for a customer or a job worker, ahead of the inventory router.
+app.use('/api/inventory/statements', authMiddleware, statementRoutes)
 app.use('/api/inventory', authMiddleware, inventoryRoutes)
 // Labelled packages of stock with QR stickers: scan, issue, move, split.
 app.use('/api/packages', authMiddleware, packageRoutes)

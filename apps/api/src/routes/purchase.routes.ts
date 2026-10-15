@@ -19,7 +19,8 @@ import {
   statObject,
   storagePathFor,
 } from '../lib/storage'
-import { recordMovement } from '../services/stock.service'
+import { assertStockUnused, recordMovement } from '../services/stock.service'
+import { lockRow } from '../lib/lockRow'
 import { rateFor, sectionTermsOn, tdsOn } from '../services/tds.service'
 import { withHsnRates } from '../lib/hsn'
 import { qcSummaryOf, refuseIfInspected } from '../services/grnQc.service'
@@ -3310,6 +3311,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
   const when = data.grnDate ?? new Date()
 
   const grn = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'grn', req.params.id)
     const before = await tx.gRN.findUnique({
       where: { id: req.params.id },
       include: { lines: true },
@@ -3360,22 +3362,6 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
       )
     }
 
-    for (const line of before.lines) {
-      const accepted = Number(line.acceptedQty)
-      if (accepted <= 0) continue
-      await recordMovement(tx, {
-        itemId: line.itemId,
-        warehouseId: line.warehouseId,
-        transactionType: 'RETURN',
-        direction: 'OUT',
-        qty: accepted,
-        referenceType: 'GRN_EDITED',
-        referenceId: before.id,
-        transactionDate: new Date(),
-        notes: `${before.grnNumber} corrected: ${data.editReason}`,
-      })
-    }
-
     const poLines = new Map(po.lines.map((l) => [l.id, l]))
 
     // This receipt's own old lines must not count against themselves when
@@ -3394,6 +3380,46 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
     }
 
     const { prepared } = prepareGrnLines(poLines, already, data.lines, data.overReceiptReason)
+
+    // Cutting a line down takes stock back out: only what of it has not
+    // already been issued or sent on can come back.
+    const cut = new Map<string, number>()
+    for (const line of before.lines) {
+      const k = `${line.itemId}|${line.warehouseId}`
+      cut.set(k, (cut.get(k) ?? 0) + Number(line.acceptedQty))
+    }
+    for (const p of prepared) {
+      const k = `${p.poLine.itemId}|${p.warehouseId}`
+      cut.set(k, (cut.get(k) ?? 0) - p.accepted)
+    }
+    await assertStockUnused(tx, {
+      referenceId: before.id,
+      label: before.grnNumber,
+      take: new Map([...cut].filter(([, q]) => q > 0.0005)),
+      suggestion: 'Correct it to no less than what is still in the store, or return the rest with a purchase return.',
+    })
+
+    // The old lines come out, the corrected ones go back in. Both happen now:
+    // a correction is entered today, whatever day the receipt is dated, and
+    // the receipt's own stickers are put right after, below.
+    for (const line of before.lines) {
+      const accepted = Number(line.acceptedQty)
+      if (accepted <= 0) continue
+      await recordMovement(tx, {
+        itemId: line.itemId,
+        warehouseId: line.warehouseId,
+        transactionType: 'RETURN',
+        direction: 'OUT',
+        qty: accepted,
+        referenceType: 'GRN_EDITED',
+        referenceId: before.id,
+        transactionDate: new Date(),
+        notes: `${before.grnNumber} corrected: ${data.editReason}`,
+        stickers: 'caller',
+        earlierDate: 'move-up',
+        ignoreReservations: true,
+      })
+    }
 
     await assertWarehousesUsable(tx, [...new Set(prepared.map((p) => p.warehouseId))])
 
@@ -3584,6 +3610,7 @@ router.patch('/grn/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequ
         referenceId: before.id,
         transactionDate: when,
         notes: `${before.grnNumber} against ${po.poNumber} (corrected)`,
+        earlierDate: 'move-up',
       })
     }
 
@@ -3627,6 +3654,7 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
   const { reason } = deleteGrnSchema.parse(req.body ?? {})
 
   const before = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'grn', req.params.id)
     const grn = await tx.gRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
     if (!grn) throw new AppError('That goods receipt does not exist', 404, 'NOT_FOUND')
 
@@ -3638,6 +3666,12 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
     // unwound in the first place, and the refusal can name the bill.
     await refuseIfClaimed(tx, grn, 'deleted')
     await refuseIfInspected(tx, grn, 'deleted')
+
+    if (grn.status !== 'CANCELLED') await assertStockUnused(tx, { referenceId: grn.id, label: grn.grnNumber })
+
+    // Its stickers come off with it, first, so taking the stock out does not
+    // take another receipt's stickers down in their place.
+    await withdrawStickers(tx, { type: 'GRN', id: grn.id, ref: grn.grnNumber }, reason ? `${grn.grnNumber} deleted: ${reason}` : `${grn.grnNumber} deleted`, req.user?.id ?? null)
 
     if (grn.status !== 'CANCELLED') {
       for (const line of grn.lines) {
@@ -3653,12 +3687,10 @@ router.delete('/grn/:id', requirePermission(MODULE, 'delete'), async (req: AuthR
           referenceId: grn.id,
           transactionDate: new Date(),
           notes: reason ? `${grn.grnNumber} deleted: ${reason}` : `${grn.grnNumber} deleted`,
+          earlierDate: 'move-up',
         })
       }
     }
-
-    // Its stickers come off with it: the goods they were for are no longer here.
-    await withdrawStickers(tx, { type: 'GRN', id: grn.id, ref: grn.grnNumber }, reason ? `${grn.grnNumber} deleted: ${reason}` : `${grn.grnNumber} deleted`, req.user?.id ?? null)
 
     try {
       await tx.gRN.delete({ where: { id: grn.id } })
@@ -3851,6 +3883,7 @@ router.patch(
     const { reason } = cancelGrnSchema.parse(req.body ?? {})
 
     const after = await prisma.$transaction(async (tx) => {
+      await lockRow(tx, 'grn', req.params.id)
       const before = await tx.gRN.findUnique({
         where: { id: req.params.id },
         include: { lines: true },
@@ -3866,6 +3899,11 @@ router.patch(
       // already been paid for.
       await refuseIfClaimed(tx, before, 'cancelled')
       await refuseIfInspected(tx, before, 'cancelled')
+      await assertStockUnused(tx, { referenceId: before.id, label: before.grnNumber })
+
+      // Its stickers come off with it, first, so taking the stock out does not
+      // take another receipt's stickers down in their place.
+      await withdrawStickers(tx, { type: 'GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       for (const line of before.lines) {
         const accepted = Number(line.acceptedQty)
@@ -3881,11 +3919,9 @@ router.patch(
           referenceId: before.id,
           transactionDate: new Date(),
           notes: `${before.grnNumber} cancelled: ${reason}`,
+          earlierDate: 'move-up',
         })
       }
-
-      // Its stickers come off with it: the goods they were for are no longer here.
-      await withdrawStickers(tx, { type: 'GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
 
       const cancelled = await tx.gRN.update({
         where: { id: before.id },

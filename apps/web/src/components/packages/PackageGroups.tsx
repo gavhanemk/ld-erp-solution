@@ -215,7 +215,7 @@ export function PackageGroups({
                       <div className="text-xs text-muted-foreground">
                         <span className="font-mono">{g.itemCode}</span>
                         {g.category ? ` · ${g.category}` : ''}
-                        {g.owner ? ` · ${g.owner}'s` : ''}
+                        {g.owner ? ` · Customer material: ${g.owner}` : ''}
                       </div>
                     </td>
                     <td className="whitespace-nowrap text-sm">{g.store}</td>

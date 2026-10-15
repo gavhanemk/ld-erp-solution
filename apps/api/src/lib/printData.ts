@@ -87,6 +87,10 @@ const DEFAULT_TITLES: Record<string, string> = {
   CUT: 'CUTTING SHEET',
   JC: 'JOB CARD',
   SHEET: 'PROCESS SHEET',
+  // Statements for people outside the mill: a customer's material with us,
+  // and a job worker's account of what they were sent and sent back.
+  CMS: 'CUSTOMER MATERIAL STATEMENT',
+  JWS: 'JOB WORK STATEMENT',
 }
 
 export async function getPrintHeader(docType: string): Promise<PrintHeader> {

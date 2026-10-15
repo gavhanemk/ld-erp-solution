@@ -877,6 +877,8 @@ export async function moveNoteStock(
       // valued at what it is carried at, which `recordMovement` decides.
       ...(direction === 'IN' ? { unitRate: round2(Number(line.unitPrice)) } : {}),
       transactionDate: note.noteDate,
+      // Posted or cancelled now, whatever day the note is dated.
+      earlierDate: 'move-up',
       notes:
         mode === 'POST'
           ? direction === 'OUT'

@@ -1327,7 +1327,7 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
 router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const { reason } = reasonBody.parse(req.body)
 
-  const { before, after } = await prisma.$transaction(async (tx) => {
+  const { before, after, released } = await prisma.$transaction(async (tx) => {
     const before = await tx.salesOrder.findUnique({
       where: { id: req.params.id },
       include: {
@@ -1372,7 +1372,13 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
         shortCloseReason: reason,
       },
     })
-    return { before, after }
+    // Material held for the order, or for its manufacturing orders, is no
+    // longer held: the rest of the order is not coming, so it is free stock.
+    const released = await tx.stockReservation.updateMany({
+      where: { status: 'ACTIVE', OR: [{ soId: before.id }, { mr: { soId: before.id } }, { mr: { mo: { soId: before.id } } }] },
+      data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: `${before.soNumber} short-closed: ${reason}` },
+    })
+    return { before, after, released: released.count }
   })
 
   await writeAuditLog(req, {
@@ -1383,7 +1389,11 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
     before,
     after,
   })
-  res.json({ success: true, message: `${before.soNumber} short-closed at what was sent`, data: after })
+  res.json({
+    success: true,
+    message: `${before.soNumber} short-closed at what was sent${released ? `; ${released} material hold${released === 1 ? '' : 's'} for it released` : ''}`,
+    data: after,
+  })
 })
 
 // Approving and rejecting a sales order is done through /api/approvals, which

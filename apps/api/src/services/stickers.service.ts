@@ -385,8 +385,23 @@ export async function withdrawStickers(
   reason: string,
   userId: string | null,
 ): Promise<number> {
+  // Its own stickers, and every one split from them since: a roll cut in two
+  // is still the receipt's goods, and must not stay on the rack without them.
+  // Only in the stores it came into: the cancel takes stock out of those, and
+  // a piece already sent on to another store is not part of it.
+  const [own, came] = await Promise.all([
+    tx.stockPackage.findMany({ where: { sourceType: source.type, sourceId: source.id }, select: { id: true } }),
+    tx.stockLedger.findMany({ where: { referenceId: source.id, inQty: { gt: 0 } }, select: { warehouseId: true }, distinct: ['warehouseId'] }),
+  ])
+  const stores = came.map((r) => r.warehouseId)
+  const family = new Set(own.map((p) => p.id))
+  for (let parents = [...family]; parents.length; ) {
+    const children = await tx.stockPackage.findMany({ where: { parentId: { in: parents } }, select: { id: true } })
+    parents = children.map((c) => c.id).filter((id) => !family.has(id))
+    parents.forEach((id) => family.add(id))
+  }
   const live = await tx.stockPackage.findMany({
-    where: { sourceType: source.type, sourceId: source.id, status: 'IN_STOCK' },
+    where: { id: { in: [...family] }, status: 'IN_STOCK', warehouseId: { in: stores } },
     select: { id: true, qty: true, warehouseId: true },
   })
   for (const p of live) {

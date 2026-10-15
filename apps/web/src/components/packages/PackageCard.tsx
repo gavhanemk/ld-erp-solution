@@ -118,7 +118,7 @@ export function PackageCard({
             <span className="font-mono text-lg font-bold tracking-wide text-primary">{pkg.code}</span>
             <span className={`badge ${st.cls}`}>{st.label}</span>
             <span className="badge badge-neutral">{packLabel(pkg.packType)}</span>
-            {pkg.ownerCustomer && <span className="badge badge-purple">{pkg.ownerCustomer.name}'s</span>}
+            {pkg.ownerCustomer && <span className="badge badge-purple">Customer material · {pkg.ownerCustomer.name}</span>}
           </div>
           <h2 className="text-xl font-semibold leading-tight text-foreground">{pkg.item.name}</h2>
           <p className="text-sm text-muted-foreground">
