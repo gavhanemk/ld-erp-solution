@@ -339,6 +339,8 @@ model User {
 
 
   adjustmentsApproved StockAdjustment[] @relation("AdjustmentApprovedBy")
+  stockCountsStarted  StockCount[]      @relation("StockCountStartedBy")
+  stockCountScans     StockCountScan[]  @relation("StockCountScannedBy")
   cuttingsCreated CuttingOrder[] @relation("CuttingCreatedBy")
   @@index([email])
   @@index([roleId])
@@ -1024,6 +1026,10 @@ model Customer {
   isActive          Boolean      @default(true)
   isBlacklisted     Boolean      @default(false)
   notes             String?
+  /// The buyer's own sticker on goods made for them: their brand, who markets
+  /// it, the consumer-complaints block, the barcode pattern and the number at
+  /// the bottom. Set once, used on every order's buyer stickers.
+  labelProfile Json?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -1179,6 +1185,7 @@ model Warehouse {
   deliveryChallans         DeliveryChallan[]      @relation("DCWarehouse")
   creditNotes              CreditNote[]           @relation("CNWarehouse")
   packages StockPackage[] @relation("WarehousePackages")
+  stockCounts StockCount[] @relation("WarehouseCounts")
   garments Garment[] @relation("GarmentStore")
 }
 
@@ -1382,6 +1389,9 @@ model SalesOrderLine {
   /// The print or design name the buyer orders by.
   printName    String?
   description  String?
+  /// The buyer sticker's lines for this garment: their article and colour
+  /// code, the product name, MRP and pieces per pack.
+  labelInfo   Json?
   /// No GST on this line: the rate is 0 whatever the HSN code says.
   taxExempt    Boolean    @default(false)
   totalQty     Decimal    @db.Decimal(10, 2)
@@ -2836,6 +2846,8 @@ model StockAdjustment {
   kind         String    @default("COUNT")
   /// For a stock-in: where it came from.
   source       String?
+  /// The scanned stock count this adjustment settles, when it came from one.
+  stockCount   StockCount?
   @@index([adjustmentDate])
   @@map("stock_adjustments")
 }
@@ -2864,6 +2876,67 @@ model StockAdjustmentLine {
   sizeId          String?
   size            Size?          @relation("AdjustmentLineSize", fields: [sizeId], references: [id])
   @@map("stock_adjustment_lines")
+}
+
+/// A stock count made by scanning stickers: a store keeper walks one store's
+/// racks and scans every package. What was scanned is set against what the
+/// store should hold; the differences go to a store manager as a stock
+/// adjustment, and the stickers not found are withdrawn once it is approved.
+model StockCount {
+  id           String    @id @default(cuid())
+  countNumber  String    @unique
+  warehouseId  String
+  warehouse    Warehouse @relation("WarehouseCounts", fields: [warehouseId], references: [id])
+  /// OPEN while scanning; SUBMITTED once its adjustment is raised and waiting;
+  /// CLOSED when that is decided; CANCELLED if the count was abandoned.
+  status       String    @default("OPEN")
+  notes        String?
+  /// What was counted of stock kept without stickers, by item and owner:
+  /// {"<itemId>|<ownership>|<ownerCustomerId>": qty}. An item left out is taken as it stands.
+  loose        Json?
+  /// The packages the store should have held and nobody scanned, fixed when
+  /// the count is finished, so a box that arrives later is never written off with them.
+  missing      Json?
+  startedById  String?
+  startedBy    User?     @relation("StockCountStartedBy", fields: [startedById], references: [id])
+  startedAt    DateTime  @default(now())
+  submittedAt  DateTime?
+  adjustmentId String?   @unique
+  adjustment   StockAdjustment? @relation(fields: [adjustmentId], references: [id])
+  closedAt     DateTime?
+  cancelReason String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  scans StockCountScan[]
+
+  @@index([warehouseId, status])
+  @@map("stock_counts")
+}
+
+/// One sticker scanned in a count, and what it turned out to be.
+model StockCountScan {
+  id          String        @id @default(cuid())
+  countId     String
+  count       StockCount    @relation(fields: [countId], references: [id], onDelete: Cascade)
+  /// As read off the sticker, tidied: PK-000123.
+  code        String
+  packageId   String?
+  package     StockPackage? @relation("PackageCountScans", fields: [packageId], references: [id])
+  /// FOUND (in stock in this store), ELSEWHERE (in stock in another store),
+  /// NOT_IN_STOCK (emptied, split or withdrawn) or UNKNOWN (no such sticker).
+  result      String
+  /// What the package held when scanned.
+  qty         Decimal?      @db.Decimal(10, 3)
+  /// The rack it was found on, when the counter said which rack they were on.
+  rack        String?
+  scannedById String?
+  scannedBy   User?         @relation("StockCountScannedBy", fields: [scannedById], references: [id])
+  scannedAt   DateTime      @default(now())
+
+  @@unique([countId, code])
+  @@index([countId])
+  @@map("stock_count_scans")
 }
 
 /// How far a job work consignment has got.
@@ -5332,6 +5405,8 @@ enum PackageMoveType {
   SPLIT_FROM
   CORRECTED
   VOIDED
+  /// Put on a rack, or moved from one rack to another in the same store.
+  RACKED
 }
 
 /// One physical package of stock — a roll, a box, a carton — with the QR
@@ -5362,6 +5437,9 @@ model StockPackage {
   qty             Decimal        @db.Decimal(10, 3)
   /// The supplier's lot or batch, from the GRN, or as typed.
   lotNo           String?
+  /// Where in its store it sits: B-3. Set by scanning it onto a rack, or in a
+  /// stock count; cleared when it moves to another store.
+  rack            String?
   notes           String?
   status          PackageStatus  @default(IN_STOCK)
   /// Where it came from: GRN (labelled on receipt), STOCK (stock already on
@@ -5387,10 +5465,12 @@ model StockPackage {
   updatedAt       DateTime       @updatedAt
 
   moves StockPackageMove[]
+  countScans StockCountScan[] @relation("PackageCountScans")
 
   @@index([itemId, warehouseId, status])
   @@index([sourceType, sourceId])
   @@index([parentId])
+  @@index([warehouseId, rack])
   @@map("stock_packages")
 }
 

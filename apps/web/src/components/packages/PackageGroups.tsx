@@ -23,6 +23,7 @@ export interface PackageGroup {
   qty: number
   packTypes: string[]
   lots: string[]
+  racks: string[]
   lastAt: string
 }
 
@@ -35,6 +36,7 @@ interface PackageRow {
   initialQty: number
   unit: string
   lotNo: string | null
+  rack: string | null
   createdAt: string
 }
 
@@ -187,6 +189,7 @@ export function PackageGroups({
               <th style={{ textAlign: 'right' }}>Packages</th>
               <th style={{ textAlign: 'right' }}>In them</th>
               <th>Lots</th>
+              <th>Racks</th>
               <th>Last labelled</th>
               <th />
             </tr>
@@ -223,6 +226,9 @@ export function PackageGroups({
                     <td className="max-w-[200px] truncate text-sm" title={g.lots.join(', ')}>
                       {g.lots.length ? g.lots.join(', ') : <span className="text-muted-foreground">—</span>}
                     </td>
+                    <td className="max-w-[160px] truncate text-sm" title={g.racks.join(', ')}>
+                      {g.racks.length ? g.racks.join(', ') : <span className="text-muted-foreground">—</span>}
+                    </td>
                     <td className="whitespace-nowrap text-sm">{day(g.lastAt)}</td>
                     <td className="whitespace-nowrap text-right" onClick={(e) => e.stopPropagation()}>
                       <button className="btn-secondary h-8" onClick={() => void printGroup(g)} title={`Print the ${g.packages} stickers of ${g.item}`}>
@@ -232,7 +238,7 @@ export function PackageGroups({
                   </tr>
                   {isOpen && (
                     <tr>
-                      <td colSpan={8} className="p-0">
+                      <td colSpan={9} className="p-0">
                         {/* Its own short box: fifty boxes open under one line must
                           not push the rest of the list, or this line, off the screen. */}
                         <div className="border-y border-primary/20 bg-secondary/30">
@@ -271,6 +277,7 @@ export function PackageGroups({
                                     <th style={{ textAlign: 'right' }}>In it</th>
                                     <th style={{ textAlign: 'right' }}>Labelled with</th>
                                     <th>Lot</th>
+                                    <th>Rack</th>
                                     <th>Labelled on</th>
                                     <th>Status</th>
                                     <th />
@@ -300,6 +307,7 @@ export function PackageGroups({
                                         </td>
                                         <td className="whitespace-nowrap text-right text-sm tabular-nums text-muted-foreground">{qtyText(p.initialQty)}</td>
                                         <td className="whitespace-nowrap text-sm">{p.lotNo ?? <span className="text-muted-foreground">—</span>}</td>
+                                        <td className="whitespace-nowrap text-sm font-medium">{p.rack ?? <span className="text-muted-foreground font-normal">—</span>}</td>
                                         <td className="whitespace-nowrap text-sm">{day(p.createdAt)}</td>
                                         <td>
                                           <span className={`badge ${st.cls}`}>{st.label}</span>

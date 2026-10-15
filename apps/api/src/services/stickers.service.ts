@@ -503,6 +503,7 @@ export async function restickStickers(
       status: true,
       packType: true,
       lotNo: true,
+      rack: true,
       notes: true,
       sourceType: true,
       sourceId: true,
@@ -562,6 +563,8 @@ export async function restickStickers(
     packType: packType ?? first.packType,
     qtys: wanted,
     lotNo: first.lotNo,
+    // Still on the rack the old stickers were on, when they were all on one.
+    rack: list.every((p) => p.rack === first.rack) ? first.rack : null,
     notes: first.notes,
     sourceType: first.sourceType as PackageSource,
     sourceId: first.sourceId,

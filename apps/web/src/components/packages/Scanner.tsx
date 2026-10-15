@@ -23,6 +23,8 @@ export function Scanner({
   onType,
   suggestions,
   clearOnCode = true,
+  focusKey,
+  onKeyDown,
 }: {
   onCode: (code: string) => void
   busy?: boolean
@@ -34,6 +36,10 @@ export function Scanner({
   suggestions?: React.ReactNode
   /** Empty the box once a code is sent — for scanning one after another. Off where what is typed is a search. */
   clearOnCode?: boolean
+  /** Changed to give the box the cursor back, after something else on the screen was typed in. */
+  focusKey?: number
+  /** Keys for the suggestions under the box — arrows, Escape. True when it was used. */
+  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => boolean
 }) {
   const [typed, setTyped] = useState('')
   const [camera, setCamera] = useState(false)
@@ -47,7 +53,7 @@ export function Scanner({
   useEffect(() => {
     const touch = typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches
     if (autoFocus && !busy && !touch) inputRef.current?.focus()
-  }, [autoFocus, busy])
+  }, [autoFocus, busy, focusKey])
 
   useEffect(() => {
     if (!camera) return
@@ -121,6 +127,7 @@ export function Scanner({
               onType?.(e.target.value)
             }}
             onKeyDown={(e) => {
+              if (onKeyDown?.(e)) return
               if (e.key === 'Enter') {
                 e.preventDefault()
                 submit()

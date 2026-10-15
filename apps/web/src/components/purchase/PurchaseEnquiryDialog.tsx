@@ -21,7 +21,7 @@ import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
 import { Section } from '@/components/purchase/Section'
 import { AttachmentsBox, type AttachmentsBoxHandle } from '@/components/purchase/AttachmentsBox'
-import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
+import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import type { EnquiryRecord } from '@/components/purchase/enquiryTypes'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -166,6 +166,10 @@ export function PurchaseEnquiryDialog({
   const [requiredDate, setRequiredDate] = useState(iso(record?.requiredDate))
   const [locationId, setLocationId] = useState(record?.locationId ?? '')
   const [reference, setReference] = useState(record?.reference ?? '')
+  // The indent lines taken, and the reference they last wrote: the box follows
+  // them until somebody types in it themselves.
+  const [indentRows, setIndentRows] = useState<IndentRow[]>([])
+  const [autoReference, setAutoReference] = useState<string | null>(null)
   const [notes, setNotes] = useState(record?.notes ?? '')
   const [terms, setTerms] = useState(record?.terms ?? '')
   const [remark, setRemark] = useState(record?.remark ?? '')
@@ -416,8 +420,15 @@ export function PurchaseEnquiryDialog({
           }
         }),
       ])
+      const taken = [...indentRows.filter((r) => !picks.some((p) => p.row.mrLineId === r.mrLineId)), ...picks.map((p) => p.row)]
+      setIndentRows(taken)
+      if (!reference.trim() || reference === autoReference) {
+        const text = indentReference(taken)
+        setReference(text)
+        setAutoReference(text)
+      }
     },
-    [categories]
+    [categories, indentRows, reference, autoReference]
   )
 
   const estimate = useMemo(

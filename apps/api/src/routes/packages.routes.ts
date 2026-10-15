@@ -9,12 +9,16 @@ import {
   createPackages,
   lockPackage,
   normaliseCode,
+  codeCandidates,
+  normaliseRack,
   packageRule,
   positionOf,
   recordPackageMove,
   round3,
   packageRules,
   positionsOf,
+  racksIn,
+  setRack,
   stickerDefaultsFrom,
   suggestQtys,
   trackedCategoryIds,
@@ -23,6 +27,8 @@ import {
 import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
 import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, restickStickers, sourceRefOf } from '../services/stickers.service'
 import { lockedBalanceOf } from '../services/stock.service'
+import { findOptions, findPackages, findSchema } from '../services/packageFind.service'
+import { fillJobCardBlanks } from '../services/jobCard.service'
 
 /*
  * Labelled packages of stock and what is done to them by scanning.
@@ -102,6 +108,11 @@ const correctSchema = z.object({
   reason: z.string().trim().min(3, 'Say why the quantity is being corrected'),
 })
 const voidSchema = z.object({ reason: z.string().trim().min(3, 'Say why the label is being withdrawn') })
+const rackSchema = z.object({ rack: z.string().max(40).nullable() })
+const putAwaySchema = z.object({
+  code: z.string().trim().min(1, 'Scan a sticker, or type its number').max(120),
+  rack: z.string().trim().min(1, 'Type the rack first').max(40),
+})
 const restickSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(500),
   qtys: z.array(qty).min(1, 'Make at least one sticker').max(500, 'That is more than 500 stickers'),
@@ -139,7 +150,7 @@ async function detail(id: string) {
   if (!pkg) throw new AppError('That package does not exist', 404, 'NOT_FOUND')
 
   const spot = { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId }
-  const [position, stores, grn, wanting] = await Promise.all([
+  const [position, stores, grn, wanting, racks] = await Promise.all([
     positionOf(prisma, spot),
     prisma.warehouse.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
     pkg.sourceType === 'GRN' && pkg.sourceId
@@ -175,6 +186,8 @@ async function detail(id: string) {
       orderBy: { mr: { requestDate: 'asc' } },
       take: 30,
     }),
+    // The racks already in use in its store, for the rack box to offer.
+    racksIn(prisma, pkg.warehouseId),
   ])
 
   const storeName = new Map(stores.map((s) => [s.id, s.name]))
@@ -186,6 +199,7 @@ async function detail(id: string) {
     grn,
     position,
     stores,
+    racks: racks.map((r) => r.rack),
     requisitions: wanting
       .map((l) => ({
         lineId: l.id,
@@ -213,6 +227,9 @@ async function detail(id: string) {
   }
 }
 
+/** A search term read as a rack, "rack b3" as B3; never refused, as a search is not a rack being set. */
+const rackOf = (q: string) => q.trim().toUpperCase().replace(/\s+/g, ' ').replace(/^RACK[\s:.-]*/, '').trim() || q
+
 /** The filters the list and the item view share, from the query string. */
 function listWhere(query: Record<string, unknown>): Prisma.StockPackageWhereInput {
   const str = (k: string) => (typeof query[k] === 'string' ? (query[k] as string).trim() : '')
@@ -231,6 +248,7 @@ function listWhere(query: Record<string, unknown>): Prisma.StockPackageWhereInpu
           OR: [
             { code: { contains: normaliseCode(q).replace(/^PK-0*/, ''), mode: 'insensitive' as const } },
             { lotNo: { contains: q, mode: 'insensitive' as const } },
+            { rack: { equals: rackOf(q), mode: 'insensitive' as const } },
             { item: { name: { contains: q, mode: 'insensitive' as const } } },
             { item: { code: { contains: q, mode: 'insensitive' as const } } },
           ],
@@ -293,24 +311,25 @@ router.get('/', requirePermission(MODULE, 'view'), async (req, res) => {
 router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
   const rows = await prisma.stockPackage.findMany({
     where: listWhere(req.query),
-    select: { itemId: true, warehouseId: true, ownerCustomerId: true, packType: true, lotNo: true, qty: true, createdAt: true },
+    select: { itemId: true, warehouseId: true, ownerCustomerId: true, packType: true, lotNo: true, rack: true, qty: true, createdAt: true },
     take: 50_000,
   })
   const byKey = new Map<
     string,
-    { itemId: string; warehouseId: string; ownerCustomerId: string | null; packages: number; qty: number; types: Map<string, number>; lots: Set<string>; lastAt: Date }
+    { itemId: string; warehouseId: string; ownerCustomerId: string | null; packages: number; qty: number; types: Map<string, number>; lots: Set<string>; racks: Set<string>; lastAt: Date }
   >()
   for (const r of rows) {
     const key = `${r.itemId}|${r.warehouseId}|${r.ownerCustomerId ?? ''}`
     let g = byKey.get(key)
     if (!g) {
-      g = { itemId: r.itemId, warehouseId: r.warehouseId, ownerCustomerId: r.ownerCustomerId, packages: 0, qty: 0, types: new Map(), lots: new Set(), lastAt: r.createdAt }
+      g = { itemId: r.itemId, warehouseId: r.warehouseId, ownerCustomerId: r.ownerCustomerId, packages: 0, qty: 0, types: new Map(), lots: new Set(), racks: new Set(), lastAt: r.createdAt }
       byKey.set(key, g)
     }
     g.packages += 1
     g.qty += Number(r.qty)
     g.types.set(r.packType, (g.types.get(r.packType) ?? 0) + 1)
     if (r.lotNo) g.lots.add(r.lotNo)
+    if (r.rack) g.racks.add(r.rack)
     if (r.createdAt > g.lastAt) g.lastAt = r.createdAt
   }
   const groups = [...byKey.values()]
@@ -349,6 +368,7 @@ router.get('/groups', requirePermission(MODULE, 'view'), async (req, res) => {
           qty: round3(g.qty),
           packTypes: [...g.types].sort((a, b) => b[1] - a[1]).map(([t]) => t),
           lots: [...g.lots].sort(),
+          racks: [...g.racks].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })),
           lastAt: g.lastAt,
         }
       })
@@ -684,8 +704,8 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
           await recordPackageMove(tx, { packageId: pkg.id, type: 'ISSUED', qty: -t.qty, balanceAfter: left, warehouseId: pkg.warehouseId, notes: `To ${doc.to}`, ...ref })
           if (left > 0) reprint.push(pkg.id)
         } else if (left <= 0) {
-          // The whole roll went: it keeps its sticker, now in the other store.
-          await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: doc.toWarehouseId! } })
+          // The whole roll went: it keeps its sticker, now in the other store, off its old rack.
+          await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: doc.toWarehouseId!, rack: null } })
           await recordPackageMove(tx, {
             packageId: pkg.id,
             type: 'TRANSFERRED',
@@ -731,6 +751,11 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
     { timeout: 60_000, maxWait: 20_000 },
   )
   await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: data.takes[0]?.packageId ?? doc.id, after: { outward: doc.number, takes: data.takes } })
+  // The rolls now say which order they went to: its job cards can take their lot.
+  if (data.type === 'MR' && data.takes.length) {
+    const mr = await prisma.materialRequisition.findUnique({ where: { id: data.id }, select: { moId: true } })
+    if (mr?.moId) await prisma.$transaction((tx) => fillJobCardBlanks(tx, mr.moId!), { timeout: 30_000 })
+  }
   res.json({
     success: true,
     message: data.takes.length ? `Packages brought up to date with ${doc.number}.` : `Labels for ${doc.number}.`,
@@ -777,10 +802,60 @@ router.get('/ready', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: { count: rows.length, groups: [...groups.values()] } })
 })
 
+/**
+ * Stickers found by what people remember of them — item, lot, rack, the GRN,
+ * challan, PO or supplier it came on, the requisition, MO or order it went
+ * to — typed as one line, or picked detail by detail.
+ */
+router.get('/find', requirePermission(MODULE, 'view'), async (req, res) => {
+  const out = await findPackages(findSchema.parse(req.query))
+  res.json({ success: true, data: out.rows, total: out.total, inStock: out.inStock })
+})
+
+/** What the find-by-details dropdowns offer. */
+router.get('/find/options', requirePermission(MODULE, 'view'), async (_req, res) => {
+  res.json({ success: true, data: await findOptions() })
+})
+
+/** The racks in use, in one store or all of them, for the rack box to offer. */
+router.get('/racks', requirePermission(MODULE, 'view'), async (req, res) => {
+  const warehouseId = typeof req.query.warehouseId === 'string' ? req.query.warehouseId : null
+  res.json({ success: true, data: await racksIn(prisma, warehouseId) })
+})
+
+/**
+ * Putting stock away: the rack is typed once, then each sticker scanned goes
+ * on it. Only packages in stock; the rack is within the package's own store.
+ */
+router.post('/put-away', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = putAwaySchema.parse(req.body)
+  const rack = normaliseRack(data.rack)
+  if (!rack) throw new AppError('Type the rack first', 400, 'NO_RACK')
+  const code = normaliseCode(data.code)
+  const out = await prisma.$transaction(async (tx) => {
+    const found = await tx.stockPackage.findFirst({ where: { code: { in: codeCandidates(data.code) } }, select: { id: true } })
+    if (!found) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
+    const pkg = await lockPackage(tx, found.id)
+    if (pkg.status !== 'IN_STOCK') {
+      throw new AppError(`${pkg.code} is ${pkg.status === 'EMPTY' ? 'empty' : pkg.status === 'SPLIT' ? 'split into other packages' : 'withdrawn'}, so it is not on any rack.`, 400, 'NOT_IN_STOCK')
+    }
+    const was = pkg.rack
+    const changed = await setRack(tx, pkg, rack, { userId: req.user?.id ?? null })
+    return { pkg, was, changed }
+  })
+  const p = out.pkg
+  res.json({
+    success: true,
+    message: out.changed ? `${p.code} put on rack ${rack}${out.was ? ` (was ${out.was})` : ''}.` : `${p.code} is already on rack ${rack}.`,
+    data: { id: p.id, code: p.code, item: p.item.name, qty: Number(p.qty), unit: p.item.uom?.symbol ?? '', store: p.warehouse.name, rack, was: out.was, changed: out.changed },
+  })
+})
+
 /** A scanned or typed code: the package behind it. */
 router.get('/scan/:code', requirePermission(MODULE, 'view'), async (req, res) => {
-  const code = normaliseCode(decodeURIComponent(req.params.code))
-  const pkg = await prisma.stockPackage.findUnique({ where: { code }, select: { id: true } })
+  const raw = decodeURIComponent(req.params.code)
+  const code = normaliseCode(raw)
+  const pkg = await prisma.stockPackage.findFirst({ where: { code: { in: codeCandidates(raw) } }, select: { id: true } })
   if (!pkg) throw new AppError(`No package with the code ${code}. Check the sticker, or type the number under the QR.`, 404, 'NOT_FOUND')
   res.json({ success: true, data: await detail(pkg.id) })
 })
@@ -881,6 +956,22 @@ router.post('/batch', requirePermission(MODULE, 'create'), async (req: AuthReque
   res.status(201).json({ success: true, message: labelledMessage(created), data: created.map((c) => ({ id: c.id, code: c.code, qty: Number(c.qty) })) })
 })
 
+/** Putting one package on a rack, or taking it off (rack null). */
+router.post('/:id/rack', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const rack = normaliseRack(rackSchema.parse(req.body).rack)
+  const pkg = await prisma.$transaction(async (tx) => {
+    const p = await lockPackage(tx, req.params.id)
+    if (p.status !== 'IN_STOCK') throw new AppError(`${p.code} has nothing in it, so it is not on any rack.`, 400, 'NOT_IN_STOCK')
+    await setRack(tx, p, rack, { userId: req.user?.id ?? null })
+    return p
+  })
+  res.json({
+    success: true,
+    message: rack ? `${pkg.code} is on rack ${rack}.` : `${pkg.code} is no longer on a rack.`,
+    data: await detail(pkg.id),
+  })
+})
+
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */
 router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = issueSchema.parse(req.body)
@@ -953,7 +1044,8 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
       const whole = Math.abs(data.qty - Number(pkg.qty)) < 1e-9
       let moved = pkg.id
       if (whole) {
-        await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: data.toWarehouseId } })
+        // A rack belongs to the store it is in: put away again on arrival.
+        await tx.stockPackage.update({ where: { id: pkg.id }, data: { warehouseId: data.toWarehouseId, rack: null } })
         await recordPackageMove(tx, {
           packageId: pkg.id,
           type: 'TRANSFERRED',
@@ -1032,6 +1124,7 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
         packType: pkg.packType,
         qtys: data.qtys,
         lotNo: pkg.lotNo,
+        rack: pkg.rack,
         notes: `Split from ${pkg.code}`,
         sourceType: 'SPLIT',
         sourceId: pkg.sourceId,

@@ -38,14 +38,50 @@ export interface QcLine {
   reasonCode?: string | null
   /** The mill's own name for that reason, when one from Dropdown Lists was picked. */
   reasonName?: string | null
+  /** Of what was rejected: taken back into good stock after all. */
+  usedQty?: number
+  /** Of what was rejected: sent back to the supplier on return challans. */
+  returnedQty?: number
+  /** What became of the rejected goods, in order. */
+  events?: QcEvent[]
+}
+
+/** One decision on rejected goods. */
+export interface QcEvent {
+  at: string
+  by: string
+  kind: 'USED' | 'RETURNED' | 'RETURN_CANCELLED'
+  qty: number
+  note?: string | null
+  /** The return challan, for a send-back. */
+  ref?: string | null
+  refNumber?: string | null
 }
 
 export interface QcData {
   version: 1
   rejectWarehouseId: string | null
+  /**
+   * SAME_STORE: the rejected goods stay where they were received, held as
+   * rejected (grade R) so they cannot be issued. Checks recorded before this
+   * have no hold: they either moved to a reject godown or only noted.
+   */
+  hold?: 'SAME_STORE' | null
   lines: QcLine[]
   cancelled?: { at: string; byId: string; byName: string; reason: string }
 }
+
+/**
+ * The grade rejected goods are held under, in the store they came into.
+ * Every balance that issues stock reads grade A, so held goods cannot be
+ * issued by mistake, yet they stay on the books where they physically are.
+ */
+export const REJECTED_GRADE = 'R'
+
+const r3 = (n: number) => Math.round(n * 1000) / 1000
+
+/** Rejected goods still held: rejected, less used after all, less sent back. */
+export const heldOf = (l: QcLine) => r3(l.rejectedQty - (l.usedQty ?? 0) - (l.returnedQty ?? 0))
 
 /** The data on a check, or null for a row written some other way. */
 export function readQc(raw: unknown): QcData | null {
@@ -144,13 +180,44 @@ export async function qcRejectedByGrnLine(
     for (const l of d.lines) {
       if (!wanted.has(l.grnLineId) || !(l.rejectedQty > 0)) continue
       const prev = out.get(l.grnLineId)
+      // Held in the store: only what is still held is there to send back.
+      const qty = d.hold === 'SAME_STORE' ? heldOf(l) : l.rejectedQty
+      if (!(qty > 0)) continue
       out.set(l.grnLineId, {
-        qty: (prev?.qty ?? 0) + l.rejectedQty,
+        qty: (prev?.qty ?? 0) + qty,
         warehouseId: d.rejectWarehouseId,
         reasonCode: l.reasonCode ?? prev?.reasonCode ?? null,
         reasonName: l.reasonName ?? prev?.reasonName ?? null,
         note: l.reason ?? prev?.note ?? null,
       })
+    }
+  }
+  return out
+}
+
+/**
+ * What the quality check passed and rejected on each receipt line, from the
+ * checks not cancelled. A line with no entry was never checked — QC is
+ * optional, so that is not a fault.
+ */
+export async function qcByGrnLine(
+  tx: Prisma.TransactionClient,
+  grnLineIds: string[]
+): Promise<Map<string, { passed: number; rejected: number }>> {
+  const out = new Map<string, { passed: number; rejected: number }>()
+  if (!grnLineIds.length) return out
+  const checks = await tx.inwardQC.findMany({
+    where: { grn: { lines: { some: { id: { in: grnLineIds } } } } },
+    select: { checklistData: true },
+  })
+  const wanted = new Set(grnLineIds)
+  for (const c of checks) {
+    const d = readQc(c.checklistData)
+    if (!d || d.cancelled) continue
+    for (const l of d.lines) {
+      if (!wanted.has(l.grnLineId)) continue
+      const prev = out.get(l.grnLineId) ?? { passed: 0, rejected: 0 }
+      out.set(l.grnLineId, { passed: prev.passed + l.approvedQty, rejected: prev.rejected + l.rejectedQty })
     }
   }
   return out
@@ -168,5 +235,58 @@ export function qcSummaryOf(
     result: live.result,
     inspectionDate: live.inspectionDate,
     rejectedQty: d.lines.reduce((s, l) => s + l.rejectedQty, 0),
+  }
+}
+
+/**
+ * A return challan sending back goods a check rejected and held in the
+ * store: of `qty` going back on this receipt line from this store, how much
+ * comes out of the held rejected goods — all of it, up to what is held. The
+ * check records it as sent back. The rest of the challan, if any, is good
+ * stock going back for another reason.
+ */
+export async function creditReturn(
+  tx: Prisma.TransactionClient,
+  a: { grnLineId: string; warehouseId: string; qty: number; returnId: string; returnNumber: string; by: string },
+): Promise<number> {
+  const line = await tx.gRNLine.findUnique({ where: { id: a.grnLineId }, select: { grnId: true } })
+  if (!line) return 0
+  const qc = await liveQcOf(tx, line.grnId)
+  const d = qc ? readQc(qc.checklistData) : null
+  if (!qc || !d || d.hold !== 'SAME_STORE') return 0
+  const l = d.lines.find((x) => x.grnLineId === a.grnLineId && x.warehouseId === a.warehouseId)
+  if (!l) return 0
+  const take = r3(Math.min(a.qty, heldOf(l)))
+  if (!(take > 0)) return 0
+  l.returnedQty = r3((l.returnedQty ?? 0) + take)
+  l.events = [...(l.events ?? []), { at: new Date().toISOString(), by: a.by, kind: 'RETURNED', qty: take, ref: a.returnId, refNumber: a.returnNumber }]
+  await tx.inwardQC.update({ where: { id: qc.id }, data: { checklistData: d as unknown as Prisma.InputJsonValue } })
+  return take
+}
+
+/** A return challan cancelled: what it sent back from held rejected goods is held again. */
+export async function uncreditReturn(
+  tx: Prisma.TransactionClient,
+  a: { grnLineIds: string[]; returnId: string; returnNumber: string; by: string },
+) {
+  if (!a.grnLineIds.length) return
+  const checks = await tx.inwardQC.findMany({
+    where: { grn: { lines: { some: { id: { in: a.grnLineIds } } } } },
+    select: { id: true, checklistData: true },
+  })
+  for (const c of checks) {
+    const d = readQc(c.checklistData)
+    if (!d || d.cancelled || d.hold !== 'SAME_STORE') continue
+    let changed = false
+    for (const l of d.lines) {
+      const sent = (l.events ?? []).filter((e) => e.kind === 'RETURNED' && e.ref === a.returnId).reduce((s, e) => s + e.qty, 0)
+      const undone = (l.events ?? []).filter((e) => e.kind === 'RETURN_CANCELLED' && e.ref === a.returnId).reduce((s, e) => s + e.qty, 0)
+      const back = r3(sent - undone)
+      if (!(back > 0)) continue
+      l.returnedQty = r3(Math.max(0, (l.returnedQty ?? 0) - back))
+      l.events = [...(l.events ?? []), { at: new Date().toISOString(), by: a.by, kind: 'RETURN_CANCELLED', qty: back, ref: a.returnId, refNumber: a.returnNumber }]
+      changed = true
+    }
+    if (changed) await tx.inwardQC.update({ where: { id: c.id }, data: { checklistData: d as unknown as Prisma.InputJsonValue } })
   }
 }

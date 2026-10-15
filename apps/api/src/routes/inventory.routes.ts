@@ -16,6 +16,7 @@ import {
 } from '../services/stock.service'
 import { decidePending } from '../services/requisition.service'
 import { approveAdjustment, rejectAdjustment } from '../services/stockAdjustment.service'
+import { qcByGrnLine } from '../services/grnQc.service'
 import { packageRule } from '../services/package.service'
 import { createPurchaseNoteIn } from './purchase-notes.routes'
 import { createNoteSchema } from '../schemas/purchase-note.schemas'
@@ -48,6 +49,7 @@ import {
   transferSchema,
 } from '../schemas/inventory.schemas'
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
+import { fillJobCardBlanks } from '../services/jobCard.service'
 
 const router = Router()
 const MODULE = 'inventory'
@@ -1163,6 +1165,8 @@ async function availableFor(
       SELECT "itemId", ownership::text AS "ownership", "ownerCustomerId", SUM("inQty" - "outQty")::float8 AS "qty"
       FROM ld_erp.stock_ledger
       WHERE "itemId" IN (${Prisma.join(itemIds)})
+        -- Goods a quality check rejected are held apart: never on offer to issue.
+        AND grade <> 'R'
       GROUP BY "itemId", ownership, "ownerCustomerId"`,
     prisma.$queryRaw<Array<{ itemId: string; mrLineId: string; qty: number }>>`
       SELECT "itemId", "mrLineId", qty::float8 AS "qty"
@@ -1301,7 +1305,7 @@ async function boughtFor(
  */
 router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async (req, res) => {
   const id = req.params.id
-  const [lines, stock, orderRows, received, handovers, activity, receipts, itemOrders, reservations] = await Promise.all([
+  const [lines, stock, orderRows, received, handovers, activity, receipts, itemOrders, reservations, packs] = await Promise.all([
     prisma.$queryRaw<
       Array<{ id: string; requestedQty: number; issuedQty: number; purchaseQty: number | null; fulfilment: string }>
     >`
@@ -1317,6 +1321,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       FROM ld_erp.stock_ledger s
       JOIN ld_erp.warehouses w ON w.id = s."warehouseId"
       WHERE s."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+        AND s.grade <> 'R'
       GROUP BY s."itemId", s."warehouseId", w.name, s."ownership", s."ownerCustomerId"
       HAVING SUM(s."inQty" - s."outQty") > 0`,
     // Each order line raised against these lines. Cancelled orders have bought nothing.
@@ -1368,8 +1373,9 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       WHERE a."entityType" = 'MaterialRequisition' AND a."entityId" = ${id}
       ORDER BY a."createdAt"`,
     // The goods receipts booked against those orders, one row per receipt line.
-    prisma.$queryRaw<Array<{ poLineId: string; grnNumber: string; grnDate: Date; qty: number }>>`
-      SELECT gl."poLineId", g."grnNumber", g."grnDate", gl."receivedQty"::float8 AS "qty"
+    prisma.$queryRaw<Array<{ grnLineId: string; poLineId: string; grnNumber: string; grnDate: Date; qty: number; refused: number }>>`
+      SELECT gl.id AS "grnLineId", gl."poLineId", g."grnNumber", g."grnDate", gl."receivedQty"::float8 AS "qty",
+             COALESCE(gl."rejectedQty", 0)::float8 AS "refused"
       FROM ld_erp.grn_lines gl
       JOIN ld_erp.grn g ON g.id = gl."grnId"
       JOIN ld_erp.purchase_order_lines pol ON pol.id = gl."poLineId"
@@ -1407,8 +1413,22 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
       LEFT JOIN ld_erp.sales_orders so ON so.id = r."soId"
       WHERE r.status::text = 'ACTIVE'
         AND r."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})`,
+    // The stickered rolls, boxes and bundles of these items on the racks, so the
+    // window can say "3 rolls on rack B-3" rather than a code to look up.
+    prisma.$queryRaw<
+      Array<{ itemId: string; warehouseId: string; ownership: string; ownerCustomerId: string | null; packType: string; n: number; qty: number; racks: string[] | null }>
+    >`
+      SELECT p."itemId", p."warehouseId", p.ownership::text AS "ownership", p."ownerCustomerId",
+             MIN(p."packType"::text) AS "packType", COUNT(*)::int AS "n", SUM(p.qty)::float8 AS "qty",
+             ARRAY_AGG(DISTINCT p.rack) FILTER (WHERE p.rack IS NOT NULL) AS "racks"
+      FROM ld_erp.stock_packages p
+      WHERE p.status::text = 'IN_STOCK'
+        AND p."itemId" IN (SELECT "itemId" FROM ld_erp.material_requisition_lines WHERE "mrId" = ${id})
+      GROUP BY p."itemId", p."warehouseId", p.ownership, p."ownerCustomerId"`,
   ])
   if (!lines.length) throw new AppError('Requisition not found', 404, 'NOT_FOUND')
+  // What each receipt's quality check passed and rejected.
+  const qc = await qcByGrnLine(prisma, receipts.map((g) => g.grnLineId))
 
   const bought = lines.map((l) => {
     const mine = orderRows.filter((o) => o.mrLineId === l.id)
@@ -1436,7 +1456,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
         receivedQty: o.receivedQty,
         receipts: receipts
           .filter((g) => g.poLineId === o.poLineId)
-          .map((g) => ({ grnNumber: g.grnNumber, grnDate: g.grnDate, qty: g.qty })),
+          .map((g) => ({ grnNumber: g.grnNumber, grnDate: g.grnDate, qty: g.qty, refused: g.refused, qc: qc.get(g.grnLineId) ?? null })),
       })),
     }
   })
@@ -1481,7 +1501,7 @@ router.get('/requisitions/:id/fulfil', requirePermission(MODULE, 'view'), async 
     toBuy: a.toBuy,
   }))
 
-  res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys, reservations } })
+  res.json({ success: true, data: { lines, bought, stock, handovers, events, itemBuys, reservations, packs } })
 })
 
 /**
@@ -2141,6 +2161,8 @@ export async function issueRequisition(
     where: { id: mr.id },
     include: mrInclude,
   })
+  // Material handed to an order: its job cards learn the fabric's lot.
+  if (after.mo?.id) await fillJobCardBlanks(tx, after.mo.id)
   return { after, handedOver, stillOwed }
 }
 
@@ -2507,7 +2529,7 @@ router.get('/reservations', requirePermission(MODULE, 'view'), async (req, res) 
            xb.name AS "releasedBy", r."releasedAt", r."releaseReason",
            -- Our stock of the item in that store now, reserved or not.
            COALESCE((SELECT SUM(sl."inQty" - sl."outQty") FROM ld_erp.stock_ledger sl
-                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED'), 0)::float8 AS "onHand"
+                     WHERE sl."itemId" = r."itemId" AND sl."warehouseId" = r."warehouseId" AND sl.ownership::text = 'OWNED' AND sl.grade <> 'R'), 0)::float8 AS "onHand"
     FROM ld_erp.stock_reservations r
     JOIN ld_erp.items i ON i.id = r."itemId"
     LEFT JOIN ld_erp.uom u ON u.id = i."uomId"

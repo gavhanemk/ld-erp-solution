@@ -2,9 +2,10 @@
 
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, Printer, RefreshCw, ScanLine, Search, Shirt, Tags, X } from 'lucide-react'
+import { AlertTriangle, Barcode, CheckCircle2, ChevronDown, ChevronRight, Loader2, Printer, RefreshCw, ScanLine, Search, Shirt, Tags, X } from 'lucide-react'
 import { api, ApiError, can } from '@/lib/api'
 import { ScrollableTable } from '@/components/tables/ScrollableTable'
+import { BuyerLabelsDialog } from '@/components/inventory/BuyerLabelsDialog'
 
 interface Order {
   id: string
@@ -71,6 +72,8 @@ export default function GarmentTagsPage() {
   const [openId, setOpenId] = useState<string | null>(null)
   const [detail, setDetail] = useState<OrderDetail | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  // The order whose buyer stickers are being set up and printed.
+  const [buyerFor, setBuyerFor] = useState<string | null>(null)
   const editor = can('inventory', 'edit')
   const creator = can('inventory', 'create')
 
@@ -241,6 +244,12 @@ export default function GarmentTagsPage() {
                               <Printer size={14} /> Print {n(o.tagged - o.printed)} new
                             </button>
                           )}
+                          {/* The buyer's own barcode sticker, for a customer's order. */}
+                          {o.customer && (
+                            <button className="btn-ghost ml-1 h-8" onClick={() => setBuyerFor(o.id)} title="The barcode sticker the buyer's brand wants on each garment or pack">
+                              <Barcode size={14} /> Buyer stickers
+                            </button>
+                          )}
                         </td>
                       </tr>
                       {isOpen && (
@@ -264,6 +273,16 @@ export default function GarmentTagsPage() {
           </ScrollableTable>
         )}
       </div>
+      {buyerFor && (
+        <BuyerLabelsDialog
+          moId={buyerFor}
+          onClose={() => setBuyerFor(null)}
+          onSaved={(m) => {
+            setBuyerFor(null)
+            setMessage(m)
+          }}
+        />
+      )}
     </div>
   )
 }

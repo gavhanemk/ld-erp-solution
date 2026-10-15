@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
+import Link from 'next/link'
 import {
   AlertCircle,
   Ban,
@@ -69,6 +70,8 @@ interface QcRecord {
   result: 'PASS' | 'CONDITIONAL_PASS' | 'FAIL'
   remarks: string | null
   rejectWarehouse: { id: string; name: string } | null
+  /** SAME_STORE: the rejects stay in the store, held as rejected so they cannot be issued. */
+  hold?: 'SAME_STORE' | null
   cancelled: { at: string; byName: string; reason: string } | null
   lines: QcRecordLine[]
   rejectedQty: number
@@ -600,7 +603,7 @@ export function GrnQcDialog({
             ) : (
               <p className="text-muted-foreground mr-auto basis-full text-xs sm:basis-auto">
                 {rejecting.length
-                  ? `${rejecting.length} line${rejecting.length === 1 ? '' : 's'} with rejects`
+                  ? `${rejecting.length} line${rejecting.length === 1 ? '' : 's'} with rejects — held as rejected in the store, so they cannot be issued`
                   : 'Everything passes'}
               </p>
             )}
@@ -682,7 +685,13 @@ function StandingCheck({
             {day(qc.inspectionDate)}
             {qc.inspectedBy ? ` · by ${qc.inspectedBy}` : ''}
             {qc.rejectWarehouse ? ` · rejects moved to ${qc.rejectWarehouse.name}` : ''}
+            {qc.hold === 'SAME_STORE' ? ' · rejects held in the store, not issuable' : ''}
           </span>
+          {qc.hold === 'SAME_STORE' && (
+            <Link href="/purchase/rejected" className="text-primary text-xs font-semibold hover:underline">
+              Rejected Goods →
+            </Link>
+          )}
         </div>
         {qc.remarks && <p className="text-muted-foreground mt-1.5 text-xs">{qc.remarks}</p>}
 

@@ -367,7 +367,6 @@ export function AttentionPanel({ checks, onApprovals }: { checks: Check[]; onApp
 /* ═════════════════════════════ waiting for a signature ═════════════════════════════ */
 
 const TYPE: Record<Approval['type'], { label: string; colour: string; href: string }> = {
-  PO: { label: 'Purchase order', colour: MODULE.purchase.colour, href: '/purchase/orders' },
   SO: { label: 'Sales order', colour: MODULE.sales.colour, href: '/sales/orders' },
   MR: { label: 'Requisition', colour: MODULE.inventory.colour, href: '/inventory/requisitions' },
   ADJ: { label: 'Stock adjustment', colour: MODULE.inventory.colour, href: '/inventory/documents?tab=adjustments' },

@@ -121,7 +121,7 @@ export interface HomeData {
 
 export interface Approval {
   id: string
-  type: 'PO' | 'SO' | 'MR' | 'ADJ'
+  type: 'SO' | 'MR' | 'ADJ'
   number: string
   description: string
   amount: number | null

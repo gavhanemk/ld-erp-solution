@@ -7,7 +7,7 @@ import { writeAuditLog } from '../lib/audit'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import { nextDocumentNumber } from '../lib/docNumber'
 import { balanceOf, recordMovement } from '../services/stock.service'
-import { qcRejectedByGrnLine, qcSummaryOf } from '../services/grnQc.service'
+import { qcRejectedByGrnLine, qcSummaryOf, REJECTED_GRADE, creditReturn, uncreditReturn } from '../services/grnQc.service'
 import { returnReasonOptions } from '../lib/returnReasons'
 import {
   adjustableOn,
@@ -558,20 +558,45 @@ router.post('/', requirePermission(MODULE, 'create'), async (req: AuthRequest, r
      * godown holds and names the shortfall, which is the message the loading
      * bay needs: the book says there are forty rolls there, you are sending
      * sixty.
+     *
+     * Goods a quality check rejected and held in the store go first: what is
+     * sent back against that receipt line comes out of the held rejected goods
+     * (grade R) up to what is held, and the check records it as sent back.
+     * Anything more is good stock going back for another reason.
      */
+    const grnLineOfBillLine = new Map(
+      (
+        await tx.purchaseInvoiceLine.findMany({
+          where: { id: { in: data.lines.map((l) => l.billLineId) } },
+          select: { id: true, grnLineId: true },
+        })
+      ).map((x) => [x.id, x.grnLineId])
+    )
     for (const l of data.lines) {
       const b = billLine.get(l.billLineId)!
-      await recordMovement(tx, {
-        itemId: b.itemId,
-        warehouseId: l.warehouseId,
-        direction: 'OUT',
-        transactionType: 'RETURN',
-        referenceType: 'PurchaseReturn',
-        referenceId: created.id,
-        qty: round3(l.qty),
-        transactionDate: returnDate,
-        notes: `Returned to supplier on ${returnNumber}`,
-      })
+      const qty = round3(l.qty)
+      const grnLineId = grnLineOfBillLine.get(l.billLineId)
+      const fromHeld = grnLineId
+        ? await creditReturn(tx, { grnLineId, warehouseId: l.warehouseId, qty, returnId: created.id, returnNumber, by: req.user?.name ?? '' })
+        : 0
+      const parts = [
+        { qty: fromHeld, grade: REJECTED_GRADE },
+        { qty: round3(qty - fromHeld), grade: 'A' },
+      ].filter((p) => p.qty > 0)
+      for (const p of parts) {
+        await recordMovement(tx, {
+          itemId: b.itemId,
+          warehouseId: l.warehouseId,
+          direction: 'OUT',
+          transactionType: 'RETURN',
+          referenceType: 'PurchaseReturn',
+          referenceId: created.id,
+          qty: p.qty,
+          grade: p.grade,
+          transactionDate: returnDate,
+          notes: `Returned to supplier on ${returnNumber}${p.grade === REJECTED_GRADE ? ' (rejected on QC)' : ''}`,
+        })
+      }
     }
 
     /*
@@ -724,9 +749,10 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
 
     const out = await tx.stockLedger.findMany({
       where: { referenceType: 'PurchaseReturn', referenceId: before.id, outQty: { gt: 0 } },
-      select: { itemId: true, warehouseId: true, outQty: true, unitRate: true },
+      select: { itemId: true, warehouseId: true, outQty: true, unitRate: true, grade: true },
     })
     for (const m of out) {
+      // Back in the grade it left: rejected goods are held as rejected again.
       await recordMovement(tx, {
         itemId: m.itemId,
         warehouseId: m.warehouseId,
@@ -736,9 +762,21 @@ router.post('/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRe
         referenceId: before.id,
         qty: Number(m.outQty),
         unitRate: Number(m.unitRate ?? 0),
-        notes: `${before.returnNumber} cancelled — goods back in stock`,
+        grade: m.grade,
+        notes: `${before.returnNumber} cancelled — goods back in stock${m.grade === REJECTED_GRADE ? ', held as rejected' : ''}`,
       })
     }
+    // The check that rejected them counts them as held again.
+    const billGrnLines = await tx.purchaseInvoiceLine.findMany({
+      where: { id: { in: before.lines.map((l) => l.billLineId) } },
+      select: { grnLineId: true },
+    })
+    await uncreditReturn(tx, {
+      grnLineIds: billGrnLines.map((x) => x.grnLineId).filter((x): x is string => !!x),
+      returnId: before.id,
+      returnNumber: before.returnNumber,
+      by: req.user?.name ?? '',
+    })
 
     const now = new Date()
     await tx.purchaseNote.updateMany({

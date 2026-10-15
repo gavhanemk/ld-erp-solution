@@ -10,7 +10,7 @@ import { SmartSelect } from '@/components/ui/SmartSelect'
 import { StepInput } from '@/components/ui/StepInput'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
 import { CuttingDialog } from './CuttingDialog'
-import { SetRoutingDialog } from './SetRoutingDialog'
+import { StagesDialog } from './StagesDialog'
 import { MoProductionPanel } from './floor/MoProductionPanel'
 import { PROGRESS, type Flow } from './floor/types'
 import { LIVE_MO, moStatus } from './status'
@@ -93,6 +93,8 @@ interface PlanRow {
   short: number
   stores: Array<{ id: string; name: string; qty: number }>
   defaultStoreId: string | null
+  /** The process the material is most likely for, to start the plan filled in. */
+  defaultProcessId: string | null
 }
 
 interface MaterialPlan {
@@ -101,9 +103,11 @@ interface MaterialPlan {
   missing: Array<{ style: string; color: string; pieces: number }>
   warehouses: Array<{ id: string; name: string }>
   departments: Array<{ id: string; name: string }>
+  /** The processes of this order's route, in floor order; the department that asks is each one's own. */
+  processes: Array<{ id: string; name: string; kind: string; department: { id: string; name: string } }>
 }
 
-type Ask = Record<string, { on: boolean; qty: string; departmentId: string; warehouseId: string }>
+type Ask = Record<string, { on: boolean; qty: string; processId: string; warehouseId: string }>
 
 const qty = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 3 })
 const pcs = (n: number) => n.toLocaleString('en-IN')
@@ -187,7 +191,7 @@ export function ManufacturingOrderDetailDialog({
         Object.fromEntries(
           res.data.rows.map((r) => [
             r.key,
-            { on: r.toRequest > 0, qty: r.toRequest > 0 ? String(r.toRequest) : '', departmentId: r.department?.id ?? '', warehouseId: r.defaultStoreId ?? '' },
+            { on: r.toRequest > 0, qty: r.toRequest > 0 ? String(r.toRequest) : '', processId: r.defaultProcessId ?? '', warehouseId: r.defaultStoreId ?? '' },
           ])
         )
       )
@@ -309,8 +313,8 @@ export function ManufacturingOrderDetailDialog({
         ? null
         : chosen.length === 0
           ? 'Tick the materials to ask for.'
-          : chosen.find((x) => !x.a.departmentId)
-            ? `Say which department asks for ${chosen.find((x) => !x.a.departmentId)!.r.item.code}.`
+          : chosen.find((x) => !x.a.processId)
+            ? `Say which process ${chosen.find((x) => !x.a.processId)!.r.item.code} is for.`
             : chosen.find((x) => !x.a.warehouseId)
               ? `Say which store to ask for ${chosen.find((x) => !x.a.warehouseId)!.r.item.code}.`
               : null
@@ -324,7 +328,7 @@ export function ManufacturingOrderDetailDialog({
         requiredDate: requiredDate || null,
         lines: chosen.map(({ r, a }) => ({
           itemId: r.item.id,
-          departmentId: a.departmentId,
+          processId: a.processId,
           warehouseId: a.warehouseId,
           qty: Number(a.qty),
           ownership: r.ownership,
@@ -509,7 +513,7 @@ export function ManufacturingOrderDetailDialog({
                             <tr className="bg-secondary">
                               {live && mayRaise && <th style={{ width: 32 }} />}
                               <th>Material</th>
-                              <th>Department</th>
+                              <th>For process</th>
                               <th style={{ textAlign: 'right' }}>Needed</th>
                               <th style={{ textAlign: 'right' }}>In stock</th>
                               <th style={{ textAlign: 'right' }}>Asked for</th>
@@ -563,11 +567,16 @@ export function ManufacturingOrderDetailDialog({
                                   </td>
                                   <td className="text-xs">
                                     {live && mayRaise ? (
-                                      <SmartSelect className="form-input h-8 w-36 py-0 text-xs" value={a?.departmentId ?? ''} onChange={(e) => setRow(r.key, { departmentId: e.target.value })}>
-                                        <option value="">Department…</option>
-                                        {plan.departments.map((d) => (
-                                          <option key={d.id} value={d.id}>
-                                            {d.name}
+                                      <SmartSelect
+                                        className="form-input h-8 w-36 py-0 text-xs"
+                                        value={a?.processId ?? ''}
+                                        onChange={(e) => setRow(r.key, { processId: e.target.value })}
+                                        aria-label={`Process for ${r.item.code}`}
+                                      >
+                                        <option value="">Process…</option>
+                                        {plan.processes.map((p) => (
+                                          <option key={p.id} value={p.id} data-sub={`Asked by ${p.department.name}`}>
+                                            {p.name}
                                           </option>
                                         ))}
                                       </SmartSelect>
@@ -621,8 +630,9 @@ export function ManufacturingOrderDetailDialog({
                     <p className="text-muted-foreground mt-2 flex items-start gap-1.5 text-xs">
                       <Info size={13} className="mt-px shrink-0" />
                       Needed = pieces by size × the BOM per piece, wastage included. On a job-work order the customer&apos;s fabric (and anything else
-                      they have sent us) is drawn from their own stock — click Ours / Customer&apos;s to switch a row. Requisitions go one per department and
-                      wait for approval in Inventory; the store then issues what it has and passes the rest to Purchase.
+                      they have sent us) is drawn from their own stock — click Ours / Customer&apos;s to switch a row. Pick the process each material is for — it starts filled in from what
+                      the material is. The process&apos;s department asks the store: one requisition each, waiting for approval in Inventory; the store
+                      then issues what it has and passes the rest to Purchase.
                     </p>
                     {live && mayRaise && raiseBlocker && <p className="warn-text mt-1 text-xs">{raiseBlocker}</p>}
                     {mo.status === 'DRAFT' && <p className="text-muted-foreground mt-1 text-xs">Release it to ask the store for these.</p>}
@@ -727,7 +737,7 @@ export function ManufacturingOrderDetailDialog({
         </div>
       </div>
       {settingRoute && mo && (
-        <SetRoutingDialog
+        <StagesDialog
           moId={mo.id}
           moNumber={mo.moNumber}
           styleIds={[...new Set(mo.lines.map((l) => l.style.id))]}

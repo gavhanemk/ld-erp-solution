@@ -15,7 +15,7 @@ import { isWriteTool, runWriteTool, writeToolsFor, type Proposal } from './write
  * Three rules hold this together:
  *
  *   1. **Read only.** There is no tool that writes. The assistant can tell you
- *      a purchase order is waiting; approving it is a button a person presses,
+ *      a requisition is waiting; approving it is a button a person presses,
  *      with their name against it. An assistant that could approve things would
  *      make the audit trail a work of fiction.
  *   2. **Never more than the person could see themselves.** Each tool names the
@@ -59,7 +59,7 @@ export const ERP_TOOLS: ErpTool[] = [
   {
     name: 'get_pending_approvals',
     description:
-      'Documents waiting for somebody to approve them — purchase orders, sales orders and material requisitions.',
+      'Documents waiting for somebody to approve them — sales orders and material requisitions. Purchase orders are never approved: purchase has no approval step.',
     needs: 'dashboard:view',
     parameters: { type: 'object', properties: {} },
   },
@@ -365,7 +365,7 @@ export async function executeTool(
       const eod = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)
       const som = new Date(now.getFullYear(), now.getMonth(), 1)
 
-      const [orders, prod, pendingPO, pendingMR, revenue, receivable, payable] =
+      const [orders, prod, pendingMR, revenue, receivable, payable] =
         await Promise.all([
           prisma.salesOrder.count({
             where: { status: { in: ['CONFIRMED', 'IN_PRODUCTION', 'PARTIALLY_DISPATCHED'] } },
@@ -374,7 +374,6 @@ export async function executeTool(
             where: { entryDate: { gte: sod, lte: eod } },
             _sum: { achieved: true, target: true, rejection: true },
           }),
-          prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null, deletedAt: null } }),
           prisma.materialRequisition.count({ where: { status: 'PENDING', closedAt: null } }),
           prisma.salesInvoice.aggregate({
             where: { invoiceDate: { gte: som } },
@@ -421,7 +420,7 @@ export async function executeTool(
         theyOweUs: showMoney ? lakh(Number(receivable._sum.balanceAmount)) : undefined,
         weOweThem: showMoney ? lakh(Number(payable._sum.balanceAmount)) : undefined,
         stockOnHand: stockValue === null ? undefined : lakh(stockValue),
-        waitingForApproval: { purchaseOrders: pendingPO, requisitions: pendingMR },
+        waitingForApproval: { requisitions: pendingMR },
         withheld: [
           ...(showMoney ? [] : ['money figures — this person has no accounts access']),
           ...(showStock ? [] : ['stock value — this person has no inventory access']),
@@ -430,13 +429,7 @@ export async function executeTool(
     }
 
     case 'get_pending_approvals': {
-      const [pos, sos, mrs] = await Promise.all([
-        prisma.purchaseOrder.findMany({
-          where: { status: 'DRAFT', approvedAt: null, deletedAt: null },
-          include: { supplier: { select: { name: true } } },
-          orderBy: { createdAt: 'asc' },
-          take: 15,
-        }),
+      const [sos, mrs] = await Promise.all([
         prisma.salesOrder.findMany({
           // Only drafts sent for approval; one still being typed is not waiting on anyone.
           where: { status: 'DRAFT', approvedAt: null, sentForApprovalAt: { not: null } },
@@ -456,13 +449,7 @@ export async function executeTool(
       ])
 
       return {
-        total: pos.length + sos.length + mrs.length,
-        purchaseOrders: pos.map((p) => ({
-          number: p.poNumber,
-          supplier: p.supplier.name,
-          value: lakh(Number(p.totalAmount)),
-          raised: day(p.createdAt),
-        })),
+        total: sos.length + mrs.length,
         salesOrders: sos.map((s) => ({
           number: s.soNumber,
           customer: s.customer.name,

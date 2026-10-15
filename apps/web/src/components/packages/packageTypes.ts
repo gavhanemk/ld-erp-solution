@@ -110,6 +110,8 @@ export interface PackageDetail {
   initialQty: number
   unit: string
   lotNo: string | null
+  /** Where in its store it sits: B-3. */
+  rack: string | null
   notes: string | null
   sourceType: string
   createdAt: string
@@ -122,6 +124,8 @@ export interface PackageDetail {
   grn: { grnNumber: string; grnDate: string; po: { supplier: { name: string } | null } | null } | null
   position: { inStore: number; inPackages: number; packages: number; loose: number }
   stores: Array<{ id: string; name: string }>
+  /** The racks in use in its store, for the rack box to offer. */
+  racks: string[]
   requisitions: Array<{
     lineId: string
     mrId: string

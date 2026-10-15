@@ -573,9 +573,77 @@ router.get('/orders/:id/materials', requirePermission(MODULE, 'view'), async (re
   // ?swap=item|department,… turns those rows to the other owner.
   const swap = new Set(String(req.query.swap ?? '').split(',').filter(Boolean))
   const plan = await materialPlan(prisma, req.params.id, { swap })
-  const departments = await prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } })
-  res.json({ success: true, data: { ...plan, departments } })
+  const [departments, processes] = await Promise.all([
+    prisma.department.findMany({ where: { isActive: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+    processesFor(req.params.id),
+  ])
+  res.json({
+    success: true,
+    data: {
+      ...plan,
+      departments,
+      processes,
+      rows: plan.rows.map((r) => ({ ...r, defaultProcessId: guessProcess(r, processes) })),
+    },
+  })
 })
+
+type ProcessOption = { id: string; name: string; kind: string; department: { id: string; name: string } }
+
+/**
+ * The processes a material can be asked for: the order's own stages once
+ * loaded, else its style's routing, else every process — in the order the
+ * floor works them. Checks are left out: nothing is issued to a check.
+ */
+async function processesFor(moId: string): Promise<ProcessOption[]> {
+  const sel = { id: true, name: true, kind: true, department: { select: { id: true, name: true } } } as const
+  const mo = await prisma.manufacturingOrder.findUnique({
+    where: { id: moId },
+    select: {
+      routingId: true,
+      steps: { orderBy: { sequence: 'asc' }, select: { operation: { select: sel } } },
+      lines: { select: { styleId: true } },
+    },
+  })
+  const workSteps = (ops: Array<{ id: string; name: string; kind: string; department: { id: string; name: string } }>) =>
+    [...new Map(ops.filter((o) => o.kind !== 'QC').map((o) => [o.id, o])).values()]
+  if (mo?.steps.length) return workSteps(mo.steps.map((s) => s.operation))
+  const styleIds = [...new Set((mo?.lines ?? []).map((l) => l.styleId).filter((x): x is string => !!x))]
+  const routing = await prisma.routing.findFirst({
+    where: { isActive: true, OR: [...(mo?.routingId ? [{ id: mo.routingId }] : []), ...(styleIds.length ? [{ styleId: { in: styleIds } }] : [])] },
+    orderBy: { version: 'desc' },
+    select: { steps: { orderBy: { sequence: 'asc' }, select: { operation: { select: sel } } } },
+  })
+  const all = await prisma.operation.findMany({ where: { isActive: true }, select: sel, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] })
+  // The routing's steps first, then any other process, should a material be for one off the route.
+  const first = workSteps((routing?.steps ?? []).map((s) => s.operation))
+  return workSteps([...first, ...all])
+}
+
+/**
+ * Which process a material is most likely for, so the plan opens filled in:
+ * the process of the BOM line's department where it names one; else fabric
+ * to cutting, interlining to fusing, buttons to kaj-button, packing material
+ * to packing, and everything else sewn on — thread, labels, trims — to
+ * stitching.
+ */
+function guessProcess(
+  r: { item: { name: string; type: string; category: string }; department: { id: string } | null },
+  processes: ProcessOption[],
+): string | null {
+  if (r.department) {
+    const own = processes.find((p) => p.department.id === r.department!.id)
+    if (own) return own.id
+  }
+  const what = `${r.item.category} ${r.item.name}`
+  const byKind = (kind: string) => processes.find((p) => p.kind === kind)?.id ?? null
+  const byName = (re: RegExp) => processes.find((p) => re.test(p.name))?.id ?? null
+  if (r.item.type === 'PACKING_MATERIAL' || /pack|poly ?bag|carton|tissue|collar clip|price tag|hang ?tag|barcode/i.test(what)) return byKind('PACKING')
+  if (/interlining|fusing/i.test(what)) return byName(/fusing/i) ?? byKind('CUTTING')
+  if (/button/i.test(what)) return byName(/kaj|button/i) ?? byKind('STITCHING')
+  if (/fabric|cloth|poplin|twill|denim|shirting|suiting/i.test(what)) return byKind('CUTTING')
+  return byKind('STITCHING')
+}
 
 export const raiseSchema = z.object({
   requiredDate: z.coerce.date().optional().nullable(),
@@ -584,7 +652,9 @@ export const raiseSchema = z.object({
     .array(
       z.object({
         itemId: z.string().min(1),
-        departmentId: z.string().min(1, 'Say which department asks for it'),
+        /** The process it is for; the requisition goes from that process's department. */
+        processId: z.string().min(1).optional().nullable(),
+        departmentId: z.string().min(1).optional().nullable(),
         warehouseId: z.string().min(1, 'Say which store to ask'),
         qty: z.number().positive('Ask for more than nothing').max(10_000_000),
         ownership: z.enum(['OWNED', 'CUSTOMER_OWNED']).optional(),
@@ -646,24 +716,38 @@ export async function raiseRequisitions(tx: Prisma.TransactionClient, moId: stri
     }
   }
 
-  // One requisition per department: fabric to cutting, trims to stitching —
-  // whoever the BOM gives the material to is who asks the store for it.
-  const byDepartment = new Map<string, typeof data.lines>()
-  for (const l of data.lines) byDepartment.set(l.departmentId, [...(byDepartment.get(l.departmentId) ?? []), l])
+  // The process each material is for decides who asks: fabric for cutting is
+  // asked by Cutting, buttons for stitching by Stitching.
+  const processIds = [...new Set(data.lines.map((l) => l.processId).filter((x): x is string => !!x))]
+  const processes = processIds.length
+    ? await tx.operation.findMany({ where: { id: { in: processIds } }, select: { id: true, name: true, departmentId: true, isActive: true } })
+    : []
+  const processOf = new Map(processes.map((p) => [p.id, p]))
+  const lines = data.lines.map((l) => {
+    const p = l.processId ? processOf.get(l.processId) : undefined
+    if (l.processId && !p) throw new AppError('One of those processes no longer exists. Refresh the plan and pick it again.', 400, 'BAD_PROCESS')
+    const departmentId = p?.departmentId ?? l.departmentId
+    if (!departmentId) throw new AppError('Say which process each material is for.', 400, 'NO_PROCESS')
+    return { ...l, departmentId, processName: p?.name ?? null }
+  })
+
+  // One requisition per department: fabric to cutting, trims to stitching.
+  const byDepartment = new Map<string, typeof lines>()
+  for (const l of lines) byDepartment.set(l.departmentId, [...(byDepartment.get(l.departmentId) ?? []), l])
 
   const raised = []
-  for (const [departmentId, lines] of byDepartment) {
+  for (const [departmentId, deptLines] of byDepartment) {
     const input = createRequisitionSchema.parse({
       departmentId,
       moId: mo.id,
       soId: mo.soId,
       requiredDate: data.requiredDate ?? null,
       notes: data.notes?.trim() || `For ${mo.moNumber}${mo.so ? ` (${mo.so.soNumber})` : ''}`,
-      lines: lines.map((l) => ({
+      lines: deptLines.map((l) => ({
         itemId: l.itemId,
         requestedQty: l.qty,
         warehouseId: l.warehouseId,
-        purpose: `For ${mo.moNumber}`,
+        purpose: l.processName ? `For ${mo.moNumber} — ${l.processName}` : `For ${mo.moNumber}`,
         styleNo: l.styleNo ?? null,
         ownership: l.ownership ?? 'OWNED',
         ownerCustomerId: l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null,

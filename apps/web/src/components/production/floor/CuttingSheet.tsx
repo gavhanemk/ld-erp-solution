@@ -289,7 +289,7 @@ export function CuttingSheet({ d, step, onChanged }: { d: JobCardDetail; step: F
           onClose={() => setOpen(null)}
           onSaved={(message, transferId) => {
             done(message)
-            openWindow(`/print/transfer/${transferId}`)
+            if (transferId) openWindow(`/print/transfer/${transferId}`)
           }}
         />
       )}

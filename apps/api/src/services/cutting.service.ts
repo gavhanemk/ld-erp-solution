@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement } from './stock.service'
 import { lockMo, postEvent, reverseEvent } from './wip.service'
+import { nextChallanNo } from './challanNo'
 import { syncProgress } from './floor.service'
 
 /**
@@ -307,10 +308,10 @@ export async function issueToCutter(tx: Db, moId: string, d: z.infer<typeof cutt
     if (line.cut + out + pieces > line.totalQty) throw new AppError(`${line.totalQty} to make, ${line.cut} cut and ${out} with contractors, so ${pieces} more is too many.`, 400, 'MORE_THAN_PLANNED')
   }
 
-  const count = await tx.cuttingOrder.count({ where: { moId } })
   return tx.cuttingOrder.create({
     data: {
-      cutOrderNumber: `${mo.moNumber}-C${count + 1}`,
+      // The cutting department's challan on this order, e.g. CUT/2627-0002/01.
+      cutOrderNumber: await nextChallanNo(tx, { id: moId, moNumber: mo.moNumber }, { kind: 'CUTTING' }),
       moId,
       moLineId: line.id,
       cutDate: d.issuedOn ?? new Date(),
@@ -441,8 +442,7 @@ export async function createCutting(
   const plannedBreakup: Breakup = {}
   for (const z of data.planned ?? []) if (z.qty > 0) plannedBreakup[z.sizeId] = z.qty
 
-  const count = await tx.cuttingOrder.count({ where: { moId } })
-  const cutOrderNumber = issue?.cutOrderNumber ?? `${mo.moNumber}-C${count + 1}`
+  const cutOrderNumber = issue?.cutOrderNumber ?? (await nextChallanNo(tx, { id: moId, moNumber: mo.moNumber }, { kind: 'CUTTING' }))
   const bundleSize = mo.routed ? (data.bundleSize ?? DEFAULT_BUNDLE_SIZE) : null
   const fields = {
       moLineId: line?.id ?? null,

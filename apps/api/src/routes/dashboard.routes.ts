@@ -19,7 +19,6 @@ router.get('/summary', async (req: AuthRequest, res) => {
   const [
     activeOrdersCount,
     todayProductionAgg,
-    pendingPOCount,
     pendingMRCount,
     revenueAgg,
     outstandingAgg,
@@ -32,7 +31,6 @@ router.get('/summary', async (req: AuthRequest, res) => {
       where: { entryDate: { gte: startOfDay, lte: endOfDay } },
       _sum: { achieved: true, target: true, rejection: true },
     }),
-    prisma.purchaseOrder.count({ where: { status: 'DRAFT', approvedAt: null, deletedAt: null } }),
     prisma.materialRequisition.count({ where: { status: 'PENDING', closedAt: null } }),
     prisma.salesInvoice.aggregate({
       where: { invoiceDate: { gte: startOfMonth } },
@@ -64,7 +62,8 @@ router.get('/summary', async (req: AuthRequest, res) => {
         efficiency,
         rejection: todayProductionAgg._sum.rejection || 0,
       },
-      pendingApprovals: pendingPOCount + pendingMRCount,
+      // Purchase has no approval step: a draft PO is the buyer's own, sent when they send it.
+      pendingApprovals: pendingMRCount,
       // The dashboard is the home screen for the whole mill, so it is not
       // guarded as a whole — but the money on it is. A store keeper with no
       // accounts access was being shown what every customer owes, which is
@@ -312,17 +311,12 @@ router.get('/production-today', async (_req, res) => {
 })
 
 // GET /api/dashboard/pending-approvals?limit=10
-// Documents waiting on a sign-off, newest first.
+// Documents waiting on a sign-off, newest first. Not purchase orders: purchase
+// has no approval step, and a draft PO is the buyer's to send when ready.
 router.get('/pending-approvals', async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10))
 
-  const [purchaseOrders, salesOrders, requisitions, adjustments] = await Promise.all([
-    prisma.purchaseOrder.findMany({
-      where: { status: 'DRAFT', approvedAt: null, deletedAt: null },
-      take: limit,
-      orderBy: { createdAt: 'desc' },
-      include: { supplier: { select: { name: true } } },
-    }),
+  const [salesOrders, requisitions, adjustments] = await Promise.all([
     prisma.salesOrder.findMany({
       // A draft still being typed is nobody's to approve until it is sent.
       where: { status: 'DRAFT', approvedAt: null, sentForApprovalAt: { not: null } },
@@ -357,15 +351,6 @@ router.get('/pending-approvals', async (req, res) => {
     (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24) > urgentAfterDays
 
   const approvals = [
-    ...purchaseOrders.map((po) => ({
-      id: po.id,
-      type: 'PO' as const,
-      number: po.poNumber,
-      description: po.supplier.name,
-      amount: Number(po.totalAmount),
-      date: po.createdAt,
-      urgent: isUrgent(po.createdAt),
-    })),
     ...salesOrders.map((so) => ({
       id: so.id,
       type: 'SO' as const,

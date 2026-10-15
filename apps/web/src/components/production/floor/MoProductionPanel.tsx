@@ -6,7 +6,7 @@ import { api, ApiError, can, type Paginated } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { Section } from '@/components/purchase/Section'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
-import { RouteEditDialog } from './RouteEditDialog'
+import { StagesDialog } from '../StagesDialog'
 import { JobCardView } from './JobCardView'
 import { SheetView } from './SheetView'
 import { isCheck, pcs, PROGRESS, type Flow, type StepFigures } from './types'
@@ -158,7 +158,7 @@ export function MoProductionPanel({
                 <p>The stages come from the routing for the style; they can be changed for this order.</p>
                 {live && can('production', 'edit') && (
                   <button type="button" className="btn-primary h-7 px-2.5 text-xs" disabled={!materialsIssued} title={materialsIssued ? undefined : 'Issue the materials first'} onClick={onLoadStages}>
-                    <Route size={13} /> Load stages from routing
+                    <Route size={13} /> Set up stages
                   </button>
                 )}
               </div>
@@ -255,7 +255,19 @@ export function MoProductionPanel({
           }}
         />
       )}
-      {open?.kind === 'route' && flow && <RouteEditDialog flow={flow} onClose={() => setOpen(null)} onSaved={(m) => { setOpen(null); onChanged(m) }} />}
+      {open?.kind === 'route' && flow && (
+        <StagesDialog
+          moId={flow.mo.id}
+          moNumber={flow.mo.moNumber}
+          styleIds={[]}
+          flow={flow}
+          onClose={() => setOpen(null)}
+          onSaved={(m) => {
+            setOpen(null)
+            onChanged(m)
+          }}
+        />
+      )}
       {open?.kind === 'hold' && (
         <ReasonDialog
           title={`Hold ${mo.moNumber}?`}

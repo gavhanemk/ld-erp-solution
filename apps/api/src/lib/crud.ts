@@ -98,6 +98,11 @@ export interface CrudOptions {
    * to send the GST rate their HSN code carries. Returns the rows to send.
    */
   afterRead?: (rows: Array<Record<string, unknown>>) => Promise<Array<Record<string, unknown>>>
+  /**
+   * A check before a record is switched off — on DELETE, or an edit setting
+   * isActive to false. Throws to refuse: "a routing still uses this process".
+   */
+  beforeDeactivate?: (before: Record<string, any>) => Promise<void>
 }
 
 export interface DeleteUse {
@@ -178,6 +183,7 @@ export function crudRouter(options: CrudOptions): Router {
     permanentDelete,
     exportSheet,
     afterRead,
+    beforeDeactivate,
   } = options
 
   const router = Router({ mergeParams: true })
@@ -395,6 +401,7 @@ export function crudRouter(options: CrudOptions): Router {
 
     const before = await delegate().findUnique({ where: { id: req.params.id } })
     if (!before) throw new AppError(`${entityType} not found`, 404, 'NOT_FOUND')
+    if (beforeDeactivate && parsed.isActive === false && before.isActive !== false) await beforeDeactivate(before)
     await assertUnique(parsed, req.params.id, before)
     const { data, onSaveError } = beforeSave
       ? await beforeSave(parsed, before)
@@ -536,6 +543,7 @@ export function crudRouter(options: CrudOptions): Router {
     }
 
     if (softDelete) {
+      if (beforeDeactivate && before.isActive !== false) await beforeDeactivate(before)
       const updated = await delegate().update({
         where: { id: req.params.id },
         data: { isActive: false },

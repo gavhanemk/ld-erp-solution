@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement } from './stock.service'
 import { afterAdjustmentDecided } from './garmentHooks.service'
+import { afterCountDecided } from './stockCountHooks.service'
 import { autoStickers } from './stickers.service'
 
 /**
@@ -86,6 +87,8 @@ export async function approveAdjustmentIn(tx: Prisma.TransactionClient, id: stri
   })
   // Tagged garments waiting on this write-off are written off with it.
   await afterAdjustmentDecided(tx, id, true, userId)
+  // A scanned count's stickers that were not found go with it.
+  await afterCountDecided(tx, id, true, userId)
   return { before, after }
 }
 
@@ -103,8 +106,11 @@ export async function rejectAdjustment(id: string, userId: string, reason: strin
       'ALREADY_DECIDED',
     )
   }
-  // Tagged garments it was writing off are free again.
-  await prisma.$transaction((tx) => afterAdjustmentDecided(tx, id, false, userId))
+  // Tagged garments it was writing off are free again; a scanned count it came from is closed.
+  await prisma.$transaction(async (tx) => {
+    await afterAdjustmentDecided(tx, id, false, userId)
+    await afterCountDecided(tx, id, false, userId)
+  })
   const after = await prisma.stockAdjustment.findUniqueOrThrow({ where: { id }, include })
   return { before, after }
 }

@@ -747,7 +747,9 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
           requiredDate: true,
           notes: true,
           department: { select: { id: true, name: true } },
-          mo: { select: { id: true, moNumber: true } },
+          // The order behind the request, so the buyer sees whose garments it is for.
+          so: { select: { soNumber: true, customer: { select: { name: true } } } },
+          mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customer: { select: { name: true } } } } } },
         },
       },
       poLines: {
@@ -783,6 +785,7 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         l.purchaseQty !== null ? Number(l.purchaseQty) : Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
       const ordered = round3(l.poLines.reduce((t, p) => t + Number(p.qty), 0))
       const enquired = round3(l.enquiryLines.reduce((t, e) => t + Number(e.qty), 0))
+      const so = l.mr.so ?? l.mr.mo?.so ?? null
       return {
         mrLineId: l.id,
         mrId: l.mr.id,
@@ -791,11 +794,12 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         requiredDate: l.mr.requiredDate,
         department: l.mr.department,
         // Named the way the old screen names them, so the two read the same to
-        // somebody moving across. There is no sales order in this system yet;
-        // the column stays empty rather than being left out, because it is
-        // coming.
+        // somebody moving across. The sales order is the requisition's own, or
+        // else its MO's.
         moNumber: l.mr.mo?.moNumber ?? null,
-        soNumber: null as string | null,
+        soNumber: so?.soNumber ?? null,
+        customerName: so?.customer.name ?? null,
+        styleNo: l.styleNo ?? null,
         remark: l.purpose ?? l.mr.notes ?? null,
         item: l.item,
         warehouse: l.warehouse,
@@ -994,12 +998,15 @@ export async function assertIndentLines(
     if (m.ownership === 'CUSTOMER_OWNED') throw new AppError(`${m.item.name} on ${m.mr.mrNumber} is the customer's material; it is never bought.`, 400, 'CUSTOMER_MATERIAL')
     const toBuy = Number(m.purchaseQty ?? m.requestedQty)
     const ordered = m.poLines.reduce((s, l) => s + Number(l.qty), 0)
-    const qty = asked.reduce((s, l) => s + l.qty, 0)
-    if (qty > toBuy - ordered + 1e-9) {
+    // Ordering more than the indent asked is allowed — a full roll, the
+    // supplier's minimum — as the Indent Items window says: the indent only
+    // counts what it asked for. An indent already ordered in full has nothing
+    // left to buy against it; more goes on a line of its own.
+    if (toBuy - ordered <= 1e-9) {
       throw new AppError(
-        `${m.item.name}: ${m.mr.mrNumber} needs ${Math.max(0, toBuy - ordered)} more bought, and this orders ${qty} against it. Order any extra on a line of its own.`,
+        `${m.item.name}: everything ${m.mr.mrNumber} asked to buy is already on order. Order more on a line of its own, not against the indent.`,
         400,
-        'MORE_THAN_INDENT',
+        'INDENT_ORDERED',
       )
     }
   }
@@ -2944,6 +2951,19 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
 
   const header = await getPrintHeader('GRN')
 
+  // How each line came packed: the stickers made for it on receipt, one per
+  // roll, bale or box. A sticker withdrawn or re-split is not a package that
+  // arrived; one cut from another later is not one either.
+  const stickers = await prisma.stockPackage.findMany({
+    where: { grnLineId: { in: grn.lines.map((l) => l.id) }, parentId: null, status: { not: 'VOID' } },
+    select: { grnLineId: true, packType: true, initialQty: true },
+    orderBy: { code: 'asc' },
+  })
+  const packsOf = (lineId: string) => {
+    const mine = stickers.filter((p) => p.grnLineId === lineId)
+    return mine.length ? { count: mine.length, packType: mine[0].packType, sizes: mine.map((p) => Number(p.initialQty)) } : null
+  }
+
   /*
    * The order decides the tax split, not this receipt.
    *
@@ -2966,6 +2986,7 @@ router.get('/grn/:id/print', requirePermission(MODULE, 'view'), async (req, res)
 
     return {
       ...l,
+      packs: packsOf(l.id),
       discountPct,
       gstPct,
       gross: round2(gross),

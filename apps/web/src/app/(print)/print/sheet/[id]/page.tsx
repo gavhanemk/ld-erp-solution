@@ -11,6 +11,8 @@ interface Payload {
   company: Record<string, string | null>
   template: { title: string; footerNote: string | null }
   detail: JobCardDetail
+  /** The department's challan run on this order, e.g. CUT/2627-0002. */
+  series: string | null
 }
 
 const day = (iso: string) => iso.slice(0, 10)
@@ -98,21 +100,57 @@ function Sheet() {
 
   if (step.kind === 'CUTTING') {
     const fig = (sizeId: string) => d.sizeFigures[sizeId]?.find((f) => f.stepId === step.id)
+    // The order's own sizes, eight to a row as on the old paper sheet: past
+    // eight, the next eight get a size row of their own with their figures under it.
+    const PER_ROW = 8
+    const chunks = Array.from({ length: Math.max(1, Math.ceil(sizes.length / PER_ROW)) }, (_, i) => sizes.slice(i * PER_ROW, (i + 1) * PER_ROW))
+    const slots = Math.max(1, chunks.length > 1 ? PER_ROW : sizes.length)
     const columns: SheetColumn[] = [
       { key: 'what', head: 'Sizes', width: '22%' },
-      ...sizes.map((z) => ({ key: z.id, head: z.code, width: `${Math.floor(66 / Math.max(1, sizes.length))}%`, align: 'center' as const })),
+      ...Array.from({ length: slots }, (_, i) => ({ key: `s${i}`, head: chunks[0][i]?.code ?? '', width: `${Math.floor(66 / slots)}%`, align: 'center' as const })),
       { key: 'total', head: 'Total', width: '12%', align: 'right' },
     ]
-    const row = (key: string, label: string, get: (sizeId: string) => number, strong = false) => {
-      const total = sizes.reduce((s, z) => s + get(z.id), 0)
-      return {
-        key,
-        cells: {
-          what: <span style={{ fontWeight: strong ? 700 : 500 }}>{label}</span>,
-          ...Object.fromEntries(sizes.map((z) => [z.id, get(z.id) ? (strong ? <strong>{qty(get(z.id))}</strong> : qty(get(z.id))) : ''])),
-          total: total ? (strong ? <strong>{qty(total)}</strong> : qty(total)) : '',
-        },
+    const sizeRow = (chunk: typeof sizes, k: number) => ({
+      key: `sizes${k}`,
+      cells: {
+        what: <strong>Sizes</strong>,
+        ...Object.fromEntries(chunk.map((z, i) => [`s${i}`, <strong key={z.id}>{z.code}</strong>])),
+        total: <strong>Total</strong>,
+      },
+    })
+    const figureRows = (chunk: typeof sizes, k: number) => {
+      const row = (key: string, label: string, get: (sizeId: string) => number, strong = false) => {
+        const total = chunk.reduce((s, z) => s + get(z.id), 0)
+        return {
+          key: `${key}${k}`,
+          cells: {
+            what: <span style={{ fontWeight: strong ? 700 : 500 }}>{label}</span>,
+            ...Object.fromEntries(chunk.map((z, i) => [`s${i}`, get(z.id) ? (strong ? <strong>{qty(get(z.id))}</strong> : qty(get(z.id))) : ''])),
+            total: total ? (strong ? <strong>{qty(total)}</strong> : qty(total)) : '',
+          },
+        }
       }
+      return [
+        row('count', 'Count (order)', (s) => sizes.find((z) => z.id === s)?.qty ?? 0),
+        row('cut', 'Actual cutting', (s) => fig(s)?.completed ?? 0, true),
+        row('out', `Sent to ${next}`, (s) => fig(s)?.sentOn ?? 0),
+      ]
+    }
+    const sizeRows: Array<{ key: string; cells: Record<string, React.ReactNode> }> = chunks.flatMap((chunk, k) => [...(k ? [sizeRow(chunk, k)] : []), ...figureRows(chunk, k)])
+    if (chunks.length > 1) {
+      const all = (get: (sizeId: string) => number) => sizes.reduce((s, z) => s + get(z.id), 0)
+      sizeRows.push({
+        key: 'grand',
+        cells: {
+          what: <strong>All sizes</strong>,
+          total: (
+            <span>
+              <strong>{qty(all((s) => sizes.find((z) => z.id === s)?.qty ?? 0))}</strong> ordered
+              {all((s) => fig(s)?.completed ?? 0) ? ` · ${qty(all((s) => fig(s)?.completed ?? 0))} cut` : ''}
+            </span>
+          ),
+        },
+      })
     }
     const entries = d.log.filter((e) => e.stepId === step.id)
     const ins = entries.filter((e) => e.type === 'CUT' && e.qty > 0)
@@ -126,18 +164,14 @@ function Sheet() {
       <StoreSheet
         company={company}
         title={data.template.title}
-        number={refNo(c)}
+        number={data.series ?? refNo(c)}
         dateLabel="Department"
         date={`CUTTING · ${longDate(new Date()) ?? ''}`}
         backHref="/production/stages"
         backLabel="Production stages"
         panels={panels}
         columns={columns}
-        rows={[
-          row('count', 'Count (order)', (s) => sizes.find((z) => z.id === s)?.qty ?? 0),
-          row('cut', 'Actual cutting', (s) => fig(s)?.completed ?? 0, true),
-          row('out', `Sent to ${next}`, (s) => fig(s)?.sentOn ?? 0),
-        ]}
+        rows={sizeRows}
         after={
           <div style={{ border: `1px solid ${RULE}`, marginTop: '8px' }}>
             <div style={{ background: TINT, borderBottom: `1px solid ${RULE}`, padding: '5px 10px' }}>
@@ -226,7 +260,7 @@ function Sheet() {
     <StoreSheet
       company={company}
       title={`${step.name.toUpperCase()} SHEET`}
-      number={refNo(c)}
+      number={data.series ?? refNo(c)}
       dateLabel="Department"
       date={`${step.department.name.toUpperCase()} · ${longDate(new Date()) ?? ''}`}
       backHref="/production/stages"

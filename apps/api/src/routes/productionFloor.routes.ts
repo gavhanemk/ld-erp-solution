@@ -6,7 +6,7 @@ import { AppError } from '../middleware/errorHandler'
 import { requirePermission, userCan, type AuthRequest } from '../middleware/auth'
 import { writeAuditLog } from '../lib/audit'
 import { getPrintHeader } from '../lib/printData'
-import { applyRouting, editRoute, editRouteSchema, restoreStep, routingsFor, skipStep } from '../services/route.service'
+import { applyRouting, editRoute, editRouteSchema, restoreStep, routeStepSchema, routingsFor, skipStep } from '../services/route.service'
 import {
   billSchema,
   cancelTransfer,
@@ -37,10 +37,11 @@ import {
   workSchema,
 } from '../services/floor.service'
 import { flowSummary } from '../services/floorView.service'
+import { processCode } from '../services/challanNo'
 import { stageReport } from '../services/stageReport.service'
 import { balancesOf } from '../services/wip.service'
 import { createCutting, cuttingSchema, cutterIssueSchema, issueToCutter } from '../services/cutting.service'
-import { ensureJobCards, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
+import { ensureJobCards, fillJobCardBlanks, jobCardDetail, jobCardSchema, listJobCards, stageSheets, stageTabs, STAGES, updateJobCard, type Stage } from '../services/jobCard.service'
 
 /**
  * The floor: an order's stages, its job cards and their department sheets
@@ -77,9 +78,15 @@ router.get('/routings/for', requirePermission(MODULE, 'view'), async (req, res) 
   res.json({ success: true, data: await routingsFor(prisma, ids) })
 })
 
-/** POST /orders/:id/routing — gives an order a routing's steps, while nothing has been cut on it. */
+/**
+ * POST /orders/:id/routing — gives an order a routing's steps, while nothing
+ * has been cut on it. With `steps`, the routing's stages as changed for this
+ * order in the same window: loaded, then set to these, in one go.
+ */
 router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { routingId } = z.object({ routingId: z.string().min(1, 'Pick a routing') }).parse(req.body)
+  const { routingId, steps } = z
+    .object({ routingId: z.string().min(1, 'Pick a routing'), steps: z.array(routeStepSchema).min(1).max(60).optional() })
+    .parse(req.body)
   const routing = await prisma.$transaction(async (tx) => {
     const mo = await tx.manufacturingOrder.findUnique({ where: { id: req.params.id }, select: { moNumber: true, status: true } })
     if (!mo) throw new AppError('Manufacturing order not found', 404, 'NOT_FOUND')
@@ -95,11 +102,23 @@ router.post('/orders/:id/routing', requirePermission(MODULE, 'edit'), async (req
       if (!issued) throw new AppError(`${mo.moNumber}'s materials have not been issued yet. Raise its requisition and have the store issue it, then load the stages.`, 409, 'MATERIALS_NOT_ISSUED')
     }
     const routing = await applyRouting(tx, req.params.id, routingId)
+    // Changed for this order before loading: nothing has moved yet, so every step is written as given.
+    if (steps) await editRoute(tx, req.params.id, { steps: steps.map((s) => ({ ...s, id: null })), reason: `Set for ${mo.moNumber} when its stages were loaded` })
     if (mo.status !== 'DRAFT') await ensureJobCards(tx, req.params.id)
-    return routing
+    const names = (await tx.mOStep.findMany({ where: { moId: req.params.id }, orderBy: { sequence: 'asc' }, select: { name: true } })).map((s) => s.name)
+    return { routing, names }
   }, T)
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'ManufacturingOrder', entityId: req.params.id, after: { routingId, routing: routing.code } })
-  res.json({ success: true, message: `Stages loaded from ${routing.code}: ${routing.steps.map((s) => s.operation.name).join(' → ')}. Each colour's process sheets are ready, starting with cutting.` })
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'UPDATE',
+    entityType: 'ManufacturingOrder',
+    entityId: req.params.id,
+    after: { routingId, routing: routing.routing.code, route: routing.names, changed: !!steps },
+  })
+  res.json({
+    success: true,
+    message: `Stages set: ${routing.names.join(' → ')}${steps ? ` (from ${routing.routing.code}, changed for this order)` : ` (from ${routing.routing.code})`}. Each colour's process sheets are ready, starting with cutting.`,
+  })
 })
 
 /** PATCH /orders/:id/route — this order's own route changed, ahead of the pieces. */
@@ -157,8 +176,8 @@ router.get('/orders/:id/flow', requirePermission(MODULE, 'view'), async (req, re
 
 const transferInclude = {
   mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
-  fromStep: { select: { id: true, name: true, department: { select: { name: true } } } },
-  toStep: { select: { id: true, name: true, kind: true, isQcStep: true, department: { select: { name: true } } } },
+  fromStep: { select: { id: true, name: true, departmentId: true, department: { select: { name: true } } } },
+  toStep: { select: { id: true, name: true, kind: true, isQcStep: true, departmentId: true, department: { select: { name: true } } } },
   vendor: { select: { id: true, name: true, gstin: true, address: true, city: true, state: true, stateCode: true } },
   jobWorkOrder: { select: { id: true, orderNumber: true, rate: true } },
   jobCard: {
@@ -341,7 +360,9 @@ router.post('/orders/:id/transfers', requirePermission(MODULE, 'create'), async 
       ? `${t.transferNumber} was already saved.`
       : t.vendor
         ? `${t.transferNumber}: ${pcs(total)} pieces in ${t.lines.length} ${t.lines.length === 1 ? 'bundle' : 'bundles'} sent to ${t.vendor.name} for ${t.toStep.name}, on ${t.jobWorkOrder?.orderNumber}. Print the job-work challan to go with them.`
-        : `${t.transferNumber}: ${pcs(total)} pieces in ${t.lines.length} ${t.lines.length === 1 ? 'bundle' : 'bundles'} sent from ${t.fromStep.name} to ${t.toStep.name}, waiting to be counted in.`,
+        : t.fromStep.departmentId === t.toStep.departmentId
+          ? `${pcs(total)} pieces moved on to ${t.toStep.name}. Both are ${t.toStep.department.name}, so they are there now: nothing to count in, no card to print.`
+          : `${t.transferNumber}: ${pcs(total)} pieces in ${t.lines.length} ${t.lines.length === 1 ? 'bundle' : 'bundles'} sent from ${t.fromStep.name} to ${t.toStep.name}, waiting to be counted in.`,
     data: t,
   })
 })
@@ -549,6 +570,9 @@ router.get('/job-cards', requirePermission(MODULE, 'view'), async (req, res) => 
 
 /** GET /job-cards/:id — the job card and everything its sheets show. */
 router.get('/job-cards/:id', requirePermission(MODULE, 'view'), async (req, res) => {
+  // Anything the order has learnt since the card was made fills its blanks.
+  const card = await prisma.jobCard.findUnique({ where: { id: req.params.id }, select: { moId: true } })
+  if (card) await prisma.$transaction((tx) => fillJobCardBlanks(tx, card.moId), { timeout: 30_000 })
   res.json({ success: true, data: await jobCardDetail(prisma, req.params.id) })
 })
 
@@ -557,7 +581,10 @@ router.get('/job-cards/:id/print', requirePermission(MODULE, 'view'), async (req
   const detail = await jobCardDetail(prisma, req.params.id)
   const step = detail.steps.find((s) => s.id === text(req.query.stepId))
   const header = await getPrintHeader(!step ? 'JC' : step.kind === 'CUTTING' ? 'CUT' : 'SHEET')
-  res.json({ success: true, data: { ...header, detail } })
+  // The department's challan run on this order, e.g. CUT/2627-0002: its challans are /01, /02 under it.
+  const op = step ? await prisma.operation.findUnique({ where: { id: step.operationId }, select: { code: true } }) : null
+  const series = step ? `${processCode(op?.code, processCode(step.name, 'GEN'))}/${detail.mo.moNumber.replace(/^MO-/, '')}` : null
+  res.json({ success: true, data: { ...header, detail, series } })
 })
 
 router.patch('/job-cards/:id', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {

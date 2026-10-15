@@ -66,7 +66,21 @@ interface GrnLine {
   item: { code: string; name: string; hsnCode: string | null; uom: { symbol: string } | null }
   warehouse: { name: string } | null
   poLine: { description: string | null; hsnCode: string | null } | null
+  /** How it came packed: one sticker per roll, bale or box. */
+  packs: { count: number; packType: string; sizes: number[] } | null
 }
+
+const PACK_WORD: Record<string, [string, string]> = {
+  ROLL: ['roll', 'rolls'],
+  BUNDLE: ['bundle', 'bundles'],
+  BOX: ['box', 'boxes'],
+  CARTON: ['carton', 'cartons'],
+  BAG: ['bag', 'bags'],
+  PACKET: ['packet', 'packets'],
+  OTHER: ['package', 'packages'],
+}
+/** "5 rolls", "1 roll". */
+const packsText = (count: number, type: string) => `${count} ${(PACK_WORD[type] ?? PACK_WORD.OTHER)[count === 1 ? 0 : 1]}`
 
 interface Payload {
   company: Company
@@ -548,7 +562,13 @@ export default function PrintGoodsReceipt() {
             <Fact label="Challan date" value={longDate(grn.challanDate)} />
             <Fact
               label="Packages"
-              value={grn.packageCount != null ? String(grn.packageCount) : null}
+              value={
+                grn.packageCount != null
+                  ? String(grn.packageCount)
+                  : grn.lines.some((l) => l.packs)
+                    ? String(grn.lines.reduce((t, l) => t + (l.packs?.count ?? 0), 0))
+                    : null
+              }
               mono
             />
             <Fact label="Vehicle No" value={grn.vehicleNo} mono />
@@ -623,6 +643,13 @@ export default function PrintGoodsReceipt() {
                     {line.poLine?.description && (
                       <div style={{ fontSize: '8.5px', color: MUTED, marginTop: '1px' }}>
                         {line.poLine.description}
+                      </div>
+                    )}
+                    {/* How many rolls (or bales, boxes) it came in, and each one's size. */}
+                    {line.packs && (
+                      <div style={{ fontSize: '8.5px', color: GREY, marginTop: '1px' }}>
+                        <b style={{ color: INK }}>{packsText(line.packs.count, line.packs.packType)}</b>
+                        {line.packs.count > 1 ? `: ${line.packs.sizes.map((q) => qty(q)).join(', ')} ${line.item.uom?.symbol ?? ''}` : ''}
                       </div>
                     )}
                   </td>

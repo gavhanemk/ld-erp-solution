@@ -387,7 +387,7 @@ export default function TransfersPage() {
           onClose={() => setCreating(false)}
           onSaved={(m, transferId) => {
             saved(m)
-            window.open(`/print/transfer/${transferId}`, '_blank', 'noopener')
+            if (transferId) window.open(`/print/transfer/${transferId}`, '_blank', 'noopener')
           }}
         />
       )}
