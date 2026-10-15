@@ -8,6 +8,7 @@ import { generateGarments, normaliseGarmentCode } from '../services/garment.serv
 import { addToChallan, dispatchScanned, moveGarments, removeFromChallan, requestScrap, returnGarments } from '../services/garmentMove.service'
 import { barcodesFor, skuKey } from '../services/barcode.service'
 import { piecesWhere } from '../services/trace.service'
+import { buyerLabelsOf, saveBuyerLabels, saveSchema } from '../services/buyerLabels.service'
 
 /*
  * Garment tags: one QR label per finished piece.
@@ -522,6 +523,19 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
       })),
     },
   })
+})
+
+/** Buyer stickers for an order: the customer's label details, each line's, and the packed count by size. */
+router.get('/buyer-labels/:moId', requirePermission(MODULE, 'view'), async (req, res) => {
+  res.json({ success: true, data: await buyerLabelsOf(req.params.moId) })
+})
+
+/** The buyer sticker details, saved: the customer's once, each order line's own. */
+router.patch('/buyer-labels/:moId', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = saveSchema.parse(req.body)
+  const out = await saveBuyerLabels(req.params.moId, data)
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'BuyerLabels', entityId: out.mo.id, after: data })
+  res.json({ success: true, message: `Sticker details saved for ${out.customer} and ${out.mo.moNumber}.`, data: await buyerLabelsOf(req.params.moId) })
 })
 
 /** Labels sent to the printer: counted, so a reprint is told apart from a first print. */

@@ -1026,6 +1026,10 @@ model Customer {
   isActive          Boolean      @default(true)
   isBlacklisted     Boolean      @default(false)
   notes             String?
+  /// The buyer's own sticker on goods made for them: their brand, who markets
+  /// it, the consumer-complaints block, the barcode pattern and the number at
+  /// the bottom. Set once, used on every order's buyer stickers.
+  labelProfile Json?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -1385,6 +1389,9 @@ model SalesOrderLine {
   /// The print or design name the buyer orders by.
   printName    String?
   description  String?
+  /// The buyer sticker's lines for this garment: their article and colour
+  /// code, the product name, MRP and pieces per pack.
+  labelInfo   Json?
   /// No GST on this line: the rate is 0 whatever the HSN code says.
   taxExempt    Boolean    @default(false)
   totalQty     Decimal    @db.Decimal(10, 2)
