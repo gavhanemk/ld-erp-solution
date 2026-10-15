@@ -37,7 +37,7 @@ import type { EnquiryQuote, EnquiryRecord as EnquiryLite } from '@/components/pu
 import { api, apiErrorMessage, ApiError, can, masterResource, type Paginated } from '@/lib/api'
 import { MasterFormDialog } from '@/components/masters/MasterFormDialog'
 import { supplierFormFields } from '@/components/masters/supplierFormFields'
-import { IndentItemsDialog, type IndentPick } from '@/components/purchase/IndentItemsDialog'
+import { IndentItemsDialog, indentReference, type IndentPick, type IndentRow } from '@/components/purchase/IndentItemsDialog'
 import { NewItemDialog, type NewItem } from '@/components/purchase/NewItemDialog'
 import { SmartSelect } from '@/components/ui/SmartSelect'
 
@@ -592,6 +592,10 @@ export function PurchaseOrderDialog({
   /// not be shown the same number as though it were theirs.
   const [nextPoNumber, setNextPoNumber] = useState('')
   const [reference, setReference] = useState('')
+  /// The indent lines taken onto this order, and the reference they last wrote:
+  /// the box follows them until somebody types in it themselves.
+  const [indentRows, setIndentRows] = useState<IndentRow[]>([])
+  const [autoReference, setAutoReference] = useState<string | null>(null)
   /// Internal. Unlike `notes` it is not printed on the supplier's copy, which
   /// is the whole reason the two are separate fields.
   const [remark, setRemark] = useState('')
@@ -712,6 +716,8 @@ export function PurchaseOrderDialog({
     setWarehouseId(record?.deliveryWarehouseId ?? '')
     setPoDate(record?.poDate?.slice(0, 10) ?? new Date().toISOString().slice(0, 10))
     setReference(record?.reference ?? '')
+    setIndentRows([])
+    setAutoReference(null)
     setRemark(record?.remark ?? '')
     setDeliveryCustomerId(record?.deliveryCustomerId ?? '')
     setDeliverTo(record?.deliveryCustomerId ? 'CUSTOMER' : 'ORGANIZATION')
@@ -1570,12 +1576,29 @@ export function PurchaseOrderDialog({
             : {}),
           qty: String(qty),
           gstRate: row.item.taxRate ? String(Number(row.item.taxRate.rate)) : '',
+          // The garment the material is for, as the requisition gave it.
+          ...(row.styleNo
+            ? {
+                styleNo: row.styleNo,
+                styleId: styles.find((st) => (st.code ?? '').toLowerCase() === row.styleNo!.toLowerCase())?.id ?? '',
+              }
+            : {}),
           mrLineId: row.mrLineId,
           mrNumber: row.mrNumber,
         }
       })
       return [...kept, ...fresh]
     })
+    // The reference says which orders and indents this buys for — filled in
+    // while the box is empty or still says what it was given, never over
+    // something typed.
+    const taken = [...indentRows.filter((r) => !picks.some((p) => p.row.mrLineId === r.mrLineId)), ...picks.map((p) => p.row)]
+    setIndentRows(taken)
+    if (!reference.trim() || reference === autoReference) {
+      const text = indentReference(taken)
+      setReference(text)
+      setAutoReference(text)
+    }
     setIndentOpen(false)
     setError(null)
   }

@@ -747,7 +747,9 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
           requiredDate: true,
           notes: true,
           department: { select: { id: true, name: true } },
-          mo: { select: { id: true, moNumber: true } },
+          // The order behind the request, so the buyer sees whose garments it is for.
+          so: { select: { soNumber: true, customer: { select: { name: true } } } },
+          mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customer: { select: { name: true } } } } } },
         },
       },
       poLines: {
@@ -783,6 +785,7 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         l.purchaseQty !== null ? Number(l.purchaseQty) : Math.max(0, Number(l.requestedQty) - Number(l.issuedQty))
       const ordered = round3(l.poLines.reduce((t, p) => t + Number(p.qty), 0))
       const enquired = round3(l.enquiryLines.reduce((t, e) => t + Number(e.qty), 0))
+      const so = l.mr.so ?? l.mr.mo?.so ?? null
       return {
         mrLineId: l.id,
         mrId: l.mr.id,
@@ -791,11 +794,12 @@ router.get('/indent-items', requirePermission(MODULE, 'view'), async (req, res) 
         requiredDate: l.mr.requiredDate,
         department: l.mr.department,
         // Named the way the old screen names them, so the two read the same to
-        // somebody moving across. There is no sales order in this system yet;
-        // the column stays empty rather than being left out, because it is
-        // coming.
+        // somebody moving across. The sales order is the requisition's own, or
+        // else its MO's.
         moNumber: l.mr.mo?.moNumber ?? null,
-        soNumber: null as string | null,
+        soNumber: so?.soNumber ?? null,
+        customerName: so?.customer.name ?? null,
+        styleNo: l.styleNo ?? null,
         remark: l.purpose ?? l.mr.notes ?? null,
         item: l.item,
         warehouse: l.warehouse,
