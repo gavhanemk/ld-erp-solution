@@ -284,6 +284,10 @@ export async function destinationsOf<T extends RouteStep>(db: Tx | PrismaClient,
  * Sends bundles on from a step to the step the floor picks: any step on the
  * order's route these bundles have not been through yet, the last one only
  * once they have been through all the others.
+ *
+ * Between two steps of the same department — cutting and its own check, the
+ * final check and packing — nothing changes hands: the department does both.
+ * The move is counted in there and then, so nobody counts their own pieces in.
  */
 export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchSchema>, userId: string) {
   const mo = await openMo(tx, moId)
@@ -412,6 +416,11 @@ export async function dispatch(tx: Tx, moId: string, d: z.infer<typeof dispatchS
       vendorId ? { stepId: to.id, bundleId: l.bundleId, bucket: 'WIP', qty: l.qty, vendorId } : { stepId: to.id, bundleId: l.bundleId, bucket: 'TRANSIT', qty: l.qty },
     ]),
   })
+  if (!vendorId && to.departmentId === from.departmentId) {
+    const sent = await tx.processTransferLine.findMany({ where: { transferId: transfer.id }, select: { id: true, dispatchedQty: true } })
+    await receive(tx, transfer.id, { lines: sent.map((l) => ({ lineId: l.id, qty: l.dispatchedQty })), close: false, receivedBy: d.issuedBy ?? null, receivedAt: when, notes: 'Same department: no handover' }, userId)
+    return { transfer: await tx.processTransfer.findUniqueOrThrow({ where: { id: transfer.id } }), duplicate: false, sameDepartment: true }
+  }
   await syncProgress(tx, moId)
   return { transfer, duplicate: false }
 }

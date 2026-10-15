@@ -176,8 +176,8 @@ router.get('/orders/:id/flow', requirePermission(MODULE, 'view'), async (req, re
 
 const transferInclude = {
   mo: { select: { id: true, moNumber: true, so: { select: { soNumber: true, customerPORef: true, customer: { select: { name: true } } } } } },
-  fromStep: { select: { id: true, name: true, department: { select: { name: true } } } },
-  toStep: { select: { id: true, name: true, kind: true, isQcStep: true, department: { select: { name: true } } } },
+  fromStep: { select: { id: true, name: true, departmentId: true, department: { select: { name: true } } } },
+  toStep: { select: { id: true, name: true, kind: true, isQcStep: true, departmentId: true, department: { select: { name: true } } } },
   vendor: { select: { id: true, name: true, gstin: true, address: true, city: true, state: true, stateCode: true } },
   jobWorkOrder: { select: { id: true, orderNumber: true, rate: true } },
   jobCard: {
@@ -360,7 +360,9 @@ router.post('/orders/:id/transfers', requirePermission(MODULE, 'create'), async 
       ? `${t.transferNumber} was already saved.`
       : t.vendor
         ? `${t.transferNumber}: ${pcs(total)} pieces in ${t.lines.length} ${t.lines.length === 1 ? 'bundle' : 'bundles'} sent to ${t.vendor.name} for ${t.toStep.name}, on ${t.jobWorkOrder?.orderNumber}. Print the job-work challan to go with them.`
-        : `${t.transferNumber}: ${pcs(total)} pieces in ${t.lines.length} ${t.lines.length === 1 ? 'bundle' : 'bundles'} sent from ${t.fromStep.name} to ${t.toStep.name}, waiting to be counted in.`,
+        : t.fromStep.departmentId === t.toStep.departmentId
+          ? `${pcs(total)} pieces moved on to ${t.toStep.name}. Both are ${t.toStep.department.name}, so they are there now: nothing to count in, no card to print.`
+          : `${t.transferNumber}: ${pcs(total)} pieces in ${t.lines.length} ${t.lines.length === 1 ? 'bundle' : 'bundles'} sent from ${t.fromStep.name} to ${t.toStep.name}, waiting to be counted in.`,
     data: t,
   })
 })

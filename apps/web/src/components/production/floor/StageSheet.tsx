@@ -580,7 +580,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
           onClose={() => setOpen(null)}
           onSaved={(m, transferId) => {
             done(m)
-            openWindow(`/print/transfer/${transferId}`)
+            if (transferId) openWindow(`/print/transfer/${transferId}`)
           }}
         />
       )}
@@ -594,7 +594,7 @@ export function StageSheet({ d, step, onChanged }: { d: JobCardDetail; step: Flo
           onClose={() => setOpen(null)}
           onSaved={(m, transferId) => {
             done(m)
-            openWindow(`/print/transfer/${transferId}`)
+            if (transferId) openWindow(`/print/transfer/${transferId}`)
           }}
         />
       )}

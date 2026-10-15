@@ -63,6 +63,8 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [clientKey] = useState(newClientKey)
+  // Within one department nothing changes hands: no count-in, no card.
+  const sameDept = !!to && !outside && to.departmentId === from.departmentId
 
   // A working step sends straight from in hand; a check or cutting what it has done or passed.
   const fromHand = sendsFromHand(from)
@@ -159,7 +161,7 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
         dispatchDate: date,
         clientKey,
       })
-      onSaved(res.message ?? 'Sent.', res.data.id)
+      onSaved(res.message ?? 'Sent.', sameDept ? '' : res.data.id)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not send them.')
     } finally {
@@ -177,7 +179,7 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
         ) : to ? (
           <span className="inline-flex items-center gap-1.5">
             {flow.mo.moNumber}: {from.name} <ArrowRight size={12} /> {to.name}
-            {outside ? ' at an outside unit, on a job-work challan' : ', to be counted in there'}
+            {outside ? ' at an outside unit, on a job-work challan' : sameDept ? ` — same department (${to.department.name}), so they go straight in` : ', to be counted in there'}
           </span>
         ) : (
           `${flow.mo.moNumber}: from ${from.name} to the step you pick`
@@ -186,7 +188,7 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
       width="max-w-4xl"
       primary={
         <button type="button" className="btn-primary" onClick={() => void save()} disabled={saving || !!blocker}>
-          {saving ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />} {outside ? 'Send out' : 'Send'} {total ? `${pcs(total)} pcs` : ''}
+          {saving ? <Loader2 size={15} className="animate-spin" /> : <Send size={15} />} {outside ? 'Send out' : sameDept ? 'Move' : 'Send'} {total ? `${pcs(total)} pcs` : ''}
         </button>
       }
       footer={
@@ -194,7 +196,15 @@ export function SendOnDialog({ flow, fromStepId, onClose, onSaved }: { flow: Flo
           Cancel
         </button>
       }
-      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${chosen.length} ${chosen.length === 1 ? 'bundle' : 'bundles'} on one card`}
+      footerNote={
+        blocker ? (
+          <span className="warn-text">{blocker}</span>
+        ) : sameDept ? (
+          `${chosen.length} ${chosen.length === 1 ? 'bundle' : 'bundles'} — the same department does both, so nothing to count in and no card to print`
+        ) : (
+          `${chosen.length} ${chosen.length === 1 ? 'bundle' : 'bundles'} on one card`
+        )
+      }
       error={error}
       onClose={onClose}
       busy={saving}
