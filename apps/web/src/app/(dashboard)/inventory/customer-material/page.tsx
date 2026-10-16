@@ -13,6 +13,7 @@ import { api, ApiError, can, currentUser } from '@/lib/api'
 import { CustomerMaterialDialog } from '@/components/inventory/CustomerMaterialDialog'
 import { CustomerGrnQcDialog } from '@/components/inventory/CustomerGrnQcDialog'
 import { ImportCustomerMaterialDialog } from '@/components/inventory/ImportCustomerMaterialDialog'
+import { ApproveCustomerReceiptsDialog, type WaitingReceipt } from '@/components/inventory/ApproveCustomerReceiptsDialog'
 import { CustomerReturnDialog } from '@/components/inventory/CustomerReturnDialog'
 import { FilterMenu, type FilterChoice } from '@/components/masters/FilterMenu'
 import { DashCard, Highlights, KpiTile, PALETTE, SplitBar, TONE } from '@/components/dashboard/DashKit'
@@ -266,6 +267,10 @@ function CustomerMaterialScreen() {
   /** Stock that just went out: its labels, and the packages it came from. */
   const [outward, setOutward] = useState<OutwardRef | null>(null)
   const [importing, setImporting] = useState(false)
+  /** The approve-several window: open with these ticked ([] for every receipt waiting), or shut. */
+  const [approving, setApproving] = useState<string[] | null>(null)
+  /** What the sheet just imported, to tick once the import window is shut. */
+  const [justImported, setJustImported] = useState<string[]>([])
 
   const [search, setSearch] = useState('')
   const [picked, setPicked] = useState<Partial<Record<FilterKey, string[]>>>({})
@@ -452,6 +457,34 @@ function CustomerMaterialScreen() {
   const mayApprove = can('inventory', 'approve')
   const mayQc = can('inventory', 'edit')
   const me = (currentUser() as { id?: string } | null)?.id ?? null
+  /** Waiting for stock approval with no QC on record: it came from a sheet, which skips QC. */
+  const fromSheet = (r: LineRow) => r.status === 'INSPECTED' && !r.inspectedAt
+
+  // Every receipt waiting for stock approval, one each, for approving several at once.
+  const waiting = useMemo(() => {
+    const by = new Map<string, WaitingReceipt>()
+    for (const r of rows) {
+      if (r.status !== 'INSPECTED' || r.cancelledAt) continue
+      let w = by.get(r.receiptId)
+      if (!w) {
+        w = {
+          id: r.receiptId,
+          grnNumber: r.grnNumber,
+          receiptDate: r.receiptDate,
+          customerName: r.customerName,
+          warehouseName: r.warehouseName,
+          challanNumber: r.challanNumber,
+          soNumber: r.soNumber,
+          imported: !r.inspectedAt,
+          inspectedByName: r.inspectedByName ?? null,
+          lines: [],
+        }
+        by.set(r.receiptId, w)
+      }
+      w.lines.push({ itemName: r.itemName, uom: r.uom, received: r.receivedQty, rejected: r.rejectedQty ?? 0, rejectReason: r.rejectReason ?? null })
+    }
+    return [...by.values()].sort((a, b) => a.receiptDate.localeCompare(b.receiptDate) || a.grnNumber.localeCompare(b.grnNumber))
+  }, [rows])
 
   /**
    * What can be done with a receipt where it stands: a draft is finished and
@@ -476,8 +509,9 @@ function CustomerMaterialScreen() {
       items.push({ key: 'cancel', label: `Cancel (${all})`, icon: icon(<Ban size={14} />), onClick: () => void cancel(r), danger: true, disabled: spin })
     } else if (r.status === 'INSPECTED') {
       if (mayApprove) items.push({ key: 'post', label: 'Approve into stock', icon: icon(<BadgeCheck size={14} />), onClick: () => void post(r), disabled: spin })
-      if (mayQc) items.push({ key: 'qc', label: mayApprove ? 'Review QC' : 'Check QC again', icon: <ClipboardCheck size={14} />, onClick: () => setQcFor(r.receiptId), disabled: spin })
-      if (mayApprove) items.push({ key: 'back', label: 'Send back to QC', icon: icon(<CornerUpLeft size={14} />), onClick: () => void sendBack(r), disabled: spin })
+      // A sheet's receipt skips QC: if it is wrong, it goes back to receiving to be put right.
+      if (mayQc && !fromSheet(r)) items.push({ key: 'qc', label: mayApprove ? 'Review QC' : 'Check QC again', icon: <ClipboardCheck size={14} />, onClick: () => setQcFor(r.receiptId), disabled: spin })
+      if (mayApprove) items.push({ key: 'back', label: fromSheet(r) ? 'Send back to receiving' : 'Send back to QC', icon: icon(<CornerUpLeft size={14} />), onClick: () => void sendBack(r), disabled: spin })
       items.push({ key: 'cancel', label: `Cancel (${all})`, icon: icon(<Ban size={14} />), onClick: () => void cancel(r), danger: true, disabled: spin })
     } else if (r.status === 'POSTED') {
       items.push({ key: 'print', label: 'Print receipt', icon: <Printer size={14} />, href: `/print/customer-grn/${r.receiptId}`, newTab: true })
@@ -515,7 +549,7 @@ function CustomerMaterialScreen() {
     const said = lines
       .map((x) => `• ${x.itemName}: ${qtyFmt(x.receivedQty - (x.rejectedQty ?? 0))} ${x.uom} passed${x.rejectedQty ? `, ${qtyFmt(x.rejectedQty)} rejected (${x.rejectReason ?? 'no reason'})` : ''}`)
       .join('\n')
-    if (!confirm(`Approve ${r.grnNumber} into stock?\n\nQC${r.inspectedByName ? ` (${r.inspectedByName})` : ''} found:\n${said}\n\nWhat passed becomes ${r.customerName}'s usable stock; anything rejected is held apart. Its stickers are made now, and it is never edited again.`)) return
+    if (!confirm(`Approve ${r.grnNumber} into stock?\n\n${fromSheet(r) ? 'From a sheet, with no QC' : `QC${r.inspectedByName ? ` (${r.inspectedByName})` : ''} found`}:\n${said}\n\nWhat passed becomes ${r.customerName}'s usable stock; anything rejected is held apart. Its stickers are made now, and it is never edited again.`)) return
     return act(
       r,
       async () => {
@@ -527,11 +561,14 @@ function CustomerMaterialScreen() {
     )
   }
   const sendBack = (r: LineRow) => {
-    const reason = prompt(
-      r.status === 'SUBMITTED' ? `What needs counting again on ${r.grnNumber}? It goes back to receiving as a draft.` : `What should QC check again on ${r.grnNumber}?`,
-    )
+    const toReceiving = r.status === 'SUBMITTED' || fromSheet(r)
+    const reason = prompt(toReceiving ? `What needs putting right on ${r.grnNumber}? It goes back to receiving as a draft.` : `What should QC check again on ${r.grnNumber}?`)
     if (!reason || reason.trim().length < 5) return
-    return act(r, () => api.post(`/inventory/customer-grn/${r.receiptId}/send-back`, { reason: reason.trim() }), 'Could not send it back.')
+    return act(
+      r,
+      () => api.post(`/inventory/customer-grn/${r.receiptId}/send-back`, { reason: reason.trim(), ...(fromSheet(r) ? { to: 'RECEIVING' } : {}) }),
+      'Could not send it back.',
+    )
   }
   const correct = (r: LineRow) => {
     const reason = prompt(
@@ -1125,7 +1162,12 @@ function CustomerMaterialScreen() {
               )}
               {figures.forApproval > 0 && (
                 <button type="button" className="font-medium hover:underline" onClick={() => toggleTo('status', ['approval'])}>
-                  {figures.forApproval} QC-checked, waiting for stock approval{mayApprove ? ' — approve or send back' : ''}
+                  {figures.forApproval} waiting for stock approval
+                </button>
+              )}
+              {mayApprove && waiting.length > 0 && (
+                <button type="button" className="btn-primary h-7 px-2.5 text-xs" onClick={() => setApproving([])}>
+                  <BadgeCheck size={13} /> Approve {waiting.length === 1 ? 'it' : 'several'}
                 </button>
               )}
               {figures.drafts > 0 && (
@@ -1260,7 +1302,7 @@ function CustomerMaterialScreen() {
                             ) : r.status === 'INSPECTED' ? (
                               <>
                                 <span className="badge-warning">Waiting for approval</span>
-                                <div className="text-[10px] text-muted-foreground">QC by {r.inspectedByName ?? '—'}; not in stock yet</div>
+                                <div className="text-[10px] text-muted-foreground">{fromSheet(r) ? 'from a sheet, no QC' : `QC by ${r.inspectedByName ?? '—'}`}; not in stock yet</div>
                               </>
                             ) : (
                               <>
@@ -1772,9 +1814,30 @@ function CustomerMaterialScreen() {
       )}
       {importing && (
         <ImportCustomerMaterialDialog
-          onClose={() => setImporting(false)}
-          onImported={() => {
-            setMessage('Imported. The list shows the new receipts.')
+          onClose={() => {
+            setImporting(false)
+            // An approver goes straight on to approving what the sheet made.
+            if (mayApprove && justImported.length) setApproving(justImported)
+            setJustImported([])
+          }}
+          onImported={(ids) => {
+            setMessage(
+              ids.length
+                ? `Imported ${ids.length} ${ids.length === 1 ? 'receipt' : 'receipts'}. ${ids.length === 1 ? 'It waits' : 'They wait'} for stock approval${mayApprove ? '' : ' by an approver'}; nothing is in stock until then.`
+                : 'Nothing new to import.',
+            )
+            setJustImported(ids)
+            void load()
+          }}
+        />
+      )}
+      {approving && (
+        <ApproveCustomerReceiptsDialog
+          receipts={waiting}
+          preselect={approving}
+          onClose={() => setApproving(null)}
+          onApproved={(m) => {
+            setMessage(m)
             void load()
           }}
         />

@@ -360,8 +360,8 @@ export const createCustomerGrnSchema = z
     /**
      * What to do with it: keep it as a draft, or hand it to QC. Left out, it
      * is handed to QC. POST is refused: a receipt goes into stock only after
-     * QC has checked it and an approver approves it (the import is the one
-     * exception, being old receipts).
+     * QC has checked it and an approver approves it. (A sheet's receipts skip
+     * QC and wait for stock approval; they never use this.)
      */
     action: z.enum(['DRAFT', 'SUBMIT', 'POST']).optional(),
     /** What QC found; set by the QC step, not by receiving. */
@@ -432,6 +432,11 @@ export const cancelCustomerGrnSchema = z.object({
 /** Approving a QC-checked receipt into stock, with anything the approver adds. */
 export const postCustomerGrnSchema = z.object({
   inspectionNotes: z.string().max(1000).optional().nullable(),
+})
+
+/** Approving several receipts waiting for stock approval at once, such as a sheet's worth. */
+export const postManyCustomerGrnSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'Tick at least one receipt').max(200, 'Approve up to 200 at a time'),
 })
 
 /**
