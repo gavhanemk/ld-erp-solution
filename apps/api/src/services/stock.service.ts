@@ -1,5 +1,7 @@
 import type { Prisma, StockOwnership, TransactionType } from '@prisma/client'
 import { AppError } from '../middleware/errorHandler'
+// package.service imports this file too; each only calls the other from inside a function.
+import { splitOff } from './package.service'
 
 /**
  * The only place in the system that is allowed to write a stock movement.
@@ -392,10 +394,12 @@ export async function recordMovement(
 /**
  * Stickers never claim more than the store holds.
  *
- * Stock that goes out by a form rather than a scan — a debit note, a count, a
- * cancellation, what a job worker used up — leaves its rolls' stickers saying
- * they are still full. Straight after it, the stickers of that item in that
- * store are taken down to what is left, the oldest first, as a store issues.
+ * Stock that goes out by a form rather than a scan — a typed issue, a debit
+ * note, a count, a cancellation, what a job worker used up — leaves its rolls'
+ * stickers saying they are still full. Straight after it, the stickers of that
+ * item in that store are taken down to what is left, the oldest first, as a
+ * store issues: a whole roll's sticker is emptied, and a roll only partly gone
+ * has its sticker retired and the rest put on a new one, to print.
  * Rejected stock held in the same store still has its rolls, so it counts.
  */
 async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
@@ -404,7 +408,6 @@ async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
   const packages = await tx.stockPackage.findMany({
     where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK' },
     orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
-    select: { id: true, qty: true, grade: true },
   })
   if (!packages.length) return
   // Stickers of the grade that went out come down first: usable stock going
@@ -422,18 +425,19 @@ async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
   for (const p of packages) {
     if (over <= 0.0005) break
     const take = round3(Math.min(Number(p.qty), over))
-    const left = round3(Number(p.qty) - take)
-    await tx.stockPackage.update({ where: { id: p.id }, data: { qty: left, status: left <= 0.0005 ? 'EMPTY' : 'IN_STOCK' } })
+    const went = `stock went out without a scan${m.notes ? ` (${m.notes})` : ''}`
+    const { part } = await splitOff(tx, p, take, { notes: went, userId: null, referenceType: m.referenceType, referenceId: m.referenceId })
+    await tx.stockPackage.update({ where: { id: part.id }, data: { qty: 0, status: 'EMPTY' } })
     await tx.stockPackageMove.create({
       data: {
-        packageId: p.id,
+        packageId: part.id,
         type: 'ISSUED',
         qty: -take,
-        balanceAfter: left,
+        balanceAfter: 0,
         warehouseId: m.warehouseId,
         referenceType: m.referenceType,
         referenceId: m.referenceId,
-        notes: `Stock went out without a scan${m.notes ? ` (${m.notes})` : ''}: the sticker is taken down with it.`,
+        notes: `${went[0].toUpperCase()}${went.slice(1)}: the sticker is taken down with it.`,
       },
     })
     over = round3(over - take)

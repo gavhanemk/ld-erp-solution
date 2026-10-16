@@ -445,3 +445,90 @@ export async function createPackages(
   }
   return created
 }
+
+type Splittable = {
+  id: string
+  code: string
+  qty: Prisma.Decimal | number
+  itemId: string
+  warehouseId: string
+  ownership: StockOwnership
+  ownerCustomerId: string | null
+  packType: PackType
+  lotNo: string | null
+  rack: string | null
+  sourceId: string | null
+  sourceRef: string | null
+  grnLineId: string | null
+  grade: string
+}
+
+/**
+ * Part of a roll going and the rest staying. A sticker says what its roll
+ * held, so it is never left on a roll that now holds less: the part taken and
+ * the rest each get a sticker of their own, and the old one is retired (SPLIT,
+ * nothing in it) — scanned again, it names what replaced it. Taking all of it
+ * splits nothing: the package itself is the part.
+ *
+ * Returns the part, for the caller to issue, move, release or send back, and
+ * the rest, which stays on the same rack waiting on "Ready to print".
+ */
+export async function splitOff(
+  tx: Prisma.TransactionClient,
+  pkg: Splittable,
+  take: number,
+  why: { notes: string; userId: string | null; unit?: string; referenceType?: string | null; referenceId?: string | null; referenceNumber?: string | null },
+): Promise<{ part: { id: string; code: string; qty: number }; rest: { id: string; code: string; qty: number } | null }> {
+  const has = round3(Number(pkg.qty))
+  const t = round3(take)
+  if (t >= has - 0.0005) return { part: { id: pkg.id, code: pkg.code, qty: has }, rest: null }
+  const left = round3(has - t)
+  const unit = why.unit ? ` ${why.unit}` : ''
+  const from = {
+    spot: { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId },
+    packType: pkg.packType,
+    lotNo: pkg.lotNo,
+    rack: pkg.rack,
+    sourceType: 'SPLIT' as const,
+    sourceId: pkg.sourceId,
+    sourceRef: pkg.sourceRef,
+    grnLineId: pkg.grnLineId,
+    parentId: pkg.id,
+    userId: why.userId,
+    fromPackage: true,
+    unit: why.unit ?? '',
+    itemName: '',
+    grade: pkg.grade,
+  }
+  const [part] = await createPackages(tx, { ...from, qtys: [t], notes: `${t}${unit} of ${pkg.code}: ${why.notes}` })
+  const [rest] = await createPackages(tx, { ...from, qtys: [left], notes: `The rest of ${pkg.code} after ${t}${unit} went (${why.notes})` })
+  await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: 0, status: 'SPLIT' } })
+  await recordPackageMove(tx, {
+    packageId: pkg.id,
+    type: 'SPLIT',
+    qty: -has,
+    balanceAfter: 0,
+    warehouseId: pkg.warehouseId,
+    referenceType: why.referenceType ?? null,
+    referenceId: why.referenceId ?? null,
+    referenceNumber: why.referenceNumber ?? null,
+    relatedPackageId: rest.id,
+    notes: `Sticker retired: ${t}${unit} became ${part.code} (${why.notes}); the ${left}${unit} left became ${rest.code}`,
+    userId: why.userId,
+  })
+  return { part: { id: part.id, code: part.code, qty: t }, rest: { id: rest.id, code: rest.code, qty: left } }
+}
+
+/**
+ * What took over from a retired sticker: the packages cut from it that are
+ * still on stock, followed through later splits.
+ */
+export async function replacementsOf(tx: Prisma.TransactionClient, id: string) {
+  const found: Array<{ code: string; qty: number }> = []
+  for (let parents = [id], i = 0; parents.length && i < 20; i++) {
+    const children = await tx.stockPackage.findMany({ where: { parentId: { in: parents } }, select: { id: true, code: true, qty: true, status: true }, orderBy: { code: 'asc' } })
+    children.filter((c) => c.status === 'IN_STOCK').forEach((c) => found.push({ code: c.code, qty: Number(c.qty) }))
+    parents = children.filter((c) => c.status === 'SPLIT').map((c) => c.id)
+  }
+  return found
+}

@@ -215,7 +215,29 @@ export function PackageCard({
             <AlertTriangle size={16} className="mt-0.5 shrink-0" /> {error}
           </p>
         )}
-        {!live && action !== 'history' && action !== 'more' && (
+        {!live && action !== 'history' && action !== 'more' && pkg.status === 'SPLIT' && (
+          <p className="text-sm text-muted-foreground">
+            This sticker is retired: its roll was split when part of it went.{' '}
+            {pkg.replacedBy?.length ? (
+              <>
+                What is left of it now carries{' '}
+                {pkg.replacedBy.map((r, i) => (
+                  <span key={r.code}>
+                    {i > 0 && ', '}
+                    <Link href={`/inventory/scan?code=${r.code}`} className="font-mono text-primary hover:underline">
+                      {r.code}
+                    </Link>{' '}
+                    ({qtyText(r.qty)} {pkg.unit})
+                  </span>
+                ))}
+                . Scan that sticker instead.
+              </>
+            ) : (
+              'Nothing of it is left in stock.'
+            )}
+          </p>
+        )}
+        {!live && action !== 'history' && action !== 'more' && pkg.status !== 'SPLIT' && (
           <p className="text-sm text-muted-foreground">This package has nothing in it, so it cannot be issued, moved or split.</p>
         )}
         {live && action === 'issue' && (
@@ -300,7 +322,7 @@ function QtyBox({
           ? `Only ${qtyText(max)} ${unit} in this package.`
           : n > 0
             ? left > 0
-              ? `${qtyText(left)} ${unit} will be left in the package.`
+              ? `${qtyText(left)} ${unit} will be left: it goes on a new sticker, and this one is retired.`
               : 'The package will be empty.'
             : `${qtyText(max)} ${unit} in the package.`}
       </p>
@@ -407,7 +429,9 @@ function MovePanel({ pkg, busy, onMove }: { pkg: PackageDetail; busy: boolean; o
       </div>
       <QtyBox value={qty} onChange={setQty} max={pkg.qty} unit={pkg.unit} label="How much moves" />
       {n > 0 && !whole && n < pkg.qty && (
-        <p className="text-sm text-muted-foreground">Part of it moves as a new package with its own label, which opens for printing.</p>
+        <p className="text-sm text-muted-foreground">
+          The part that moves and the part that stays each get a new sticker, which open for printing. This sticker is retired.
+        </p>
       )}
       <button
         type="button"
@@ -431,7 +455,7 @@ function SplitPanel({ pkg, busy, onSplit }: { pkg: PackageDetail; busy: boolean;
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Each new package gets its own label. What is not put into a new one stays in {pkg.code}.
+        Each new package gets its own label, and so does whatever is not put into one. {pkg.code} is retired.
       </p>
       <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-4">
         {rows.map((r, i) => (
@@ -454,7 +478,7 @@ function SplitPanel({ pkg, busy, onSplit }: { pkg: PackageDetail; busy: boolean;
       <p className={`text-sm font-medium ${left < -1e-9 ? 'text-red-400' : 'text-muted-foreground'}`}>
         {left < -1e-9
           ? `The new packages add up to ${qtyText(total)} ${pkg.unit}, more than the ${qtyText(pkg.qty)} in ${pkg.code}.`
-          : `${filled.length} new ${filled.length === 1 ? 'package' : 'packages'}, ${qtyText(total)} ${pkg.unit}. ${left > 0 ? `${qtyText(left)} ${pkg.unit} stays in ${pkg.code}.` : `${pkg.code} will be empty.`}`}
+          : `${filled.length} new ${filled.length === 1 ? 'package' : 'packages'}, ${qtyText(total)} ${pkg.unit}. ${left > 0 ? `The ${qtyText(left)} ${pkg.unit} left gets a new sticker too.` : ''}`}
       </p>
       <button
         type="button"
