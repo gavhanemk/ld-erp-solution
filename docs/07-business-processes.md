@@ -102,7 +102,28 @@ from payment status.
 |---|---|---|---|---|
 | **Purchase Order GRN** | A purchase order | A supplier — goods we bought | Purchase | **Built** |
 | **Job Work GRN** | A job-work order | A job worker — our own material, processed, back | Production ("MO Job work") | Not built |
-| **GRN JW Customer** | A sales order | A customer — their material, for us to work on | Sales ("Customer GRN") | Not built |
+| **GRN JW Customer** | A job-work sales order, or none | A customer — their material, for us to work on | Inventory → Customer Material ("CGRN") | **Built** (see below) |
+
+**How a customer's receipt works now (CGRN).** The order is optional: a
+customer's lorry can arrive before the paperwork, and material received with
+no order stays unassigned — it is never counted as any order's. The store
+enters the count (their challan quantity, what arrived, what was rejected and
+why) and either saves a draft or hands it over; an approver (inventory approve
+— Admin, MD, Store Manager) checks it and posts it, and only then is anything
+on the books: the accepted part as the customer's usable stock at no value,
+the rejected part held apart in the same store (grade R), each with its own
+stickers, the held ones marked HOLD. Held material is never issued, moved or
+reserved; it leaves either released for use by an approver, with a reason, or
+back to the customer on a return marked "Rejected". A posted receipt is never
+edited: it is cancelled — refused once any of it was issued or sent back — and
+a corrected copy opened as a draft. A customer's material can only be
+requisitioned, issued or sent to a job worker for an open job-work order of
+that same customer, and cutting takes the panels' owner from the fabric
+actually issued, refusing fabric that is partly ours and partly a customer's.
+The order's reconciliation counts only its own receipts and requisitions,
+compares cutting with the BOM, and lists our own material used on it at cost.
+Open: question 8 under "Open questions" — whether a separate inspection step (receive, then inspect)
+is wanted; today the inspection is the approver's check before posting.
 
 A fourth, related path: **DC Returnable** — material sent out to a vendor
 against a PO, carrying a lorry receipt number, with its own column for when
