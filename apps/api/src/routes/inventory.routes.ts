@@ -3044,7 +3044,7 @@ router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: Au
  * it is then handed over or posted in the same step. A posted receipt is never
  * edited: it is cancelled and a corrected copy entered.
  */
-router.put('/customer-grn/:id', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+router.patch('/customer-grn/:id', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerGrnSchema.parse(req.body)
   const action = data.action ?? 'DRAFT'
   if (action === 'POST') assertMayPost(req)

@@ -8,7 +8,7 @@ import {
 import { api, ApiError, currentUser } from '@/lib/api'
 import { FormFrame } from '@/components/ui/FormFrame'
 import { StepInput } from '@/components/ui/StepInput'
-import { formatDate } from '@/lib/utils'
+import { formatDate, newRequestId } from '@/lib/utils'
 import type { OutwardRef } from '@/components/packages/packageTypes'
 import { ScanIssue } from '@/components/packages/ScanIssue'
 import { packCount } from '@/components/packages/packageTypes'
@@ -326,7 +326,8 @@ export function ProcessDialog({
       let outward: OutwardRef | undefined
       if (tab === 'issue') {
         const lines = check.work.flatMap(({ r, v }) => [...spread(r, v).entries()].map(([warehouseId, q]) => ({ lineId: r.l.id, warehouseId, issueQty: q })))
-        const res = await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/issue`, { lines })
+        // One id for this press of Issue: a retry of it never issues twice.
+        const res = await api.post<{ message?: string }>(`/inventory/requisitions/${mr.id}/issue`, { lines, requestId: newRequestId() })
         message = res.message ?? 'Issued.'
         // This issue's own lines: a requisition can be issued against more than once.
         outward = { type: 'MR', id: mr.id, q: lines.map((l) => `${l.lineId}:${l.issueQty}:${l.warehouseId}`).join(',') }

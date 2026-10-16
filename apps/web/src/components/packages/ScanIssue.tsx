@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { CheckCircle2, Loader2, Printer, ScanLine } from 'lucide-react'
 import { api, ApiError } from '@/lib/api'
+import { newRequestId } from '@/lib/utils'
 import { StepInput } from '@/components/ui/StepInput'
 import { StickerScanner } from './StickerSearch'
 import { STATUS, packCount, printLabels, qtyText, type PackageDetail } from './packageTypes'
@@ -48,6 +49,11 @@ export function ScanIssue({
   const [issued, setIssued] = useState<Issued[]>([])
   // Bumped after each issue, so the scan box is fresh and focused for the next sticker.
   const [round, setRound] = useState(0)
+  // Set the moment Issue is pressed, before any state settles: a second Enter
+  // a scanner sends straight after the first is dropped here, and the id
+  // below makes the server issue once even if both got through.
+  const sending = useRef(false)
+  const requestId = useRef<string>('')
 
   const read = async (code: string) => {
     setError(null)
@@ -67,6 +73,7 @@ export function ScanIssue({
       } else {
         setPkg(p)
         setLine(waiting)
+        requestId.current = newRequestId()
         setQty(String(Math.round(Math.min(waiting.owed, p.qty) * 1000) / 1000))
         return
       }
@@ -83,11 +90,12 @@ export function ScanIssue({
   const problem = !pkg || !line ? null : !(n > 0) ? 'Enter how much goes.' : n > pkg.qty + 1e-9 ? `${pkg.code} has only ${qtyText(pkg.qty)} ${pkg.unit} on it.` : n > line.owed + 1e-9 ? `${mrNumber} needs only ${qtyText(line.owed)} ${pkg.unit} more.` : null
 
   const issue = async () => {
-    if (!pkg || !line || problem) return
+    if (!pkg || !line || problem || sending.current) return
+    sending.current = true
     setBusy(true)
     setError(null)
     try {
-      const res = await api.post<{ message: string; data: PackageDetail }>(`/packages/${pkg.id}/issue`, { mrId, lineId: line.lineId, qty: n })
+      const res = await api.post<{ message: string; data: PackageDetail }>(`/packages/${pkg.id}/issue`, { mrId, lineId: line.lineId, qty: n, requestId: requestId.current })
       setIssued((list) => [
         { id: pkg.id, code: pkg.code, item: pkg.item.name, qty: n, left: res.data.qty, unit: pkg.unit, kind: packCount(1, pkg.packType).replace(/^1 /, ''), lot: pkg.lotNo, store: pkg.warehouse.name },
         ...list,
@@ -100,6 +108,7 @@ export function ScanIssue({
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not issue it.')
     } finally {
+      sending.current = false
       setBusy(false)
     }
   }

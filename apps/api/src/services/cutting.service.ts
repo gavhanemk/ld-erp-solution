@@ -403,7 +403,7 @@ export async function createCutting(
   }
   if (fabric.mixed) {
     throw new AppError(
-      `${fabric.name} issued to ${mo.moNumber} is ${fabric.mixed.join(' and ')}'s, so a panel cut from it cannot be booked to one owner. Return one of them to the store before recording this cutting.`,
+      `${fabric.name} issued to ${mo.moNumber} is partly ${fabric.mixed.map((n) => (n === 'ours' ? 'ours' : `${n}'s`)).join(' and partly ')}, so a panel cut from it cannot be booked to one owner. Return one of them to the store before recording this cutting.`,
       409,
       'MIXED_OWNERS',
     )

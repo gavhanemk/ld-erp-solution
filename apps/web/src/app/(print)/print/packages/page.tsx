@@ -25,6 +25,8 @@ interface Label {
   grnNumber: string | null
   supplier: string | null
   date: string
+  /** Rejected at receipt and held: printed HOLD so nobody takes it to the floor. */
+  held?: boolean
   /** The supplier's challan and our order it came against. */
   challanNo?: string | null
   poNumber?: string | null
@@ -94,6 +96,11 @@ function Sticker({ p, company, layout, codes }: { p: Label; company: string; lay
   const where = p.store
   return (
     <div className="sticker pk">
+      {p.held && (
+        <div className="pk-cust" style={{ fontSize: d.tag, fontWeight: 800, letterSpacing: '0.04em' }}>
+          HOLD — REJECTED, DO NOT ISSUE
+        </div>
+      )}
       {p.owner && (
         <div className="pk-cust" style={{ fontSize: d.tag }}>
           Customer material · {p.owner}

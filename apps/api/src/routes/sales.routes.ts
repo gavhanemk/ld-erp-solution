@@ -455,6 +455,8 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
       invoices: true,
       manufacturingOrders: { select: { id: true, moNumber: true, status: true, totalPackedQty: true } },
       materialRequisitions: { select: { id: true, mrNumber: true, status: true, closedAt: true } },
+      // The customer's own material received against it, for job work.
+      customerMaterial: { select: { id: true, grnNumber: true, status: true, receiptDate: true }, orderBy: { receiptDate: 'asc' } },
     },
   })
   if (!order) throw new AppError('Sales order not found', 404, 'NOT_FOUND')

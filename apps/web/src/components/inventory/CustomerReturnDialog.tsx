@@ -27,6 +27,8 @@ export interface HeldStock {
   customerId: string
   customerName: string
   qty: number
+  /** Of `qty`, what is held as rejected at receipt: it goes back only as "Rejected". */
+  onHold?: number
 }
 
 interface Line {
@@ -57,17 +59,17 @@ export function CustomerReturnDialog({
   held: HeldStock[]
   /** Their receipts not cancelled, to return against one. */
   receipts: Array<{ id: string; grnNumber: string; customerId: string; date: string }>
-  /** Opened from a row of "Still with us": that customer, store and item. */
-  start?: { customerId: string; warehouseId: string; itemId?: string }
+  /** Opened from a row of "Still with us", or a receipt's held line: that customer, store and item. */
+  start?: { customerId: string; warehouseId: string; itemId?: string; grnId?: string; reason?: string }
   onClose: () => void
   /** `outward`: the return just saved, for its labels. */
   onSaved: (message: string, outward?: OutwardRef) => void
 }) {
   const [customerId, setCustomerId] = useState(start?.customerId ?? '')
   const [warehouseId, setWarehouseId] = useState(start?.warehouseId ?? '')
-  const [grnId, setGrnId] = useState('')
+  const [grnId, setGrnId] = useState(start?.grnId ?? '')
   const [returnDate, setReturnDate] = useState('')
-  const [reason, setReason] = useState('LEFTOVER')
+  const [reason, setReason] = useState(start?.reason ?? 'LEFTOVER')
   const [vehicleNo, setVehicleNo] = useState('')
   const [transporter, setTransporter] = useState('')
   const [lrNumber, setLrNumber] = useState('')
@@ -89,12 +91,16 @@ export function CustomerReturnDialog({
     return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
   }, [held, customerId])
 
+  // What can go back for this reason: the held (rejected) part as "Rejected",
+  // the usable part for anything else — the two are never mixed.
   const theirs = useMemo(
     () =>
       held
-        .filter((h) => h.customerId === customerId && h.warehouseId === warehouseId && h.qty > 0)
+        .filter((h) => h.customerId === customerId && h.warehouseId === warehouseId)
+        .map((h) => ({ ...h, qty: Math.round((reason === 'REJECTED' ? (h.onHold ?? 0) : h.qty - (h.onHold ?? 0)) * 1000) / 1000 }))
+        .filter((h) => h.qty > 0)
         .sort((a, b) => a.itemName.localeCompare(b.itemName)),
-    [held, customerId, warehouseId],
+    [held, customerId, warehouseId, reason],
   )
   const heldOf = (itemId: string) => theirs.find((h) => h.itemId === itemId)
 

@@ -83,6 +83,8 @@ export interface OrderDetailFull {
   lines: OrderLineView[]
   manufacturingOrders: Array<{ id: string; moNumber: string; status: string; totalPackedQty: string | number | null }>
   materialRequisitions: Array<{ id: string; mrNumber: string; status: string; closedAt: string | null }>
+  /** The customer's material received against it (job work). */
+  customerMaterial?: Array<{ id: string; grnNumber: string; status: string; receiptDate: string }>
   deliveryChallans: Array<{ id: string; dcNumber: string; dcDate: string; status: string }>
   invoices: Array<{ id: string; invoiceNumber: string; invoiceDate: string; totalAmount: string | number; status: string }>
 }
@@ -345,6 +347,13 @@ export function SalesOrderDetailDialog({
           number: m.moNumber,
           detail: m.totalPackedQty ? `${Number(m.totalPackedQty).toLocaleString('en-IN')} packed` : '',
           status: words(m.status),
+        })),
+        ...(o.customerMaterial ?? []).map((g) => ({
+          key: g.id,
+          kind: 'Customer material receipt',
+          number: g.grnNumber,
+          detail: formatDate(g.receiptDate),
+          status: g.status === 'SUBMITTED' ? 'Waiting for approval' : words(g.status),
         })),
         ...o.materialRequisitions.map((m) => ({
           key: m.id,

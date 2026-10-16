@@ -105,3 +105,15 @@ export function itemsPreview(names: Array<string | null | undefined>): {
   const extra = clean.length > 2 ? ` +${clean.length - 2} more` : ''
   return { shown, extra, full: clean.join(', ') }
 }
+
+/**
+ * An id for one press of a button that moves stock, sent with the request so
+ * the server issues once however many times the same press arrives (a
+ * scanner's second Enter, a retry on a weak signal). crypto.randomUUID needs a
+ * secure page; on plain http over the mill's network it falls back.
+ */
+export function newRequestId(): string {
+  const c = globalThis.crypto as Crypto | undefined
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
+  return `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}-${Math.random().toString(36).slice(2, 12)}`
+}
