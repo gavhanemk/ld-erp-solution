@@ -27,6 +27,7 @@ import {
 import { OUTWARD, OUTWARD_TYPES, loadOutward } from '../services/outward.service'
 import { INWARD_SOURCES, autoStickers, labelGroup, planStickers, restickStickers, sourceRefOf } from '../services/stickers.service'
 import { lockedBalanceOf } from '../services/stock.service'
+import { onceFor } from '../lib/onceFor'
 import { findOptions, findPackages, findSchema } from '../services/packageFind.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
 
@@ -100,6 +101,8 @@ const issueSchema = z.object({
   mrId: z.string().min(1, 'Choose the requisition'),
   lineId: z.string().min(1, 'Choose the requisition line'),
   qty,
+  /** The screen's id for this one press of Issue: a repeat of it issues nothing more. */
+  requestId: z.string().min(8).max(100).optional(),
 })
 const transferSchema = z.object({ toWarehouseId: z.string().min(1, 'Choose the store it goes to'), qty })
 const splitSchema = z.object({ qtys: z.array(qty).min(1, 'Enter at least one new package').max(200) })
@@ -494,7 +497,9 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
   if (!ids.length) throw new AppError('Choose the packages to print', 400, 'NO_IDS')
   const [company, rows] = await Promise.all([
     prisma.company.findFirst({ select: { name: true } }),
-    prisma.stockPackage.findMany({ where: { id: { in: ids } }, include: pkgInclude, orderBy: { code: 'asc' } }),
+    // Only stickers still on stock: a used-up, split or withdrawn code is
+    // never printed again, so it can never end up on another roll.
+    prisma.stockPackage.findMany({ where: { id: { in: ids }, status: 'IN_STOCK' }, include: pkgInclude, orderBy: { code: 'asc' } }),
   ])
   // A GRN's stickers, and the ones split from them, which keep its id.
   const fromGrn = (r: (typeof rows)[number]) => (r.sourceType === 'GRN' || r.grnLineId) && r.sourceId
@@ -551,8 +556,12 @@ router.get('/labels', requirePermission(MODULE, 'view'), async (req, res) => {
           poNumber: g?.po?.poNumber ?? null,
           styleNo: r.grnLineId ? (styleOf.get(r.grnLineId) ?? null) : null,
           seq: seqOf.get(r.id) ?? null,
+          // Rejected at receipt: printed HOLD, so nobody takes it to the floor.
+          held: r.grade === 'R',
         }
       }),
+      // Asked for but not printed: used up, split or withdrawn.
+      skipped: ids.length - rows.length,
     },
   })
 })
@@ -606,8 +615,9 @@ async function outwardSpots(doc: Awaited<ReturnType<typeof loadOutward>>) {
     // Packages claiming more than the store now holds: what went out came from them.
     if (pos.loose >= -0.0005) continue
     const over = round3(-pos.loose)
+    // Held rolls (rejected at receipt) never leave on an outward like this: not suggested.
     const packages = await prisma.stockPackage.findMany({
-      where: { ...spot, status: 'IN_STOCK' },
+      where: { ...spot, status: 'IN_STOCK', grade: { not: 'R' } },
       select: { id: true, code: true, qty: true, lotNo: true, packType: true, createdAt: true },
       orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
     })
@@ -680,6 +690,7 @@ router.post('/outward/apply', requirePermission(MODULE, 'edit'), async (req: Aut
         const unit = pkg.item.uom?.symbol ?? ''
         if (!spots.has(key)) throw new AppError(`${pkg.code} is not stock that went out on ${doc.number}.`, 400, 'WRONG_PACKAGE')
         if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is no longer in stock.`, 400, 'NOT_IN_STOCK')
+        if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it did not go out on ${doc.number}. Pick the roll that did.`, 409, 'HELD')
         if (t.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
 
         // No more off the packages than left without a scan: the rest of the
@@ -928,10 +939,27 @@ router.post('/restick', requirePermission(MODULE, 'create'), async (req: AuthReq
 })
 
 /** Counted once the print box opens on them: that is a print, opening the page is not. */
-router.post('/printed', requirePermission(MODULE, 'view'), async (req, res) => {
+router.post('/printed', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
   const { ids } = z.object({ ids: z.array(z.string().min(1)).min(1).max(500) }).parse(req.body)
-  const r = await prisma.stockPackage.updateMany({ where: { id: { in: ids } }, data: { printCount: { increment: 1 }, lastPrintedAt: new Date() } })
-  res.json({ success: true, data: { updated: r.count } })
+  const updated = await prisma.$transaction(async (tx) => {
+    const live = await tx.stockPackage.findMany({ where: { id: { in: ids }, status: 'IN_STOCK' }, select: { id: true, warehouseId: true, qty: true, printCount: true } })
+    if (!live.length) return 0
+    await tx.stockPackage.updateMany({ where: { id: { in: live.map((p) => p.id) } }, data: { printCount: { increment: 1 }, lastPrintedAt: new Date() } })
+    // The same code every time: a reprint is logged against it, never a new sticker.
+    await tx.stockPackageMove.createMany({
+      data: live.map((p) => ({
+        packageId: p.id,
+        type: 'PRINTED' as const,
+        qty: 0,
+        balanceAfter: p.qty,
+        warehouseId: p.warehouseId,
+        notes: p.printCount > 0 ? `Reprint ${p.printCount + 1}` : 'First print',
+        createdById: req.user?.id ?? null,
+      })),
+    })
+    return live.length
+  })
+  res.json({ success: true, data: { updated } })
 })
 
 router.post('/batch', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
@@ -975,11 +1003,28 @@ router.post('/:id/rack', requirePermission(MODULE, 'edit'), async (req: AuthRequ
 /** Issuing from a scanned package against a requisition. The rest stays in the package. */
 router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
   const data = issueSchema.parse(req.body)
+  // Kept for the audit trail of a first issue; a repeat writes none.
+  let audit: { mr: unknown; handedOver: unknown } | null = null
   const result = await prisma.$transaction(
-    async (tx) => {
+    async (tx) => onceFor(tx, data.requestId, 'PACKAGE_ISSUE', req.user?.id ?? null, async () => {
       const pkg = await lockPackage(tx, req.params.id)
       const unit = pkg.item.uom?.symbol ?? ''
-      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is ${pkg.status === 'EMPTY' ? 'empty' : pkg.status === 'SPLIT' ? 'split into other packages' : 'withdrawn'}; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
+      if (pkg.status === 'EMPTY') {
+        // Already used up: say where it went, so nobody hunts for the roll.
+        const last = await tx.stockPackageMove.findFirst({ where: { packageId: pkg.id, type: 'ISSUED' }, orderBy: { createdAt: 'desc' } })
+        throw new AppError(
+          last
+            ? `Sticker ${pkg.code} was already issued on ${last.createdAt.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })} to ${last.referenceNumber ?? 'a requisition'}${last.notes ? ` (${last.notes})` : ''}. No second issue was posted.`
+            : `Sticker ${pkg.code} is empty; nothing can be issued from it. No issue was posted.`,
+          409,
+          'ALREADY_ISSUED',
+        )
+      }
+      if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} is ${pkg.status === 'SPLIT' ? 'split into other packages' : 'withdrawn'}; nothing can be issued from it.`, 400, 'NOT_IN_STOCK')
+      // A held roll stays on the rack until an approver releases it or it goes back to the customer.
+      if (pkg.grade === 'R') {
+        throw new AppError(`${pkg.code} is on hold: rejected at receipt${pkg.sourceRef ? ` on ${pkg.sourceRef}` : ''}. It cannot be issued until an approver releases it.`, 409, 'HELD')
+      }
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
       const line = await tx.materialRequisitionLine.findUnique({ where: { id: data.lineId }, select: { mrId: true, itemId: true, ownership: true, ownerCustomerId: true } })
       if (!line || line.mrId !== data.mrId) throw new AppError('That line is not on this requisition.', 400, 'WRONG_LINE')
@@ -1006,23 +1051,36 @@ router.post('/:id/issue', requirePermission(MODULE, 'edit'), async (req: AuthReq
         notes: `To ${issued.after.department?.name ?? 'production'}`,
         userId: req.user?.id ?? null,
       })
-      return { pkg, left, unit, mrNumber: issued.after.mrNumber, issued }
-    },
+      audit = { mr: issued.after, handedOver: issued.handedOver }
+      return {
+        pkgId: pkg.id,
+        code: pkg.code,
+        mrId: issued.after.id,
+        mrNumber: issued.after.mrNumber,
+        left,
+        message: `${data.qty} ${unit} issued from ${pkg.code} against ${issued.after.mrNumber}. ${left > 0 ? `${left} ${unit} left in it.` : 'The package is now empty.'}`,
+      }
+    }),
     { timeout: 60_000, maxWait: 20_000 },
   )
-  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: result.pkg.id, after: { issued: data.qty, against: result.mrNumber, left: result.left } })
-  // The requisition's own history shows the issue too, as a typed one would.
-  await writeAuditLog(req, {
-    module: MODULE,
-    action: 'UPDATE',
-    entityType: 'MaterialRequisition',
-    entityId: result.issued.after.id,
-    after: { ...result.issued.after, handedOverNow: result.issued.handedOver, byScanOf: result.pkg.code },
-  })
+  const done = result.result
+  if (audit) {
+    const a = audit as { mr: Record<string, unknown>; handedOver: unknown }
+    await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'StockPackage', entityId: done.pkgId, after: { issued: data.qty, against: done.mrNumber, left: done.left } })
+    // The requisition's own history shows the issue too, as a typed one would.
+    await writeAuditLog(req, {
+      module: MODULE,
+      action: 'UPDATE',
+      entityType: 'MaterialRequisition',
+      entityId: done.mrId,
+      after: { ...a.mr, handedOverNow: a.handedOver, byScanOf: done.code },
+    })
+  }
   res.json({
     success: true,
-    message: `${data.qty} ${result.unit} issued from ${result.pkg.code} against ${result.mrNumber}. ${result.left > 0 ? `${result.left} ${result.unit} left in it.` : 'The package is now empty.'}`,
-    data: await detail(result.pkg.id),
+    message: result.repeat ? `${done.message} (That was the same scan again: nothing more was issued.)` : done.message,
+    data: await detail(done.pkgId),
+    repeat: result.repeat,
   })
 })
 
@@ -1037,6 +1095,7 @@ router.post('/:id/transfer', requirePermission(MODULE, 'edit'), async (req: Auth
       const pkg = await lockPackage(tx, req.params.id)
       const unit = pkg.item.uom?.symbol ?? ''
       if (pkg.status !== 'IN_STOCK') throw new AppError(`${pkg.code} has nothing in it to move.`, 400, 'NOT_IN_STOCK')
+      if (pkg.grade === 'R') throw new AppError(`${pkg.code} is on hold (rejected at receipt), so it stays where it is until it is released or sent back.`, 409, 'HELD')
       if (data.toWarehouseId === pkg.warehouseId) throw new AppError(`${pkg.code} is already in ${pkg.warehouse.name}.`, 400, 'SAME_STORE')
       if (data.qty > Number(pkg.qty) + 1e-9) throw new AppError(`${pkg.code} has only ${Number(pkg.qty)} ${unit} in it.`, 400, 'OVER_PACKAGE')
 
@@ -1146,6 +1205,8 @@ router.post('/:id/split', requirePermission(MODULE, 'edit'), async (req: AuthReq
         fromPackage: true,
         unit,
         itemName: pkg.item.name,
+        // A held roll's pieces are held too.
+        grade: pkg.grade,
       })
       await tx.stockPackage.update({ where: { id: pkg.id }, data: { qty: left, status: left <= 0 ? 'SPLIT' : 'IN_STOCK' } })
       await recordPackageMove(tx, {
@@ -1180,8 +1241,20 @@ router.post('/:id/correct', requirePermission(MODULE, 'edit'), async (req: AuthR
     const pkg = await lockPackage(tx, req.params.id)
     const unit = pkg.item.uom?.symbol ?? ''
     if (pkg.status === 'VOID') throw new AppError(`${pkg.code} was withdrawn.`, 400, 'VOID')
+    // An emptied or split sticker stays dead: bringing its code back would let
+    // a roll that already went to the floor be issued a second time. A roll
+    // found again is put on the books by a stock count, with a fresh sticker.
+    if (pkg.status !== 'IN_STOCK') {
+      throw new AppError(
+        `${pkg.code} is ${pkg.status === 'EMPTY' ? 'used up' : 'split into other packages'}, and a used sticker is never brought back. If the roll is really on the rack, record it in a stock count: it gets a new sticker.`,
+        409,
+        'STICKER_USED',
+      )
+    }
     const change = round3(data.qty - Number(pkg.qty))
     if (change > 0) {
+      // The same lock every movement of this stock takes, so the loose figure cannot change under us.
+      await lockedBalanceOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
       const pos = await positionOf(tx, { itemId: pkg.itemId, warehouseId: pkg.warehouseId, ownership: pkg.ownership, ownerCustomerId: pkg.ownerCustomerId })
       if (change > pos.loose + 1e-9) {
         throw new AppError(

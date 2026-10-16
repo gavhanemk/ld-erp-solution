@@ -48,7 +48,7 @@ export const MOVEMENT_DOC_JOIN = Prisma.sql`
     UNION ALL
     SELECT cg."grnNumber", 'customer', cu.id, cu.name
       FROM ld_erp.customer_grn cg JOIN ld_erp.customers cu ON cu.id = cg."customerId"
-      WHERE s."referenceType" IN ('CUSTOMER_GRN', 'CUSTOMER_GRN_CANCELLED') AND cg.id = s."referenceId"
+      WHERE s."referenceType" IN ('CUSTOMER_GRN', 'CUSTOMER_GRN_CANCELLED', 'CUSTOMER_GRN_RELEASE') AND cg.id = s."referenceId"
     UNION ALL
     SELECT cr."returnNumber", 'customer', cu.id, cu.name
       FROM ld_erp.customer_material_returns cr JOIN ld_erp.customers cu ON cu.id = cr."customerId"
@@ -113,6 +113,7 @@ export const DOCUMENT_LABEL: Record<string, string> = {
   GRN_QC_USED: 'Quality check',
   CUSTOMER_GRN: 'Received from customer',
   CUSTOMER_GRN_CANCELLED: 'Customer receipt cancelled',
+  CUSTOMER_GRN_RELEASE: 'Released from hold',
   CUSTOMER_RETURN: 'Returned to customer',
   CUSTOMER_RETURN_CANCELLED: 'Return to customer cancelled',
   JOB_WORK_CHALLAN: 'Sent for job work',

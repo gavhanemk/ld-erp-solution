@@ -30,6 +30,9 @@ import {
   STOCK_IN_SOURCES,
   adjustmentSchema,
   cancelCustomerGrnSchema,
+  postCustomerGrnSchema,
+  sendBackCustomerGrnSchema,
+  releaseCustomerGrnSchema,
   cancelCustomerReturnSchema,
   cancelJobWorkChallanSchema,
   cancelTransferSchema,
@@ -52,6 +55,9 @@ import {
   transferSchema,
 } from '../schemas/inventory.schemas'
 import { autoStickers, stickersNote, withdrawStickers } from '../services/stickers.service'
+import { assertOwnersFitOrder } from '../services/ownership.service'
+import { onceFor } from '../lib/onceFor'
+import { CGRN_STATUS_LABEL, HELD, heldByLine, postGrnStock, releaseHeld, reverseGrnStock, takeHeldPackages } from '../services/customerGrn.service'
 import { fillJobCardBlanks } from '../services/jobCard.service'
 
 const router = Router()
@@ -1570,10 +1576,9 @@ export async function createRequisition(
     if (found !== owners.length) throw new AppError('One of those customers does not exist', 404, 'NOT_FOUND')
   }
 
-  if (data.soId) {
-    const so = await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true } })
-    if (!so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
-  }
+  // The order it is for — named, or its MO's — and every customer-owned line
+  // that customer's, for a job-work order of theirs.
+  const order = await assertOwnersFitOrder(tx, { soId: data.soId, moId: data.moId, doc: 'requisition' }, data.lines)
 
   // A style number that is exactly a style's code is linked to it; anything else is kept as typed.
   const typedStyles = [...new Set(data.lines.map((l) => l.styleNo?.trim()).filter((v): v is string => !!v))]
@@ -1591,7 +1596,9 @@ export async function createRequisition(
       mrNumber,
       departmentId: data.departmentId,
       moId: data.moId || null,
-      soId: data.soId || null,
+      // Its MO's order when only the MO was named, so what it draws counts
+      // against that order everywhere the order is reconciled.
+      soId: data.soId || order?.id || null,
       requiredDate: data.requiredDate ?? null,
       notes: data.notes ?? null,
       raisedById: userId,
@@ -2108,6 +2115,11 @@ export async function issueRequisition(
     }
   }
 
+  // A customer's material goes only to that customer's job-work order:
+  // checked again at the hand-over, whatever was true when it was raised —
+  // the order may have been cancelled or changed since.
+  await assertOwnersFitOrder(tx, { soId: mr.soId, moId: mr.moId, doc: 'requisition' }, mr.lines.filter((l) => plan.has(l.id)))
+
   const storeNames = new Map(
     (await tx.warehouse.findMany({
       where: { id: { in: [...new Set([...plan.values()].flat().map((a) => a.warehouseId))] } },
@@ -2229,23 +2241,36 @@ router.post(
   async (req: AuthRequest, res) => {
     const body = issueRequisitionSchema.parse(req.body ?? {})
 
-    const result = await prisma.$transaction((tx) => issueRequisition(tx, req.params.id, body, req.user))
+    let first: Awaited<ReturnType<typeof issueRequisition>> | null = null
+    const once = await prisma.$transaction((tx) =>
+      onceFor(tx, body.requestId, 'MR_ISSUE', req.user?.id ?? null, async () => {
+        const result = await issueRequisition(tx, req.params.id, body, req.user)
+        first = result
+        return {
+          message:
+            result.stillOwed === 0
+              ? `${result.after.mrNumber} issued in full.`
+              : `Issued against ${result.after.mrNumber}: ${result.handedOver.join(', ')}. ${result.stillOwed} ${result.stillOwed === 1 ? 'line is' : 'lines are'} still to be handed over.`,
+        }
+      }),
+    )
 
-    await writeAuditLog(req, {
-      module: MODULE,
-      action: 'UPDATE',
-      entityType: 'MaterialRequisition',
-      entityId: result.after.id,
-      after: { ...result.after, handedOverNow: result.handedOver },
-    })
+    if (first) {
+      const r = first as Awaited<ReturnType<typeof issueRequisition>>
+      await writeAuditLog(req, {
+        module: MODULE,
+        action: 'UPDATE',
+        entityType: 'MaterialRequisition',
+        entityId: r.after.id,
+        after: { ...r.after, handedOverNow: r.handedOver },
+      })
+    }
 
     res.json({
       success: true,
-      message:
-        result.stillOwed === 0
-          ? `${result.after.mrNumber} issued in full.`
-          : `Issued against ${result.after.mrNumber}: ${result.handedOver.join(', ')}. ${result.stillOwed} ${result.stillOwed === 1 ? 'line is' : 'lines are'} still to be handed over.`,
-      data: result.after,
+      message: once.repeat ? `${once.result.message} (That was the same request again: nothing more was issued.)` : once.result.message,
+      data: await prisma.materialRequisition.findUnique({ where: { id: req.params.id }, include: mrInclude }),
+      repeat: once.repeat,
     })
   },
 )
@@ -2769,6 +2794,10 @@ const customerGrnInclude = {
   warehouse: { select: { id: true, name: true } },
   receivedBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
+  submittedBy: { select: { id: true, name: true } },
+  postedBy: { select: { id: true, name: true } },
+  correctionOf: { select: { id: true, grnNumber: true } },
+  corrections: { select: { id: true, grnNumber: true, status: true } },
   lines: { include: { item: itemLineSelect } },
 }
 
@@ -2811,8 +2840,82 @@ export async function createCustomerGrn(
   tx: Prisma.TransactionClient,
   data: ReturnType<typeof createCustomerGrnSchema.parse>,
   userId: string | null,
+  /** Posted unless said otherwise: the import, and every receipt before drafts, book on save. */
+  status: 'DRAFT' | 'SUBMITTED' | 'POSTED' = 'POSTED',
+  extra: { correctionOfId?: string } = {},
 ) {
   const when = data.receiptDate ?? new Date()
+  const { customer } = await checkCustomerGrnParties(tx, data)
+
+  const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
+  const now = new Date()
+
+  const created = await tx.customerGRN.create({
+    data: {
+      grnNumber,
+      ...customerGrnHeader(data),
+      receiptDate: when,
+      receivedById: userId,
+      status,
+      submittedAt: status === 'DRAFT' ? null : now,
+      submittedById: status === 'DRAFT' ? null : userId,
+      postedAt: status === 'POSTED' ? now : null,
+      postedById: status === 'POSTED' ? userId : null,
+      inspectionNotes: data.inspectionNotes ?? null,
+      correctionOfId: extra.correctionOfId ?? null,
+      lines: { create: data.lines.map(customerGrnLine) },
+    },
+    include: { lines: true },
+  })
+
+  // Nothing reaches the books before it is posted.
+  if (status === 'POSTED') await postGrnStock(tx, { ...created, receiptDate: when }, customer.name, false)
+
+  return tx.customerGRN.findUniqueOrThrow({
+    where: { id: created.id },
+    include: customerGrnInclude,
+  })
+}
+
+/** The receipt's own details, as saved: shared by a new receipt and an edited draft. */
+function customerGrnHeader(data: ReturnType<typeof createCustomerGrnSchema.parse>) {
+  return {
+    customerId: data.customerId,
+    soId: data.soId ?? null,
+    warehouseId: data.warehouseId,
+    challanNumber: data.challanNumber ?? null,
+    challanDate: data.challanDate ?? null,
+    gateEntryNumber: data.gateEntryNumber ?? null,
+    gateEntryDate: data.gateEntryDate ?? null,
+    billNumber: data.billNumber ?? null,
+    billDate: data.billDate ?? null,
+    vehicleNo: data.vehicleNo ?? null,
+    transporter: data.transporter ?? null,
+    notes: data.notes ?? null,
+  }
+}
+
+function customerGrnLine(l: ReturnType<typeof createCustomerGrnSchema.parse>['lines'][number]) {
+  return {
+    itemId: l.itemId,
+    challanQty: l.challanQty,
+    receivedQty: l.receivedQty,
+    rejectedQty: l.rejectedQty ?? 0,
+    rejectReason: (l.rejectedQty ?? 0) > 0 ? l.rejectReason?.trim() || null : null,
+    batchNumber: l.batchNumber ?? null,
+    markings: l.markings ?? null,
+  }
+}
+
+/**
+ * Whose material it is, where it went and what it is for: checked when a
+ * receipt is saved, and again when it is posted — a customer switched off or
+ * an order closed in between stops it reaching the books.
+ */
+async function checkCustomerGrnParties(
+  tx: Prisma.TransactionClient,
+  data: { customerId: string; warehouseId: string; soId?: string | null },
+) {
   const [customer, warehouse] = await Promise.all([
     tx.customer.findUnique({ where: { id: data.customerId }, select: { id: true, name: true, isActive: true } }),
     tx.warehouse.findUnique({ where: { id: data.warehouseId }, select: { id: true, name: true, isActive: true } }),
@@ -2849,101 +2952,189 @@ export async function createCustomerGrn(
       throw new AppError(`${so.soNumber} is ${so.status.toLowerCase()}, so nothing more comes in for it.`, 400, 'ORDER_NOT_OPEN')
     }
   }
+  return { customer, warehouse }
+}
 
-  const grnNumber = await nextDocumentNumber(tx, 'CGRN', when)
-
-  const created = await tx.customerGRN.create({
-    data: {
-      grnNumber,
-      customerId: data.customerId,
-      soId: data.soId ?? null,
-      warehouseId: data.warehouseId,
-      receiptDate: when,
-      challanNumber: data.challanNumber ?? null,
-      challanDate: data.challanDate ?? null,
-      gateEntryNumber: data.gateEntryNumber ?? null,
-      gateEntryDate: data.gateEntryDate ?? null,
-      billNumber: data.billNumber ?? null,
-      billDate: data.billDate ?? null,
-      vehicleNo: data.vehicleNo ?? null,
-      transporter: data.transporter ?? null,
-      notes: data.notes ?? null,
-      receivedById: userId,
-      lines: {
-        create: data.lines.map((l) => ({
-          itemId: l.itemId,
-          challanQty: l.challanQty,
-          receivedQty: l.receivedQty,
-          rejectedQty: l.rejectedQty ?? 0,
-          batchNumber: l.batchNumber ?? null,
-          markings: l.markings ?? null,
-        })),
-      },
-    },
-    include: { lines: true },
-  })
-
-  for (const line of created.lines) {
-    await recordMovement(tx, {
-      itemId: line.itemId,
-      warehouseId: data.warehouseId,
-      transactionType: 'CUSTOMER_MATERIAL',
-      direction: 'IN',
-      qty: Number(line.receivedQty),
-      // Not ours, so it carries no value to us and never reaches the stock
-      // figure or the balance sheet.
-      unitRate: 0,
-      ownership: 'CUSTOMER_OWNED',
-      ownerCustomerId: data.customerId,
-      batchNumber: line.batchNumber,
-      referenceType: 'CUSTOMER_GRN',
-      referenceId: created.id,
-      transactionDate: when,
-      notes: `${grnNumber}: ${customer.name}`,
-    })
+/**
+ * Puts a draft or submitted receipt on the books, once.
+ *
+ * The row is locked and its status moved from DRAFT/SUBMITTED to POSTED in one
+ * conditional update: a second "Post" — a double click, a retry, another
+ * approver at the same moment — waits for the first, then finds it posted and
+ * books nothing.
+ */
+async function postCustomerGrn(tx: Prisma.TransactionClient, id: string, userId: string | null, inspectionNotes?: string | null) {
+  await lockRow(tx, 'customerGrn', id)
+  const grn = await tx.customerGRN.findUnique({ where: { id }, include: { lines: true } })
+  if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+  if (grn.status === 'POSTED') {
+    throw new AppError(`${grn.grnNumber} is already on the books${grn.postedAt ? ` (posted ${grn.postedAt.toLocaleDateString('en-IN')})` : ''}. Nothing was posted again.`, 409, 'ALREADY_POSTED')
   }
+  if (grn.status === 'CANCELLED') throw new AppError(`${grn.grnNumber} was cancelled, so it cannot be posted.`, 409, 'CANCELLED')
+  if (!grn.lines.some((l) => Number(l.receivedQty) > 0)) throw new AppError(`Nothing was received on ${grn.grnNumber}. Enter what arrived first.`, 400, 'NOTHING_RECEIVED')
+  const noReason = grn.lines.find((l) => Number(l.rejectedQty) > 0 && !l.rejectReason?.trim())
+  if (noReason) throw new AppError(`Say why the rejected material on ${grn.grnNumber} was rejected before posting it: edit the receipt and fill in the reason.`, 400, 'REJECT_REASON')
+  const { customer } = await checkCustomerGrnParties(tx, grn)
 
-  return tx.customerGRN.findUniqueOrThrow({
-    where: { id: created.id },
-    include: customerGrnInclude,
+  const now = new Date()
+  const moved = await tx.customerGRN.updateMany({
+    where: { id, status: { in: ['DRAFT', 'SUBMITTED'] } },
+    data: {
+      status: 'POSTED',
+      postedAt: now,
+      postedById: userId,
+      submittedAt: grn.submittedAt ?? now,
+      submittedById: grn.submittedById ?? userId,
+      ...(inspectionNotes?.trim() ? { inspectionNotes: inspectionNotes.trim() } : {}),
+    },
   })
+  if (moved.count !== 1) throw new AppError(`${grn.grnNumber} is already on the books. Nothing was posted again.`, 409, 'ALREADY_POSTED')
+  await postGrnStock(tx, grn, customer.name, true)
+  return grn
+}
+
+/** What a receipt's figures say, for the message after saving or posting it. */
+function customerGrnMessage(grn: { grnNumber: string; status: string; customer: { name: string }; warehouse: { name: string }; lines: Array<{ receivedQty: unknown; challanQty: unknown; rejectedQty: unknown }> }, stickers: number) {
+  if (grn.status === 'DRAFT') return `${grn.grnNumber} saved as a draft. Nothing is on the books until it is posted.`
+  if (grn.status === 'SUBMITTED') return `${grn.grnNumber} handed over for approval. Stock and stickers are made when an approver posts it.`
+  const short = grn.lines.reduce((n: number, l) => n + (Number(l.receivedQty) !== Number(l.challanQty) ? 1 : 0), 0)
+  const rejected = grn.lines.filter((l) => Number(l.rejectedQty) > 0).length
+  return [
+    short
+      ? `${grn.grnNumber} posted. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
+      : `${grn.grnNumber} posted. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
+    rejected
+      ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material: it is held apart and cannot be issued until it is released or sent back.`
+      : '',
+    stickersNote(stickers).trim(),
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+/** Posting needs an approver; anyone who may receive may keep a draft or hand one over. */
+function assertMayPost(req: AuthRequest) {
+  if (!userCan(req.user, MODULE, 'approve')) {
+    throw new AppError('Posting puts the receipt on the books, which needs an approver. Save it and hand it over for approval instead.', 403, 'NEEDS_APPROVER')
+  }
 }
 
 router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerGrnSchema.parse(req.body)
-  const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null))
-  const made = await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, req.user?.id ?? null)
+  const action = data.action ?? 'POST'
+  if (action === 'POST') assertMayPost(req)
+  const status = action === 'DRAFT' ? 'DRAFT' : action === 'SUBMIT' ? 'SUBMITTED' : 'POSTED'
+  const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null, status))
+  const made = status === 'POSTED' ? await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, req.user?.id ?? null) : { count: 0, ids: [], sourceRef: null }
 
   await writeAuditLog(req, {
     module: MODULE,
-    action: 'CREATE',
+    action: status === 'POSTED' ? 'APPROVE' : 'CREATE',
     entityType: 'CustomerGRN',
     entityId: grn.id,
     after: grn,
   })
 
-  const short = grn.lines.reduce(
-    (n, l) => n + (Number(l.receivedQty) !== Number(l.challanQty) ? 1 : 0),
-    0,
-  )
-  const rejected = grn.lines.filter((l) => Number(l.rejectedQty) > 0).length
+  res.status(201).json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
+})
 
-  res.status(201).json({
-    success: true,
-    message: [
-      short
-        ? `${grn.grnNumber} saved. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
-        : `${grn.grnNumber} saved. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
-      rejected
-        ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material; it is in their stock until it goes back on a return challan.`
-        : '',
-      stickersNote(made.count).trim(),
-    ]
-      .filter(Boolean)
-      .join(' '),
-    data: grn,
-    made,
+/**
+ * Changing a receipt that is not on the books yet: a draft by whoever entered
+ * it, a submitted one by them or by the approver inspecting it. With `action`
+ * it is then handed over or posted in the same step. A posted receipt is never
+ * edited: it is cancelled and a corrected copy entered.
+ */
+router.put('/customer-grn/:id', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const data = createCustomerGrnSchema.parse(req.body)
+  const action = data.action ?? 'DRAFT'
+  if (action === 'POST') assertMayPost(req)
+  const userId = req.user?.id ?? null
+
+  const before = await prisma.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
+  const grn = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'customerGrn', req.params.id)
+    const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, select: { id: true, grnNumber: true, status: true, receivedById: true } })
+    if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+    if (was.status !== 'DRAFT' && was.status !== 'SUBMITTED') {
+      throw new AppError(
+        was.status === 'POSTED'
+          ? `${was.grnNumber} is on the books, so it is not edited. Use "Cancel & correct" to replace it with a corrected copy.`
+          : `${was.grnNumber} was cancelled, so it cannot be changed.`,
+        409,
+        'NOT_EDITABLE',
+      )
+    }
+    if (was.status === 'SUBMITTED' && was.receivedById !== userId && !userCan(req.user, MODULE, 'approve')) {
+      throw new AppError(`${was.grnNumber} is waiting for an approver; only they, or whoever entered it, can change it now.`, 403, 'NOT_YOURS')
+    }
+    await checkCustomerGrnParties(tx, data)
+    await tx.customerGRNLine.deleteMany({ where: { grnId: was.id } })
+    await tx.customerGRN.update({
+      where: { id: was.id },
+      data: {
+        ...customerGrnHeader(data),
+        ...(data.receiptDate ? { receiptDate: data.receiptDate } : {}),
+        ...(data.inspectionNotes !== undefined ? { inspectionNotes: data.inspectionNotes ?? null } : {}),
+        ...(action === 'SUBMIT' && was.status === 'DRAFT' ? { status: 'SUBMITTED', submittedAt: new Date(), submittedById: userId } : {}),
+        lines: { create: data.lines.map(customerGrnLine) },
+      },
+    })
+    if (action === 'POST') await postCustomerGrn(tx, was.id, userId, data.inspectionNotes)
+    return tx.customerGRN.findUniqueOrThrow({ where: { id: was.id }, include: customerGrnInclude })
   })
+  const made = grn.status === 'POSTED' ? await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, userId) : { count: 0, ids: [], sourceRef: null }
+
+  await writeAuditLog(req, { module: MODULE, action: grn.status === 'POSTED' ? 'APPROVE' : 'UPDATE', entityType: 'CustomerGRN', entityId: grn.id, before, after: grn })
+  res.json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
+})
+
+/** Handing a draft over to an approver. */
+router.post('/customer-grn/:id/submit', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
+  const grn = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'customerGrn', req.params.id)
+    const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
+    if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+    if (was.status !== 'DRAFT') throw new AppError(`${was.grnNumber} is ${CGRN_STATUS_LABEL[was.status]?.toLowerCase() ?? was.status}, not a draft.`, 409, 'NOT_DRAFT')
+    if (!was.lines.some((l) => Number(l.receivedQty) > 0)) throw new AppError('Enter what arrived on at least one line first.', 400, 'NOTHING_RECEIVED')
+    if (was.lines.some((l) => Number(l.rejectedQty) > 0 && !l.rejectReason?.trim())) throw new AppError('Say why the rejected material was rejected before handing it over.', 400, 'REJECT_REASON')
+    return tx.customerGRN.update({
+      where: { id: was.id },
+      data: { status: 'SUBMITTED', submittedAt: new Date(), submittedById: req.user?.id ?? null },
+      include: customerGrnInclude,
+    })
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CustomerGRN', entityId: grn.id, after: { status: grn.status } })
+  res.json({ success: true, message: customerGrnMessage(grn, 0), data: grn })
+})
+
+/** An approver posting a receipt as it stands: the stock and its stickers are made, once. */
+router.post('/customer-grn/:id/post', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { inspectionNotes } = postCustomerGrnSchema.parse(req.body ?? {})
+  const grn = await prisma.$transaction(async (tx) => {
+    await postCustomerGrn(tx, req.params.id, req.user?.id ?? null, inspectionNotes)
+    return tx.customerGRN.findUniqueOrThrow({ where: { id: req.params.id }, include: customerGrnInclude })
+  })
+  const made = await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, req.user?.id ?? null)
+  await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'CustomerGRN', entityId: grn.id, after: grn })
+  res.json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
+})
+
+/** An approver handing a submitted receipt back to be counted again. */
+router.post('/customer-grn/:id/send-back', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const { reason } = sendBackCustomerGrnSchema.parse(req.body ?? {})
+  const grn = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'customerGrn', req.params.id)
+    const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, select: { id: true, grnNumber: true, status: true } })
+    if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+    if (was.status !== 'SUBMITTED') throw new AppError(`${was.grnNumber} is not waiting for approval.`, 409, 'NOT_SUBMITTED')
+    return tx.customerGRN.update({
+      where: { id: was.id },
+      data: { status: 'DRAFT', inspectionNotes: `Sent back: ${reason}` },
+      include: customerGrnInclude,
+    })
+  })
+  await writeAuditLog(req, { module: MODULE, action: 'REJECT', entityType: 'CustomerGRN', entityId: grn.id, after: { status: grn.status, reason } })
+  res.json({ success: true, message: `${grn.grnNumber} sent back to be counted again: ${reason}`, data: grn })
 })
 
 router.get('/customer-grn', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -2953,6 +3144,7 @@ router.get('/customer-grn', requirePermission(MODULE, 'view'), async (req, res) 
   const where: Record<string, unknown> = {}
   if (str(req.query.customerId)) where.customerId = str(req.query.customerId)
   if (str(req.query.warehouseId)) where.warehouseId = str(req.query.warehouseId)
+  if (str(req.query.status)) where.status = { in: str(req.query.status)!.split(',') }
   if (str(req.query.q)) {
     where.OR = [
       { grnNumber: { contains: str(req.query.q), mode: 'insensitive' } },
@@ -2986,7 +3178,7 @@ router.get('/customer-grn', requirePermission(MODULE, 'view'), async (req, res) 
  * in our stores now, from the ledger. Ahead of /customer-grn/:id.
  */
 router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req, res) => {
-  const [receipts, held] = await Promise.all([
+  const [receipts, held, onHold, rejectedBack] = await Promise.all([
     prisma.customerGRN.findMany({
       orderBy: [{ receiptDate: 'desc' }, { createdAt: 'desc' }],
       take: 2000,
@@ -3009,7 +3201,21 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       },
     }),
     onHand(prisma, { ownership: 'CUSTOMER_OWNED' }),
+    // Of what each customer has with us, how much is held (rejected, not usable).
+    prisma.stockLedger.groupBy({
+      by: ['itemId', 'warehouseId', 'ownerCustomerId'],
+      where: { ownership: 'CUSTOMER_OWNED', grade: HELD },
+      _sum: { inQty: true, outQty: true },
+    }),
+    prisma.customerMaterialReturnLine.findMany({
+      where: { return: { reason: 'REJECTED', cancelledAt: null, grnId: { not: null } } },
+      select: { itemId: true, qty: true, return: { select: { grnId: true } } },
+    }),
   ])
+  const holdKey = (itemId: string, warehouseId: string, customerId: string | null) => `${itemId}|${warehouseId}|${customerId ?? ''}`
+  const holdOf = new Map(onHold.map((h) => [holdKey(h.itemId, h.warehouseId, h.ownerCustomerId), Number(h._sum.inQty ?? 0) - Number(h._sum.outQty ?? 0)]))
+  const backOf = new Map<string, number>()
+  for (const b of rejectedBack) backOf.set(`${b.return.grnId}|${b.itemId}`, (backOf.get(`${b.return.grnId}|${b.itemId}`) ?? 0) + Number(b.qty))
 
   type ItemAbout = {
     type: string
@@ -3043,6 +3249,10 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       notes: r.notes,
       cancelledAt: r.cancelledAt,
       cancelReason: r.cancelReason,
+      status: r.status,
+      statusLabel: CGRN_STATUS_LABEL[r.status] ?? r.status,
+      postedAt: r.postedAt,
+      correctionOfId: r.correctionOfId,
       customerId: r.customer.id,
       customerName: r.customer.name,
       soNumber: r.so?.soNumber ?? null,
@@ -3058,6 +3268,13 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       challanQty: Number(l.challanQty),
       receivedQty: Number(l.receivedQty),
       rejectedQty: Number(l.rejectedQty),
+      rejectReason: l.rejectReason,
+      releasedQty: Number(l.releasedQty),
+      // Still held on this line: rejected, less released, less sent back as rejected.
+      heldQty:
+        r.status === 'POSTED'
+          ? Math.max(0, Math.round((Number(l.rejectedQty) - Number(l.releasedQty) - (backOf.get(`${r.id}|${l.item.id}`) ?? 0)) * 1000) / 1000)
+          : 0,
       batchNumber: l.batchNumber,
       markings: l.markings,
     })),
@@ -3087,6 +3304,8 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       customerId: h.ownerCustomerId,
       customerName: h.ownerName,
       qty: h.qty,
+      /** Of `qty`, what is held (rejected at receipt): on the rack, not usable. */
+      onHold: Math.round((holdOf.get(holdKey(h.itemId, h.warehouseId, h.ownerCustomerId)) ?? 0) * 1000) / 1000,
       lastMovedAt: h.lastMovedAt,
       ...heldAbout.get(h.itemId),
     })),
@@ -3155,7 +3374,55 @@ router.get('/customer-grn/:id', requirePermission(MODULE, 'view'), async (req, r
     include: customerGrnInclude,
   })
   if (!row) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
-  res.json({ success: true, data: row })
+  const [held, packages] = await Promise.all([
+    row.status === 'POSTED' ? heldByLine(prisma, row.id) : Promise.resolve(new Map<string, { rejected: number; released: number; returned: number; held: number }>()),
+    // Its own stickers and every piece split from them: they keep its id.
+    prisma.stockPackage.findMany({
+      where: { sourceId: row.id, sourceType: { in: ['CUSTOMER_GRN', 'SPLIT'] } },
+      select: { id: true, code: true, itemId: true, packType: true, qty: true, initialQty: true, grade: true, status: true, lotNo: true, rack: true, printCount: true, parentId: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ])
+  res.json({
+    success: true,
+    data: {
+      ...row,
+      statusLabel: CGRN_STATUS_LABEL[row.status] ?? row.status,
+      lines: row.lines.map((l) => ({ ...l, hold: held.get(l.id) ?? null })),
+      packages,
+    },
+  })
+})
+
+/**
+ * The receipt as a printed acknowledgement for the customer's driver and the
+ * file: their challan beside what we counted, accepted and held, why, who
+ * received and who approved it, and the sticker numbers on the rolls.
+ */
+router.get('/customer-grn/:id/print', requirePermission(MODULE, 'view'), async (req, res) => {
+  const doc = await prisma.customerGRN.findUnique({
+    where: { id: req.params.id },
+    include: {
+      ...customerGrnInclude,
+      customer: {
+        select: {
+          id: true, name: true, code: true, gstin: true, phone: true,
+          billingAddress: true, billingCity: true, billingState: true, billingStateCode: true, billingPincode: true,
+        },
+      },
+      warehouse: { select: { id: true, name: true, address: true } },
+    },
+  })
+  if (!doc) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+  const [header, packages] = await Promise.all([
+    getPrintHeader('CGRN'),
+    prisma.stockPackage.findMany({
+      where: { sourceId: doc.id, sourceType: { in: ['CUSTOMER_GRN', 'SPLIT'] }, status: { not: 'VOID' } },
+      select: { code: true, itemId: true, qty: true, initialQty: true, grade: true, status: true },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ])
+  res.json({ success: true, data: { ...header, doc: { ...doc, statusLabel: CGRN_STATUS_LABEL[doc.status] ?? doc.status, packages } } })
 })
 
 /**
@@ -3165,72 +3432,57 @@ router.get('/customer-grn/:id', requirePermission(MODULE, 'view'), async (req, r
  * and says how much is actually left, which is the right answer: the cloth is
  * cut, and a tidy document would not put it back together.
  */
+/**
+ * Takes a receipt back. A draft or a submitted one never reached the books, so
+ * it is only marked. A posted one comes off the books — usable and held stock
+ * alike, as the ledger has it — unless any of it has gone back to the customer
+ * or out to the floor: the cloth is cut, and a tidy document would not put it
+ * back together.
+ */
+async function cancelCustomerGrn(tx: Prisma.TransactionClient, id: string, reason: string, userId: string | null) {
+  await lockRow(tx, 'customerGrn', id)
+  const before = await tx.customerGRN.findUnique({ where: { id }, include: { lines: true } })
+  if (!before) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+  if (before.cancelledAt || before.status === 'CANCELLED') {
+    throw new AppError(
+      `${before.grnNumber} was already cancelled${before.cancelledAt ? ` on ${before.cancelledAt.toLocaleDateString('en-IN')}` : ''}.`,
+      400,
+      'ALREADY_CANCELLED',
+    )
+  }
+
+  if (before.status === 'POSTED') {
+    // Material already sent back to the customer against it would be taken out a second time.
+    const returns = await tx.customerMaterialReturn.findMany({ where: { grnId: before.id, cancelledAt: null }, select: { returnNumber: true } })
+    if (returns.length) {
+      throw new AppError(
+        `${returns.map((r) => r.returnNumber).join(', ')} already sent material from ${before.grnNumber} back to the customer. Cancel ${returns.length === 1 ? 'that return' : 'those returns'} first, or leave the receipt as it is.`,
+        409,
+        'RETURNED_AGAINST',
+      )
+    }
+    await assertStockUnused(tx, { referenceId: before.id, label: before.grnNumber, suggestion: 'Send what is left back to the customer with a return instead.' })
+
+    // Its stickers come off with it, first, so taking the material out does
+    // not take another receipt's stickers down in their place.
+    await withdrawStickers(tx, { type: 'CUSTOMER_GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, userId)
+    await reverseGrnStock(tx, before, reason)
+  }
+
+  return tx.customerGRN.update({
+    where: { id: before.id },
+    data: { status: 'CANCELLED', cancelledAt: new Date(), cancelledById: userId, cancelReason: reason },
+    include: customerGrnInclude,
+  })
+}
+
 router.patch(
   '/customer-grn/:id/cancel',
   requirePermission(MODULE, 'edit'),
   async (req: AuthRequest, res) => {
     const { reason } = cancelCustomerGrnSchema.parse(req.body ?? {})
-
-    const after = await prisma.$transaction(async (tx) => {
-      await lockRow(tx, 'customerGrn', req.params.id)
-      const before = await tx.customerGRN.findUnique({
-        where: { id: req.params.id },
-        include: { lines: true },
-      })
-      if (!before) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
-      if (before.cancelledAt) {
-        throw new AppError(
-          `${before.grnNumber} was already cancelled on ${before.cancelledAt.toLocaleDateString('en-IN')}.`,
-          400,
-          'ALREADY_CANCELLED',
-        )
-      }
-
-      // Material already sent back to the customer against it would be taken out a second time.
-      const returns = await tx.customerMaterialReturn.findMany({ where: { grnId: before.id, cancelledAt: null }, select: { returnNumber: true } })
-      if (returns.length) {
-        throw new AppError(
-          `${returns.map((r) => r.returnNumber).join(', ')} already sent material from ${before.grnNumber} back to the customer. Cancel ${returns.length === 1 ? 'that return' : 'those returns'} first, or leave the receipt as it is.`,
-          409,
-          'RETURNED_AGAINST',
-        )
-      }
-      await assertStockUnused(tx, { referenceId: before.id, label: before.grnNumber, suggestion: 'Send what is left back to the customer with a return instead.' })
-
-      // Its stickers come off with it, first, so taking the material out does
-      // not take another receipt's stickers down in their place.
-      await withdrawStickers(tx, { type: 'CUSTOMER_GRN', id: before.id, ref: before.grnNumber }, `${before.grnNumber} cancelled: ${reason}`, req.user?.id ?? null)
-
-      for (const line of before.lines) {
-        const qty = Number(line.receivedQty)
-        if (qty <= 0) continue
-
-        await recordMovement(tx, {
-          itemId: line.itemId,
-          warehouseId: before.warehouseId,
-          transactionType: 'RETURN',
-          direction: 'OUT',
-          qty,
-          ownership: 'CUSTOMER_OWNED',
-          ownerCustomerId: before.customerId,
-          referenceType: 'CUSTOMER_GRN_CANCELLED',
-          referenceId: before.id,
-          transactionDate: new Date(),
-          notes: `${before.grnNumber} cancelled: ${reason}`,
-          earlierDate: 'move-up',
-        })
-      }
-
-      return tx.customerGRN.update({
-        where: { id: before.id },
-        data: {
-          cancelledAt: new Date(),
-          cancelledById: req.user?.id ?? null,
-          cancelReason: reason,
-        },
-        include: customerGrnInclude,
-      })
-    })
+    const wasPosted = (await prisma.customerGRN.findUnique({ where: { id: req.params.id }, select: { status: true } }))?.status === 'POSTED'
+    const after = await prisma.$transaction((tx) => cancelCustomerGrn(tx, req.params.id, reason, req.user?.id ?? null))
 
     await writeAuditLog(req, {
       module: MODULE,
@@ -3242,11 +3494,99 @@ router.patch(
 
     res.json({
       success: true,
-      message: `${after.grnNumber} cancelled and the material taken back off the books.`,
+      message: wasPosted ? `${after.grnNumber} cancelled and the material taken back off the books.` : `${after.grnNumber} cancelled. It was never on the books.`,
       data: after,
     })
   },
 )
+
+/**
+ * A posted receipt that was wrong: it is cancelled — with every check a cancel
+ * has — and a copy of it opened as a draft, linked to it, to be put right and
+ * posted. Nothing posted is ever edited in place, so the books and the audit
+ * trail show both the wrong receipt and the right one.
+ */
+router.post('/customer-grn/:id/correct', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason } = cancelCustomerGrnSchema.parse(req.body ?? {})
+  const userId = req.user?.id ?? null
+  const { was, copy } = await prisma.$transaction(
+    async (tx) => {
+      const was = await cancelCustomerGrn(tx, req.params.id, `Corrected: ${reason}`, userId)
+      const draft = createCustomerGrnSchema.parse({
+        customerId: was.customerId,
+        soId: was.soId,
+        warehouseId: was.warehouseId,
+        receiptDate: was.receiptDate,
+        challanNumber: was.challanNumber,
+        challanDate: was.challanDate,
+        gateEntryNumber: was.gateEntryNumber,
+        gateEntryDate: was.gateEntryDate,
+        billNumber: was.billNumber,
+        billDate: was.billDate,
+        vehicleNo: was.vehicleNo,
+        transporter: was.transporter,
+        notes: was.notes,
+        action: 'DRAFT',
+        lines: was.lines.map((l) => ({
+          itemId: l.itemId,
+          challanQty: Number(l.challanQty),
+          receivedQty: Number(l.receivedQty),
+          rejectedQty: Number(l.rejectedQty),
+          rejectReason: l.rejectReason,
+          batchNumber: l.batchNumber,
+          markings: l.markings,
+        })),
+      })
+      const copy = await createCustomerGrn(tx, draft, userId, 'DRAFT', { correctionOfId: was.id })
+      return { was, copy }
+    },
+    { timeout: 60_000 },
+  )
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CustomerGRN', entityId: was.id, after: { status: was.status, correctedBy: copy.grnNumber, reason } })
+  await writeAuditLog(req, { module: MODULE, action: 'CREATE', entityType: 'CustomerGRN', entityId: copy.id, after: copy })
+  res.status(201).json({
+    success: true,
+    message: `${was.grnNumber} cancelled. ${copy.grnNumber} is its corrected copy, as a draft: put right what was wrong and post it.`,
+    data: copy,
+  })
+})
+
+/**
+ * Rejected material passed for use after a second look, by an approver, with a
+ * reason: it moves from held to usable, and its stickers with it.
+ */
+router.post('/customer-grn/:id/release', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
+  const data = releaseCustomerGrnSchema.parse(req.body)
+  const result = await prisma.$transaction(
+    async (tx) => {
+      await lockRow(tx, 'customerGrn', req.params.id)
+      const grn = await tx.customerGRN.findUnique({
+        where: { id: req.params.id },
+        include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } },
+      })
+      if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+      if (grn.status !== 'POSTED') throw new AppError(`${grn.grnNumber} is not on the books, so nothing on it is held.`, 409, 'NOT_POSTED')
+      const line = grn.lines.find((l) => l.id === data.lineId)
+      if (!line) throw new AppError(`That line is not on ${grn.grnNumber}.`, 404, 'NOT_FOUND')
+      const unit = line.item.uom?.symbol ?? ''
+      const done = await releaseHeld(tx, grn, { id: line.id, itemId: line.itemId, itemName: line.item.name, unit }, data.qty, data.reason, req.user?.id ?? null)
+      return { grn, line, unit, done }
+    },
+    { timeout: 60_000 },
+  )
+  await writeAuditLog(req, {
+    module: MODULE,
+    action: 'APPROVE',
+    entityType: 'CustomerGRN',
+    entityId: result.grn.id,
+    after: { released: data.qty, item: result.line.item.name, reason: data.reason, stickers: result.done.packages },
+  })
+  res.json({
+    success: true,
+    message: `${data.qty} ${result.unit} of ${result.line.item.name} on ${result.grn.grnNumber} released for use${result.done.packages.length ? ` (stickers ${result.done.packages.join(', ')})` : ''}.`,
+    data: result.done,
+  })
+})
 
 // ── A customer's material going back to them ────────────────────────────────
 
@@ -3271,7 +3611,7 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
   if (data.grnId) {
     const grn = await tx.customerGRN.findUnique({
       where: { id: data.grnId },
-      select: { customerId: true, grnNumber: true, cancelledAt: true },
+      select: { customerId: true, grnNumber: true, cancelledAt: true, status: true },
     })
     if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
     if (grn.customerId !== data.customerId) {
@@ -3280,19 +3620,32 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
     if (grn.cancelledAt) {
       throw new AppError(`${grn.grnNumber} was cancelled, so nothing came in on it.`, 400, 'RECEIPT_CANCELLED')
     }
+    if (grn.status !== 'POSTED') {
+      throw new AppError(`${grn.grnNumber} is not on the books yet, so nothing can go back against it.`, 400, 'RECEIPT_NOT_POSTED')
+    }
     // Against a receipt: only what came in on it, and no more than came in
-    // less what has already gone back against it.
+    // less what has already gone back against it — the held part for a
+    // "Rejected" return, the usable part for any other.
+    const rejectedReturn = data.reason === 'REJECTED'
     const [gl, back] = await Promise.all([
-      tx.customerGRNLine.findMany({ where: { grnId: data.grnId }, select: { itemId: true, receivedQty: true, item: { select: { name: true } } } }),
-      tx.customerMaterialReturnLine.findMany({ where: { return: { grnId: data.grnId, cancelledAt: null } }, select: { itemId: true, qty: true } }),
+      tx.customerGRNLine.findMany({ where: { grnId: data.grnId }, select: { itemId: true, receivedQty: true, rejectedQty: true, releasedQty: true, item: { select: { name: true } } } }),
+      tx.customerMaterialReturnLine.findMany({ where: { return: { grnId: data.grnId, cancelledAt: null } }, select: { itemId: true, qty: true, return: { select: { reason: true } } } }),
     ])
     for (const l of data.lines) {
       const inLines = gl.filter((g) => g.itemId === l.itemId)
       if (!inLines.length) throw new AppError(`That item did not come in on ${grn.grnNumber}.`, 400, 'NOT_ON_RECEIPT')
-      const came = inLines.reduce((s, g) => s + Number(g.receivedQty), 0)
-      const gone = back.filter((b) => b.itemId === l.itemId).reduce((s, b) => s + Number(b.qty), 0)
+      const held = inLines.reduce((s, g) => s + Number(g.rejectedQty) - Number(g.releasedQty), 0)
+      const usable = inLines.reduce((s, g) => s + Number(g.receivedQty), 0) - held
+      const came = rejectedReturn ? held : usable
+      const gone = back.filter((b) => b.itemId === l.itemId && (b.return.reason === 'REJECTED') === rejectedReturn).reduce((s, b) => s + Number(b.qty), 0)
       if (l.qty > came - gone + 1e-9) {
-        throw new AppError(`${inLines[0].item.name}: ${came} came in on ${grn.grnNumber} and ${gone} has gone back, so ${l.qty} more is too much.`, 400, 'MORE_THAN_RECEIVED')
+        throw new AppError(
+          rejectedReturn
+            ? `${inLines[0].item.name}: ${Math.round(Math.max(0, came - gone) * 1000) / 1000} is still held as rejected on ${grn.grnNumber}, so ${l.qty} cannot go back as rejected.`
+            : `${inLines[0].item.name}: ${Math.round(came * 1000) / 1000} usable came in on ${grn.grnNumber} and ${gone} has gone back, so ${l.qty} more is too much.`,
+          400,
+          'MORE_THAN_RECEIVED',
+        )
       }
     }
   }
@@ -3336,7 +3689,19 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
     include: { lines: true },
   })
 
+  // Rejected material goes back from the held stock, with its held stickers;
+  // anything else from the usable stock, the labels window saying which rolls.
+  const rejected = data.reason === 'REJECTED'
   for (const line of doc.lines) {
+    if (rejected) {
+      await takeHeldPackages(
+        tx,
+        { itemId: line.itemId, warehouseId: data.warehouseId, ownership: 'CUSTOMER_OWNED', ownerCustomerId: data.customerId },
+        Number(line.qty),
+        { type: 'CUSTOMER_RETURN', id: doc.id, number: returnNumber, grnId: data.grnId ?? null },
+        userId,
+      )
+    }
     await recordMovement(tx, {
       itemId: line.itemId,
       warehouseId: data.warehouseId,
@@ -3345,11 +3710,12 @@ export async function createCustomerReturn(tx: Prisma.TransactionClient, data: z
       qty: Number(line.qty),
       ownership: 'CUSTOMER_OWNED',
       ownerCustomerId: data.customerId,
+      grade: rejected ? HELD : 'A',
       referenceType: 'CUSTOMER_RETURN',
       referenceId: doc.id,
       transactionDate: when,
       notes: `${returnNumber}: back to ${customer.name} (${RETURN_REASON_LABEL[data.reason].toLowerCase()})`,
-      stickers: 'window',
+      stickers: rejected ? 'caller' : 'window',
     })
   }
 
@@ -3503,16 +3869,25 @@ router.patch(
         )
       }
 
-      for (const line of before.lines) {
+      // Back in the grade it left: rejected material comes back held.
+      const went = await tx.stockLedger.groupBy({
+        by: ['itemId', 'grade'],
+        where: { referenceId: before.id, referenceType: 'CUSTOMER_RETURN' },
+        _sum: { outQty: true },
+      })
+      for (const w of went) {
+        const qty = Number(w._sum.outQty ?? 0)
+        if (qty <= 0.0005) continue
         await recordMovement(tx, {
-          itemId: line.itemId,
+          itemId: w.itemId,
           warehouseId: before.warehouseId,
           transactionType: 'CUSTOMER_MATERIAL',
           direction: 'IN',
-          qty: Number(line.qty),
+          qty,
           unitRate: 0,
           ownership: 'CUSTOMER_OWNED',
           ownerCustomerId: before.customerId,
+          grade: w.grade,
           referenceType: 'CUSTOMER_RETURN_CANCELLED',
           referenceId: before.id,
           transactionDate: new Date(),
@@ -3568,18 +3943,13 @@ export async function createJobWorkChallan(tx: Prisma.TransactionClient, data: z
   const whose: Array<Awaited<ReturnType<typeof whoseStock>>> = []
   for (const line of data.lines) whose.push(await whoseStock(tx, line))
 
-  // The order it is for: a customer's material can only go out for their own order.
-  const so = data.soId
-    ? await tx.salesOrder.findUnique({ where: { id: data.soId }, select: { id: true, soNumber: true, customerId: true } })
-    : null
-  if (data.soId && !so) throw new AppError('That sales order does not exist', 404, 'NOT_FOUND')
-  const mo = data.moId ? await tx.manufacturingOrder.findUnique({ where: { id: data.moId }, select: { id: true, soId: true } }) : null
-  if (data.moId && !mo) throw new AppError('That manufacturing order does not exist', 404, 'NOT_FOUND')
-  const orderCustomer =
-    so?.customerId ?? (mo?.soId ? (await tx.salesOrder.findUnique({ where: { id: mo.soId }, select: { customerId: true } }))?.customerId : null)
-  if (orderCustomer && whose.some((w) => w.ownerCustomerId && w.ownerCustomerId !== orderCustomer)) {
-    throw new AppError("A customer's material can only go out against their own order.", 400, 'WRONG_OWNER')
-  }
+  // The order it is for: a customer's material goes out only for one of
+  // their own job-work orders, which has to be named — never against none.
+  const order = await assertOwnersFitOrder(
+    tx,
+    { soId: data.soId, moId: data.moId, doc: 'job-work challan' },
+    whose.map((w, i) => ({ ...w, itemId: data.lines[i].itemId })),
+  )
 
   const challanNumber = await nextDocumentNumber(tx, 'JW', when)
 
@@ -3608,8 +3978,8 @@ export async function createJobWorkChallan(tx: Prisma.TransactionClient, data: z
       transporter: data.transporter ?? null,
       lrNumber: data.lrNumber ?? null,
       notes: data.notes ?? null,
-      soId: so?.id ?? mo?.soId ?? null,
-      moId: mo?.id ?? null,
+      soId: order?.id ?? null,
+      moId: data.moId || null,
       sentById: userId,
       lines: {
         create: data.lines.map((l, i) => ({

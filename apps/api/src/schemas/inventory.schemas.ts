@@ -302,6 +302,8 @@ export const releaseReservationSchema = z.object({
  */
 export const issueRequisitionSchema = z.object({
   issueDate: z.coerce.date().optional(),
+  /** The screen's id for this one press of Issue: a repeat of it issues nothing more. */
+  requestId: z.string().min(8).max(100).optional(),
   lines: z
     .array(
       z.object({
@@ -355,6 +357,14 @@ export const createCustomerGrnSchema = z
     vehicleNo: z.string().max(20, 'That vehicle number is too long').optional().nullable(),
     transporter: z.string().max(120).optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
+    /**
+     * What to do with it: keep it as a draft, hand it to an approver, or post
+     * it (approvers only) — stock and stickers are made only on posting. Left
+     * out, it is posted, as every receipt was before drafts existed.
+     */
+    action: z.enum(['DRAFT', 'SUBMIT', 'POST']).optional(),
+    /** What the approver found on inspection, when they post it. */
+    inspectionNotes: z.string().max(1000).optional().nullable(),
     lines: z
       .array(
         z.object({
@@ -365,6 +375,8 @@ export const createCustomerGrnSchema = z
           receivedQty: qty,
           /** Of what arrived, how much failed the check. Still booked in, and flagged to go back. */
           rejectedQty: z.coerce.number().min(0, 'Rejected cannot be below zero').max(9999999).optional().default(0),
+          /** Why: torn, stained, wrong shade. */
+          rejectReason: z.string().max(200).optional().nullable(),
           batchNumber: z.string().max(50).optional().nullable(),
           markings: z.string().max(200).optional().nullable(),
         })
@@ -389,6 +401,15 @@ export const createCustomerGrnSchema = z
           message: 'More is rejected than arrived. Rejected is part of what arrived.',
         })
       }
+      // Rejected material is held and can only leave on a reason: say it when
+      // the receipt is handed over or posted. A draft can wait for it.
+      if ((data.action === 'SUBMIT' || data.action === 'POST') && (line.rejectedQty ?? 0) > 0 && !line.rejectReason?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['lines', i, 'rejectReason'],
+          message: 'Say why it was rejected: torn, stained, wrong shade.',
+        })
+      }
     })
 
     if (!data.lines.some((l) => l.receivedQty > 0)) {
@@ -405,6 +426,23 @@ export const cancelCustomerGrnSchema = z.object({
     .string()
     .min(5, 'Say why the receipt is being cancelled — one line is enough')
     .max(500),
+})
+
+/** Posting a receipt as it stands, with what the approver found. */
+export const postCustomerGrnSchema = z.object({
+  inspectionNotes: z.string().max(1000).optional().nullable(),
+})
+
+/** Handing a submitted receipt back to be counted again. */
+export const sendBackCustomerGrnSchema = z.object({
+  reason: z.string().min(5, 'Say what needs checking again — one line is enough').max(500),
+})
+
+/** Releasing rejected material for use after a second look. */
+export const releaseCustomerGrnSchema = z.object({
+  lineId: id('the line'),
+  qty: z.coerce.number().positive('Enter how much to release').max(9999999),
+  reason: z.string().min(5, 'Say why it can be used after all — one line is enough').max(500),
 })
 
 /** Why a customer's material is going back to them. */

@@ -67,11 +67,11 @@ export const customerMaterialStock: ReportDefinition = {
         ownerCustomer: { select: { name: true } },
       },
     })
-    // Rejected at the gate is kept on the receipt line, not as a movement:
-    // rejected material still goes into stock, flagged.
+    // Rejected at the gate: on the receipt line, and in stock as held (grade
+    // R) on posted receipts. A draft has put nothing in stock yet.
     const rejectLines = await tx.customerGRNLine.findMany({
       where: {
-        grn: { cancelledAt: null, receiptDate: { lte: end }, ...(params.customerId ? { customerId: params.customerId } : {}) },
+        grn: { status: 'POSTED', receiptDate: { lte: end }, ...(params.customerId ? { customerId: params.customerId } : {}) },
         rejectedQty: { gt: 0 },
       },
       select: { itemId: true, rejectedQty: true, grn: { select: { customerId: true } } },

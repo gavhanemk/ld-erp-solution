@@ -135,8 +135,12 @@ export interface StockSpot {
  * more than the store holds: something left without being scanned.
  */
 export async function positionOf(tx: Prisma.TransactionClient, spot: StockSpot) {
-  const [ledger, packed] = await Promise.all([
-    balanceOf(tx, { itemId: spot.itemId, warehouseId: spot.warehouseId, ownership: spot.ownership, ownerCustomerId: spot.ownerCustomerId }),
+  // Usable and held together, as `positionsOf` and the sticker sync count
+  // them: a held roll is still a roll on the rack with its sticker.
+  const key = { itemId: spot.itemId, warehouseId: spot.warehouseId, ownership: spot.ownership, ownerCustomerId: spot.ownerCustomerId }
+  const [ledger, held, packed] = await Promise.all([
+    balanceOf(tx, key),
+    balanceOf(tx, { ...key, grade: 'R' }),
     tx.stockPackage.aggregate({
       where: {
         itemId: spot.itemId,
@@ -150,11 +154,12 @@ export async function positionOf(tx: Prisma.TransactionClient, spot: StockSpot) 
     }),
   ])
   const inPackages = round3(Number(packed._sum.qty ?? 0))
+  const inStore = round3(ledger.qty + held.qty)
   return {
-    inStore: round3(ledger.qty),
+    inStore,
     inPackages,
     packages: packed._count,
-    loose: round3(ledger.qty - inPackages),
+    loose: round3(inStore - inPackages),
     avgRate: ledger.avgRate,
   }
 }
@@ -375,6 +380,8 @@ export async function createPackages(
     fromPackage?: boolean
     unit: string
     itemName: string
+    /** 'R' for held stock (rejected at receipt): never issued until released. */
+    grade?: string
   },
 ) {
   const qtys = input.qtys.map(round3)
@@ -420,6 +427,7 @@ export async function createPackages(
         sourceRef: input.sourceRef ?? null,
         grnLineId: input.grnLineId ?? null,
         parentId: input.parentId ?? null,
+        grade: input.grade ?? 'A',
         createdById: input.userId,
       },
     })

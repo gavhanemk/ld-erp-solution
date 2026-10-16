@@ -351,6 +351,8 @@ model User {
   @@map("users")
   customerGrnReceived  CustomerGRN[]    @relation("CustomerGRNReceivedBy")
   customerGrnCancelled CustomerGRN[]    @relation("CustomerGRNCancelledBy")
+  customerGrnSubmitted CustomerGRN[]    @relation("CustomerGRNSubmittedBy")
+  customerGrnPosted    CustomerGRN[]    @relation("CustomerGRNPostedBy")
   customerReturnsMade      CustomerMaterialReturn[] @relation("CustomerReturnCreatedBy")
   customerReturnsCancelled CustomerMaterialReturn[] @relation("CustomerReturnCancelledBy")
   jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
@@ -3049,11 +3051,33 @@ model CustomerGRN {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
+  /// DRAFT (being entered), SUBMITTED (counted, waiting for an approver),
+  /// POSTED (on the books: stock and stickers made) or CANCELLED. Checked by
+  /// the API rather than an enum, like the return's reason. Nothing reaches
+  /// the stock ledger before POSTED, and posting happens once. Receipts made
+  /// before this field existed were all booked on save, so they read POSTED.
+  status          String      @default("POSTED")
+  submittedAt     DateTime?
+  submittedById   String?
+  submittedBy     User?       @relation("CustomerGRNSubmittedBy", fields: [submittedById], references: [id])
+  /// Who checked the count and the rejects and put it on the books, and when.
+  postedAt        DateTime?
+  postedById      String?
+  postedBy        User?       @relation("CustomerGRNPostedBy", fields: [postedById], references: [id])
+  /// What the approver found on inspection.
+  inspectionNotes String?
+  /// The cancelled receipt this one was entered to correct. A posted receipt
+  /// is never edited in place: it is cancelled, and a corrected copy entered.
+  correctionOfId  String?
+  correctionOf    CustomerGRN?  @relation("CustomerGRNCorrection", fields: [correctionOfId], references: [id])
+  corrections     CustomerGRN[] @relation("CustomerGRNCorrection")
+
   lines   CustomerGRNLine[]
   returns CustomerMaterialReturn[]
 
   @@index([customerId])
   @@index([receiptDate])
+  @@index([status])
   @@map("customer_grn")
 }
 
@@ -3073,6 +3097,11 @@ model CustomerGRNLine {
   /// into the customer's stock — it is on our floor — and is flagged so it can
   /// go back on a return challan. Accepted is received less this.
   rejectedQty Decimal     @default(0) @db.Decimal(10, 3)
+  /// Why it was rejected: torn, stained, wrong shade. Printed on the receipt.
+  rejectReason String?
+  /// Of the rejected, how much an approver has since released for use, with
+  /// a reason, after a second look. What is left is still held.
+  releasedQty Decimal     @default(0) @db.Decimal(10, 3)
   batchNumber String?
   /// Lot, shade, or whatever the customer wrote on the roll. Free text, because
   /// every customer marks their material differently.
@@ -5479,6 +5508,10 @@ enum PackageMoveType {
   VOIDED
   /// Put on a rack, or moved from one rack to another in the same store.
   RACKED
+  /// Printed again after its first print: who and when.
+  PRINTED
+  /// Taken off hold: rejected at receipt, then passed for use.
+  RELEASED
 }
 
 /// One physical package of stock — a roll, a box, a carton — with the QR
@@ -5514,6 +5547,10 @@ model StockPackage {
   rack            String?
   notes           String?
   status          PackageStatus  @default(IN_STOCK)
+  /// The grade of the stock it holds, as on the ledger: A is usable, R is held
+  /// (rejected at receipt). A held package is never issued, moved or
+  /// suggested for an outward until it is released.
+  grade           String         @default("A")
   /// Where it came from: GRN (labelled on receipt), STOCK (stock already on
   /// the rack, labelled later), SPLIT (cut from another package), or the
   /// inward it was labelled straight after: STOCK_IN, OPENING, CUSTOMER_GRN,
@@ -5544,6 +5581,26 @@ model StockPackage {
   @@index([parentId])
   @@index([warehouseId, rack])
   @@map("stock_packages")
+}
+
+/// One stock-changing request, kept under the id the screen sent with it.
+///
+/// A scanner that sends Enter twice, or a phone that retries on a weak
+/// signal, sends the same request again; the second finds the first here and
+/// gets its answer back instead of moving the stock a second time. The id is
+/// the primary key, so two copies arriving at once cannot both get in: the
+/// second waits for the first to finish and then reads what it did.
+model StockRequest {
+  id        String   @id
+  /// What the request was: MR_ISSUE, PACKAGE_ISSUE.
+  kind      String
+  userId    String?
+  /// The answer the first one got, sent back to any repeat.
+  result    Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("stock_requests")
 }
 
 /// Everything that happened to one package, in order: labelled, issued from,

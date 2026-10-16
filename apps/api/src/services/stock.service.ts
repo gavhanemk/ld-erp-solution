@@ -404,9 +404,13 @@ async function keepStickersInStep(tx: Prisma.TransactionClient, m: Movement) {
   const packages = await tx.stockPackage.findMany({
     where: { itemId: m.itemId, warehouseId: m.warehouseId, ownership, ownerCustomerId: owner, status: 'IN_STOCK' },
     orderBy: [{ createdAt: 'asc' }, { code: 'asc' }],
-    select: { id: true, qty: true },
+    select: { id: true, qty: true, grade: true },
   })
   if (!packages.length) return
+  // Stickers of the grade that went out come down first: usable stock going
+  // out never takes a held roll's sticker down while a usable one is left.
+  const grade = m.grade ?? 'A'
+  packages.sort((a, b) => Number(b.grade === grade) - Number(a.grade === grade))
   const [row] = await tx.$queryRaw<Array<{ qty: number }>>`
     SELECT COALESCE(SUM("inQty" - "outQty"), 0)::float8 AS qty
     FROM ld_erp.stock_ledger
@@ -464,6 +468,49 @@ export async function assertStockUnused(
     WHERE "referenceId" = ${args.referenceId}
     GROUP BY 1, 2, 3, 4, 5, 6
     HAVING SUM("inQty" - "outQty") > 0.0005`
+
+  // Its own stickers say what became of its goods, whatever first-in-first-out
+  // would guess: a roll of it scanned out, used up or cut down is gone. Each
+  // sticker it made is followed through its splits; whatever of them is not
+  // still on stock in the store it came into has been used.
+  if (!args.take) {
+    const roots = await tx.stockPackage.findMany({
+      where: { sourceId: args.referenceId, parentId: null, status: { not: 'VOID' } },
+      select: { id: true, code: true, itemId: true, warehouseId: true, initialQty: true },
+    })
+    for (const spot of new Map(mine.map((k) => [keyOf(k), k])).values()) {
+      const own = roots.filter((r) => r.itemId === spot.itemId)
+      if (!own.length) continue
+      const family = new Set(own.map((r) => r.id))
+      for (let parents = [...family]; parents.length; ) {
+        const children = await tx.stockPackage.findMany({ where: { parentId: { in: parents } }, select: { id: true } })
+        parents = children.map((c) => c.id).filter((id) => !family.has(id))
+        parents.forEach((id) => family.add(id))
+      }
+      const [left] = await tx.$queryRaw<Array<{ qty: number }>>`
+        SELECT COALESCE(SUM(qty), 0)::float8 AS qty FROM ld_erp.stock_packages
+        WHERE id = ANY(${[...family]}::text[]) AND status = 'IN_STOCK' AND "warehouseId" = ${spot.warehouseId}`
+      const labelled = own.reduce((t, r) => t + Number(r.initialQty), 0)
+      const gone = round3(labelled - Number(left?.qty ?? 0))
+      if (gone <= 0.0005) continue
+      const [item, used] = await Promise.all([
+        tx.item.findUnique({ where: { id: spot.itemId }, select: { name: true, uom: { select: { symbol: true } } } }),
+        tx.stockPackageMove.findMany({
+          where: { packageId: { in: [...family] }, type: { in: ['ISSUED', 'TRANSFERRED'] } },
+          select: { referenceNumber: true },
+          distinct: ['referenceNumber'],
+          take: 3,
+        }),
+      ])
+      const onWhat = used.map((u) => u.referenceNumber).filter(Boolean).join(', ')
+      throw new AppError(
+        `${gone} ${item?.uom?.symbol ?? ''} of the ${item?.name ?? 'item'} that came in on ${args.label} has already gone out by its stickers${onWhat ? ` (${onWhat})` : ''}, so ${args.label} cannot take it back. ${args.suggestion ?? 'Send what is left back with a return, or correct the stock with a stock adjustment.'}`.replace(/\s+/g, ' '),
+        409,
+        'STOCK_ALREADY_USED',
+      )
+    }
+  }
+
   for (const k of mine) {
     const want = args.take ? (args.take.get(keyOf(k)) ?? 0) : Number(k.net)
     if (!(want > 0.0005) || !k.since) continue

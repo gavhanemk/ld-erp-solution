@@ -136,10 +136,13 @@ export async function cuttingPrep(db: Db, moId: string) {
       issuedQty: true,
       returnedQty: true,
       ownership: true,
+      ownerCustomerId: true,
+      ownerCustomer: { select: { name: true } },
       item: { select: { code: true, name: true, uom: { select: { symbol: true } }, category: { select: { name: true, parent: { select: { name: true } } } } } },
     },
   })
-  const byItem = new Map<string, { itemId: string; code: string; name: string; uom: string | null; fabric: boolean; theirs: boolean; issued: number }>()
+  type Owner = { ownerCustomerId: string | null; name: string; issued: number }
+  const byItem = new Map<string, { itemId: string; code: string; name: string; uom: string | null; fabric: boolean; issued: number; owners: Map<string, Owner> }>()
   for (const l of issued) {
     const row = byItem.get(l.itemId) ?? {
       itemId: l.itemId,
@@ -147,11 +150,16 @@ export async function cuttingPrep(db: Db, moId: string) {
       name: l.item.name,
       uom: l.item.uom?.symbol ?? null,
       fabric: isFabric(l.item.category),
-      theirs: false,
       issued: 0,
+      owners: new Map<string, Owner>(),
     }
-    row.issued = round3(row.issued + Number(l.issuedQty) - Number(l.returnedQty))
-    row.theirs = row.theirs || l.ownership === 'CUSTOMER_OWNED'
+    const net = round3(Number(l.issuedQty) - Number(l.returnedQty))
+    row.issued = round3(row.issued + net)
+    // Whose cloth it is, owner by owner: the panels cut from it are theirs.
+    const theirs = l.ownership === 'CUSTOMER_OWNED' ? l.ownerCustomerId : null
+    const o = row.owners.get(theirs ?? '') ?? { ownerCustomerId: theirs, name: theirs ? (l.ownerCustomer?.name ?? 'the customer') : 'ours', issued: 0 }
+    o.issued = round3(o.issued + net)
+    row.owners.set(theirs ?? '', o)
     byItem.set(l.itemId, row)
   }
   const fabrics = [...byItem.values()]
@@ -159,7 +167,25 @@ export async function cuttingPrep(db: Db, moId: string) {
       const accounted = round3(
         mo.cuttingOrders.filter((c) => c.fabricItemId === f.itemId).reduce((s, c) => s + Number(c.fabricUsed ?? 0) + Number(c.wastage ?? 0), 0),
       )
-      return { ...f, accounted, left: round3(f.issued - accounted) }
+      // Who the fabric still on the floor belongs to. One owner: the panels
+      // are theirs. More than one — ours and a customer's, or two customers'
+      // — and nobody can say whose a cut panel is, so cutting is refused
+      // until one of them goes back to the store.
+      const owners = [...f.owners.values()].filter((o) => o.issued > 0.0005)
+      const only = owners.length === 1 ? owners[0] : null
+      return {
+        itemId: f.itemId,
+        code: f.code,
+        name: f.name,
+        uom: f.uom,
+        fabric: f.fabric,
+        issued: f.issued,
+        theirs: !!only?.ownerCustomerId,
+        ownerCustomerId: only?.ownerCustomerId ?? null,
+        mixed: owners.length > 1 ? owners.map((o) => o.name) : null,
+        accounted,
+        left: round3(f.issued - accounted),
+      }
     })
     .sort((a, b) => Number(b.fabric) - Number(a.fabric) || a.name.localeCompare(b.name))
 
@@ -375,6 +401,22 @@ export async function createCutting(
   if (!fabric) {
     throw new AppError(`That fabric has not been issued to ${mo.moNumber}. Issue it on the order's requisition first.`, 400, 'FABRIC_NOT_ISSUED')
   }
+  if (fabric.mixed) {
+    throw new AppError(
+      `${fabric.name} issued to ${mo.moNumber} is ${fabric.mixed.join(' and ')}'s, so a panel cut from it cannot be booked to one owner. Return one of them to the store before recording this cutting.`,
+      409,
+      'MIXED_OWNERS',
+    )
+  }
+  // A customer's fabric is cut only on that customer's job-work order: what
+  // is made from it must stay theirs.
+  if (fabric.theirs && (!mo.so?.isJobWork || mo.so.customerId !== fabric.ownerCustomerId)) {
+    throw new AppError(
+      `${fabric.name} issued to ${mo.moNumber} is a customer's fabric, but ${mo.so ? `${mo.so.soNumber} is not their job-work order` : 'the order is not a job-work order of theirs'}. Return it to the store; it cannot be cut here.`,
+      409,
+      'WRONG_OWNER',
+    )
+  }
   const wastage = data.wastage ?? 0
   if (round3(data.fabricUsed + wastage) > fabric.left + 1e-9) {
     throw new AppError(
@@ -502,7 +544,8 @@ export async function createCutting(
   if (panelsIn) {
     // The customer's panels on a job-work order (their fabric), at no value
     // of ours; our own at the value of the fabric that went into them.
-    const theirs = !!(mo.so?.isJobWork && fabric.theirs)
+    // Whose they are follows the fabric itself, checked above to be one owner.
+    const theirs = fabric.theirs
     let rate = 0
     if (!theirs) {
       const issues = await tx.stockLedger.findMany({
@@ -519,7 +562,7 @@ export async function createCutting(
         itemId: data.panelItemId!,
         warehouseId: data.panelWarehouseId!,
         sizeId: p.sizeId,
-        ...(theirs ? { ownership: 'CUSTOMER_OWNED' as const, ownerCustomerId: mo.so!.customerId } : {}),
+        ...(theirs ? { ownership: 'CUSTOMER_OWNED' as const, ownerCustomerId: fabric.ownerCustomerId } : {}),
         transactionType: 'PRODUCTION',
         direction: 'IN',
         qty: p.qty,
