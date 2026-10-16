@@ -43,7 +43,16 @@ export interface RowAction {
  * on a press outside, on Escape, and on a scroll — a menu that floats away
  * from the row it belongs to is worse than one that shuts.
  */
-export function ActionMenu({ label, items }: { label: string; items: RowAction[] }) {
+export function ActionMenu({
+  label,
+  items,
+  compact = false,
+}: {
+  label: string
+  items: RowAction[]
+  /** Just the ⋯, square, for a header with buttons beside it; the word "Actions" otherwise. */
+  compact?: boolean
+}) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
@@ -104,12 +113,13 @@ export function ActionMenu({ label, items }: { label: string; items: RowAction[]
           place()
           setOpen(true)
         }}
-        className="border-border text-muted-foreground hover:bg-secondary hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors"
+        className={`border-border text-muted-foreground hover:bg-secondary hover:text-foreground inline-flex h-8 items-center gap-1.5 rounded-lg border text-xs font-medium transition-colors ${compact ? 'w-8 justify-center' : 'px-2.5'}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={label}
+        title={compact ? label : undefined}
       >
-        Actions
+        {!compact && 'Actions'}
         <MoreHorizontal size={14} />
       </button>
 

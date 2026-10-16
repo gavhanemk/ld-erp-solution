@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowDown, ArrowUp, GripVertical, Info, ListOrdered, Loader2, Lock, Plus, Route, Save, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, CircleCheck, GripVertical, Info, ListOrdered, Loader2, Lock, Plus, Route, Save, Trash2, Truck } from 'lucide-react'
 import { api, ApiError, masterResource, type Paginated } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { FormFrame } from '@/components/ui/FormFrame'
@@ -20,12 +20,13 @@ import { changed } from './routing/track'
  * floor or at an outside unit — and says who may leave it out, and whether it
  * is a check.
  *
- * Laid out as one short row per step — the process, where it is done, the
- * unit and the rate, which are what a person scans for — with the rest of the
- * step (leaving it out, the check, standard minutes, instructions) in a panel
- * beside the list for whichever step is picked. The rows used to carry all
- * nine controls each, two lines deep, and a routing of eleven steps was a wall
- * of boxes. Steps move by dragging the handle, or with the arrows.
+ * Laid out for reading as much as for filling in: the route in one line at
+ * the top with its totals, then one row a step under plain column headings —
+ * the process, where it is done, the line or unit, minutes and rate a piece,
+ * and whether it may be skipped — with a step's instructions and its check
+ * opening under its own row. Processes not yet on the route are offered as
+ * buttons, each going where the Process Master's order puts it. Steps move by
+ * dragging the handle, or with the arrows.
  *
  * An order takes a copy of the steps when it is planned, so saving a change
  * here makes a new version for orders to come and leaves running ones alone.
@@ -137,10 +138,10 @@ interface Row {
   instructions: string
 }
 
-const SKIPS: Array<{ value: Skip; label: string; short: string; help: string }> = [
-  { value: 'OPTIONAL', label: 'Can be left out', short: 'Optional', help: 'Anyone recording production can leave it out, with a reason' },
-  { value: 'WITH_APPROVAL', label: 'Manager only', short: 'Manager only', help: 'Only a production manager can leave it out, with a reason' },
-  { value: 'NEVER', label: 'Never left out', short: 'Always', help: 'Every piece goes through it' },
+const SKIPS: Array<{ value: Skip; label: string; help: string }> = [
+  { value: 'NEVER', label: 'Never skipped', help: 'Every piece goes through it' },
+  { value: 'WITH_APPROVAL', label: 'Manager can skip', help: 'Only a production manager can leave it out, with a reason' },
+  { value: 'OPTIONAL', label: 'Anyone can skip', help: 'Anyone recording production can leave it out, with a reason' },
 ]
 
 const APPLIES: Array<{ value: Applies; label: string }> = [
@@ -149,9 +150,13 @@ const APPLIES: Array<{ value: Applies; label: string }> = [
   { value: 'ANY', label: 'Any style' },
 ]
 
+/** The step columns, the same on the heading and every row of a wide screen. */
+const COLS = 'lg:grid-cols-[2.75rem_minmax(9rem,1fr)_8.5rem_minmax(11rem,1.6fr)_6rem_6rem_10.5rem_6.5rem]'
+
 let seq = 0
 const blank = (): Row => ({ key: `n${++seq}`, operationId: '', workstationId: '', execution: 'IN_HOUSE', skip: 'WITH_APPROVAL', isQcStep: false, smv: '', ratePerPiece: '', instructions: '' })
 const num = (v: string | number | null | undefined) => (v == null || v === '' ? '' : String(Number(v)))
+const figure = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 })
 const rowsOf = (steps: RoutingStep[] | undefined): Row[] =>
   steps?.length
     ? [...steps]
@@ -200,7 +205,8 @@ export function RoutingFormDialog({
   const [notes, setNotes] = useState('')
   const [isActive, setIsActive] = useState(true)
   const [rows, setRows] = useState<Row[]>([blank()])
-  const [selected, setSelected] = useState<string | null>(null)
+  /** The step whose instructions and check are open under its row. */
+  const [openKey, setOpenKey] = useState<string | null>(null)
   // Dragging: only from the handle, so a select or a number box inside the row
   // still takes the mouse normally.
   const [armed, setArmed] = useState<string | null>(null)
@@ -219,9 +225,8 @@ export function RoutingFormDialog({
     setCategory(record?.category ?? '')
     setNotes(record?.notes ?? '')
     setIsActive(record?.isActive ?? true)
-    const next = rowsOf(from?.steps)
-    setRows(next)
-    setSelected(next[0]?.key ?? null)
+    setRows(rowsOf(from?.steps))
+    setOpenKey(null)
     setError(null)
   }, [open, record, preset])
 
@@ -249,7 +254,8 @@ export function RoutingFormDialog({
 
   // The list is the processes in use. One switched off since this routing was
   // made still has to show on its step, or the step reads "Pick a process" and
-  // the routing cannot be saved at all — so the routing's own are added back.
+  // the routing cannot be saved at all — so the routing's own are added back,
+  // marked, for the step to be changed or taken off.
   const opById = useMemo(() => {
     const map = new Map<string, Operation>(ops.map((o) => [o.id, o]))
     for (const s of (record ?? preset?.from)?.steps ?? []) {
@@ -271,6 +277,8 @@ export function RoutingFormDialog({
     return map
   }, [ops, record, preset])
   const processOptions = useMemo(() => [...opById.values()], [opById])
+  // Where a process comes in the Process Master: the order it offers them in.
+  const rank = useMemo(() => new Map(ops.map((o, i) => [o.id, i])), [ops])
   // The fabrics with stock records — and the routing's own, the same way as
   // its processes, if it has since dropped off that list.
   const fabricOptions = useMemo(() => {
@@ -283,10 +291,10 @@ export function RoutingFormDialog({
   if (!open) return null
 
   const set = (key: string, patch: Partial<Row>) => setRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)))
-  /** Picking a process fills in what it usually is: outside or not, a check or not, its rate and instructions. */
-  const pick = (key: string, operationId: string) => {
+  /** What a process usually is: outside or not, a check or not, its rate, minutes and instructions. */
+  const defaultsOf = (operationId: string): Omit<Row, 'key'> => {
     const o = opById.get(operationId)
-    set(key, {
+    return {
       operationId,
       workstationId: '',
       execution: o?.defaultExecution ?? 'IN_HOUSE',
@@ -295,8 +303,9 @@ export function RoutingFormDialog({
       ratePerPiece: o?.defaultExecution === 'OUTSOURCED' ? num(o?.jobWorkRate) : '',
       smv: num(o?.smv),
       instructions: o?.instructions ?? '',
-    })
+    }
   }
+  const pick = (key: string, operationId: string) => set(key, defaultsOf(operationId))
   const move = (i: number, d: -1 | 1) =>
     setRows((rs) => {
       const j = i + d
@@ -321,17 +330,29 @@ export function RoutingFormDialog({
     setOverKey(null)
     setArmed(null)
   }
-  const addStep = () => {
-    const r = blank()
-    setRows((rs) => [...rs, r])
-    setSelected(r.key)
-  }
+  const addStep = () => setRows((rs) => [...rs, blank()])
+  /**
+   * A process added from the buttons goes where the Process Master's order
+   * puts it — washing after stitching, packing last — and never before
+   * cutting. A blank step left on the route is filled instead.
+   */
+  const addProcess = (operationId: string) =>
+    setRows((rs) => {
+      const row = { key: `n${++seq}`, ...defaultsOf(operationId) }
+      const empty = rs.findIndex((r) => !r.operationId)
+      if (empty >= 0) return rs.map((r, i) => (i === empty ? { ...row, key: r.key } : r))
+      const mine = rank.get(operationId) ?? Infinity
+      let at = rs.findIndex((r) => (rank.get(r.operationId) ?? Infinity) > mine)
+      if (at === -1) at = rs.length
+      if (at === 0 && opById.get(rs[0]?.operationId)?.kind === 'CUTTING' && opById.get(operationId)?.kind !== 'CUTTING') at = 1
+      const next = [...rs]
+      next.splice(at, 0, row)
+      return next
+    })
   const remove = (key: string) => {
     if (rows.length === 1) return
-    const i = rows.findIndex((r) => r.key === key)
-    const next = rows.filter((r) => r.key !== key)
-    setRows(next)
-    if (selected === key) setSelected(next[Math.min(i, next.length - 1)]?.key ?? null)
+    setRows((rs) => rs.filter((r) => r.key !== key))
+    if (openKey === key) setOpenKey(null)
   }
 
   const kinds = rows.map((r) => opById.get(r.operationId)?.kind)
@@ -342,13 +363,14 @@ export function RoutingFormDialog({
       : applies === 'CATEGORY' && !category.trim()
         ? 'Say which category of styles it is for.'
         : rows.some((r) => !r.operationId)
-          ? 'Pick a process on every step.'
+          ? 'Pick a process on every step, or take the empty step off.'
           : kinds[0] !== 'CUTTING'
             ? 'Start with cutting: that is where the pieces are made.'
             : kinds.filter((k) => k === 'CUTTING').length > 1
               ? 'Cut once: only one cutting step.'
               : null
   const noCheck = rows.length > 0 && !rows.some((r, i) => r.isQcStep || kinds[i] === 'QC')
+  const offRoute = rows.filter((r) => opById.get(r.operationId)?.inactive)
 
   const save = async () => {
     if (blocker) return
@@ -391,10 +413,11 @@ export function RoutingFormDialog({
     return units.filter((u) => u.departmentId === o?.departmentId && (r.execution === 'OUTSOURCED' ? u.type === 'JOB_WORK' : u.type === 'IN_HOUSE'))
   }
 
-  const selIndex = Math.max(0, rows.findIndex((r) => r.key === selected))
-  const sel = rows[selIndex]
-  const selOp = sel ? opById.get(sel.operationId) : undefined
-  const selIsCut = selOp?.kind === 'CUTTING'
+  // The route's totals, for the line above the steps.
+  const minutes = rows.reduce((t, r) => t + (Number(r.smv) || 0), 0)
+  const rupees = rows.reduce((t, r) => t + (Number(r.ratePerPiece) || 0), 0)
+  const outside = rows.filter((r) => r.execution === 'OUTSOURCED').length
+  const notOnRoute = ops.filter((o) => !rows.some((r) => r.operationId === o.id))
 
   return (
     <FormFrame
@@ -413,7 +436,7 @@ export function RoutingFormDialog({
             ? `Starting from the steps of ${preset.from.code}. Change what this style does differently.`
             : 'The steps a garment goes through, in order. Orders take a copy when they are planned.'
       }
-      width="max-w-6xl"
+      width="max-w-7xl"
       primary={
         <button type="button" className="btn-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none" onClick={() => void save()} disabled={saving || !!blocker}>
           {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />} {isEdit ? 'Save routing' : 'Create routing'}
@@ -424,7 +447,7 @@ export function RoutingFormDialog({
           Cancel
         </button>
       }
-      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${rows.length} ${rows.length === 1 ? 'step' : 'steps'}`}
+      footerNote={blocker ? <span className="warn-text">{blocker}</span> : `${rows.length} ${rows.length === 1 ? 'step' : 'steps'} · saving makes a new version for orders to come`}
       error={error}
       onClose={onClose}
       busy={saving}
@@ -435,25 +458,14 @@ export function RoutingFormDialog({
         </p>
       )}
 
-      <Section icon={Route} title="Routing">
+      <Section icon={Route} title="What it is for">
         <div className="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-6">
           <label className="block lg:col-span-2">
             <span className="form-label">Name</span>
-            <input className="form-input" value={name} placeholder="Shirt with washing" onChange={(e) => setName(e.target.value)} />
+            <input className="form-input" value={name} placeholder="e.g. Shirt with washing" onChange={(e) => setName(e.target.value)} />
           </label>
-          <label className="block lg:col-span-2">
-            <span className="form-label">Fabric</span>
-            <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)} aria-label="Fabric">
-              <option value="">{fabricOptions.length ? 'Select…' : 'No fabric in stock records'}</option>
-              {fabricOptions.map((f) => (
-                <option key={f.id} value={f.id} data-sub={stockLine(f)}>
-                  {f.name}
-                </option>
-              ))}
-            </SmartSelect>
-          </label>
-          <div className="sm:col-span-2 lg:col-span-2">
-            <span className="form-label">For</span>
+          <div className="lg:col-span-2">
+            <span className="form-label">Used for</span>
             <div className="border-border bg-field flex rounded-lg border p-0.5" role="radiogroup" aria-label="Which styles it is for">
               {APPLIES.map((a) => (
                 <button
@@ -469,12 +481,12 @@ export function RoutingFormDialog({
               ))}
             </div>
           </div>
-          <div className="sm:col-span-2 lg:col-span-4">
+          <div className="lg:col-span-2">
             {applies === 'STYLE' && (
               <label className="block">
                 <span className="form-label">Style</span>
                 <SmartSelect className="form-input" value={styleId} onChange={(e) => setStyleId(e.target.value)}>
-                  <option value="">Select…</option>
+                  <option value="">Pick the style…</option>
                   {styles.map((s) => (
                     <option key={s.id} value={s.id} data-sub={s.category ?? undefined}>
                       {s.code} — {s.name}
@@ -487,7 +499,7 @@ export function RoutingFormDialog({
               <label className="block">
                 <span className="form-label">Category</span>
                 <SmartSelect className="form-input" value={category} onChange={(e) => setCategory(e.target.value)}>
-                  <option value="">Select…</option>
+                  <option value="">Pick the category…</option>
                   {categories.map((c) => (
                     <option key={c} value={c}>
                       {c}
@@ -498,8 +510,23 @@ export function RoutingFormDialog({
             )}
             {applies === 'ANY' && <p className="text-muted-foreground pt-6 text-xs">Followed by any style that has no routing of its own and none for its category.</p>}
           </div>
-          <label className="flex items-center gap-2 self-end pb-2.5 text-sm lg:col-span-2">
-            <input type="checkbox" className="accent-primary h-4 w-4" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} /> Offered on new orders
+          <label className="block lg:col-span-3">
+            <span className="form-label">Fabric (optional)</span>
+            <SmartSelect className="form-input" value={fabricItemId} onChange={(e) => setFabricItemId(e.target.value)} aria-label="Fabric">
+              <option value="">{fabricOptions.length ? 'Any fabric' : 'No fabric in stock records'}</option>
+              {fabricOptions.map((f) => (
+                <option key={f.id} value={f.id} data-sub={stockLine(f)}>
+                  {f.name}
+                </option>
+              ))}
+            </SmartSelect>
+          </label>
+          <label className="border-border bg-card flex cursor-pointer items-start gap-2.5 self-end rounded-lg border px-3 py-2 text-sm lg:col-span-3">
+            <input type="checkbox" className="accent-primary mt-0.5 h-4 w-4" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
+            <span>
+              <span className="text-foreground block font-medium">Offered on new orders</span>
+              <span className="text-muted-foreground text-xs">Untick to stop using it; orders that have its steps keep them.</span>
+            </span>
           </label>
         </div>
       </Section>
@@ -509,44 +536,90 @@ export function RoutingFormDialog({
         title="Steps, in the order the garment moves"
         actions={
           <button type="button" className="btn-secondary h-8 px-3 text-xs" onClick={addStep}>
-            <Plus size={13} /> Add step
+            <Plus size={13} /> Blank step
           </button>
         }
       >
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-          <ol className="space-y-1.5 lg:col-span-2" aria-label="Steps">
+        {/* The whole route in one line, and what it adds up to. */}
+        <div className="border-border bg-secondary/40 mb-3 rounded-lg border px-3 py-2.5">
+          <ol className="flex flex-wrap items-center gap-x-1 gap-y-1.5 text-sm" aria-label="The route">
             {rows.map((r, i) => {
               const o = opById.get(r.operationId)
-              const isCut = o?.kind === 'CUTTING'
-              const skip = SKIPS.find((s) => s.value === (isCut ? 'NEVER' : r.skip))!
               return (
-                <li
-                  key={r.key}
-                  draggable={armed === r.key}
-                  onDragStart={(e) => {
-                    setDragKey(r.key)
-                    e.dataTransfer.effectAllowed = 'move'
-                  }}
-                  onDragOver={(e) => {
-                    if (!dragKey) return
-                    e.preventDefault()
-                    if (overKey !== r.key) setOverKey(r.key)
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault()
-                    if (dragKey) moveTo(dragKey, r.key)
-                    endDrag()
-                  }}
-                  onDragEnd={endDrag}
-                  onClick={() => setSelected(r.key)}
-                  className={cn(
-                    'bg-card rounded-lg border px-2 py-1.5 transition-colors',
-                    sel?.key === r.key ? 'border-primary ring-primary/25 ring-2' : 'border-border',
-                    overKey === r.key && dragKey && dragKey !== r.key && 'border-primary border-dashed',
-                    dragKey === r.key && 'opacity-50',
-                  )}
-                >
-                  <div className="flex flex-wrap items-center gap-2">
+                <li key={r.key} className="flex items-center gap-1">
+                  {i > 0 && <ChevronRight size={14} className="text-muted-foreground shrink-0" aria-hidden />}
+                  <button
+                    type="button"
+                    onClick={() => setOpenKey(openKey === r.key ? null : r.key)}
+                    className={cn(
+                      'flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium transition-colors',
+                      !o ? 'border-amber-500/50 text-amber-700 border-dashed' : o.inactive ? 'border-red-500/40 text-red-600' : 'border-border bg-card text-foreground hover:border-primary/50',
+                    )}
+                    title={o ? `${o.name}${r.execution === 'OUTSOURCED' ? ', at an outside unit' : ''}` : 'No process picked yet'}
+                  >
+                    <span className="text-primary font-mono">{i + 1}</span>
+                    {o?.name ?? 'Pick a process'}
+                    {r.execution === 'OUTSOURCED' && <Truck size={12} className="text-muted-foreground" aria-label="outside unit" />}
+                    {(r.isQcStep || o?.kind === 'QC') && <CircleCheck size={12} className="text-primary" aria-label="a check" />}
+                  </button>
+                </li>
+              )
+            })}
+          </ol>
+          <p className="text-muted-foreground mt-2 text-xs">
+            {rows.length} {rows.length === 1 ? 'step' : 'steps'}
+            {minutes > 0 ? ` · ${figure(minutes)} standard minutes a piece` : ''}
+            {rupees > 0 ? ` · ₹${figure(rupees)} a piece in rates` : ''}
+            {outside ? ` · ${outside} at an outside unit` : ''}
+          </p>
+        </div>
+
+        {/* The headings, on a wide screen; on a narrow one each box carries its own. */}
+        <div className={cn('text-muted-foreground hidden gap-2 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide lg:grid', COLS)}>
+          <span>Step</span>
+          <span>Process</span>
+          <span>Done at</span>
+          <span>Line or unit</span>
+          <span className="text-right">Minutes / pc</span>
+          <span className="text-right">Rate ₹ / pc</span>
+          <span>If skipped</span>
+          <span className="sr-only">Move, details, remove</span>
+        </div>
+
+        <ol className="space-y-1.5" aria-label="Steps">
+          {rows.map((r, i) => {
+            const o = opById.get(r.operationId)
+            const isCut = o?.kind === 'CUTTING'
+            const isOpen = openKey === r.key
+            const extras = (r.isQcStep || o?.kind === 'QC' ? 1 : 0) + (r.instructions.trim() ? 1 : 0)
+            return (
+              <li
+                key={r.key}
+                draggable={armed === r.key}
+                onDragStart={(e) => {
+                  setDragKey(r.key)
+                  e.dataTransfer.effectAllowed = 'move'
+                }}
+                onDragOver={(e) => {
+                  if (!dragKey) return
+                  e.preventDefault()
+                  if (overKey !== r.key) setOverKey(r.key)
+                }}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  if (dragKey) moveTo(dragKey, r.key)
+                  endDrag()
+                }}
+                onDragEnd={endDrag}
+                className={cn(
+                  'bg-card rounded-lg border transition-colors',
+                  !r.operationId ? 'border-amber-500/50' : o?.inactive ? 'border-red-500/40' : isOpen ? 'border-primary/60' : 'border-border',
+                  overKey === r.key && dragKey && dragKey !== r.key && 'border-primary border-dashed',
+                  dragKey === r.key && 'opacity-50',
+                )}
+              >
+                <div className={cn('grid grid-cols-2 items-center gap-2 px-2 py-1.5 sm:grid-cols-4', COLS)}>
+                  <div className="col-span-2 flex items-center gap-1 sm:col-span-4 lg:col-span-1">
                     <button
                       type="button"
                       className="text-muted-foreground hover:text-foreground cursor-grab active:cursor-grabbing"
@@ -557,17 +630,23 @@ export function RoutingFormDialog({
                     >
                       <GripVertical size={15} />
                     </button>
-                    <span className="text-primary w-5 text-center font-mono text-xs font-semibold">{i + 1}</span>
-                    <SmartSelect className="form-input h-9 min-w-0 flex-1 basis-40" value={r.operationId} onChange={(e) => pick(r.key, e.target.value)} aria-label={`Step ${i + 1} process`}>
+                    <span className="text-primary font-mono text-sm font-semibold">{i + 1}</span>
+                  </div>
+                  <label className="col-span-2 block min-w-0 sm:col-span-4 lg:col-span-1">
+                    <span className="form-label lg:sr-only">Process</span>
+                    <SmartSelect className="form-input h-9" value={r.operationId} onChange={(e) => pick(r.key, e.target.value)} aria-label={`Step ${i + 1} process`}>
                       <option value="">Pick a process…</option>
                       {processOptions.map((op) => (
                         <option key={op.id} value={op.id} data-sub={op.department?.name ?? undefined}>
-                          {op.inactive ? `${op.name} (no longer in use)` : op.name}
+                          {op.inactive ? `${op.name} (switched off in the Process Master)` : op.name}
                         </option>
                       ))}
                     </SmartSelect>
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="form-label lg:sr-only">Done at</span>
                     <SmartSelect
-                      className="form-input h-9 w-28"
+                      className="form-input h-9"
                       value={r.execution}
                       disabled={isCut}
                       onChange={(e) => set(r.key, { execution: e.target.value as Execution, workstationId: '' })}
@@ -576,132 +655,172 @@ export function RoutingFormDialog({
                       <option value="IN_HOUSE">Our floor</option>
                       <option value="OUTSOURCED">Outside unit</option>
                     </SmartSelect>
-                    <SmartSelect className="form-input h-9 w-36" value={r.workstationId} onChange={(e) => set(r.key, { workstationId: e.target.value })} aria-label={`Step ${i + 1} unit`}>
-                      <option value="">{r.execution === 'OUTSOURCED' ? 'Unit: picked when sent' : 'Line: any'}</option>
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="form-label lg:sr-only">Line or unit</span>
+                    <SmartSelect className="form-input h-9" value={r.workstationId} onChange={(e) => set(r.key, { workstationId: e.target.value })} aria-label={`Step ${i + 1} line or unit`}>
+                      <option value="">{r.execution === 'OUTSOURCED' ? 'Picked when sent' : 'Any line'}</option>
                       {unitsFor(r).map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.name}
                         </option>
                       ))}
                     </SmartSelect>
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="form-label lg:sr-only">Minutes / pc</span>
                     <StepInput
                       decimals
-                      className="form-input h-9 w-20 text-right tabular-nums"
+                      className="form-input h-9 text-right tabular-nums"
+                      value={r.smv}
+                      placeholder="—"
+                      onValueChange={(v) => set(r.key, { smv: v })}
+                      aria-label={`Step ${i + 1} standard minutes a piece`}
+                      title="Standard minutes for one piece (SMV)"
+                    />
+                  </label>
+                  <label className="block min-w-0">
+                    <span className="form-label lg:sr-only">Rate ₹ / pc</span>
+                    <StepInput
+                      decimals
+                      className="form-input h-9 text-right tabular-nums"
                       value={r.ratePerPiece}
-                      placeholder="₹ / pc"
+                      placeholder="—"
                       onValueChange={(v) => set(r.key, { ratePerPiece: v })}
                       aria-label={`Step ${i + 1} rate per piece`}
+                      title={r.execution === 'OUTSOURCED' ? 'What the outside unit is paid a piece' : 'The rate a piece for this step'}
                     />
-                    <span className="ml-auto flex items-center gap-0.5">
-                      <span className="flex flex-col">
-                        <button type="button" className="btn-ghost px-1 py-0" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move step ${i + 1} earlier`}>
-                          <ArrowUp size={12} />
-                        </button>
-                        <button type="button" className="btn-ghost px-1 py-0" onClick={() => move(i, 1)} disabled={i === rows.length - 1} aria-label={`Move step ${i + 1} later`}>
-                          <ArrowDown size={12} />
-                        </button>
-                      </span>
-                      <button
-                        type="button"
-                        className="btn-ghost text-muted-foreground hover:text-destructive p-1"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          remove(r.key)
-                        }}
-                        disabled={rows.length === 1}
-                        aria-label={`Remove step ${i + 1}`}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </span>
+                  </label>
+                  <label className="col-span-2 block min-w-0 sm:col-span-2 lg:col-span-1">
+                    <span className="form-label lg:sr-only">If skipped</span>
+                    <SmartSelect
+                      className="form-input h-9"
+                      value={isCut ? 'NEVER' : r.skip}
+                      disabled={isCut}
+                      onChange={(e) => set(r.key, { skip: e.target.value as Skip })}
+                      aria-label={`Step ${i + 1} who may skip it`}
+                      title={isCut ? 'Cutting makes the pieces, so it is never skipped' : SKIPS.find((s) => s.value === r.skip)?.help}
+                    >
+                      {SKIPS.map((s) => (
+                        <option key={s.value} value={s.value}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </SmartSelect>
+                  </label>
+                  <div className="col-span-2 flex items-center justify-end gap-0.5 sm:col-span-2 lg:col-span-1">
+                    <button
+                      type="button"
+                      className={cn('btn-ghost relative p-1.5', isOpen && 'text-primary')}
+                      onClick={() => setOpenKey(isOpen ? null : r.key)}
+                      aria-expanded={isOpen}
+                      aria-label={`Step ${i + 1} instructions and check`}
+                      title="Instructions and check"
+                    >
+                      <ChevronDown size={15} className={cn('transition-transform', isOpen && 'rotate-180')} />
+                      {extras > 0 && !isOpen && <span className="bg-primary absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full" aria-hidden />}
+                    </button>
+                    <button type="button" className="btn-ghost p-1" onClick={() => move(i, -1)} disabled={i === 0} aria-label={`Move step ${i + 1} earlier`} title="Earlier">
+                      <ArrowUp size={14} />
+                    </button>
+                    <button type="button" className="btn-ghost p-1" onClick={() => move(i, 1)} disabled={i === rows.length - 1} aria-label={`Move step ${i + 1} later`} title="Later">
+                      <ArrowDown size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost text-muted-foreground hover:text-destructive p-1"
+                      onClick={() => remove(r.key)}
+                      disabled={rows.length === 1}
+                      aria-label={`Remove step ${i + 1}`}
+                      title="Take this step off"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
-                  {/* What the panel holds, in a line, so the list alone tells the whole route. */}
-                  {o && (
-                    <p className="text-muted-foreground mt-1 pl-12 text-[11px]">
-                      {o.department?.name ?? 'Its department'}
-                      {r.isQcStep || o.kind === 'QC' ? ' · check' : ''}
-                      {` · ${skip.short.toLowerCase()}`}
-                      {r.smv ? ` · ${r.smv} min` : ''}
-                      {r.instructions.trim() ? ' · has instructions' : ''}
-                    </p>
-                  )}
-                </li>
-              )
-            })}
-          </ol>
+                </div>
 
-          {/* The picked step's other settings. Beside the list on a wide screen, under it on a narrow one. */}
-          <aside className="border-border bg-secondary/40 space-y-3 self-start rounded-xl border p-3 lg:sticky lg:top-0 lg:col-span-1" aria-label="Step settings">
-            <div className="flex items-center gap-2">
-              <SlidersHorizontal size={14} className="text-primary shrink-0" />
-              <p className="text-foreground text-sm font-semibold">
-                Step {selIndex + 1}
-                {selOp ? ` · ${selOp.name}` : ''}
-              </p>
+                {/* What the row does not show, in a line — only when there is something: a
+                    department other than the process's own name, a check, instructions. */}
+                {o &&
+                  !isOpen &&
+                  (() => {
+                    const dept = o.department?.name
+                    const said = [
+                      dept && dept.toLowerCase() !== o.name.toLowerCase() ? `Done by ${dept}` : null,
+                      r.isQcStep || o.kind === 'QC' ? 'a check: pieces pass or fail here' : null,
+                      r.instructions.trim() || null,
+                      o.inactive ? 'switched off in the Process Master: change it or take the step off' : null,
+                    ].filter(Boolean)
+                    return said.length ? <p className="text-muted-foreground -mt-0.5 truncate px-2 pb-1.5 text-[11px] lg:pl-[3.75rem]">{said.join(' · ')}</p> : null
+                  })()}
+
+                {isOpen && (
+                  <div className="border-border bg-secondary/30 grid gap-3 border-t px-3 py-3 md:grid-cols-[16rem_1fr] lg:pl-[3.75rem]">
+                    <div className="space-y-2">
+                      <p className="text-muted-foreground text-xs">
+                        {o ? (
+                          <>
+                            Done by {o.department?.name ?? 'its department'}
+                            {isCut ? ': makes the pieces and the bundles.' : '.'}
+                            {r.execution === 'OUTSOURCED' ? ' Goes out on a job-work challan.' : ''}
+                          </>
+                        ) : (
+                          'Pick the process for this step first.'
+                        )}
+                      </p>
+                      <label className="border-border bg-card flex cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
+                        <input type="checkbox" className="accent-primary mt-0.5" checked={r.isQcStep} onChange={(e) => set(r.key, { isQcStep: e.target.checked })} />
+                        <span>
+                          <span className="text-foreground block font-medium">A check</span>
+                          <span className="text-muted-foreground">Pieces are passed or failed here, not made</span>
+                        </span>
+                      </label>
+                    </div>
+                    <label className="block">
+                      <span className="form-label">Instructions for the floor</span>
+                      <textarea
+                        className="form-input text-xs"
+                        rows={3}
+                        value={r.instructions}
+                        maxLength={500}
+                        placeholder={isCut ? 'Lay face up; check shade lot before cutting' : 'What the department must know for this style'}
+                        onChange={(e) => set(r.key, { instructions: e.target.value })}
+                      />
+                    </label>
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ol>
+
+        {/* Processes not yet on the route, one press each. */}
+        {notOnRoute.length > 0 && (
+          <div className="mt-3">
+            <p className="text-muted-foreground mb-1.5 text-xs">Add a process — it goes where the Process Master&apos;s order puts it; move it if this style differs:</p>
+            <div className="flex flex-wrap gap-1.5">
+              {notOnRoute.map((op) => (
+                <button
+                  key={op.id}
+                  type="button"
+                  onClick={() => addProcess(op.id)}
+                  className="border-border bg-card text-foreground hover:border-primary/60 hover:text-primary flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
+                  title={op.department?.name ?? undefined}
+                >
+                  <Plus size={12} /> {op.name}
+                </button>
+              ))}
             </div>
-            {!sel || !selOp ? (
-              <p className="text-muted-foreground text-xs">Pick the process for this step first.</p>
-            ) : (
-              <>
-                <p className="text-muted-foreground text-xs">
-                  {selOp.department?.name ?? 'Its department'}
-                  {selIsCut ? ' — makes the pieces and the bundles.' : selOp.kind === 'QC' || sel.isQcStep ? ' — passes or fails pieces.' : '.'}
-                  {sel.execution === 'OUTSOURCED' ? ' Goes out on a job work order and a job-work challan.' : ''}
-                </p>
+          </div>
+        )}
 
-                <fieldset>
-                  <legend className="form-label">Leaving it out</legend>
-                  <div className="space-y-1.5">
-                    {SKIPS.map((s) => {
-                      const value = selIsCut ? 'NEVER' : sel.skip
-                      return (
-                        <label
-                          key={s.value}
-                          className={cn(
-                            'flex cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-xs',
-                            value === s.value ? 'border-primary bg-primary/5' : 'border-border bg-card',
-                            selIsCut && 'cursor-not-allowed opacity-60',
-                          )}
-                        >
-                          <input type="radio" className="accent-primary mt-0.5" checked={value === s.value} disabled={selIsCut} onChange={() => set(sel.key, { skip: s.value })} />
-                          <span>
-                            <span className="text-foreground block font-medium">{s.label}</span>
-                            <span className="text-muted-foreground">{selIsCut ? 'Cutting makes the pieces, so it is never left out.' : s.help}</span>
-                          </span>
-                        </label>
-                      )
-                    })}
-                  </div>
-                </fieldset>
-
-                <label className="border-border bg-card flex cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-xs">
-                  <input type="checkbox" className="accent-primary mt-0.5" checked={sel.isQcStep} onChange={(e) => set(sel.key, { isQcStep: e.target.checked })} />
-                  <span>
-                    <span className="text-foreground block font-medium">A check</span>
-                    <span className="text-muted-foreground">Pieces are passed or failed here, not made</span>
-                  </span>
-                </label>
-
-                <label className="block">
-                  <span className="form-label">Standard minutes for one piece (SMV)</span>
-                  <StepInput decimals className="form-input h-9 w-32 text-right tabular-nums" value={sel.smv} placeholder="—" onValueChange={(v) => set(sel.key, { smv: v })} />
-                </label>
-
-                <label className="block">
-                  <span className="form-label">Instructions for the floor</span>
-                  <textarea
-                    className="form-input text-xs"
-                    rows={3}
-                    value={sel.instructions}
-                    maxLength={500}
-                    placeholder={selIsCut ? 'Lay face up; check shade lot before cutting' : 'What the department must know for this style'}
-                    onChange={(e) => set(sel.key, { instructions: e.target.value })}
-                  />
-                </label>
-              </>
-            )}
-          </aside>
-        </div>
+        {offRoute.length > 0 && (
+          <p className="mt-2 flex items-start gap-1.5 text-xs text-red-600">
+            <Info size={13} className="mt-px shrink-0" />
+            {offRoute.map((r) => opById.get(r.operationId)?.name).join(', ')} {offRoute.length === 1 ? 'is' : 'are'} switched off in the Process Master. Take{' '}
+            {offRoute.length === 1 ? 'it' : 'them'} off the route, or pick another process.
+          </p>
+        )}
         {noCheck && (
           <p className="warn-text mt-2 flex items-start gap-1.5 text-xs">
             <Info size={13} className="mt-px shrink-0" /> There is no check on this route, so pieces reach finished goods without one.
