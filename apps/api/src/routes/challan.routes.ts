@@ -10,6 +10,7 @@ import { amountInWords, getPrintHeader } from '../lib/printData'
 import { balanceOf, recordMovement } from '../services/stock.service'
 import { lockRow } from '../lib/lockRow'
 import { OPEN_ORDER_STATUSES } from '../services/salesOrder.service'
+import { closeCheck } from '../services/reconciliation.service'
 import { afterChallanCancelled, afterChallanDispatched } from '../services/garmentHooks.service'
 
 /**
@@ -470,11 +471,16 @@ export async function dispatchChallan(tx: Prisma.TransactionClient, dcId: string
     where: { id: dc.soId },
     select: { status: true, lines: { select: { pendingQty: true, deliveredQty: true } }, _count: { select: { manufacturingOrders: { where: { status: { notIn: ['DRAFT', 'CLOSED'] } } } } } },
   })
-  const status = statusAfter(
+  let status = statusAfter(
     order.status,
     order.lines.map((l) => ({ pendingQty: Number(l.pendingQty), deliveredQty: Number(l.deliveredQty) })),
     order._count.manufacturingOrders > 0,
   )
+  // Everything sent on a job-work order does not close it while the
+  // customer's material is not all accounted for: it stays open, to be
+  // closed from the order once that is put right, or on a manager's exception.
+  const materialOpen = status === 'COMPLETED' && so.isJobWork && (await closeCheck(tx, dc.soId)).gaps.length > 0
+  if (materialOpen) status = 'PARTIALLY_DISPATCHED'
   await tx.salesOrder.update({ where: { id: dc.soId }, data: { status } })
   await tx.deliveryChallan.update({
     where: { id: dc.id },

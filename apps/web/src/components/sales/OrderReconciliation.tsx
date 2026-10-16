@@ -15,8 +15,10 @@ import { api, ApiError } from '@/lib/api'
  * left for it. Beside it, the customer's whole stock of the item with us —
  * usable and held — with what came in on receipts with no order or for other
  * orders, which never count as this one's. Then our own material that went
- * into the order, at what it cost us, and the pieces. A gap is shown, not
- * hidden.
+ * into the order, at what it cost us — covered by the job charge or billed, as
+ * the order says — and the pieces. A gap is shown, not hidden; while the
+ * customer's material has one, the order is not closed except on a manager's
+ * exception.
  */
 
 interface Recon {
@@ -48,7 +50,14 @@ interface Recon {
     bomVariance: number | null
     bomForOrder: number | null
   }>
-  ownMaterial?: { lines: Array<{ item: { code: string; name: string; uom: string | null }; qty: number; value: number }>; value: number }
+  ownMaterial?: {
+    lines: Array<{ item: { code: string; name: string; uom: string | null }; qty: number; value: number }>
+    value: number
+    /** IN_JOB_CHARGE: the job charge covers it. BILLED: billed to the customer as a charge. */
+    billing?: 'IN_JOB_CHARGE' | 'BILLED'
+    billed?: number
+    toBill?: number
+  }
   pieces: { ordered: number; cut: number; good: number; bGrade: number; damaged: number; inProcess: number; sent: number }
   balanced: boolean
 }
@@ -193,10 +202,17 @@ export function OrderReconciliation({ orderId, isJobWork }: { orderId: string; i
               ))}
             </tbody>
           </table>
-          <p className="warn-text border-border border-t px-3 py-1.5 text-[10px]">
-            {inr(own.value)} of our own material went into this job-work order. Its finished goods are the customer&apos;s at no value, so check the job
-            charge covers this, or bill it.
-          </p>
+          {own.billing === 'BILLED' ? (
+            <p className={`border-border border-t px-3 py-1.5 text-[10px] ${(own.toBill ?? 0) > 0.005 ? 'warn-text' : 'text-muted-foreground'}`}>
+              Billed separately, as agreed: {inr(own.billed ?? 0)} billed so far on its invoices
+              {(own.toBill ?? 0) > 0.005 ? `, ${inr(own.toBill ?? 0)} still to bill at cost — the next invoice offers it as a charge.` : ', nothing left to bill.'}
+            </p>
+          ) : (
+            <p className="text-muted-foreground border-border border-t px-3 py-1.5 text-[10px]">
+              {inr(own.value)} of our own material went into this job-work order, covered by the job charge as the order says. Its finished goods are the
+              customer&apos;s at no value.
+            </p>
+          )}
         </div>
       )}
 

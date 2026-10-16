@@ -25,11 +25,13 @@ import { AppError } from '../middleware/errorHandler'
  * us at all, which only another order or a correction can explain.
  *
  * Then our own material that went into the order (trims, thread), at what it
- * cost us: the job charge covers it or it is billed, but it is never lost at
- * the ₹0 the customer's finished goods carry.
+ * cost us: the job charge covers it or it is billed, as the order says, but it
+ * is never lost at the ₹0 the customer's finished goods carry.
  *
  * For the pieces: ordered, cut, packed good and B-grade, damaged at job
- * workers, sent. A gap is shown as a gap; nothing here stops an order.
+ * workers, sent. A gap is shown as a gap. The customer's material not all
+ * accounted for stops the order being closed — `closeCheck` — unless a
+ * manager records an exception.
  */
 type Db = Prisma.TransactionClient
 
@@ -44,6 +46,7 @@ export async function orderReconciliation(db: Db, soId: string) {
       soNumber: true,
       status: true,
       isJobWork: true,
+      ownMaterialBilling: true,
       customerId: true,
       customer: { select: { name: true } },
       lines: { select: { totalQty: true, deliveredQty: true } },
@@ -55,7 +58,7 @@ export async function orderReconciliation(db: Db, soId: string) {
   const forOrder = { OR: [{ soId }, { mo: { soId } }] }
   const itemSelect = { select: { code: true, name: true, uom: { select: { symbol: true } } } }
 
-  const [grnLines, issueLines, cmrLines, cuttings, fgLines, damaged, openOrders, jwChallans, moLines, ownLines, mrs] = await Promise.all([
+  const [grnLines, issueLines, cmrLines, cuttings, fgLines, damaged, openOrders, jwChallans, moLines, ownLines, mrs, ownBilled] = await Promise.all([
     db.customerGRNLine.findMany({
       where: { grn: { soId, status: 'POSTED' } },
       select: { itemId: true, challanQty: true, receivedQty: true, rejectedQty: true, releasedQty: true, item: itemSelect },
@@ -86,6 +89,8 @@ export async function orderReconciliation(db: Db, soId: string) {
       select: { itemId: true, issuedQty: true, returnedQty: true, item: itemSelect },
     }),
     db.materialRequisition.findMany({ where: forOrder, select: { id: true } }),
+    // What of our own material its invoices have billed, as charges marked for it.
+    db.salesInvoiceCharge.aggregate({ where: { ownMaterial: true, invoice: { soId, status: { not: 'CANCELLED' } } }, _sum: { amount: true } }),
   ])
 
   const itemIds = [...new Set([...grnLines.map((l) => l.itemId), ...issueLines.map((l) => l.itemId)])]
@@ -273,6 +278,8 @@ export async function orderReconciliation(db: Db, soId: string) {
     })
     .filter((m) => m.qty > 0.0005)
 
+  const ownCost = round2(ownMaterial.reduce((s, m) => s + m.value, 0))
+  const billed = round2(Number(ownBilled._sum.amount ?? 0))
   const ordered = so.lines.reduce((s, l) => s + Number(l.totalQty), 0)
   const sent = so.lines.reduce((s, l) => s + Number(l.deliveredQty), 0)
   const cut = cuttings.reduce((s, c) => s + c.actualPieces, 0)
@@ -287,7 +294,12 @@ export async function orderReconciliation(db: Db, soId: string) {
     fabric,
     ownMaterial: {
       lines: ownMaterial,
-      value: round2(ownMaterial.reduce((s, m) => s + m.value, 0)),
+      value: ownCost,
+      /** IN_JOB_CHARGE: the job charge covers it. BILLED: it is billed to the customer as a charge. */
+      billing: so.ownMaterialBilling,
+      billed,
+      /** At cost, what is still to bill when it is billed separately. */
+      toBill: so.ownMaterialBilling === 'BILLED' ? round2(Math.max(0, ownCost - billed)) : 0,
     },
     pieces: {
       ordered,
@@ -299,8 +311,53 @@ export async function orderReconciliation(db: Db, soId: string) {
       inProcess: Math.max(0, cut - good - bGrade - damagedPieces),
       sent,
     },
+    // Every metre of theirs has an end — used, wasted, sent back, used at a job
+    // worker — as closing the order asks; and every piece cut is packed or written off.
     balanced:
-      fabric.every((f) => Math.abs(f.unaccounted) < 0.001 && Math.abs(f.issuedNotCut) < 0.001) &&
+      fabric.every((f) => Math.abs(f.unaccounted) < 0.001 && Math.abs(f.issuedNotCut) < 0.001 && f.leftForOrder <= 0.0005) &&
       (cut === 0 || cut === good + bGrade + damagedPieces),
   }
+}
+
+export type MaterialGap = { itemId: string; item: string; unit: string; kind: 'MISSING' | 'ON_FLOOR' | 'WITH_US'; qty: number; text: string }
+
+/**
+ * What of the customer's material on a job-work order has no end yet, item by
+ * item. Every metre they sent for it should finish used in its cutting,
+ * wasted there, sent back to them or used at a job worker; until then the
+ * order is not closed:
+ *
+ *   MISSING   its receipts say more should be with us than the customer has
+ *             with us at all — another order or a correction took it
+ *   ON_FLOOR  issued to production and neither cut nor brought back
+ *   WITH_US   still in our store for this order — send it back to them
+ */
+export function materialGaps(r: Awaited<ReturnType<typeof orderReconciliation>>): MaterialGap[] {
+  if (!r.order.isJobWork) return []
+  return r.fabric.flatMap((f) => {
+    const unit = f.item.uom ?? ''
+    const q = (n: number) => `${n.toLocaleString('en-IN', { maximumFractionDigits: 3 })}${unit ? ` ${unit}` : ''}`
+    const gaps: MaterialGap[] = []
+    const base = { itemId: f.item.id, item: f.item.name, unit }
+    if (f.unaccounted > 0.0005) gaps.push({ ...base, kind: 'MISSING', qty: f.unaccounted, text: `${q(f.unaccounted)} of ${f.item.name} is missing: the customer has less with us than this order's receipts leave` })
+    if (f.issuedNotCut > 0.0005) gaps.push({ ...base, kind: 'ON_FLOOR', qty: f.issuedNotCut, text: `${q(f.issuedNotCut)} of ${f.item.name} was issued to production and neither cut nor brought back` })
+    const withUs = round3(Math.max(0, f.leftForOrder - f.unaccounted))
+    if (withUs > 0.0005) gaps.push({ ...base, kind: 'WITH_US', qty: withUs, text: `${q(withUs)} of ${f.item.name} is still with us for this order, in a store or at a job worker${f.rejected - f.released - f.returnedRejected > 0.0005 ? ' (rejected material included)' : ''}: send it back to the customer` })
+    return gaps
+  })
+}
+
+/**
+ * Whether a job-work order can be closed or cancelled as its material stands:
+ * the gaps that stop it, and — not stopping it — our own material still to
+ * bill when the order says it is billed separately.
+ */
+export async function closeCheck(db: Db, soId: string) {
+  const r = await orderReconciliation(db, soId)
+  const gaps = materialGaps(r)
+  const notes: string[] = []
+  if (r.order.isJobWork && r.ownMaterial.billing === 'BILLED' && r.ownMaterial.toBill > 0.005) {
+    notes.push(`₹${r.ownMaterial.toBill.toLocaleString('en-IN', { maximumFractionDigits: 2 })} of our own material used on it is not billed yet.`)
+  }
+  return { gaps, notes, isJobWork: r.order.isJobWork }
 }

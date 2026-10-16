@@ -51,6 +51,7 @@ import {
   type ReasonAction,
 } from '@/components/sales/orderActions'
 import { ReasonDialog } from '@/components/ui/ReasonDialog'
+import { MaterialExceptionDialog } from '@/components/sales/MaterialExceptionDialog'
 
 interface SalesOrderRow {
   id: string
@@ -234,6 +235,8 @@ export default function SalesOrdersPage() {
     null
   )
   const [acting, setActing] = useState(false)
+  /** A close or cancel refused for the customer's material: what is unaccounted for, and a manager's way through. */
+  const [exception, setException] = useState<{ order: SalesOrderRow; action: 'short-close' | 'cancel'; reason: string } | null>(null)
 
   const [customers, setCustomers] = useState<Array<{ id: string; name: string }>>([])
   const [brands, setBrands] = useState<Array<{ id: string; name: string }>>([])
@@ -423,7 +426,12 @@ export default function SalesOrdersPage() {
       setAsking(null)
       refresh()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'That could not be done.')
+      // A job-work order with the customer's material not accounted for: say what, and offer a manager's exception.
+      if (err instanceof ApiError && err.code === 'MATERIAL_UNACCOUNTED' && (asking.action === 'short-close' || asking.action === 'cancel')) {
+        setException({ order: asking.order, action: asking.action, reason })
+      } else {
+        setError(err instanceof ApiError ? err.message : 'That could not be done.')
+      }
       setAsking(null)
     } finally {
       setActing(false)
@@ -1040,6 +1048,19 @@ export default function SalesOrdersPage() {
           busy={acting}
           onCancel={() => setAsking(null)}
           onConfirm={(reason) => void runReason(reason)}
+        />
+      )}
+      {exception && (
+        <MaterialExceptionDialog
+          order={exception.order}
+          action={exception.action}
+          reason={exception.reason}
+          onCancel={() => setException(null)}
+          onDone={(msg) => {
+            setException(null)
+            setMessage(msg)
+            refresh()
+          }}
         />
       )}
     </div>

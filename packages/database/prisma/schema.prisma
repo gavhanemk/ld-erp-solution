@@ -352,7 +352,9 @@ model User {
   customerGrnReceived  CustomerGRN[]    @relation("CustomerGRNReceivedBy")
   customerGrnCancelled CustomerGRN[]    @relation("CustomerGRNCancelledBy")
   customerGrnSubmitted CustomerGRN[]    @relation("CustomerGRNSubmittedBy")
+  customerGrnInspected CustomerGRN[]    @relation("CustomerGRNInspectedBy")
   customerGrnPosted    CustomerGRN[]    @relation("CustomerGRNPostedBy")
+  soMaterialExceptions SalesOrder[]     @relation("SOMaterialExceptionBy")
   customerReturnsMade      CustomerMaterialReturn[] @relation("CustomerReturnCreatedBy")
   customerReturnsCancelled CustomerMaterialReturn[] @relation("CustomerReturnCancelledBy")
   jobWorkSent          JobWorkChallan[] @relation("JobWorkSentBy")
@@ -1350,6 +1352,18 @@ model SalesOrder {
   shortClosedBy       User?     @relation("SOShortClosedBy", fields: [shortClosedById], references: [id])
   shortClosedAt       DateTime?
   shortCloseReason    String?
+  /// A job-work order: our own material used on it (trims, thread) is either
+  /// covered by the job charge (IN_JOB_CHARGE) or billed to the customer
+  /// separately (BILLED), as agreed with them. Its cost is tracked either way.
+  ownMaterialBilling  String    @default("IN_JOB_CHARGE")
+  /// A job-work order closed or cancelled with the customer's material not
+  /// all accounted for: allowed only by a manager, with a reason. What was
+  /// missing at that moment is kept as it stood.
+  materialExceptionById     String?
+  materialExceptionBy       User?     @relation("SOMaterialExceptionBy", fields: [materialExceptionById], references: [id])
+  materialExceptionAt       DateTime?
+  materialExceptionReason   String?
+  materialExceptionSnapshot Json?
 
   lines               SalesOrderLine[]
   /// Transport, freight, packing: each taxed at its own rate.
@@ -3051,20 +3065,26 @@ model CustomerGRN {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
-  /// DRAFT (being entered), SUBMITTED (counted, waiting for an approver),
-  /// POSTED (on the books: stock and stickers made) or CANCELLED. Checked by
-  /// the API rather than an enum, like the return's reason. Nothing reaches
-  /// the stock ledger before POSTED, and posting happens once. Receipts made
-  /// before this field existed were all booked on save, so they read POSTED.
+  /// DRAFT (being entered), SUBMITTED (received and counted, waiting for QC),
+  /// INSPECTED (QC has passed and rejected, waiting for stock approval),
+  /// POSTED (approved: on the books, stock and stickers made) or CANCELLED.
+  /// Checked by the API rather than an enum, like the return's reason.
+  /// Nothing reaches the stock ledger before POSTED, and posting happens once.
+  /// Receipts made before this field existed were all booked on save, so they
+  /// read POSTED.
   status          String      @default("POSTED")
   submittedAt     DateTime?
   submittedById   String?
   submittedBy     User?       @relation("CustomerGRNSubmittedBy", fields: [submittedById], references: [id])
-  /// Who checked the count and the rejects and put it on the books, and when.
+  /// Who checked the material — what passed, what was rejected and why — and when.
+  inspectedAt     DateTime?
+  inspectedById   String?
+  inspectedBy     User?       @relation("CustomerGRNInspectedBy", fields: [inspectedById], references: [id])
+  /// Who approved it into stock, and when.
   postedAt        DateTime?
   postedById      String?
   postedBy        User?       @relation("CustomerGRNPostedBy", fields: [postedById], references: [id])
-  /// What the approver found on inspection.
+  /// What QC found.
   inspectionNotes String?
   /// The cancelled receipt this one was entered to correct. A posted receipt
   /// is never edited in place: it is cancelled, and a corrected copy entered.
@@ -4640,6 +4660,9 @@ model SalesInvoiceCharge {
   cgst         Decimal      @default(0) @db.Decimal(12, 2)
   sgst         Decimal      @default(0) @db.Decimal(12, 2)
   igst         Decimal      @default(0) @db.Decimal(12, 2)
+  /// This charge bills our own material used on a job-work order (trims,
+  /// thread), so the order can show what of it is billed and what is not.
+  ownMaterial  Boolean      @default(false)
 
   @@map("sales_invoice_charges")
 }

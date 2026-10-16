@@ -1,16 +1,22 @@
 import type { Prisma } from '@ld-erp/database'
 import { AppError } from '../middleware/errorHandler'
 import { recordMovement, lockedBalanceOf } from './stock.service'
-import { createPackages, recordPackageMove, round3, type StockSpot } from './package.service'
+import { recordPackageMove, round3, splitOff, type StockSpot } from './package.service'
 
 /*
  * A customer's receipt, from the count at the gate to the books.
  *
  *   DRAFT      the storekeeper is still entering it — nothing on the books
- *   SUBMITTED  counted and handed to an approver — still nothing on the books
- *   POSTED     the approver checked the count and the rejects: the stock and
- *              its stickers are made, once
+ *   SUBMITTED  received and counted, handed to QC — still nothing on the books
+ *   INSPECTED  QC has said, line by line, what passed and what is rejected and
+ *              why — waiting for stock approval, still nothing on the books
+ *   POSTED     an approver approved it into stock: the stock and its stickers
+ *              are made, once
  *   CANCELLED  taken back out; the number and the document stay
+ *
+ * Until it is approved the material is on our floor but not in stock, so no
+ * requisition can draw on it: held in the way an ERP's "goods received,
+ * blocked" stock is. Only what QC accepted becomes usable.
  *
  * What was rejected at the gate is booked in as well, because it is on our
  * floor and still the customer's, but held: grade R in the same store, which
@@ -19,7 +25,7 @@ import { createPackages, recordPackageMove, round3, type StockSpot } from './pac
  * reason, or back to the customer on a return with the reason "Rejected".
  */
 
-export const CGRN_STATUS = ['DRAFT', 'SUBMITTED', 'POSTED', 'CANCELLED'] as const
+export const CGRN_STATUS = ['DRAFT', 'SUBMITTED', 'INSPECTED', 'POSTED', 'CANCELLED'] as const
 export type CgrnStatus = (typeof CGRN_STATUS)[number]
 
 /** The grade held stock carries on the ledger, as the purchase quality check holds its rejects. */
@@ -27,8 +33,9 @@ export const HELD = 'R'
 
 export const CGRN_STATUS_LABEL: Record<string, string> = {
   DRAFT: 'Draft',
-  SUBMITTED: 'Waiting for approval',
-  POSTED: 'Posted',
+  SUBMITTED: 'Waiting for QC',
+  INSPECTED: 'Waiting for stock approval',
+  POSTED: 'Approved',
   CANCELLED: 'Cancelled',
 }
 
@@ -168,7 +175,8 @@ export async function regradeStock(
  * Held stickers of one spot, this receipt's own first and oldest first, for
  * `qty`: whole ones while they fit, and the last one split so exactly `qty`
  * is taken. Locked, so two people releasing or returning at once cannot take
- * the same roll. Returns the packages taken (whole, or the split-off part).
+ * the same roll. Returns the packages taken (whole, or the split-off part;
+ * the rest of a split roll goes on a new held sticker, to print).
  */
 async function heldPackagesFor(
   tx: Prisma.TransactionClient,
@@ -203,30 +211,10 @@ async function heldPackagesFor(
       left = round3(left - has)
       continue
     }
-    // Part of a roll: the part is cut off onto a sticker of its own, which is
-    // what is taken; the rest stays held under the old code.
-    const [child] = await createPackages(tx, {
-      spot,
-      packType: p.packType,
-      qtys: [left],
-      lotNo: p.lotNo,
-      rack: p.rack,
-      notes: `Split from ${p.code}: ${why}`,
-      sourceType: 'SPLIT',
-      sourceId: p.sourceId,
-      sourceRef: p.sourceRef,
-      grnLineId: p.grnLineId,
-      parentId: p.id,
-      userId,
-      fromPackage: true,
-      unit: p.item.uom?.symbol ?? '',
-      itemName: p.item.name,
-      grade: HELD,
-    })
-    const rest = round3(has - left)
-    await tx.stockPackage.update({ where: { id: p.id }, data: { qty: rest } })
-    await recordPackageMove(tx, { packageId: p.id, type: 'SPLIT', qty: -left, balanceAfter: rest, warehouseId: p.warehouseId, notes: `Into ${child.code}: ${why}`, userId })
-    taken.push({ id: child.id, code: child.code, qty: left })
+    // Part of a roll: the part taken and the rest, still held, each get a
+    // sticker of their own, and the old one is retired.
+    const { part } = await splitOff(tx, p, left, { notes: why, userId, unit: p.item.uom?.symbol ?? '' })
+    taken.push(part)
     left = 0
   }
   return taken

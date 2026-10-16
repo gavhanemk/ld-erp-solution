@@ -7,7 +7,7 @@ import { AppError } from '../middleware/errorHandler'
 import { writeAuditLog } from '../lib/audit'
 import { applyRoundOff, nextDocumentNumber, resolvePlaceOfSupply } from '../lib/docNumber'
 import { findHsn, gstRateFor, loadHsnIndex } from '../lib/hsn'
-import { orderReconciliation } from '../services/reconciliation.service'
+import { closeCheck, orderReconciliation } from '../services/reconciliation.service'
 import { GST_STATES, stateName } from '../lib/gstStates'
 import { amountInWords, getPrintHeader } from '../lib/printData'
 import {
@@ -111,6 +111,11 @@ const salesOrderBaseSchema = z.object({
   brokeragePercent: z.number().min(0).max(100).optional().nullable(),
   discountAmount: z.number().min(0).optional(),
   isJobWork: z.boolean().optional(),
+  /**
+   * A job-work order: our own material used on it (trims, thread) is covered
+   * by the job charge, or billed to the customer separately, as agreed.
+   */
+  ownMaterialBilling: z.enum(['IN_JOB_CHARGE', 'BILLED']).optional(),
   currency: z.string().length(3).optional(),
   notes: z.string().max(1000).optional().nullable(),
   terms: z.string().max(2000).optional().nullable(),
@@ -200,7 +205,47 @@ const amendSalesOrderSchema = salesOrderBaseSchema
 /** Why an order is cancelled or short-closed. */
 const reasonBody = z.object({
   reason: z.string().trim().min(5, 'Say why, in a few words').max(500),
+  /**
+   * A job-work order whose customer material is not all accounted for: why it
+   * may close anyway. A manager's exception, kept with the order.
+   */
+  materialException: z.string().trim().min(10, 'Say why the order can close with this material unaccounted for — a sentence').max(1000).optional(),
 })
+
+/**
+ * A job-work order's customer material must all be accounted for before the
+ * order is closed or cancelled: used, wasted, sent back or used at a job
+ * worker. Otherwise it closes only on an exception — a manager who approves
+ * both orders and stock, with a reason — and what was not accounted for is
+ * kept with the order as it stood then. Returns what to write on the order.
+ */
+async function materialClosure(
+  tx: Prisma.TransactionClient,
+  req: AuthRequest,
+  so: { id: string; soNumber: string; isJobWork: boolean },
+  act: 'short-closed' | 'cancelled',
+  exception: string | undefined,
+) {
+  if (!so.isJobWork) return {}
+  const { gaps } = await closeCheck(tx, so.id)
+  if (!gaps.length) return {}
+  if (!exception) {
+    throw new AppError(
+      `${so.soNumber} cannot be ${act}: the customer's material is not all accounted for. ${gaps.map((g) => g.text).join('; ')}. Put it right first, or a manager can let it close with a reason.`,
+      409,
+      'MATERIAL_UNACCOUNTED',
+    )
+  }
+  if (!(userCan(req.user, MODULE, 'approve') && userCan(req.user, 'inventory', 'approve'))) {
+    throw new AppError(`Only a manager who approves both orders and stock can let ${so.soNumber} close with the customer's material not accounted for.`, 403, 'NEEDS_MANAGER')
+  }
+  return {
+    materialExceptionById: req.user!.id,
+    materialExceptionAt: new Date(),
+    materialExceptionReason: exception,
+    materialExceptionSnapshot: { act, gaps } as unknown as Prisma.InputJsonValue,
+  }
+}
 
 /** A non-empty trimmed query value, or nothing. */
 const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined)
@@ -421,6 +466,7 @@ router.get('/orders/:id', requirePermission(MODULE, 'view'), async (req, res) =>
       creditReleasedBy: { select: { id: true, name: true } },
       cancelledBy: { select: { id: true, name: true } },
       shortClosedBy: { select: { id: true, name: true } },
+      materialExceptionBy: { select: { id: true, name: true } },
       // The list of earlier versions; each one's full snapshot is fetched on
       // its own when somebody opens it.
       revisions: {
@@ -774,6 +820,8 @@ export async function prepareOrder(
     brokerageAmount,
     placeOfSupplyCode,
     isJobWork: data.isJobWork ?? false,
+    // Only a job-work order uses our material on someone else's goods.
+    ownMaterialBilling: data.isJobWork ? (data.ownMaterialBilling ?? 'IN_JOB_CHARGE') : 'IN_JOB_CHARGE',
     currency: data.currency ?? 'INR',
     notes: data.notes ?? null,
     terms: data.terms ?? null,
@@ -837,6 +885,17 @@ const savedOrderInclude = {
  */
 router.get('/orders/:id/reconciliation', requirePermission(MODULE, 'view'), async (req, res) => {
   res.json({ success: true, data: await prisma.$transaction((tx) => orderReconciliation(tx, req.params.id)) })
+})
+
+/**
+ * GET /api/sales/orders/:id/close-check
+ *
+ * Before closing or cancelling: what of the customer's material stops it, any
+ * notes that do not, and whether this user may record an exception.
+ */
+router.get('/orders/:id/close-check', requirePermission(MODULE, 'view'), async (req: AuthRequest, res) => {
+  const check = await prisma.$transaction((tx) => closeCheck(tx, req.params.id))
+  res.json({ success: true, data: { ...check, mayException: userCan(req.user, MODULE, 'approve') && userCan(req.user, 'inventory', 'approve') } })
 })
 
 // POST /api/sales/orders
@@ -907,6 +966,8 @@ router.patch('/orders/:id', requirePermission(MODULE, 'edit'), async (req: AuthR
       throw new AppError(`${before.soNumber} is on credit hold, waiting for a manager, and cannot be changed now`, 409, 'ON_HOLD')
     }
 
+    // A form that leaves it out keeps how the order bills our own material.
+    data.ownMaterialBilling = data.ownMaterialBilling ?? (before.ownMaterialBilling as 'IN_JOB_CHARGE' | 'BILLED')
     const { header, lines, charges } = await prepareOrder(tx, data)
 
     // The lines are replaced whole. A draft has nothing pointing at its lines
@@ -1077,6 +1138,7 @@ router.post('/orders/:id/amend', requirePermission(MODULE, 'edit'), async (req: 
     // it: the customer's fabric received, production planned, goods sent.
     // A form that leaves the flag out keeps the order's own.
     data.isJobWork = data.isJobWork ?? before.isJobWork
+    data.ownMaterialBilling = data.ownMaterialBilling ?? (before.ownMaterialBilling as 'IN_JOB_CHARGE' | 'BILLED')
     if (data.isJobWork !== before.isJobWork) {
       const [grns, mos, dcs] = await Promise.all([
         tx.customerGRN.count({ where: { soId: before.id, cancelledAt: null } }),
@@ -1248,7 +1310,7 @@ router.get('/orders/:id/revisions/:version', requirePermission(MODULE, 'view'), 
  * someone who can approve them.
  */
 router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
-  const { reason } = reasonBody.parse(req.body)
+  const { reason, materialException } = reasonBody.parse(req.body)
 
   const before = await prisma.salesOrder.findUnique({
     where: { id: req.params.id },
@@ -1302,9 +1364,11 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
     )
   }
 
+  // The customer's material received for it is sent back, or the cancel is a manager's exception.
+  const exception = await prisma.$transaction((tx) => materialClosure(tx, req, before, 'cancelled', materialException))
   const after = await prisma.salesOrder.update({
     where: { id: before.id },
-    data: { status: 'CANCELLED', cancelledById: req.user!.id, cancelledAt: new Date(), cancelReason: reason },
+    data: { status: 'CANCELLED', cancelledById: req.user!.id, cancelledAt: new Date(), cancelReason: reason, ...exception },
   })
   await writeAuditLog(req, {
     module: 'sales',
@@ -1314,7 +1378,10 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
     before,
     after,
   })
-  res.json({ success: true, message: `${before.soNumber} cancelled`, data: after })
+  if (exception.materialExceptionReason) {
+    await writeAuditLog(req, { module: 'sales', action: 'APPROVE', entityType: 'SalesOrderMaterialException', entityId: before.id, after: { soNumber: before.soNumber, act: 'cancelled', reason: exception.materialExceptionReason, unaccounted: exception.materialExceptionSnapshot } })
+  }
+  res.json({ success: true, message: `${before.soNumber} cancelled${exception.materialExceptionReason ? ', with the material exception recorded' : ''}`, data: after })
 })
 
 /**
@@ -1327,9 +1394,9 @@ router.post('/orders/:id/cancel', requirePermission(MODULE, 'edit'), async (req:
  * cancelled instead.
  */
 router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
-  const { reason } = reasonBody.parse(req.body)
+  const { reason, materialException } = reasonBody.parse(req.body)
 
-  const { before, after, released } = await prisma.$transaction(async (tx) => {
+  const { before, after, released, exception } = await prisma.$transaction(async (tx) => {
     const before = await tx.salesOrder.findUnique({
       where: { id: req.params.id },
       include: {
@@ -1364,6 +1431,9 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
       )
     }
 
+    // A job-work order closes with the customer's material accounted for, or on a manager's exception.
+    const exception = await materialClosure(tx, req, before, 'short-closed', materialException)
+
     await tx.salesOrderLine.updateMany({ where: { soId: before.id }, data: { pendingQty: 0 } })
     const after = await tx.salesOrder.update({
       where: { id: before.id },
@@ -1372,6 +1442,7 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
         shortClosedById: req.user!.id,
         shortClosedAt: new Date(),
         shortCloseReason: reason,
+        ...exception,
       },
     })
     // Material held for the order, or for its manufacturing orders, is no
@@ -1380,7 +1451,7 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
       where: { status: 'ACTIVE', OR: [{ soId: before.id }, { mr: { soId: before.id } }, { mr: { mo: { soId: before.id } } }] },
       data: { status: 'RELEASED', qty: 0, releasedAt: new Date(), releasedById: req.user!.id, releaseReason: `${before.soNumber} short-closed: ${reason}` },
     })
-    return { before, after, released: released.count }
+    return { before, after, released: released.count, exception }
   })
 
   await writeAuditLog(req, {
@@ -1391,9 +1462,12 @@ router.post('/orders/:id/short-close', requirePermission(MODULE, 'approve'), asy
     before,
     after,
   })
+  if (exception.materialExceptionReason) {
+    await writeAuditLog(req, { module: 'sales', action: 'APPROVE', entityType: 'SalesOrderMaterialException', entityId: before.id, after: { soNumber: before.soNumber, act: 'short-closed', reason: exception.materialExceptionReason, unaccounted: exception.materialExceptionSnapshot } })
+  }
   res.json({
     success: true,
-    message: `${before.soNumber} short-closed at what was sent${released ? `; ${released} material hold${released === 1 ? '' : 's'} for it released` : ''}`,
+    message: `${before.soNumber} short-closed at what was sent${released ? `; ${released} material hold${released === 1 ? '' : 's'} for it released` : ''}${exception.materialExceptionReason ? '; the material exception is recorded with it' : ''}`,
     data: after,
   })
 })

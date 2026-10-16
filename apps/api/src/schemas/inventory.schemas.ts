@@ -358,12 +358,13 @@ export const createCustomerGrnSchema = z
     transporter: z.string().max(120).optional().nullable(),
     notes: z.string().max(1000).optional().nullable(),
     /**
-     * What to do with it: keep it as a draft, hand it to an approver, or post
-     * it (approvers only) — stock and stickers are made only on posting. Left
-     * out, it is posted, as every receipt was before drafts existed.
+     * What to do with it: keep it as a draft, or hand it to QC. Left out, it
+     * is handed to QC. POST is refused: a receipt goes into stock only after
+     * QC has checked it and an approver approves it (the import is the one
+     * exception, being old receipts).
      */
     action: z.enum(['DRAFT', 'SUBMIT', 'POST']).optional(),
-    /** What the approver found on inspection, when they post it. */
+    /** What QC found; set by the QC step, not by receiving. */
     inspectionNotes: z.string().max(1000).optional().nullable(),
     lines: z
       .array(
@@ -402,8 +403,8 @@ export const createCustomerGrnSchema = z
         })
       }
       // Rejected material is held and can only leave on a reason: say it when
-      // the receipt is handed over or posted. A draft can wait for it.
-      if ((data.action === 'SUBMIT' || data.action === 'POST') && (line.rejectedQty ?? 0) > 0 && !line.rejectReason?.trim()) {
+      // the receipt is posted. Receiving leaves rejecting to QC.
+      if (data.action === 'POST' && (line.rejectedQty ?? 0) > 0 && !line.rejectReason?.trim()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['lines', i, 'rejectReason'],
@@ -428,14 +429,45 @@ export const cancelCustomerGrnSchema = z.object({
     .max(500),
 })
 
-/** Posting a receipt as it stands, with what the approver found. */
+/** Approving a QC-checked receipt into stock, with anything the approver adds. */
 export const postCustomerGrnSchema = z.object({
   inspectionNotes: z.string().max(1000).optional().nullable(),
 })
 
-/** Handing a submitted receipt back to be counted again. */
+/**
+ * QC on a received customer receipt: for every line, how much is rejected
+ * (the rest passes) and why, and what QC found. `approve` lets an approver
+ * approve it into stock in the same step.
+ */
+export const inspectCustomerGrnSchema = z
+  .object({
+    lines: z
+      .array(
+        z.object({
+          lineId: id('the line'),
+          rejectedQty: z.coerce.number().min(0, 'Rejected cannot be below zero').max(9_999_999),
+          rejectReason: z.string().max(200).optional().nullable(),
+        }),
+      )
+      .min(1, 'Check every line'),
+    inspectionNotes: z.string().max(1000).optional().nullable(),
+    approve: z.boolean().optional(),
+  })
+  .superRefine((data, ctx) => {
+    data.lines.forEach((line, i) => {
+      if (line.rejectedQty > 0 && !line.rejectReason?.trim()) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['lines', i, 'rejectReason'], message: 'Say why it was rejected: torn, stained, wrong shade.' })
+      }
+    })
+  })
+
+/**
+ * Handing a receipt back a step: from QC to receiving to be counted again,
+ * or from stock approval to QC (or straight to receiving) to be checked again.
+ */
 export const sendBackCustomerGrnSchema = z.object({
   reason: z.string().min(5, 'Say what needs checking again — one line is enough').max(500),
+  to: z.enum(['RECEIVING', 'QC']).optional(),
 })
 
 /** Releasing rejected material for use after a second look. */

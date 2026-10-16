@@ -81,6 +81,8 @@ interface Prepared {
   charges: Array<{ chargeTypeId: string; name: string; amount: number; gstRate: number }>
   otherCharges: number
   defaults: { invoiceDate: string; dueDate: string }
+  /** A job-work order that bills our own trims separately: their cost, what is billed, what is left to bill. */
+  ownMaterial?: { cost: number; billed: number; toBill: number; lines: Array<{ item: { name: string; uom: string | null }; qty: number; value: number }> } | null
 }
 
 interface ChargeTypeOption {
@@ -96,6 +98,8 @@ interface ChargeDraft {
   chargeTypeId: string
   amount: string
   gstRate: string
+  /** Bills our own trims used on a job-work order that bills them separately. */
+  ownMaterial?: boolean
 }
 
 let chargeKey = 0
@@ -350,7 +354,7 @@ export function SalesInvoiceDialog({
         eWayBillDate: eWayBillDate || null,
         charges: totals.chargeRows
           .filter((c) => c.type && c.value > 0)
-          .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value, gstRate: c.gstRate !== '' ? c.rate : null })),
+          .map((c) => ({ chargeTypeId: c.chargeTypeId, amount: c.value, gstRate: c.gstRate !== '' ? c.rate : null, ownMaterial: !!c.ownMaterial })),
         otherCharges: totals.other,
         notes: notes.trim() || null,
         terms: terms.trim() || null,
@@ -576,19 +580,40 @@ export function SalesInvoiceDialog({
                     )}
                     <TotalRow label="Taxable value" value={inr(totals.taxable)} />
 
+                    {/* The order bills our own trims separately: what is still to bill, offered as a charge. */}
+                    {prep.ownMaterial && prep.ownMaterial.toBill > 0.005 && !charges.some((c) => c.ownMaterial) && (
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-foreground">
+                        Our own trims on {prep.order.soNumber} are billed separately: ₹{inr(prep.ownMaterial.toBill)} still to bill at cost
+                        {prep.ownMaterial.billed > 0 ? ` (₹${inr(prep.ownMaterial.billed)} billed already)` : ''} —{' '}
+                        {prep.ownMaterial.lines.map((l) => `${pcs(l.qty)} ${l.item.uom ?? ''} ${l.item.name}`.replace(/\s+/g, ' ')).join(', ')}.{' '}
+                        <button
+                          type="button"
+                          className="text-primary font-semibold hover:underline"
+                          onClick={() => setCharges((cs) => [...cs, { key: `c${++chargeKey}`, chargeTypeId: '', amount: String(prep.ownMaterial!.toBill), gstRate: '', ownMaterial: true }])}
+                        >
+                          Add it as a charge
+                        </button>
+                      </div>
+                    )}
+
                     {chargeTypes.length > 0 && (
                       <div className="space-y-1.5 py-0.5">
                         {totals.chargeRows.map((c, i) => {
                           const taken = new Set(charges.filter((x) => x.key !== c.key).map((x) => x.chargeTypeId))
                           return (
                             <div key={c.key} className="flex items-center gap-1.5">
+                              {c.ownMaterial && (
+                                <span className="badge-neutral shrink-0 text-[10px]" title="Bills our own trims used on this job-work order">
+                                  our trims
+                                </span>
+                              )}
                               <SmartSelect
                                 className="form-input h-8 min-w-0 flex-1 text-xs"
                                 value={c.chargeTypeId}
                                 onChange={(e) => setCharge(c.key, { chargeTypeId: e.target.value, gstRate: '' })}
                                 aria-label={`Charge ${i + 1}`}
                               >
-                                <option value="">Charge…</option>
+                                <option value="">{c.ownMaterial ? 'Which charge bills our trims…' : 'Charge…'}</option>
                                 {chargeTypes
                                   .filter((ct) => !taken.has(ct.id))
                                   .map((ct) => (

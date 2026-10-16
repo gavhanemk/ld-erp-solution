@@ -31,6 +31,7 @@ import {
   adjustmentSchema,
   cancelCustomerGrnSchema,
   postCustomerGrnSchema,
+  inspectCustomerGrnSchema,
   sendBackCustomerGrnSchema,
   releaseCustomerGrnSchema,
   cancelCustomerReturnSchema,
@@ -2795,6 +2796,7 @@ const customerGrnInclude = {
   receivedBy: { select: { id: true, name: true } },
   cancelledBy: { select: { id: true, name: true } },
   submittedBy: { select: { id: true, name: true } },
+  inspectedBy: { select: { id: true, name: true } },
   postedBy: { select: { id: true, name: true } },
   correctionOf: { select: { id: true, grnNumber: true } },
   corrections: { select: { id: true, grnNumber: true, status: true } },
@@ -2907,6 +2909,11 @@ function customerGrnLine(l: ReturnType<typeof createCustomerGrnSchema.parse>['li
   }
 }
 
+/** Receiving records what came; what QC rejects is QC's to say, so a receiving save carries no rejects. */
+function asReceived<T extends { lines: Array<{ rejectedQty?: number; rejectReason?: string | null }> }>(data: T): T {
+  return { ...data, lines: data.lines.map((l) => ({ ...l, rejectedQty: 0, rejectReason: null })) }
+}
+
 /**
  * Whose material it is, where it went and what it is for: checked when a
  * receipt is saved, and again when it is posted — a customer switched off or
@@ -2956,36 +2963,44 @@ async function checkCustomerGrnParties(
 }
 
 /**
- * Puts a draft or submitted receipt on the books, once.
+ * Approves a QC-checked receipt into stock, once.
  *
- * The row is locked and its status moved from DRAFT/SUBMITTED to POSTED in one
- * conditional update: a second "Post" — a double click, a retry, another
- * approver at the same moment — waits for the first, then finds it posted and
- * books nothing.
+ * Only a receipt QC has checked is approved: until then the material is on
+ * our floor but not in stock, and nothing can draw on it. The row is locked
+ * and its status moved from INSPECTED to POSTED in one conditional update: a
+ * second "Approve" — a double click, a retry, another approver at the same
+ * moment — waits for the first, then finds it posted and books nothing.
  */
 async function postCustomerGrn(tx: Prisma.TransactionClient, id: string, userId: string | null, inspectionNotes?: string | null) {
   await lockRow(tx, 'customerGrn', id)
   const grn = await tx.customerGRN.findUnique({ where: { id }, include: { lines: true } })
   if (!grn) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
   if (grn.status === 'POSTED') {
-    throw new AppError(`${grn.grnNumber} is already on the books${grn.postedAt ? ` (posted ${grn.postedAt.toLocaleDateString('en-IN')})` : ''}. Nothing was posted again.`, 409, 'ALREADY_POSTED')
+    throw new AppError(`${grn.grnNumber} is already in stock${grn.postedAt ? ` (approved ${grn.postedAt.toLocaleDateString('en-IN')})` : ''}. Nothing was posted again.`, 409, 'ALREADY_POSTED')
   }
-  if (grn.status === 'CANCELLED') throw new AppError(`${grn.grnNumber} was cancelled, so it cannot be posted.`, 409, 'CANCELLED')
+  if (grn.status === 'CANCELLED') throw new AppError(`${grn.grnNumber} was cancelled, so it cannot be approved.`, 409, 'CANCELLED')
+  if (grn.status !== 'INSPECTED') {
+    throw new AppError(
+      grn.status === 'DRAFT'
+        ? `${grn.grnNumber} is still being received. Hand it over for QC; it is approved into stock after QC has checked it.`
+        : `QC has not checked ${grn.grnNumber} yet. It goes into stock only after QC has said what passed and what is rejected.`,
+      409,
+      'QC_FIRST',
+    )
+  }
   if (!grn.lines.some((l) => Number(l.receivedQty) > 0)) throw new AppError(`Nothing was received on ${grn.grnNumber}. Enter what arrived first.`, 400, 'NOTHING_RECEIVED')
   const noReason = grn.lines.find((l) => Number(l.rejectedQty) > 0 && !l.rejectReason?.trim())
-  if (noReason) throw new AppError(`Say why the rejected material on ${grn.grnNumber} was rejected before posting it: edit the receipt and fill in the reason.`, 400, 'REJECT_REASON')
+  if (noReason) throw new AppError(`Say why the rejected material on ${grn.grnNumber} was rejected before approving it: send it back to QC for the reason.`, 400, 'REJECT_REASON')
   const { customer } = await checkCustomerGrnParties(tx, grn)
 
   const now = new Date()
   const moved = await tx.customerGRN.updateMany({
-    where: { id, status: { in: ['DRAFT', 'SUBMITTED'] } },
+    where: { id, status: 'INSPECTED' },
     data: {
       status: 'POSTED',
       postedAt: now,
       postedById: userId,
-      submittedAt: grn.submittedAt ?? now,
-      submittedById: grn.submittedById ?? userId,
-      ...(inspectionNotes?.trim() ? { inspectionNotes: inspectionNotes.trim() } : {}),
+      ...(inspectionNotes?.trim() ? { inspectionNotes: [grn.inspectionNotes, `Approval: ${inspectionNotes.trim()}`].filter(Boolean).join('\n') } : {}),
     },
   })
   if (moved.count !== 1) throw new AppError(`${grn.grnNumber} is already on the books. Nothing was posted again.`, 409, 'ALREADY_POSTED')
@@ -2995,14 +3010,17 @@ async function postCustomerGrn(tx: Prisma.TransactionClient, id: string, userId:
 
 /** What a receipt's figures say, for the message after saving or posting it. */
 function customerGrnMessage(grn: { grnNumber: string; status: string; customer: { name: string }; warehouse: { name: string }; lines: Array<{ receivedQty: unknown; challanQty: unknown; rejectedQty: unknown }> }, stickers: number) {
-  if (grn.status === 'DRAFT') return `${grn.grnNumber} saved as a draft. Nothing is on the books until it is posted.`
-  if (grn.status === 'SUBMITTED') return `${grn.grnNumber} handed over for approval. Stock and stickers are made when an approver posts it.`
-  const short = grn.lines.reduce((n: number, l) => n + (Number(l.receivedQty) !== Number(l.challanQty) ? 1 : 0), 0)
+  if (grn.status === 'DRAFT') return `${grn.grnNumber} saved as a draft. Nothing is in stock until QC has checked it and it is approved.`
+  if (grn.status === 'SUBMITTED') return `${grn.grnNumber} handed over for QC. The material stays on hold — not in stock — until QC has checked it and an approver approves it.`
   const rejected = grn.lines.filter((l) => Number(l.rejectedQty) > 0).length
+  if (grn.status === 'INSPECTED') {
+    return `QC recorded on ${grn.grnNumber}${rejected ? `: ${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material` : ': everything passed'}. It waits for stock approval; nothing is in stock yet.`
+  }
+  const short = grn.lines.reduce((n: number, l) => n + (Number(l.receivedQty) !== Number(l.challanQty) ? 1 : 0), 0)
   return [
     short
-      ? `${grn.grnNumber} posted. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
-      : `${grn.grnNumber} posted. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
+      ? `${grn.grnNumber} approved into stock. ${short} ${short === 1 ? 'line does' : 'lines do'} not match their challan — worth telling ${grn.customer.name}.`
+      : `${grn.grnNumber} approved into stock. ${grn.customer.name}'s material is in ${grn.warehouse.name}.`,
     rejected
       ? `${rejected} ${rejected === 1 ? 'line has' : 'lines have'} rejected material: it is held apart and cannot be issued until it is released or sent back.`
       : '',
@@ -3012,42 +3030,49 @@ function customerGrnMessage(grn: { grnNumber: string; status: string; customer: 
     .join(' ')
 }
 
-/** Posting needs an approver; anyone who may receive may keep a draft or hand one over. */
+/** Approving into stock needs an approver; anyone who may receive may keep a draft or hand one over. */
 function assertMayPost(req: AuthRequest) {
   if (!userCan(req.user, MODULE, 'approve')) {
-    throw new AppError('Posting puts the receipt on the books, which needs an approver. Save it and hand it over for approval instead.', 403, 'NEEDS_APPROVER')
+    throw new AppError('Approving puts the receipt into stock, which needs an approver.', 403, 'NEEDS_APPROVER')
+  }
+}
+
+/** Receiving never puts material into stock: QC checks it first, then an approver approves it. */
+function assertNotPostedOnReceipt(action: string) {
+  if (action === 'POST') {
+    throw new AppError('A receipt goes into stock only after QC has checked it and an approver has approved it. Hand it over for QC.', 400, 'QC_FIRST')
   }
 }
 
 router.post('/customer-grn', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const data = createCustomerGrnSchema.parse(req.body)
-  const action = data.action ?? 'POST'
-  if (action === 'POST') assertMayPost(req)
-  const status = action === 'DRAFT' ? 'DRAFT' : action === 'SUBMIT' ? 'SUBMITTED' : 'POSTED'
-  const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, data, req.user?.id ?? null, status))
-  const made = status === 'POSTED' ? await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, req.user?.id ?? null) : { count: 0, ids: [], sourceRef: null }
+  const action = data.action ?? 'SUBMIT'
+  assertNotPostedOnReceipt(action)
+  const status = action === 'DRAFT' ? 'DRAFT' : 'SUBMITTED'
+  const grn = await prisma.$transaction((tx) => createCustomerGrn(tx, asReceived(data), req.user?.id ?? null, status))
 
   await writeAuditLog(req, {
     module: MODULE,
-    action: status === 'POSTED' ? 'APPROVE' : 'CREATE',
+    action: 'CREATE',
     entityType: 'CustomerGRN',
     entityId: grn.id,
     after: grn,
   })
 
-  res.status(201).json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
+  res.status(201).json({ success: true, message: customerGrnMessage(grn, 0), data: grn, made: { count: 0, ids: [], sourceRef: null } })
 })
 
 /**
- * Changing a receipt that is not on the books yet: a draft by whoever entered
- * it, a submitted one by them or by the approver inspecting it. With `action`
- * it is then handed over or posted in the same step. A posted receipt is never
- * edited: it is cancelled and a corrected copy entered.
+ * Changing what was received on a receipt QC has not checked yet: a draft by
+ * whoever entered it, one waiting for QC by them or by someone who can
+ * approve. With `action` SUBMIT it is handed over for QC in the same step.
+ * Once QC has checked it, it is sent back before it is changed; once in
+ * stock, it is never edited — it is cancelled and a corrected copy entered.
  */
 router.patch('/customer-grn/:id', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
-  const data = createCustomerGrnSchema.parse(req.body)
+  const data = asReceived(createCustomerGrnSchema.parse(req.body))
   const action = data.action ?? 'DRAFT'
-  if (action === 'POST') assertMayPost(req)
+  assertNotPostedOnReceipt(action)
   const userId = req.user?.id ?? null
 
   const before = await prisma.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
@@ -3058,14 +3083,16 @@ router.patch('/customer-grn/:id', requirePermission(MODULE, 'create'), async (re
     if (was.status !== 'DRAFT' && was.status !== 'SUBMITTED') {
       throw new AppError(
         was.status === 'POSTED'
-          ? `${was.grnNumber} is on the books, so it is not edited. Use "Cancel & correct" to replace it with a corrected copy.`
-          : `${was.grnNumber} was cancelled, so it cannot be changed.`,
+          ? `${was.grnNumber} is in stock, so it is not edited. Use "Cancel & correct" to replace it with a corrected copy.`
+          : was.status === 'INSPECTED'
+            ? `QC has already checked ${was.grnNumber}. Send it back to receiving first if the count is wrong.`
+            : `${was.grnNumber} was cancelled, so it cannot be changed.`,
         409,
         'NOT_EDITABLE',
       )
     }
     if (was.status === 'SUBMITTED' && was.receivedById !== userId && !userCan(req.user, MODULE, 'approve')) {
-      throw new AppError(`${was.grnNumber} is waiting for an approver; only they, or whoever entered it, can change it now.`, 403, 'NOT_YOURS')
+      throw new AppError(`${was.grnNumber} is waiting for QC; only whoever entered it, or an approver, can change what was received now.`, 403, 'NOT_YOURS')
     }
     await checkCustomerGrnParties(tx, data)
     await tx.customerGRNLine.deleteMany({ where: { grnId: was.id } })
@@ -3074,21 +3101,18 @@ router.patch('/customer-grn/:id', requirePermission(MODULE, 'create'), async (re
       data: {
         ...customerGrnHeader(data),
         ...(data.receiptDate ? { receiptDate: data.receiptDate } : {}),
-        ...(data.inspectionNotes !== undefined ? { inspectionNotes: data.inspectionNotes ?? null } : {}),
         ...(action === 'SUBMIT' && was.status === 'DRAFT' ? { status: 'SUBMITTED', submittedAt: new Date(), submittedById: userId } : {}),
         lines: { create: data.lines.map(customerGrnLine) },
       },
     })
-    if (action === 'POST') await postCustomerGrn(tx, was.id, userId, data.inspectionNotes)
     return tx.customerGRN.findUniqueOrThrow({ where: { id: was.id }, include: customerGrnInclude })
   })
-  const made = grn.status === 'POSTED' ? await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, userId) : { count: 0, ids: [], sourceRef: null }
 
-  await writeAuditLog(req, { module: MODULE, action: grn.status === 'POSTED' ? 'APPROVE' : 'UPDATE', entityType: 'CustomerGRN', entityId: grn.id, before, after: grn })
-  res.json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CustomerGRN', entityId: grn.id, before, after: grn })
+  res.json({ success: true, message: customerGrnMessage(grn, 0), data: grn, made: { count: 0, ids: [], sourceRef: null } })
 })
 
-/** Handing a draft over to an approver. */
+/** Handing a draft over to QC. */
 router.post('/customer-grn/:id/submit', requirePermission(MODULE, 'create'), async (req: AuthRequest, res) => {
   const grn = await prisma.$transaction(async (tx) => {
     await lockRow(tx, 'customerGrn', req.params.id)
@@ -3096,7 +3120,6 @@ router.post('/customer-grn/:id/submit', requirePermission(MODULE, 'create'), asy
     if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
     if (was.status !== 'DRAFT') throw new AppError(`${was.grnNumber} is ${CGRN_STATUS_LABEL[was.status]?.toLowerCase() ?? was.status}, not a draft.`, 409, 'NOT_DRAFT')
     if (!was.lines.some((l) => Number(l.receivedQty) > 0)) throw new AppError('Enter what arrived on at least one line first.', 400, 'NOTHING_RECEIVED')
-    if (was.lines.some((l) => Number(l.rejectedQty) > 0 && !l.rejectReason?.trim())) throw new AppError('Say why the rejected material was rejected before handing it over.', 400, 'REJECT_REASON')
     return tx.customerGRN.update({
       where: { id: was.id },
       data: { status: 'SUBMITTED', submittedAt: new Date(), submittedById: req.user?.id ?? null },
@@ -3107,7 +3130,65 @@ router.post('/customer-grn/:id/submit', requirePermission(MODULE, 'create'), asy
   res.json({ success: true, message: customerGrnMessage(grn, 0), data: grn })
 })
 
-/** An approver posting a receipt as it stands: the stock and its stickers are made, once. */
+/**
+ * QC on a received receipt: for every line, how much is rejected and why —
+ * the rest passes — and what QC found. It then waits for stock approval; an
+ * approver may approve it in the same step. Done again while it waits, the
+ * new check replaces the last. Nothing reaches the books here. Whoever
+ * received it does not check it, unless they are an approver.
+ */
+router.post('/customer-grn/:id/inspect', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const data = inspectCustomerGrnSchema.parse(req.body)
+  if (data.approve) assertMayPost(req)
+  const userId = req.user?.id ?? null
+  const before = await prisma.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: true } })
+  const grn = await prisma.$transaction(async (tx) => {
+    await lockRow(tx, 'customerGrn', req.params.id)
+    const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, include: { lines: { include: { item: { select: { name: true, uom: { select: { symbol: true } } } } } } } })
+    if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
+    if (was.status !== 'SUBMITTED' && was.status !== 'INSPECTED') {
+      throw new AppError(
+        was.status === 'DRAFT'
+          ? `${was.grnNumber} is still being received. It comes to QC once it is handed over.`
+          : was.status === 'POSTED'
+            ? `${was.grnNumber} is already approved into stock. What is held there is released or sent back from the receipt.`
+            : `${was.grnNumber} was cancelled.`,
+        409,
+        'NOT_FOR_QC',
+      )
+    }
+    // A second pair of eyes: QC is someone other than whoever received it,
+    // unless that person is an approver, who may check their own count.
+    if (was.receivedById === userId && !userCan(req.user, MODULE, 'approve')) {
+      throw new AppError(`You received ${was.grnNumber}, so someone else does its QC.`, 403, 'QC_NOT_RECEIVER')
+    }
+    const missing = was.lines.filter((l) => !data.lines.some((d) => d.lineId === l.id))
+    if (missing.length) throw new AppError(`QC every line: ${missing.map((l) => l.item.name).join(', ')} ${missing.length === 1 ? 'is' : 'are'} not checked.`, 400, 'QC_EVERY_LINE')
+    for (const d of data.lines) {
+      const line = was.lines.find((l) => l.id === d.lineId)
+      if (!line) throw new AppError(`That line is not on ${was.grnNumber}.`, 400, 'WRONG_LINE')
+      if (d.rejectedQty > Number(line.receivedQty) + 1e-9) {
+        throw new AppError(`Only ${Number(line.receivedQty)} ${line.item.uom?.symbol ?? ''} of ${line.item.name} arrived, so ${d.rejectedQty} cannot be rejected.`.replace(/\s+/g, ' '), 400, 'OVER_REJECTED')
+      }
+      await tx.customerGRNLine.update({
+        where: { id: line.id },
+        data: { rejectedQty: d.rejectedQty, rejectReason: d.rejectedQty > 0 ? d.rejectReason?.trim() || null : null },
+      })
+    }
+    await tx.customerGRN.update({
+      where: { id: was.id },
+      data: { status: 'INSPECTED', inspectedAt: new Date(), inspectedById: userId, inspectionNotes: data.inspectionNotes?.trim() || null },
+    })
+    if (data.approve) await postCustomerGrn(tx, was.id, userId)
+    return tx.customerGRN.findUniqueOrThrow({ where: { id: was.id }, include: customerGrnInclude })
+  })
+  const made = grn.status === 'POSTED' ? await autoStickers({ sourceType: 'CUSTOMER_GRN', sourceId: grn.id }, userId) : { count: 0, ids: [], sourceRef: null }
+  await writeAuditLog(req, { module: MODULE, action: 'UPDATE', entityType: 'CustomerGRN', entityId: grn.id, before, after: { ...grn, qc: data.lines } })
+  if (grn.status === 'POSTED') await writeAuditLog(req, { module: MODULE, action: 'APPROVE', entityType: 'CustomerGRN', entityId: grn.id, after: grn })
+  res.json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
+})
+
+/** An approver approving a QC-checked receipt into stock: the stock and its stickers are made, once. */
 router.post('/customer-grn/:id/post', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
   const { inspectionNotes } = postCustomerGrnSchema.parse(req.body ?? {})
   const grn = await prisma.$transaction(async (tx) => {
@@ -3119,22 +3200,37 @@ router.post('/customer-grn/:id/post', requirePermission(MODULE, 'approve'), asyn
   res.json({ success: true, message: customerGrnMessage(grn, made.count), data: grn, made })
 })
 
-/** An approver handing a submitted receipt back to be counted again. */
-router.post('/customer-grn/:id/send-back', requirePermission(MODULE, 'approve'), async (req: AuthRequest, res) => {
-  const { reason } = sendBackCustomerGrnSchema.parse(req.body ?? {})
+/**
+ * Handing a receipt back a step. QC sends one waiting for it back to
+ * receiving, to be counted again; an approver sends one waiting for approval
+ * back to QC — or, with `to: RECEIVING`, to receiving. Going back clears the
+ * QC it had; the audit trail keeps it.
+ */
+router.post('/customer-grn/:id/send-back', requirePermission(MODULE, 'edit'), async (req: AuthRequest, res) => {
+  const { reason, to } = sendBackCustomerGrnSchema.parse(req.body ?? {})
   const grn = await prisma.$transaction(async (tx) => {
     await lockRow(tx, 'customerGrn', req.params.id)
     const was = await tx.customerGRN.findUnique({ where: { id: req.params.id }, select: { id: true, grnNumber: true, status: true } })
     if (!was) throw new AppError('That receipt does not exist', 404, 'NOT_FOUND')
-    if (was.status !== 'SUBMITTED') throw new AppError(`${was.grnNumber} is not waiting for approval.`, 409, 'NOT_SUBMITTED')
+    if (was.status !== 'SUBMITTED' && was.status !== 'INSPECTED') {
+      throw new AppError(`${was.grnNumber} is not waiting for QC or approval, so there is nothing to send back.`, 409, 'NOT_WAITING')
+    }
+    if (was.status === 'INSPECTED' && !userCan(req.user, MODULE, 'approve')) {
+      throw new AppError(`${was.grnNumber} is waiting for stock approval; only an approver sends it back from there.`, 403, 'NEEDS_APPROVER')
+    }
+    const back = was.status === 'SUBMITTED' || to === 'RECEIVING' ? 'DRAFT' : 'SUBMITTED'
     return tx.customerGRN.update({
       where: { id: was.id },
-      data: { status: 'DRAFT', inspectionNotes: `Sent back: ${reason}` },
+      data: { status: back, inspectedAt: null, inspectedById: null, inspectionNotes: `Sent back to ${back === 'DRAFT' ? 'receiving' : 'QC'}: ${reason}` },
       include: customerGrnInclude,
     })
   })
   await writeAuditLog(req, { module: MODULE, action: 'REJECT', entityType: 'CustomerGRN', entityId: grn.id, after: { status: grn.status, reason } })
-  res.json({ success: true, message: `${grn.grnNumber} sent back to be counted again: ${reason}`, data: grn })
+  res.json({
+    success: true,
+    message: grn.status === 'DRAFT' ? `${grn.grnNumber} sent back to receiving to be counted again: ${reason}` : `${grn.grnNumber} sent back to QC to be checked again: ${reason}`,
+    data: grn,
+  })
 })
 
 router.get('/customer-grn', requirePermission(MODULE, 'view'), async (req, res) => {
@@ -3187,6 +3283,8 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
         so: { select: { id: true, soNumber: true } },
         warehouse: { select: { id: true, name: true } },
         receivedBy: { select: { id: true, name: true } },
+        inspectedBy: { select: { id: true, name: true } },
+        postedBy: { select: { id: true, name: true } },
         lines: {
           include: {
             item: {
@@ -3251,7 +3349,12 @@ router.get('/customer-grn/lines', requirePermission(MODULE, 'view'), async (_req
       cancelReason: r.cancelReason,
       status: r.status,
       statusLabel: CGRN_STATUS_LABEL[r.status] ?? r.status,
+      inspectedAt: r.inspectedAt,
+      inspectedByName: r.inspectedBy?.name ?? null,
       postedAt: r.postedAt,
+      postedByName: r.postedBy?.name ?? null,
+      inspectionNotes: r.inspectionNotes,
+      receivedById: r.receivedById,
       correctionOfId: r.correctionOfId,
       customerId: r.customer.id,
       customerName: r.customer.name,

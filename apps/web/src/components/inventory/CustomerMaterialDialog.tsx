@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save, Send, BadgeCheck, ClipboardCheck } from 'lucide-react'
-import { api, ApiError, can, masterResource } from '@/lib/api'
+import { X, Loader2, AlertCircle, Plus, Trash2, PackageOpen, FileText, Truck, Boxes, Save, Send } from 'lucide-react'
+import { api, ApiError, masterResource } from '@/lib/api'
 import { StepInput } from '@/components/ui/StepInput'
 import { Section } from '@/components/purchase/Section'
 import { SmartSelect } from '@/components/ui/SmartSelect'
@@ -18,13 +18,12 @@ import type { InwardRef } from '@/components/packages/InwardStickers'
  *
  * The fields follow the old system's "GRN JW Customer" form: their challan
  * (D.C.) and bill, the gate entry, and per line the category, sub-category and
- * item, then challan, received, short/excess, rejected and accepted. Rejected
- * material is booked into the customer's stock — it is on our floor — but held:
- * it is never issued until an approver releases it or it goes back on a return.
+ * item, then challan, received and short/excess.
  *
- * Saved three ways: as a draft, handed over to an approver, or — by an
- * approver — posted, which is when the stock and its stickers are made. The
- * same form opens a draft or a handed-over receipt again to finish or inspect.
+ * This is receiving only. What is rejected, and why, is QC's to say in the
+ * next step (CustomerGrnQcDialog), and an approver then approves it into
+ * stock. Saved as a draft or handed over for QC; the same form opens a draft,
+ * or one waiting for QC, again to put the count right.
  */
 
 interface Option {
@@ -51,8 +50,6 @@ interface Line {
   itemId: string
   challanQty: string
   receivedQty: string
-  rejectedQty: string
-  rejectReason: string
   markings: string
 }
 
@@ -62,8 +59,6 @@ const emptyLine = (): Line => ({
   itemId: '',
   challanQty: '',
   receivedQty: '',
-  rejectedQty: '',
-  rejectReason: '',
   markings: '',
 })
 
@@ -88,7 +83,7 @@ interface Saved {
   notes: string | null
   inspectionNotes: string | null
   submittedBy?: { name: string } | null
-  lines: Array<{ itemId: string; challanQty: string | number; receivedQty: string | number; rejectedQty: string | number; rejectReason: string | null; markings: string | null }>
+  lines: Array<{ itemId: string; challanQty: string | number; receivedQty: string | number; markings: string | null }>
 }
 
 /** A date as the date box wants it, on India's calendar. */
@@ -135,14 +130,12 @@ export function CustomerMaterialDialog({
   const [vehicleNo, setVehicleNo] = useState('')
   const [transporter, setTransporter] = useState('')
   const [notes, setNotes] = useState('')
-  const [inspectionNotes, setInspectionNotes] = useState('')
   const [lines, setLines] = useState<Line[]>([emptyLine()])
   /** The receipt being changed, when it is one already saved. */
   const [saved, setSaved] = useState<Saved | null>(null)
 
-  const [saving, setSaving] = useState<null | 'DRAFT' | 'SUBMIT' | 'POST'>(null)
+  const [saving, setSaving] = useState<null | 'DRAFT' | 'SUBMIT'>(null)
   const [error, setError] = useState<string | null>(null)
-  const mayPost = can('inventory', 'approve')
 
   useEffect(() => {
     let cancelled = false
@@ -199,7 +192,6 @@ export function CustomerMaterialDialog({
         setVehicleNo(r.vehicleNo ?? '')
         setTransporter(r.transporter ?? '')
         setNotes(r.notes ?? '')
-        setInspectionNotes(r.inspectionNotes ?? '')
         setLines(
           r.lines.map((l) => {
             const it = items.find((x) => x.id === l.itemId)
@@ -210,8 +202,6 @@ export function CustomerMaterialDialog({
               itemId: l.itemId,
               challanQty: String(Number(l.challanQty)),
               receivedQty: String(Number(l.receivedQty)),
-              rejectedQty: Number(l.rejectedQty) > 0 ? String(Number(l.rejectedQty)) : '',
-              rejectReason: l.rejectReason ?? '',
               markings: l.markings ?? '',
             }
           }),
@@ -260,20 +250,15 @@ export function CustomerMaterialDialog({
       return (!l.categoryId || p.main === l.categoryId) && (!l.subCategoryId || p.sub === l.subCategoryId)
     })
 
-  const save = async (action: 'DRAFT' | 'SUBMIT' | 'POST') => {
+  const save = async (action: 'DRAFT' | 'SUBMIT') => {
     setError(null)
     if (!customerId) return setError('Whose material is this?')
     if (!warehouseId) return setError('Which store did it go into?')
     if (filled.length === 0) return setError('Enter what arrived on at least one line.')
-    const over = filled.find((l) => num(l.rejectedQty) > num(l.receivedQty))
-    if (over) return setError(`Line ${lines.indexOf(over) + 1}: more is rejected than arrived. Rejected is part of what arrived.`)
     // Their challan's figure is what any shortage is measured against, so it
     // is asked for rather than copied from what was measured.
     const noChallan = filled.find((l) => !(num(l.challanQty) > 0))
     if (noChallan) return setError(`Line ${lines.indexOf(noChallan) + 1}: enter the quantity on their challan, so a shortage shows.`)
-    // Rejected material is held and only leaves on a reason: asked for before it is handed over or posted.
-    const noReason = action !== 'DRAFT' && filled.find((l) => num(l.rejectedQty) > 0 && !l.rejectReason.trim())
-    if (noReason) return setError(`Line ${lines.indexOf(noReason) + 1}: say why it was rejected — torn, stained, wrong shade.`)
 
     setSaving(action)
     try {
@@ -295,18 +280,15 @@ export function CustomerMaterialDialog({
             itemId: l.itemId,
             challanQty: num(l.challanQty),
             receivedQty: num(l.receivedQty),
-            rejectedQty: num(l.rejectedQty),
-            rejectReason: num(l.rejectedQty) > 0 ? l.rejectReason.trim() || null : null,
             markings: l.markings || null,
           })),
-          inspectionNotes: inspectionNotes.trim() || null,
           action,
         }
       const res = saved
         ? await api.patch<{ message?: string; data: { id: string; grnNumber: string; status: string } }>(`/inventory/customer-grn/${saved.id}`, body)
         : await api.post<{ message?: string; data: { id: string; grnNumber: string; status: string } }>('/inventory/customer-grn', body)
-      // Stickers only exist once it is posted.
-      onSaved(res.message ?? `${res.data.grnNumber} saved.`, res.data.status === 'POSTED' ? { type: 'CUSTOMER_GRN', id: res.data.id } : undefined)
+      // Stickers are made only when it is approved into stock, after QC.
+      onSaved(res.message ?? `${res.data.grnNumber} saved.`)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save. Try again.')
     } finally {
@@ -322,13 +304,13 @@ export function CustomerMaterialDialog({
    * transition had made, so `fixed` measured from that box and a strip of the
    * page showed above the dimmed cover.
    */
-  const spin = (a: 'DRAFT' | 'SUBMIT' | 'POST', icon: ReactNode) => (saving === a ? <Loader2 size={15} className="animate-spin" /> : icon)
-  // The main button: an approver posts, anyone else hands it over.
-  const primary: 'POST' | 'SUBMIT' = mayPost ? 'POST' : 'SUBMIT'
+  const spin = (a: 'DRAFT' | 'SUBMIT', icon: ReactNode) => (saving === a ? <Loader2 size={15} className="animate-spin" /> : icon)
+  // The main button hands it to QC; it goes into stock after QC and approval.
+  const primary = 'SUBMIT' as const
   const saveButton = (
     <button type="submit" form="customer-material-form" className="btn-primary" disabled={!!saving}>
-      {primary === 'POST' ? spin('POST', <BadgeCheck size={15} />) : spin('SUBMIT', <Send size={15} />)}
-      {primary === 'POST' ? (saved ? 'Approve and post' : 'Receive and post') : 'Hand over for approval'}
+      {spin('SUBMIT', <Send size={15} />)}
+      {saved?.status === 'SUBMITTED' ? 'Save — waiting for QC' : 'Hand over for QC'}
     </button>
   )
   const draftButton = (
@@ -362,8 +344,8 @@ export function CustomerMaterialDialog({
               </h2>
               <p className="text-muted-foreground mt-0.5 truncate text-[13px]">
                 {saved
-                  ? `${saved.statusLabel ?? saved.status}${saved.submittedBy ? ` · handed over by ${saved.submittedBy.name}` : ''} · nothing is on the books until it is posted`
-                  : "Stays the customer's — shown under their name, never in our stock value"}
+                  ? `${saved.statusLabel ?? saved.status}${saved.submittedBy ? ` · handed over by ${saved.submittedBy.name}` : ''} · on hold, not in stock, until QC and approval`
+                  : 'Receiving: what came. QC checks it next, then an approver puts it into stock'}
               </p>
             </div>
           </div>
@@ -553,8 +535,6 @@ export function CustomerMaterialDialog({
                     <th style={{ textAlign: 'right' }}>Challan qty</th>
                     <th style={{ textAlign: 'right' }}>Received qty</th>
                     <th style={{ textAlign: 'right' }}>Short / excess</th>
-                    <th style={{ textAlign: 'right' }}>Rejected qty</th>
-                    <th style={{ textAlign: 'right' }}>Accepted qty</th>
                     <th>Markings / remarks</th>
                     <th style={{ width: 40 }} />
                   </tr>
@@ -564,14 +544,12 @@ export function CustomerMaterialDialog({
                     const diff = num(line.receivedQty) - num(line.challanQty)
                     const item = items.find((x) => x.id === line.itemId)
                     const uom = item?.uom?.symbol ?? ''
-                    const rejected = num(line.rejectedQty)
-                    const accepted = num(line.receivedQty) - rejected
                     const subs = line.categoryId ? subCategoriesOf(line.categoryId) : []
                     const choices = itemsFor(line)
-                    const qtyInput = (field: 'challanQty' | 'receivedQty' | 'rejectedQty', label: string, bad = false) => (
+                    const qtyInput = (field: 'challanQty' | 'receivedQty', label: string) => (
                       <div className="relative">
                         <StepInput
-                          className={`form-input h-9 pr-10 text-right ${bad ? 'border-red-500/60' : ''}`}
+                          className="form-input h-9 pr-10 text-right"
                           decimals
                           value={line[field]}
                           onValueChange={(v) => setLine(i, { [field]: v })}
@@ -667,31 +645,6 @@ export function CustomerMaterialDialog({
                             </span>
                           )}
                         </td>
-                        <td className="min-w-[130px]">
-                          {qtyInput('rejectedQty', 'Rejected quantity', rejected > num(line.receivedQty))}
-                          {rejected > 0 && (
-                            <input
-                              className="form-input mt-1.5 h-8 text-xs placeholder:text-muted-foreground/60"
-                              value={line.rejectReason}
-                              onChange={(e) => setLine(i, { rejectReason: e.target.value })}
-                              placeholder="Why? Torn, stained…"
-                              maxLength={200}
-                              aria-label={`Why it was rejected on line ${i + 1}`}
-                            />
-                          )}
-                          {rejected > 0 && <div className="mt-0.5 text-[10px] text-amber-600">held — not issued until released</div>}
-                        </td>
-                        <td className="whitespace-nowrap pt-4 text-right text-sm tabular-nums">
-                          {!line.receivedQty ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : accepted < 0 ? (
-                            <span className="text-red-500">more rejected than received</span>
-                          ) : (
-                            <span className="text-emerald-600">
-                              {fmt(accepted)} {uom}
-                            </span>
-                          )}
-                        </td>
                         <td className="min-w-[150px]">
                           <input
                             className="form-input h-9 placeholder:text-muted-foreground/60"
@@ -723,35 +676,19 @@ export function CustomerMaterialDialog({
             </div>
           </Section>
 
-          {mayPost && (
-            <Section icon={ClipboardCheck} title="Inspection">
-              <label className="block">
-                <span className="form-label">What you found when checking the count and the rejects</span>
-                <textarea
-                  className="form-input min-h-[60px] placeholder:text-muted-foreground/60"
-                  value={inspectionNotes}
-                  onChange={(e) => setInspectionNotes(e.target.value)}
-                  placeholder="e.g. Counted again: 96 rolls. 6 torn at the edge, held."
-                  maxLength={1000}
-                />
-              </label>
-            </Section>
+          {saved?.inspectionNotes && (
+            <p className="text-muted-foreground rounded-lg border border-border px-3 py-2 text-sm">{saved.inspectionNotes}</p>
           )}
         </div>
 
         <div className="border-border flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-5 py-3">
           <span className="text-muted-foreground mr-auto hidden text-xs sm:inline">
-            {filled.length} {filled.length === 1 ? 'item' : 'items'} · stock and stickers are made when it is posted
+            {filled.length} {filled.length === 1 ? 'item' : 'items'} · QC checks it next; stock and stickers are made when it is approved
           </span>
           <button type="button" onClick={onClose} className="btn-secondary" disabled={!!saving}>
             Close
           </button>
-          {draftButton}
-          {mayPost && (
-            <button type="button" className="btn-secondary" onClick={() => void save('SUBMIT')} disabled={!!saving || saved?.status === 'SUBMITTED'}>
-              {spin('SUBMIT', <Send size={15} />)} Hand over
-            </button>
-          )}
+          {saved?.status !== 'SUBMITTED' && draftButton}
           {saveButton}
         </div>
       </form>

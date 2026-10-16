@@ -53,6 +53,8 @@ interface Payload {
     so: { soNumber: string } | null
     warehouse: { name: string; address: string | null }
     receivedBy: { name: string } | null
+    inspectedBy: { name: string } | null
+    inspectedAt: string | null
     postedBy: { name: string } | null
     cancelledBy: { name: string } | null
     correctionOf: { grnNumber: string } | null
@@ -218,7 +220,8 @@ export default function PrintCustomerGrn() {
               <Fact label="Receipt No" value={doc.grnNumber} mono />
               <Fact label="Into store" value={doc.warehouse.name} />
               <Fact label="Status" value={doc.statusLabel} />
-              <Fact label="Posted" value={doc.postedAt ? `${longDate(doc.postedAt)}${doc.postedBy ? `, ${doc.postedBy.name}` : ''}` : null} />
+              <Fact label="QC" value={doc.inspectedAt ? `${longDate(doc.inspectedAt)}${doc.inspectedBy ? `, ${doc.inspectedBy.name}` : ''}` : null} />
+              <Fact label="Approved" value={doc.postedAt ? `${longDate(doc.postedAt)}${doc.postedBy ? `, ${doc.postedBy.name}` : ''}` : null} />
               <Fact label="Corrects" value={doc.correctionOf?.grnNumber ?? null} mono />
             </>
           ),
@@ -232,7 +235,7 @@ export default function PrintCustomerGrn() {
           {(doc.inspectionNotes || doc.notes) && (
             <div style={{ border: `1px solid ${RULE}`, padding: '7px 10px', marginTop: '8px' }}>
               <Eyebrow style={{ color: GREY }}>Notes</Eyebrow>
-              {doc.inspectionNotes && <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>Inspection: {doc.inspectionNotes}</div>}
+              {doc.inspectionNotes && <div style={{ fontSize: '10px', color: INK, marginTop: '3px', lineHeight: 1.55 }}>QC: {doc.inspectionNotes}</div>}
               {doc.notes && <div style={{ fontSize: '10px', color: GREY, marginTop: '3px', lineHeight: 1.55 }}>{doc.notes}</div>}
             </div>
           )}
@@ -247,7 +250,8 @@ export default function PrintCustomerGrn() {
       }
       signatures={[
         { role: 'Received by (store)', who: doc.receivedBy?.name },
-        { role: 'Checked and approved', who: doc.postedBy?.name },
+        { role: 'QC', who: doc.inspectedBy?.name },
+        { role: 'Approved into stock', who: doc.postedBy?.name },
         { role: "Customer's driver", who: null },
       ]}
       footerNote={template.footerNote ?? 'Acknowledgement of customer material received. Not a tax invoice.'}
