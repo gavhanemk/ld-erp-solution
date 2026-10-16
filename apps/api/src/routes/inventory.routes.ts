@@ -3338,6 +3338,8 @@ router.post('/customer-grn/import', requirePermission(MODULE, 'create'), async (
   if (summary.problems) {
     throw new AppError('Some rows have problems. Fix them in the sheet and try again; nothing was imported.', 400, 'IMPORT_PROBLEMS')
   }
+  // Imported receipts go straight onto the books, so importing is posting: an approver's.
+  assertMayPost(req)
 
   // All or nothing: one bad receipt and none of them are booked.
   const created = await prisma.$transaction(
